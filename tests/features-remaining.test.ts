@@ -9,7 +9,7 @@ import { BLACKOP_CONFIDENCE, STAMINA_FLOOR, stepBladeburner } from "../shared/st
 import { CORP_STAGES, stepCorp, type CorpView } from "../shared/strategy/corp/stages.ts";
 import { reachableFrom, stepDarknet, unlockValue } from "../shared/strategy/dnet/decide.ts";
 import { darknetRoute } from "../game/lib/features/dnet.ts";
-import { emptyKnowledge, foldReports } from "../shared/strategy/dnet/knowledge.ts";
+import { emptyKnowledge, foldKnowledgeReports } from "../shared/strategy/dnet/host.ts";
 import { msPerHostEvent } from "../shared/strategy/dnet/rates.ts";
 import { ASCEND_THRESHOLD, CLASH_CONFIDENCE, stepGang } from "../shared/strategy/gang/decide.ts";
 import {
@@ -50,7 +50,7 @@ import { scoreAugMults, weightsFromMarginals } from "../shared/strategy/factions
 const WORTH = new Map([["money", 1_000], ["hacking", 19_174], ["reputation", 49_505]]);
 import { canSolve, solve } from "../shared/strategy/side/contracts.ts";
 import { shockMultiplier, stepSleeves } from "../shared/strategy/sleeves/decide.ts";
-import { chargeOrder, distinctRotations, packFragments } from "../shared/strategy/stanek/pack.ts";
+import { distinctRotations, packFragments } from "../shared/strategy/stanek/pack.ts";
 // stock has outgrown this file — see tests/stock.test.ts
 
 // --- assignment (shared by gang, sleeves, bladeburner) -----------------------
@@ -428,14 +428,6 @@ describe("stanek packing", () => {
     expect(result.value).toBe(10);
   });
 
-  test("charge order follows the objective weights", () => {
-    const fragments = [
-      { id: 1, shape: [{ x: 0, y: 0 }], power: 1, weight: 1 },
-      { id: 2, shape: [{ x: 0, y: 0 }], power: 1, weight: 9 },
-    ];
-    const packed = packFragments(fragments, 2, 1);
-    expect(chargeOrder(fragments, packed.placements)[0]).toBe(2);
-  });
 });
 
 // --- go -----------------------------------------------------------------------
@@ -769,7 +761,7 @@ describe("darknet", () => {
     // darknet servers outright, so from home it sees `darkweb` and stops. The
     // graph has to come from the controller's folded adjacency.
     const now = 10_000_000;
-    const knowledge = foldReports(
+    const knowledge = foldKnowledgeReports(
       emptyKnowledge("15:0"),
       [
         { hostname: "darkweb", at: now, present: true, neighbours: ["dn-0"], depth: -1 },
@@ -792,7 +784,7 @@ describe("darknet", () => {
     // halfway leaves the TERMINAL stranded deep in a net that is rearranging
     // around it.
     const now = 10_000_000;
-    const knowledge = foldReports(
+    const knowledge = foldKnowledgeReports(
       emptyKnowledge("15:0"),
       [
         { hostname: "darkweb", at: now, present: true, neighbours: ["dn-0"], depth: -1 },

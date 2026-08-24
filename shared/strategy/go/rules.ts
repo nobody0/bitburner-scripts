@@ -206,6 +206,10 @@ export interface GoDecision {
    * a seed where one wins; the caller must dispatch in that later tick or the
    * decision does not describe the game it will be played in. */
   dispatchOffsetMs?: number;
+  /** Set when a losing move was swapped for a game-ending pass to bank the
+   * standing score. Only ever set while White's pass is on the table, so the
+   * swap ends the game immediately rather than conceding a free move. */
+  passReason?: "banking-lost-position";
   /** Present only when the evaluation was asked to seed the double-move cheat
    * family from a certified first stone: true when that move was found among
    * the legal candidates (seeded double offered, plain certified move

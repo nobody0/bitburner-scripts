@@ -351,15 +351,11 @@ export const PRIORITY = {
   "hacknet:upgrade": 25,
   /** A blocking server-access dodge (backdoor install) whose measured
    *  BN-seconds-per-second value beats the farm income of the RAM it needs.
-   *  At or above `FARM_PREEMPTION_PRIORITY` (= progression:install-freeze,
-   *  110) the RAM broker may reclaim one in-flight farm worker for it — which
-   *  is the point: on a saturated fleet a backdoor stub priced at probe:detail
-   *  waited on arena growth forever while the faction it gated idled. Strictly
-   *  below career:progress-lock (120): evicting a worker desyncs one batch,
-   *  cancelling near-complete player work throws whole units away. The
-   *  escalation is CONDITIONAL — claims() only posts this band when the need
-   *  is blocking AND the value comparison holds; everything else stays at
-   *  probe:detail. */
+   *  The high band wins broker queue order and arena growth, but still cannot
+   *  kill active farm work: reclamation is limited to share and idle pooled
+   *  workers. The escalation is CONDITIONAL — claims() only posts this band
+   *  when the need is blocking AND the value comparison holds; everything
+   *  else stays at probe:detail. */
   "hacking:critical-access": 111,
   /** Port openers and TOR that unblock requested rooting/backdoors. They must
    *  remain fundable through the imminent-install reserve: until the backdoor

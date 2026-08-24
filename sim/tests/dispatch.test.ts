@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   BATCH_KINDS,
-  HACK_ZERO_DESYNC_STREAK,
   JIT_LAUNCH_GUARD_MS,
   MAX_LAUNCH_ACTIONS_PER_PASS,
   PREP_ORDER_MS,
+  requestShareStops,
   SPACER_MS,
   trackOp,
   WORKER_STARTUP_GUARD_MS,
@@ -31,6 +31,26 @@ const soak = lane({ feature: "hacking" });
  * overflows the argument list of a spread-based Math.max/min. Fold instead. */
 const maxOf = (values: readonly number[]): number => values.reduce((a, b) => (b > a ? b : a), -Infinity);
 const minOf = (values: readonly number[]): number => values.reduce((a, b) => (b < a ? b : a), Infinity);
+const pendingBatches = (memory: FarmMemory) => [...memory.dispatch.jitByTarget.values()].flat();
+const expectPendingIndex = (memory: FarmMemory): void => {
+  const batches = pendingBatches(memory).filter((batch) => batch.ops.length > 0);
+  expect(memory.dispatch.pendingJitBatchCount).toBe(batches.length);
+  expect(memory.dispatch.pendingJitOpCount).toBe(
+    batches.reduce((sum, batch) => sum + batch.ops.length, 0),
+  );
+  const unstarted = new Map<string, number>();
+  for (const batch of batches) {
+    if (!batch.started) unstarted.set(batch.target, (unstarted.get(batch.target) ?? 0) + 1);
+  }
+  expect(memory.dispatch.unstartedJitBatchCountByTarget).toEqual(unstarted);
+  const byTarget = new Map<string, { h: number; w1: number; g: number; w2: number }>();
+  for (const batch of batches) {
+    const counts = byTarget.get(batch.target) ?? { h: 0, w1: 0, g: 0, w2: 0 };
+    for (const op of batch.ops) counts[op.role]++;
+    byTarget.set(batch.target, counts);
+  }
+  expect(memory.dispatch.pendingJitRoleCountByTarget).toEqual(byTarget);
+};
 
 /** The dispatcher drives the sim exactly as it will drive the game, so these
  * are end-to-end checks of the HWGW engine against the real game effects. */
@@ -182,7 +202,7 @@ describe("HWGW dispatcher", () => {
     // Many batches in flight means each replan pass advances less virtual
     // time; this cap counts passes, not milliseconds.
     for (let pass = 0; pass < 40_000; pass++) {
-      const hackBatch = memory.dispatch.jitPending.find((batch) => batch.ops.some((op) => op.kind === "hack"));
+      const hackBatch = pendingBatches(memory).find((batch) => batch.ops.some((op) => op.kind === "hack"));
       const hack = hackBatch?.ops.find((op) => op.kind === "hack");
       if (!hack) throw new Error("no pending hack");
       const farmCap = memory.dispatch.evaluator.directive.segments.find((segment) => segment.kind === "farm")?.gb ?? 0;
@@ -193,7 +213,7 @@ describe("HWGW dispatcher", () => {
         hackBatch!.ops.length === 1
         && launchAt <= world.clock.now() + 1e-9
         && hackFits
-        && memory.dispatch.jitPending[0] === hackBatch
+        && pendingBatches(memory)[0] === hackBatch
       ) {
         return { memory, plannedThreads: hack.threads };
       }
@@ -201,7 +221,7 @@ describe("HWGW dispatcher", () => {
       inbox = [];
       memory = result.memory;
       for (const action of result.actions) expect(world.execute(action)).toBe(true);
-      const nextStart = memory.dispatch.jitPending
+      const nextStart = pendingBatches(memory)
         .flatMap((batch) => batch.ops)
         .reduce((earliest, op) => {
           const due = op.reservation
@@ -212,7 +232,7 @@ describe("HWGW dispatcher", () => {
       world.clock.run(() => inbox.length > 0, nextStart);
     }
     throw new Error("hack window did not open at " + world.clock.now() + ": " + JSON.stringify(
-      memory.dispatch.jitPending.slice(0, 2).map((batch) => batch.ops.map((op) => ({
+      pendingBatches(memory).slice(0, 2).map((batch) => batch.ops.map((op) => ({
         kind: op.kind, startAt: op.startAt, landing: op.landing,
       }))),
     ));
@@ -253,7 +273,7 @@ describe("HWGW dispatcher", () => {
       for (const action of result.actions) expect(world.execute(action)).toBe(true);
       // Only clock.run advances virtual time; executing a sleep action alone
       // does not. Run to the earliest pending reservation deadline.
-      const nextStart = result.memory.dispatch.jitPending
+      const nextStart = pendingBatches(result.memory)
         .flatMap((batch) => batch.ops)
         .reduce((earliest, op) => {
           const due = op.reservation
@@ -268,7 +288,7 @@ describe("HWGW dispatcher", () => {
     }
     expect(launched.length).toBeGreaterThan(0);
     expect(launched.every((action) => action.type === "weaken")).toBe(true);
-    expect(result.memory.dispatch.jitPending.some((batch) =>
+    expect(pendingBatches(result.memory).some((batch) =>
       batch.ops.some((op) => op.kind === "hack") && batch.ops.some((op) => op.kind === "grow")
     )).toBe(true);
     // Padding is bounded by the launch guard, not the landing grid: an op
@@ -276,6 +296,132 @@ describe("HWGW dispatcher", () => {
     // native call. Holds at any spacer.
     expect(maxOf(launched.map((action) => action.additionalMsec ?? 0)))
       .toBeLessThanOrEqual(JIT_LAUNCH_GUARD_MS + 1e-6);
+  });
+
+  test("active prep drains a smaller JIT allotment without replacing its queue with eager batches", () => {
+    const prepSpec: ServerSpec = {
+      hostname: "prep-target",
+      hackDifficulty: 40,
+      moneyAvailable: 1e9,
+      requiredHackingSkill: 100,
+      serverGrowth: 80,
+      numOpenPortsRequired: 0,
+      maxRam: 0,
+      currentDifficulty: 30,
+      currentMoney: 1,
+    };
+    const world = new SimWorld({
+      seed: 12,
+      network: [...JIT_TEST_NETWORK, prepSpec],
+      homeRam: 4_096,
+      startingMoney: 1e9,
+    });
+    prepareJitTestWorld(world);
+    const prepServer = world.servers.get("prep-target")!;
+    prepServer.hasAdminRights = true;
+    prepServer.hackDifficulty = prepServer.minDifficulty + 10;
+    prepServer.moneyAvailable = 1;
+    let seeded = planFarm(world.view(), initFarm(), [], { jit: true });
+    const ready = reachFirstHackWindow(world, seeded);
+    let memory = ready.memory;
+    const farmTarget = memory.dispatch.evaluator.directive.farm!.host;
+    expect(farmTarget).toBe("jit-target");
+    expect(pendingBatches(memory).length).toBeGreaterThan(0);
+    expect(pendingBatches(memory).filter((batch) => batch.started).length).toBeGreaterThan(0);
+
+    const prepEntry = memory.dispatch.evaluator.entries.get(prepServer.hostname)!;
+    const prepPlan = solvePrep(memory.dispatch.evaluator.ctx!, prepEntry.statics, {
+      hackDifficulty: prepServer.hackDifficulty,
+      moneyAvailable: prepServer.moneyAvailable,
+    });
+    const fleetGb = memory.dispatch.evaluator.directive.segments.reduce((sum, segment) => sum + segment.gb, 0);
+    const requestedFarmGb = 128;
+    const requestedDirective: typeof memory.dispatch.evaluator.directive = {
+      ...memory.dispatch.evaluator.directive,
+      prep: { host: prepServer.hostname, statics: prepEntry.statics, plan: prepPlan },
+      segments: [
+        { kind: "prep", gb: fleetGb - requestedFarmGb },
+        { kind: "farm", gb: requestedFarmGb },
+        { kind: "share", gb: 0 },
+      ],
+    };
+    memory.dispatch.evaluator.directive = requestedDirective;
+    memory.dispatch.evaluator.forceGate = false;
+    memory.dispatch.evaluator.lastGateAt = world.clock.now();
+    const waveId = 9_200_001;
+    trackOp(memory.dispatch, waveId, {
+      hostname: "home",
+      target: prepServer.hostname,
+      kind: "weaken",
+      segment: "prep",
+      gb: 1.75,
+      wave: true,
+      landing: world.clock.now() + 60_000,
+    } as never);
+    memory.dispatch.prepInFlight.set(prepServer.hostname, 1);
+    memory.dispatch.segmentGb.prep = 1.75;
+
+    const batchIdBefore = memory.dispatch.nextBatchId;
+    const pendingBefore = memory.dispatch.pendingJitBatchCount;
+    const originalHackThreads = memory.dispatch.jitRuntimeByTarget.get(farmTarget)!.solution.hackThreads;
+    const result = planFarm(world.view(), memory, [], { jit: true });
+    memory = result.memory;
+
+    // The old path saw unused prep RAM, set `borrow`, skipped proper JIT and
+    // opened eager farm batches beside the still-pending ordered queue.
+    expect(memory.dispatch.nextBatchId).toBe(batchIdBefore);
+    expect(memory.dispatch.pendingJitBatchCount).toBeGreaterThan(0);
+    expect(memory.dispatch.pendingJitBatchCount).toBeLessThanOrEqual(pendingBefore);
+    expect(pendingBatches(memory).every((batch) => batch.started)).toBe(true);
+    expectPendingIndex(memory);
+    expect(memory.dispatch.stats.batchesByKind.hwgw.noHack).toBe(0);
+
+    const effectiveFarmGb = result.directive.segments.find((segment) => segment.kind === "farm")!.gb;
+    const effectivePrepGb = result.directive.segments.find((segment) => segment.kind === "prep")!.gb;
+    expect(effectiveFarmGb).toBeGreaterThan(requestedFarmGb);
+    expect(effectivePrepGb).toBeLessThan(fleetGb - requestedFarmGb);
+    expect(result.directive.segments[0]!.kind).toBe("farm");
+    expect(result.directive.segments.reduce((sum, segment) => sum + segment.gb, 0)).toBeCloseTo(fleetGb, 9);
+
+    expect(memory.dispatch.jitRuntimeByTarget.get(farmTarget)!.solution.hackThreads).toBe(originalHackThreads);
+  });
+
+  test("re-solves an oversized farm shape into the available JIT segment", () => {
+    const world = new SimWorld({ seed: 13, network: JIT_TEST_NETWORK, homeRam: 4_096, startingMoney: 1e9 });
+    prepareJitTestWorld(world);
+    let memory = planFarm(world.view(), initFarm(), [], { jit: true }).memory;
+    const farmTarget = memory.dispatch.evaluator.directive.farm!.host;
+    const originalHackThreads = memory.dispatch.jitRuntimeByTarget.get(farmTarget)!.solution.hackThreads;
+
+    // Model the instant after a graceful drain: no pending/resident work, but
+    // the evaluator still carries the large-fleet optimum and the runtime cache
+    // remembers its last executable shape.
+    memory.dispatch.jitByTarget.clear();
+    memory.dispatch.jitWakeByTarget.clear();
+    memory.dispatch.pendingJitRoleCountByTarget.clear();
+    memory.dispatch.unstartedJitBatchCountByTarget.clear();
+    memory.dispatch.pendingJitBatchCount = 0;
+    memory.dispatch.pendingJitOpCount = 0;
+    memory.dispatch.batches.clear();
+    const fleetGb = memory.dispatch.evaluator.directive.segments.reduce((sum, segment) => sum + segment.gb, 0);
+    const farmGb = 128;
+    memory.dispatch.evaluator.directive = {
+      ...memory.dispatch.evaluator.directive,
+      segments: [
+        { kind: "farm", gb: farmGb },
+        { kind: "prep", gb: 0 },
+        { kind: "share", gb: fleetGb - farmGb },
+      ],
+    };
+    memory.dispatch.evaluator.forceGate = false;
+    memory.dispatch.evaluator.lastGateAt = world.clock.now();
+
+    memory = planFarm(world.view(), memory, [], { jit: true }).memory;
+    const downscaled = memory.dispatch.jitRuntimeByTarget.get(farmTarget)!;
+    expect(downscaled.solution.hackThreads).toBeLessThan(originalHackThreads);
+    expect(downscaled.schedule.totalGb).toBeLessThanOrEqual(farmGb + 1e-9);
+    expect(memory.dispatch.pendingJitBatchCount).toBeGreaterThan(0);
+    expectPendingIndex(memory);
   });
 
   soak.test("a farm-ready tolerance state can bootstrap into the steady-state JIT envelope", () => {
@@ -297,7 +443,7 @@ describe("HWGW dispatcher", () => {
     expect(h.memory.dispatch.stats.hacks).toBeGreaterThan(0);
   });
 
-  test("a run of money-zeroed hacks abandons the pipeline and falls back to prep", () => {
+  test("a money-reduced started batch launches its hack and stops new leading weakens", () => {
     const world = new SimWorld({ seed: 2, network: JIT_TEST_NETWORK, homeRam: 4_096, startingMoney: 1e9 });
     prepareJitTestWorld(world);
     const initial = planFarm(world.view(), initFarm(), [], { jit: true });
@@ -305,58 +451,34 @@ describe("HWGW dispatcher", () => {
     const target = world.servers.get("jit-target")!;
     const before = ready.memory.dispatch.stats.missedWindow["arrival-money"];
 
-    // A deep externally-observed money deficit: every pending hack is zeroed
-    // by the arrival-money check while support ops keep landing, and later
-    // grows are sized from the same short predicted ledger — without the
-    // desync detector this is a stable zero-hack state. Money is pinned low
-    // across passes so in-flight grows cannot mask the deficit.
-    let memory = ready.memory;
-    let inbox: CompletionEvent[] = [];
-    world.onSettled = (event) => inbox.push(event);
-    let sawHack = false;
-    for (let pass = 0; pass < 40_000 && memory.dispatch.jitPending.length > 0; pass++) {
-      target.moneyAvailable = target.moneyMax * 0.4;
-      const result = planFarm(world.view(), memory, inbox, { jit: true });
-      inbox = [];
-      memory = result.memory;
-      sawHack ||= result.actions.some((action) => action.type === "hack" && action.target === target.hostname);
-      for (const action of result.actions) world.execute(action);
-      const nextDue = memory.dispatch.jitPending
-        .flatMap((batch) => batch.ops)
-        .reduce((earliest, op) => {
-          const due = op.reservation
-            ? op.startAt
-            : op.reserveAt ?? op.startAt - (JIT_LAUNCH_GUARD_MS - WORKER_STARTUP_GUARD_MS);
-          return due > world.clock.now() ? Math.min(earliest, due) : earliest;
-        }, Infinity);
-      if (Number.isFinite(nextDue)) world.clock.run(() => inbox.length > 0, nextDue);
-    }
-
-    // The streak trips: the pending set is abandoned after at most
-    // HACK_ZERO_DESYNC_STREAK zeroed hacks instead of being drained one
-    // doomed batch per landing window (the old behavior skips every batch of
-    // the pipeline), and no zero-thread hack ever reached the world.
-    expect(memory.dispatch.jitPending.length).toBe(0);
-    expect(sawHack).toBe(false);
-    expect(memory.dispatch.stats.missedWindow["arrival-money"]).toBeGreaterThanOrEqual(before + 1);
-    expect(memory.dispatch.stats.batchesSkipped).toBeLessThanOrEqual(HACK_ZERO_DESYNC_STREAK);
-    expect(memory.dispatch.hackZeroStreak).toBe(0);
-    // The skips are ATTRIBUTED, and the parts sum to the whole: a single
-    // pooled counter reads as one phenomenon when it is really several, and
-    // here the cause is the arrival-money brake rather than a starved
-    // pipeline. Every increment goes through `noteBatchSkipped`, so the two
-    // cannot drift apart.
-    const skippedBy = memory.dispatch.stats.batchesSkippedBy;
-    expect(Object.values(skippedBy).reduce((a, b) => a + b, 0)).toBe(
-      memory.dispatch.stats.batchesSkipped,
+    // Its support is already sunk. Reduce the steal, but launch it, then drain
+    // only batches which crossed the leading-weaken boundary.
+    const nextBatchId = ready.memory.dispatch.nextBatchId;
+    const skipped = ready.memory.dispatch.stats.batchesSkippedBy["arrival-money"];
+    target.moneyAvailable = target.moneyMax * 0.4;
+    const result = planFarm(world.view(), ready.memory, [], { jit: true });
+    const hacks = result.actions.filter(
+      (action): action is HgwAction => action.type === "hack" && action.target === target.hostname,
     );
-    expect(skippedBy["arrival-money"]).toBe(memory.dispatch.stats.batchesSkipped);
+
+    expect(hacks.length).toBeGreaterThan(0);
+    expect(hacks.every((action) =>
+      action.strengthThreads !== undefined && action.strengthThreads > 0
+    )).toBe(true);
+    expect(result.memory.dispatch.drainingJitTargets.has(target.hostname)).toBe(true);
+    expect(pendingBatches(result.memory).every((batch) => batch.started)).toBe(true);
+    expect(result.memory.dispatch.nextBatchId).toBe(nextBatchId);
+    expect(result.memory.dispatch.stats.batchesSkippedBy["arrival-money"]).toBe(skipped);
+    expect(result.memory.dispatch.stats.missedWindow["arrival-money"]).toBeGreaterThanOrEqual(before + 1);
+    expectPendingIndex(result.memory);
+    // A reduction is measured as an arrival-money miss, not a skipped batch:
+    // the already-started batch still emits its hack.
+    const skippedBy = result.memory.dispatch.stats.batchesSkippedBy;
+    expect(Object.values(skippedBy).reduce((a, b) => a + b, 0)).toBe(
+      result.memory.dispatch.stats.batchesSkipped,
+    );
+    expect(skippedBy["arrival-money"]).toBe(result.memory.dispatch.stats.batchesSkipped);
     expect(skippedBy.deadline + skippedBy.placement).toBe(0);
-    // With the pending set gone and the target genuinely under the prepped
-    // band, the farm branch's existing `isPrepped` gate routes the next
-    // passes through the prep path (dispatch.ts farm-segment else-branch),
-    // re-seeding money from the OBSERVED state — the old behavior instead
-    // kept the doomed pipeline, replanning and zeroing batches indefinitely.
   });
 
   test("a rising hacking level shrinks only the hack's STRENGTH, never the cadence", () => {
@@ -392,7 +514,7 @@ describe("HWGW dispatcher", () => {
     const rising = build(expForSkill(1_002) - expForSkill(1_000));
 
     const hackOf = (result: ReturnType<typeof build>) =>
-      result.memory.dispatch.jitPending[0]!.ops.find((op) => op.kind === "hack")!;
+      pendingBatches(result.memory)[0]!.ops.find((op) => op.kind === "hack")!;
     const flatHack = hackOf(flat);
     const risingHack = hackOf(rising);
 
@@ -404,7 +526,7 @@ describe("HWGW dispatcher", () => {
     expect(risingHack.threads).toBe(flatHack.threads);
     expect(rising.memory.dispatch.depthCapGb).toBe(flat.memory.dispatch.depthCapGb);
     const roles = (result: ReturnType<typeof build>) =>
-      result.memory.dispatch.jitPending[0]!.ops
+      pendingBatches(result.memory)[0]!.ops
         .map((op) => `${op.role}:${op.threads}`)
         .sort();
     expect(roles(rising)).toEqual(roles(flat));
@@ -463,6 +585,25 @@ describe("HWGW dispatcher", () => {
     expect(guarded.memory.dispatch.stats.missedWindow["arrival-security"]).toBe(before + 1);
   });
 
+  test("a late started batch launches its hack instead of discarding paid support", () => {
+    const world = new SimWorld({ seed: 2, network: JIT_TEST_NETWORK, homeRam: 4_096, startingMoney: 1e9 });
+    prepareJitTestWorld(world);
+    const initial = planFarm(world.view(), initFarm(), [], { jit: true });
+    const ready = reachFirstHackWindow(world, initial);
+    const target = world.servers.get("jit-target")!;
+    const skipped = ready.memory.dispatch.stats.batchesSkippedBy.deadline;
+    const missed = ready.memory.dispatch.stats.missedWindow.deadline;
+
+    world.clock.run(() => false, world.clock.now() + JIT_LAUNCH_GUARD_MS + 1);
+    const late = planFarm(world.view(), ready.memory, [], { jit: true });
+
+    expect(late.actions.some((action) =>
+      action.type === "hack" && action.target === target.hostname
+    )).toBe(true);
+    expect(late.memory.dispatch.stats.missedWindow.deadline).toBe(missed + 1);
+    expect(late.memory.dispatch.stats.batchesSkippedBy.deadline).toBe(skipped);
+  });
+
   test("down-strengths a pending hack when money falls after planning, without re-placing it", () => {
     const world = new SimWorld({ seed: 2, network: JIT_TEST_NETWORK, homeRam: 4_096, startingMoney: 1e9 });
     prepareJitTestWorld(world);
@@ -492,6 +633,23 @@ describe("HWGW dispatcher", () => {
     expect(guarded.memory.dispatch.stats.allocFailsByPhase.jit).toBe(allocFailsBefore);
   });
 
+  test("a weaken wake does not mistake transient interleave money for the hack's arrival money", () => {
+    const world = new SimWorld({ seed: 2, network: JIT_TEST_NETWORK, homeRam: 4_096, startingMoney: 1e9 });
+    prepareJitTestWorld(world);
+    const ready = reachFirstHackWindow(world, planFarm(world.view(), initFarm(), [], { jit: true }));
+    const target = world.servers.get("jit-target")!;
+    target.moneyAvailable = target.moneyMax * 0.4;
+    const skipped = ready.memory.dispatch.stats.batchesSkippedBy["arrival-money"];
+
+    const hot = planFarm(world.view(), ready.memory, [], {
+      jit: true,
+      trigger: { kind: "target-wake", target: target.hostname, source: "completion" },
+    });
+    const hack = hot.actions.find((action) => action.type === "hack" && action.target === target.hostname);
+    expect(hack).toBeDefined();
+    expect(hot.memory.dispatch.stats.batchesSkippedBy["arrival-money"]).toBe(skipped);
+  });
+
   test("weaken always runs at full spawned strength; only hack and grow are late-bound", () => {
     // Weaken is deliberately exempt from late binding. Its RAM is already
     // committed by the time it launches, over-weakening clamps harmlessly at
@@ -516,7 +674,7 @@ describe("HWGW dispatcher", () => {
         if (action.type === "grow") grows.push(action);
         expect(world.execute(action)).toBe(true);
       }
-      const nextStart = memory.dispatch.jitPending
+      const nextStart = pendingBatches(memory)
         .flatMap((batch) => batch.ops)
         .reduce((earliest, op) => {
           const due = op.reservation
@@ -556,13 +714,13 @@ describe("HWGW dispatcher", () => {
     }
 
     const hwgw = planFarm(world.view(), initFarm(), [], { jit: true, modeOverride: "hwgw" });
-    expect(hwgw.memory.dispatch.jitPending.some((batch) => batch.ops.some((op) => op.role === "w1"))).toBe(true);
+    expect(pendingBatches(hwgw.memory).some((batch) => batch.ops.some((op) => op.role === "w1"))).toBe(true);
     for (const action of hwgw.actions) world.execute(action);
 
     const hgw = planFarm(world.view(), hwgw.memory, [], { jit: true, modeOverride: "hgw" });
     expect(hgw.memory.dispatch.mode).toBe("hgw");
-    expect(hgw.memory.dispatch.jitPending.length).toBeGreaterThan(0);
-    expect(hgw.memory.dispatch.jitPending.every((batch) => batch.ops.every((op) => op.role !== "w1"))).toBe(true);
+    expect(pendingBatches(hgw.memory).length).toBeGreaterThan(0);
+    expect(pendingBatches(hgw.memory).every((batch) => batch.ops.every((op) => op.role !== "w1"))).toBe(true);
   });
 
   soak.test("batches land in H -> W1 -> G -> W2 order, one spacer apart", () => {
@@ -831,6 +989,51 @@ describe("HWGW dispatcher", () => {
       result: { securityReduced: 1 },
     }]).memory;
     expect(memory.dispatch.failedWeakenGroups.size).toBe(0);
+  });
+
+  test("a target wake cannot advance another target's pipeline", () => {
+    const world = new SimWorld({
+      seed: 11,
+      network: JIT_TEST_NETWORK,
+      homeRam: 4_096,
+      startingMoney: 1_000,
+    });
+    prepareJitTestWorld(world);
+    let memory = planFarm(world.view(), initFarm(), [], { jit: true }).memory;
+    const farmTarget = memory.dispatch.evaluator.directive.farm!.host;
+    const pendingBefore = pendingBatches(memory).reduce((sum, batch) => sum + batch.ops.length, 0);
+    const anchorBefore = memory.dispatch.lastAnchor;
+    expect(pendingBefore).toBeGreaterThan(0);
+    expectPendingIndex(memory);
+
+    const otherTarget = "wake-only-target";
+    const opId = 9_100_001;
+    trackOp(memory.dispatch, opId, {
+      hostname: "home",
+      target: otherTarget,
+      kind: "weaken",
+      segment: "prep",
+      gb: 0,
+      wave: false,
+      landing: world.clock.now(),
+    });
+    memory.dispatch.inFlight.weaken++;
+
+    const result = planFarm(world.view(), memory, [{
+      kind: "weaken",
+      opId,
+      target: otherTarget,
+      result: { securityReduced: 1 },
+    }], { jit: true, trigger: { kind: "target-wake", target: otherTarget, source: "completion" } });
+    memory = result.memory;
+
+    expect(result.actions.some((action) =>
+      action.type === "hack" || action.type === "grow" || action.type === "weaken"
+    )).toBe(false);
+    expect(pendingBatches(memory).reduce((sum, batch) => sum + batch.ops.length, 0)).toBe(pendingBefore);
+    expectPendingIndex(memory);
+    expect(memory.dispatch.lastAnchor).toBe(anchorBefore);
+    expect(memory.dispatch.evaluator.directive.farm?.host).toBe(farmTarget);
   });
 
   test("a dispatcher pass stays well inside the 10ms tick budget", () => {
@@ -1566,7 +1769,6 @@ describe("worker pooling", () => {
     }));
     const exits: CompletionEvent[] = [...spawnedWorkers].map((id) => ({ kind: "workerExit", opId: id }));
     plan([...secondDone, ...exits]);
-    expect(memory.dispatch.pool.workers.size).toBeGreaterThanOrEqual(0);
     // Everything the pool held is free again (the pass may have launched a
     // fresh wave of spawns; subtract what is currently tracked).
     const stillHeld = [...memory.dispatch.pool.workers.values()].reduce((sum, w) => sum + w.gb, 0);
@@ -1764,5 +1966,38 @@ describe("stock manipulation reaches the ops", () => {
     expect(none.host).not.toBe("");
     expect(none.flagged).toEqual({});
     expect(none.stockIncome).toBe(0);
+  });
+});
+
+describe("share stop requests", () => {
+  const shareWorker = (workerId: number, gb: number) => ({
+    workerId,
+    hostname: "home",
+    threads: gb / 4,
+    gb,
+    effectiveThreads: gb / 4,
+    stopping: false,
+  });
+
+  test("RAM already on its way out satisfies a repeat request instead of evicting more", () => {
+    const memory = initFarm().dispatch;
+    memory.shareWorkers.set(1, shareWorker(1, 16));
+    memory.shareWorkers.set(2, shareWorker(2, 8));
+
+    const first: Action[] = [];
+    expect(requestShareStops(memory, first, 12)).toBe(16);
+    expect(first).toEqual([{ type: "stopShare", opId: 1 }]);
+
+    // The 16 GB pending stop already covers this ask: no second victim. The
+    // old accounting skipped stopping workers entirely, so every repeated call
+    // for the same shortfall stopped a fresh worker on top of the pending one.
+    const repeat: Action[] = [];
+    expect(requestShareStops(memory, repeat, 12)).toBe(16);
+    expect(repeat).toEqual([]);
+
+    // A genuinely larger ask still evicts beyond the pending RAM.
+    const larger: Action[] = [];
+    expect(requestShareStops(memory, larger, 20)).toBe(24);
+    expect(larger).toEqual([{ type: "stopShare", opId: 2 }]);
   });
 });

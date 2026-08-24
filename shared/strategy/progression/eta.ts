@@ -56,8 +56,8 @@ export const FALLBACK_GANG_REP_PER_SEC = 50;
 /** Creating/joining a gang is a bounded route prerequisite whose detailed
  * faction/karma work is delegated through needs. */
 export const FALLBACK_GANG_START_SEC = 3_600;
-/** The labyrinth walk itself. Unmodelled mechanic, so this is a pure guess —
- *  marked unmeasured in the parts so the calibration loop can see it. */
+/** The labyrinth walk itself. The mechanic is simulated, but this route
+ * fallback has not yet been calibrated from completed walks. */
 export const LABYRINTH_WALK_SEC = 7_200;
 /** Install + requeue overhead around the Red Pill install. */
 export const INSTALL_OVERHEAD_SEC = 300;

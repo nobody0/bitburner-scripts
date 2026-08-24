@@ -6,6 +6,7 @@ import {
   KIND_CALLS,
   NO_RESPAWN_KINDS,
   live,
+  orderCalls,
   priceCalls,
   waitForWake,
   type AgentHandle,
@@ -28,14 +29,12 @@ import { runOrder } from "./orders.ts";
  * states why the spawn round trip is cheaper than `exec` and how a session
  * survives it.
  *
- * ## Cancellation is a promise, not a poll
+ * ## Cancellation is cooperative, with a hard-kill backstop
  *
- * The agent races the running order against a cancel promise whose resolver the
- * controller holds (`handle.cancelFire`). To cancel, the controller sets
- * `handle.cancelReason` and fires it; the race falls through even seconds deep
- * in a blocking `authenticate`, the order settles `cancelled`, and atExit takes
- * the next order. A body stuck in one blocking call cannot look at the flag
- * itself, so the fire — plus the armored hard-kill backstop — is what stops it.
+ * Bodies check cancelReason at safe boundaries. A body blocked inside one
+ * Darknet call cannot observe the flag, so the controller hard-kills an armored
+ * agent on the next derive pass; atExit stages the successor after the game
+ * clears the blocked Netscript call.
  *
  * ## The one rule that binds this file (and `orders.ts`/`attempt.ts`/`walk.ts`)
  *
@@ -72,7 +71,8 @@ export async function main(ns: NS): Promise<void> {
     return;
   }
 
-  const residentGb = priceCalls(ns, KIND_CALLS.idle);
+  const controllerManaged = launch?.controllerManaged === true;
+  const residentGb = priceCalls(ns, orderCalls("idle", controllerManaged));
 
   // Did the predecessor hand us a specific order? It stamps `entry.pendingOrder`
   // just before its zero-delay spawn; we read and clear it.
@@ -85,7 +85,7 @@ export async function main(ns: NS): Promise<void> {
     return;
   }
 
-  await runAsResident(ns, host, residentGb);
+  await runAsResident(ns, host, residentGb, controllerManaged);
 }
 
 /** This host's entry, creating it if the controller has not seen this host yet.
@@ -114,11 +114,12 @@ function armRespawn(
   residentGb: number,
   state: { deliberate: boolean },
   onDeath: () => void,
+  respawns: boolean,
 ): void {
   ns.atExit(() => {
     if (state.deliberate) return;
     onDeath();
-    respawnFromEntry(ns, host, residentGb);
+    if (respawns) respawnFromEntry(ns, host, residentGb);
   }, "dnet-respawn");
 }
 
@@ -142,7 +143,7 @@ function respawnFromEntry(ns: NS, host: string, residentGb: number): void {
 
 /** Resident mode: register an idle handle, beat, wait for work. When the
  * controller stages an order, hand `staged[0]` to a fresh process and spawn. */
-async function runAsResident(ns: NS, host: string, residentGb: number): Promise<void> {
+async function runAsResident(ns: NS, host: string, residentGb: number, controllerManaged: boolean): Promise<void> {
   const state = { deliberate: false };
   // A resident killed by a host restart drops its handle and wakes the
   // controller, but never inserts a replacement into the live killall iterator.
@@ -156,7 +157,7 @@ async function runAsResident(ns: NS, host: string, residentGb: number): Promise<
   // would still spawn a resident, which is correct here (a live host keeps its
   // resident). So a plain resident kill DOES respawn a resident; only a host
   // restart/delete makes the spawn throw and stop. That matches the old design.
-  armRespawn(ns, host, residentGb, state, onDeath);
+  armRespawn(ns, host, residentGb, state, onDeath, !controllerManaged);
 
   const startupAt = Date.now();
   let sawController = false;
@@ -181,8 +182,21 @@ async function runAsResident(ns: NS, host: string, residentGb: number): Promise<
       entry.agent.beatAt = Date.now();
     }
 
-    const next = (entry.staged ??= []).shift();
+    const staged = entry.staged ??= [];
+    const next = staged[0];
     if (next) {
+      if (controllerManaged) {
+        // The remote dispatcher claims the order only when it can exec it.
+        // Until then it remains in the durable controller-owned queue.
+        if (entry.agent?.pid === ns.pid) entry.agent = undefined;
+        // This is a handoff, not a failed spread attempt. Let the controller
+        // replant immediately instead of imposing the ordinary retry cooldown.
+        entry.lastPlantAt = undefined;
+        state.deliberate = true;
+        g.wake("stasis-dispatch-requested");
+        return;
+      }
+      staged.shift();
       entry.pendingOrder = next;
       state.deliberate = true;
       respawnFromEntry(ns, host, residentGb);
@@ -195,8 +209,12 @@ async function runAsResident(ns: NS, host: string, residentGb: number): Promise<
 
 /** Order mode: run one order to completion, then atExit into the next. */
 async function runAsOrder(ns: NS, g: ControllerHandle, entry: HostEntry, order: Order, residentGb: number): Promise<void> {
+  const startedAt = Date.now();
+  order.startedAt = startedAt;
+  delete order.expectedDoneAt;
   const state = { deliberate: false };
-  const respawns = !NO_RESPAWN_KINDS.has(order.kind);
+  const controllerManaged = order.controllerManaged === true;
+  const respawns = !controllerManaged && !NO_RESPAWN_KINDS.has(order.kind);
 
   let settled = false;
   let result: Report | undefined;
@@ -207,16 +225,13 @@ async function runAsOrder(ns: NS, g: ControllerHandle, entry: HostEntry, order: 
     settled = true;
     settleDone(r);
   };
-  let fire!: () => void;
-  const cancelP = new Promise<void>((resolve) => { fire = resolve; });
 
   const handle: AgentHandle = {
     pid: ns.pid,
     order,
-    startedAt: order.startedAt ?? Date.now(),
-    beatAt: Date.now(),
+    startedAt,
+    beatAt: startedAt,
     armored: false,
-    cancelFire: fire,
     done,
     settle,
   };
@@ -234,6 +249,7 @@ async function runAsOrder(ns: NS, g: ControllerHandle, entry: HostEntry, order: 
   let atExitRan = false;
   const onDeath = (): void => {
     atExitRan = true;
+    delete order.expectedDoneAt;
     const cancelled = handle.cancelReason !== undefined;
     handle.pid = 0;
     settle(terminal(order, cancelled ? "cancelled" : undefined, handle.cancelReason ?? "killed mid-order", cancelled ? false : true));
@@ -244,7 +260,7 @@ async function runAsOrder(ns: NS, g: ControllerHandle, entry: HostEntry, order: 
       entry.pendingOrder = undefined;
     }
   };
-  armRespawn(ns, host_of(order), residentGb, state, onDeath);
+  armRespawn(ns, host_of(order), residentGb, state, onDeath, respawns);
   handle.armored = respawns; // pin/walk never arm the respawn spawn.
 
   g.adopt(order.from, handle);
@@ -259,20 +275,22 @@ async function runAsOrder(ns: NS, g: ControllerHandle, entry: HostEntry, order: 
           if (progress !== undefined) handle.progress = progress;
         }
       },
+      setExpectedDoneAt: (at) => {
+        if (entry.agent !== handle) return;
+        handle.beatAt = Date.now();
+        if (at === undefined) delete order.expectedDoneAt;
+        else order.expectedDoneAt = at;
+      },
       cancelled: () => (entry.agent === handle ? handle.cancelReason : "orphaned"),
       deps: g.deps,
     };
     try {
-      await Promise.race([
-        runOrder(ns, order, io).then((r) => {
-          result = { id: order.id, kind: order.kind, host: order.host, from: order.from, ...r };
-          fire();
-        }),
-        cancelP,
-      ]);
+      const r = await runOrder(ns, order, io);
+      result = { id: order.id, kind: order.kind, host: order.host, from: order.from, ...r };
     } catch (error) {
       result = { id: order.id, kind: order.kind, host: order.host, from: order.from, ok: false, detail: `${order.kind}: ${String(error)}`.slice(0, 200) };
     }
+    delete order.expectedDoneAt;
     settle(result ?? terminal(order, "cancelled", handle.cancelReason ?? "cancelled", false));
   }
 
@@ -288,9 +306,12 @@ async function runAsOrder(ns: NS, g: ControllerHandle, entry: HostEntry, order: 
     stageSuccessor(entry);
     respawnFromEntry(ns, order.from, residentGb);
   } else {
-    // pin/walk: leave the host empty for the spread planner to re-plant.
+    // pin/walk and stasis-managed work leave recovery to the controller. The
+    // staged queue remains intact and is the successor handoff.
     if (entry.agent === handle) entry.agent = undefined;
     entry.pendingOrder = undefined;
+    if (controllerManaged) entry.lastPlantAt = undefined;
+    g.wake("controller-managed-order-finished");
   }
 }
 
@@ -299,16 +320,17 @@ function stageSuccessor(entry: HostEntry): void {
   const next = (entry.staged ??= []).shift();
   entry.pendingOrder = next;
   entry.agent = undefined; // the successor process adopts its own handle
-  if (next) next.startedAt = Date.now();
 }
 
 function makeHandle(ns: NS, order: Order): AgentHandle {
   let settle!: (r: Report) => void;
+  const startedAt = Date.now();
+  order.startedAt = startedAt;
   return {
     pid: ns.pid,
     order,
-    startedAt: Date.now(),
-    beatAt: Date.now(),
+    startedAt,
+    beatAt: startedAt,
     armored: false,
     done: new Promise<Report>((resolve) => { settle = resolve; }),
     settle: (r) => settle(r),

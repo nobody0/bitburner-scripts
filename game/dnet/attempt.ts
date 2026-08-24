@@ -3,10 +3,12 @@ import { attemptDisposition, conclusiveAttempt, LOCAL_CODE, type AttemptOutcome,
 import { modelEntry, planAttempt, type ModelId, type PasswordFacts } from "../../shared/strategy/dnet/models.ts";
 import { harvestLogs, logShape, oracleFor } from "../../shared/strategy/dnet/oracle.ts";
 import { solverFor } from "../../shared/strategy/dnet/solvers/index.ts";
+import { authenticateWaitMs } from "../../shared/strategy/dnet/rates.ts";
 import {
   EXHAUSTED_PHASE,
   PENDING_ATTEMPT,
   PENDING_NEEDS_ORACLE,
+  PENDING_STEP_KIND,
   SOLVER_CODES,
   freshState,
   resumableState,
@@ -16,9 +18,11 @@ import {
   type SolverStep,
 } from "../../shared/strategy/dnet/solvers/types.ts";
 import type { AgentIo, ControllerDeps, Order, Report } from "./shared.ts";
+import { awaitDnetOperation } from "./timing.ts";
 
-/** The `attempt` order body: authenticate + heartbleed, in ONE process on
- * purpose — extracted mechanically from `jobs.ts`.
+/** The `attempt` order body owns authenticate plus any heartbleed needed to
+ * advance a feedback solver. One-shot attempts may also have a separately
+ * prequeued post-attempt bleed on a second vantage.
  *
  * The body returns the report FIELDS; the agent wrapper stamps `id`, `kind`,
  * `host` and `from` on top.
@@ -65,20 +69,6 @@ function grammarDrift(
   return { unrecognised: unrecognised.length, shapes };
 }
 
-/** How long one attempt job may keep talking to a host.
- *
- * Not a taste decision. A vantage — the adjacency `authenticate` and
- * `heartbleed` both require — survives about 108 s at the default net depth
- * before a move or a disconnect takes it away, and a round trip out there is
- * roughly 3.3 s. A job that ran longer than this would be conversing with a
- * host it can no longer reach, and would learn that by collecting 351s. Well
- * under `JOB_TIMEOUT_MS`, so the overseer never times out a job that is
- * working.
- *
- * A solve that does not finish inside it is not lost: the solver's state rides
- * home on the attempt ledger and the next vantage resumes the conversation. */
-const ATTEMPT_WALL_MS = 36_000;
-
 /** The storm seed's filename, exactly as upstream's program enum spells it. */
 
 /** Everything one `ls` teaches about a darknet host, in one call.
@@ -122,12 +112,13 @@ function describeHost(jobNs: NS, host: string): ReportHost {
   };
 }
 
-/** authenticate + heartbleed, in ONE job on purpose.
+/** Feedback authenticate + heartbleed stay in one job on purpose.
  *
  * `authenticate()` returns a GENERIC failure for every model but the labyrinth:
  * the model's real answer goes into the target's log ring, and only
- * `heartbleed` reads it back. Splitting them across two jobs would race the
- * 200-line ring against every other agent's noise for the sake of 0.6 GB. */
+ * `heartbleed` reads it back. Splitting a multi-round solver across jobs would
+ * race the 200-line ring and lose its exact response. One-shot candidates do
+ * not need that response, so they may use a promise-linked second vantage. */
 export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<OrderResult> {
   const jobNs = ns;
   const state = order;
@@ -163,7 +154,9 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
   const drainLogs = async (): Promise<ReturnType<typeof harvestLogs> | undefined> => {
     const attemptedAt = Date.now();
     lastBleedAttemptAt = attemptedAt;
-    const bled = await jobNs["dnet"]["heartbleed"](state.host, { peek: false, logsToCapture: LOG_LINES });
+    const bled = await awaitDnetOperation(io, {
+      operation: "heartbleed", host: state.host, from: state.from, threads: state.jobThreads ?? state.threads,
+    }, () => jobNs["dnet"]["heartbleed"](state.host, { peek: false, logsToCapture: LOG_LINES }));
     count(bled.code);
     if (!bled.success) {
       deps.recordLogDrain(state.host, {
@@ -194,7 +187,7 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
   // capped ring, so even one attempt could otherwise evict its oldest hint or
   // leaked credential. The ring's own stamp is authoritative—a standalone
   // drain may already have done this before an attempt job was scheduled.
-  if (canBleed && (lastBleedAt === undefined || pendingAuthRecords > 0)) await drainLogs();
+  if (!state.skipInitialBleed && canBleed && (lastBleedAt === undefined || pendingAuthRecords > 0)) await drainLogs();
 
   const facts: PasswordFacts = {
     passwordLength: details.passwordLength,
@@ -211,33 +204,28 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
    *  otherwise raise out of the body, fail the job, and re-derive for ever.
    *  One probe decides it; the solver's other channel — the mismatch index
    *  the failure log states outright — needs no formulas at all. */
-  let timingChannel = true;
 
   /** One measured authentication and its optional full-ring drain. */
   const send = async (password: string, wantsOracle: boolean): Promise<SolverObservation> => {
     // The fourth formula argument is the caller's assumed prefix length; it
     // does not inspect the password. Refresh the zero-prefix baseline before
     // every measurement because failed attempts can raise charisma.
-    if (details.modelId === "2G_cellular" && timingChannel) {
-      try {
-        const threads = state.jobThreads ?? 1;
-        const baseline = jobNs["formulas"]["dnet"]["getAuthenticateTime"](details, threads, undefined, 0);
+    if (details.modelId === "2G_cellular") {
+      const profile = deps.timing();
+      if (profile !== undefined) {
+        const threads = state.jobThreads ?? state.threads;
+        const baseline = authenticateWaitMs(details, profile, threads, 0);
         facts.authenticateBaseMs = baseline;
-        const stepMs = jobNs["formulas"]["dnet"]["getAuthenticateTime"](details, threads, undefined, 1) - baseline;
-        // Defensive for incomplete test doubles; upstream always returns > 0.
-        if (stepMs > 0) facts.authenticateStepMs = stepMs;
-      } catch {
-        // No Formulas.exe, or no darknet formulas surface at all. Stop asking
-        // and leave the baseline unset: `readMismatchIndex` is the channel
-        // the solver falls back to, and it gives up by name if neither is
-        // available rather than killing the agent.
-        timingChannel = false;
+        facts.authenticateStepMs = authenticateWaitMs(details, profile, threads, 1) - baseline;
+      } else {
         delete facts.authenticateBaseMs;
         delete facts.authenticateStepMs;
       }
     }
     const at = Date.now();
-    const answer = await jobNs["dnet"]["authenticate"](state.host, password);
+    const answer = await awaitDnetOperation(io, {
+      operation: "authenticate", host: state.host, from: state.from, threads: state.jobThreads ?? state.threads,
+    }, () => jobNs["dnet"]["authenticate"](state.host, password));
     const elapsedMs = Date.now() - at;
     count(answer.code);
     if (answer.code === 401 || answer.success) {
@@ -259,6 +247,21 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
     // hole in `shared/strategy/dnet/models.ts`.
     if (entry === undefined) count(LOCAL_CODE.UnknownModel);
 
+    const outcome: AttemptOutcome = {
+      at,
+      ...(details.modelId !== undefined ? { modelId: details.modelId } : {}),
+      status: entry === undefined ? "unknown-model" : entry.status,
+      attempted: password,
+      code: answer.code,
+      success: answer.success,
+      disposition: attemptDisposition(answer.code, answer.success, wantsOracle, false),
+      elapsedMs,
+    };
+    attempts.push(outcome);
+    // This authenticate has completed. Persist it before the optional delayed
+    // drain so cancellation at that boundary cannot erase the exchange.
+    deps.recordAttempt(state.host, outcome);
+
     // Feedback models drain immediately; timing-only 2G rounds can safely
     // batch until the full-ring bound. A SUCCESS deliberately drains nothing:
     // the credential is already recorded above, spreading onto the opened
@@ -271,18 +274,8 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
     // agent and with the host's own noise, so folding whichever oracle came
     // back first would hand the solver someone else's feedback.
     const oracle = harvest ? oracleFor(harvest, password, details.modelId) : undefined;
-    const outcome: AttemptOutcome = {
-      at,
-      ...(details.modelId !== undefined ? { modelId: details.modelId } : {}),
-      status: entry === undefined ? "unknown-model" : entry.status,
-      attempted: password,
-      code: answer.code,
-      success: answer.success,
-      disposition: attemptDisposition(answer.code, answer.success, wantsOracle, oracle !== undefined),
-      elapsedMs,
-      ...(oracle ? { oracle } : {}),
-    };
-    attempts.push(outcome);
+    outcome.disposition = attemptDisposition(answer.code, answer.success, wantsOracle, oracle !== undefined);
+    if (oracle !== undefined) outcome.oracle = oracle;
     deps.recordAttempt(state.host, outcome);
     return {
       attempted: password,
@@ -291,6 +284,27 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
       elapsedMs,
       ...(oracle ? { oracle } : {}),
     };
+  };
+
+  const checkpoint = (
+    carried: SolverState | undefined,
+    pending: string,
+    pendingNeedsOracle: boolean,
+    kind: "attempt" | "answer" = "attempt",
+  ): void => {
+    if (carried === undefined || attempts.length === 0) return;
+    const withPending = {
+      ...carried,
+      scratch: {
+        ...carried.scratch,
+        [PENDING_ATTEMPT]: pending,
+        [PENDING_NEEDS_ORACLE]: pendingNeedsOracle,
+        [PENDING_STEP_KIND]: kind,
+      },
+    };
+    const outcome = attempts[attempts.length - 1]!;
+    outcome.solver = withPending as unknown as Record<string, unknown>;
+    deps.recordAttempt(state.host, outcome);
   };
 
   const settle = (
@@ -313,6 +327,7 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
               ...carried.scratch,
               [PENDING_ATTEMPT]: pending,
               ...(pendingNeedsOracle !== undefined ? { [PENDING_NEEDS_ORACLE]: pendingNeedsOracle } : {}),
+              [PENDING_STEP_KIND]: "attempt",
             },
           };
       const outcome = attempts[attempts.length - 1]!;
@@ -332,9 +347,8 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
       // A server's FIRST successful authentication can create a `.cache`, but
       // this thread-scaled job does NOT `ls` to see it — that is 0.2 GB on every
       // authenticate thread. A successful solve flags the host dirty and the
-      // overseer files one instant list job. Plain describe otherwise.
-      hosts: [describeHost(jobNs, state.host)],
-      ...(won ? { dirtied: true } : {}),
+      // controller files one instant list job. Plain describe otherwise.
+      hosts: [{ ...describeHost(jobNs, state.host), ...(won ? { invalidates: ["files" as const] } : {}) }],
       attempts,
       ...(grammar ? { grammar } : {}),
       detail,
@@ -364,7 +378,7 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
   }
   //
   // A log line that reads `--<password>--` leaks a random MOVABLE host's
-  // password with no name attached, and the overseer has already narrowed
+  // password with no name attached, and the controller has already narrowed
   // it to hosts whose length and format match. Spending it is one call: a
   // failed `authenticate` costs nothing but time and even pays charisma xp
   // (`effects.ts:48-50`), so there is nothing to weigh up. It short-circuits
@@ -385,7 +399,7 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
   if (solver) {
     // --- the conversation, in ONE process ---------------------------------
     //
-    // One attempt per job would pay the 2.0 GB spawn tax and a full overseer
+    // One attempt per job would pay the 2.0 GB spawn tax and a full controller
     // tick per guess, turning a nine-exchange solve into half a minute of
     // scheduling. `JOB_METHODS.attempt` already carries both calls, so the
     // whole conversation happens here and reports once.
@@ -395,7 +409,6 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
     const exhaustedState = (): SolverState =>
       freshState(details.modelId as ModelId, facts, EXHAUSTED_PHASE);
 
-    const deadline = Date.now() + ATTEMPT_WALL_MS;
     const budget = solver.budget(facts);
 
     /** The exchanges, from wherever the conversation currently stands. */
@@ -410,7 +423,7 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
             step.kind === "attempt" ? step.needsOracle : false,
           );
         }
-        if (Date.now() > deadline || spent >= budget) {
+        if (spent >= budget) {
           count(SOLVER_CODES.SolverBudget);
           return settle(
             false,
@@ -420,6 +433,11 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
             step.kind === "attempt" ? step.needsOracle : false,
           );
         }
+        checkpoint(
+          step.kind === "attempt" ? step.state : undefined,
+          step.password,
+          step.kind === "attempt" ? step.needsOracle : false,
+        );
         const seen = await send(step.password, step.kind === "attempt" ? step.needsOracle : false);
         if (seen.success) return settle(true, `opened ${state.host}`);
 
@@ -439,12 +457,6 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
           );
         }
         spent++;
-        const leaked = await tryTargetCandidates();
-        if (leaked?.success) return settle(true, `opened ${state.host} with a named log leak`);
-        if (leaked?.code === 351 || leaked?.code === 503) {
-          return settle(false, `${state.host}: lost the target while checking a named log leak`);
-        }
-
         if (step.kind === "answer") {
           // We asserted a decoded password and it was refused, so our reading of
           // this model is wrong rather than unlucky. That is worth hearing.
@@ -461,7 +473,16 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
           // re-sending the same password recovers the answer that was lost.
           return settle(false, `${state.host}: no readable response`, step.state, step.password, step.needsOracle);
         }
-        step = solver.next(facts, step.state, seen);
+        const next = solver.next(facts, step.state, seen);
+        if (next.kind !== "give-up") {
+          checkpoint(step.state, next.password, next.kind === "attempt" ? next.needsOracle : false, next.kind);
+        }
+        const leaked = await tryTargetCandidates();
+        if (leaked?.success) return settle(true, `opened ${state.host} with a named log leak`);
+        if (leaked?.code === 351 || leaked?.code === 503) {
+          return settle(false, `${state.host}: lost the target while checking a named log leak`);
+        }
+        step = next;
       }
 
       count(step.code);
@@ -483,13 +504,15 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
       // Reconstruct the pending step and use the ordinary loop, so resumed
       // work shares its budget, deadline, cancellation, timeout, and
       // target-loss semantics.
-      return await converse({
-        kind: "attempt",
-        password: carried.pending,
-        state: withoutPending(carried.state),
-        needsOracle,
-        note: "resumed pending attempt",
-      }, carried.state.spent);
+      return await converse(carried.pendingKind === "answer"
+        ? { kind: "answer", password: carried.pending, note: "resumed decoded answer" }
+        : {
+            kind: "attempt",
+            password: carried.pending,
+            state: withoutPending(carried.state),
+            needsOracle,
+            note: "resumed pending attempt",
+          }, carried.state.spent);
     }
     if (cancelled() !== undefined) return cancelledResult();
     return await converse(solver.first(facts), 0);

@@ -1,4 +1,4 @@
-import { compareDepthDesc } from "./knowledge.ts";
+import { compareDepthDesc } from "./host.ts";
 import {
   PHISH_CACHE_COOLDOWN_MS,
   phishMoney,
@@ -60,7 +60,7 @@ import {
  *
  * ## Named refusals, and they are PUBLISHED
  *
- * Same contract as `spread.ts`, for the reason `spread.ts` proved by omission:
+ * Same contract as `plan.ts`, for the reason its spread policy proved by omission:
  * its refusals were computed and thrown away for months, so a planner that had
  * run out of work looked exactly like one that had stopped working. Every rung
  * this ladder declines produces a refusal by name, including the rungs a host
@@ -68,7 +68,7 @@ import {
  * there is no cache to open and no block to grind" is the whole answer, and half
  * of it is the two refusals. */
 
-/** The three farm calls. `TaskKind` in `queue.ts` carries the same three names,
+/** The three farm calls. `TaskKind` in `plan.ts` carries the same three names,
  * because a farm task is a task like any other once it has been decided. */
 export type FarmKind = "cache" | "reclaim" | "phish" | "promote";
 
@@ -170,7 +170,7 @@ export interface FarmInputs {
    *  there is only one of, while a grind is capped only by not wanting one host
    *  to sit in a forty-second batch on every gigabyte it owns. */
   maxReclaimThreads?: number;
-  /** The overseer wants a `STORM_SEED.exe` and none exists: every block cleared
+  /** The controller wants a `STORM_SEED.exe` and none exists: every block cleared
    *  to zero is a 15% seed roll, so the `reclaim-not-needed` budget stands down
    *  and blocks keep getting ground outright however long they take. Set only
    *  while the storm's other gates are already met and the engine could
@@ -241,7 +241,7 @@ export const PROMOTE_PROFIT_SHARE = 1e-6;
 /** Phish's thumb on the earn scale: every call pays charisma exp (a quarter
  * rate even on failure), and charisma gates `heartbleed` and taxes every
  * `authenticate` — value the $/ms figure cannot see. */
-export const PHISH_CHARISMA_WEIGHT = 1.25;
+export const PHISH_CHARISMA_WEIGHT = 1.5;
 
 /** No default thread ceiling on any farm call. A resident runs one job at a
  * time, so RAM the job does not take is idle; money, charisma and block-clear
@@ -461,7 +461,7 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
       // file here, AND clearing the block outright — which is what mints the
       // free `.cache` — is further away than we are willing to spend, even at
       // every thread the host can hold. A seed hunt suspends the budget: while
-      // the overseer wants a `STORM_SEED.exe` and one could be minted, every
+      // the controller wants a `STORM_SEED.exe` and one could be minted, every
       // cleared block is a 15% roll and the grind pays in rolls, not RAM.
       refuse(
         "reclaim-not-needed",
@@ -593,26 +593,4 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
   }
 
   return { tasks, refused, ...(hunter !== undefined ? { cacheHunter: hunter } : {}) };
-}
-
-/** How long one bounded farm batch should keep calling.
- *
- * Every farm job runs a BATCH rather than one call, because the alternative is
- * paying the 2.0 GB spawn back and a full overseer tick for a 6-second wait.
- * It is bounded rather than long-lived so that `longLived` — and the beat that
- * goes with it — ends up with exactly one user, the maze walker, and so that a
- * host is never held away from a plant or an attempt for longer than an attempt
- * job would hold it anyway. */
-export const FARM_BATCH_MS = 40_000;
-
-/** Whether another call fits inside the batch. Checked BEFORE the call rather
- * than after, because the wait is known in advance and a job that starts a
- * ten-second phish with two seconds left has overrun by design. */
-export function batchHasRoom(kind: FarmKind, startedAt: number, now: number, charisma: number): boolean {
-  const waitMs = kind === "phish"
-    ? phishWaitMs(charisma)
-    : kind === "promote"
-      ? promoteWaitMs(charisma)
-      : reclaimWaitMs(charisma);
-  return now + waitMs <= startedAt + FARM_BATCH_MS;
 }

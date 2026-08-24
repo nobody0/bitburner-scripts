@@ -49,17 +49,30 @@ const TRANSCRIPTION_SOURCE_PATHS = [
   "src/Work/CreateProgramWork.ts",
   "src/Hacknet/HacknetHelpers.tsx",
   "src/StockMarket/BuyingAndSelling.tsx",
+  "src/CodingContract/Contract.ts",
+  "src/CodingContract/ContractGenerator.ts",
   // The darknet cannot be vendored — its import graph reaches the whole game
   // UI — so sim/features/dnet*.ts transcribes it. The first two carry the stock
   // propaganda: the charge curve and per-cycle decay, and the promoteStock
   // wait/charge/charisma formulas. The rest carry the password models: how
   // every one of the twenty-four mints its secret, what a wrong attempt answers
-  // and how that answer reaches a script's log ring.
+  // and how that answer reaches a script's log ring. Network construction,
+  // churn, state, storms, caches and labyrinth rewards are pinned too because
+  // the simulator transcribes their behavior directly.
   "src/DarkNet/effects/effects.ts",
+  "src/DarkNet/Constants.ts",
+  "src/DarkNet/Enums.ts",
   "src/NetscriptFunctions/Darknet.ts",
+  "src/DarkNet/controllers/NetworkGenerator.ts",
+  "src/DarkNet/controllers/NetworkMovement.ts",
   "src/DarkNet/controllers/ServerGenerator.ts",
+  "src/DarkNet/models/DarknetState.ts",
+  "src/DarkNet/models/DarknetServerOptions.ts",
   "src/DarkNet/effects/authentication.ts",
   "src/DarkNet/effects/phishing.ts",
+  "src/DarkNet/effects/webstorm.ts",
+  "src/DarkNet/effects/cacheFiles.ts",
+  "src/DarkNet/effects/labyrinth.ts",
   // The reclaim ladder in `shared/strategy/dnet/rates.ts` is transcribed from
   // these two — `getRamBlockRemoved` and its charisma reward, and the self
   // early-out that makes `memoryReallocation` free on the calling host — so
@@ -67,6 +80,7 @@ const TRANSCRIPTION_SOURCE_PATHS = [
   "src/DarkNet/effects/ramblock.ts",
   "src/DarkNet/effects/offlineServerHandling.ts",
   "src/DarkNet/utils/darknetAuthUtils.ts",
+  "src/DarkNet/utils/darknetNetworkUtils.ts",
   "src/DarkNet/models/packetSniffing.ts",
   "src/DarkNet/models/dictionaryData.ts",
   "src/Gang/Gang.ts",
@@ -420,11 +434,11 @@ const MANIFEST: VendorFile[] = [
 ];
 
 function gitShow(objectPath: string): string {
-  return execFileSync("git", ["-C", SRC_REPO, "show", `${COMMIT}:${objectPath}`], { encoding: "utf8" });
+  return execFileSync("git", ["-c", `safe.directory=${SRC_REPO}`, "-C", SRC_REPO, "show", `${COMMIT}:${objectPath}`], { encoding: "utf8" });
 }
 
 function gitRevParse(revision: string): string {
-  return execFileSync("git", ["-C", SRC_REPO, "rev-parse", revision], { encoding: "utf8" }).trim();
+  return execFileSync("git", ["-c", `safe.directory=${SRC_REPO}`, "-C", SRC_REPO, "rev-parse", revision], { encoding: "utf8" }).trim();
 }
 
 /** Refuse a moving tag or a checkout on another revision before it can become

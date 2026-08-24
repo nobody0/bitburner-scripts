@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { planStorm, type StormHost, type StormView } from "../shared/strategy/dnet/storm.ts";
+import { planStorm as planLiveStorm } from "../shared/strategy/dnet/plan.ts";
+import { emptyHost, stormWipe, type DnetHost, type DnetHosts } from "../shared/strategy/dnet/host.ts";
 import { STORM_PHISH_OVERLAP_MS, STORM_QUIET_MS } from "../shared/strategy/dnet/rates.ts";
 import { planFarm, type FarmHost, type FarmInputs } from "../shared/strategy/dnet/farm.ts";
-import { FACT_CLASS, emptyKnowledge, stormWipe, type DarknetKnowledge } from "../shared/strategy/dnet/knowledge.ts";
-import { deriveTasks } from "../shared/strategy/dnet/queue.ts";
+import { deriveTasks } from "../shared/strategy/dnet/plan.ts";
 
 /** The one decision in the feature that destroys most of what we know on
  * purpose, so what these tests pin is the GATES: each refusal encodes a
@@ -20,6 +20,56 @@ const host = (over: Partial<StormHost> & { hostname: string }): StormHost => ({
 });
 
 const NOW = 10_000_000;
+
+interface StormHost extends Partial<DnetHost> {
+  hostname: string;
+  hasCredential?: boolean;
+  harvestBusy?: boolean;
+  stasisLinked?: boolean;
+  gone?: boolean;
+}
+
+interface StormView {
+  hosts: readonly StormHost[];
+  now: number;
+  stasisLimit: number;
+  stasisLinked: number;
+  pinsPending: boolean;
+  walkInFlight: boolean;
+  walkerPinned: boolean;
+  labWalked: boolean;
+  lastPhishCacheAt?: number;
+  lastStormFiredAt?: number;
+}
+
+/** Preserve the compact gate fixtures while sending every assertion through
+ * the same flat-host planner used by the controller. */
+function planStorm(view: StormView) {
+  const linked = new Set(view.hosts.filter((host) => host.stasisLinked).map((host) => host.hostname));
+  const vault = new Set(view.hosts.filter((host) => host.hasCredential).map((host) => host.hostname));
+  const hosts = view.hosts.map((source): DnetHost => {
+    const { hasCredential: _credential, harvestBusy, stasisLinked: _linked, gone, ...fields } = source;
+    return {
+      ...emptyHost(source.hostname, view.now),
+      ...fields,
+      ...(harvestBusy ? { busy: new Set(["reclaim"]) } : {}),
+      ...(gone ? { goneAt: view.now } : {}),
+    };
+  });
+  return planLiveStorm(hosts, {
+    now: view.now,
+    vault,
+    stasisLinked: linked,
+    stasisLimit: view.stasisLimit,
+    stasisLinkedCount: view.stasisLinked,
+    pinsPending: view.pinsPending,
+    walkInFlight: view.walkInFlight,
+    walkerPinned: view.walkerPinned,
+    labWalked: view.labWalked,
+    lastPhishCacheAt: view.lastPhishCacheAt,
+    lastStormFiredAt: view.lastStormFiredAt,
+  });
+}
 
 /** Every gate green: a live seeded holder with a resident, all links spent, no
  * walk exposed, a `.d.cache` seconds old, no storm in flight. Tests then break
@@ -247,9 +297,9 @@ describe("a storm task sits below losable caches and above ordinary farm work", 
     // the storm, and the priorities enforce it even if both are filed in the
     // same derivation. A discovered cache is the exception: the storm can
     // destroy its host, so it must be collected first. A storm queued behind a
-    // 36 s attempt or ordinary farm batch could miss the phish window its
-    // policy just proved.
-    const tasks = deriveTasks(emptyKnowledge("test:1"), NOW, {
+    // lower-value attempt or farm work could miss the phish window its policy
+    // just proved.
+    const tasks = deriveTasks(new Map(), NOW, {
       agents: new Set(["dn-5-1", "dn-6-1"]),
       hold: [
         { kind: "storm", host: "dn-5-1", from: "dn-5-1", reason: "fire" },
@@ -272,58 +322,48 @@ describe("a storm task sits below losable caches and above ordinary farm work", 
 // --- the wipe ----------------------------------------------------------------
 
 describe("stormWipe drops what the burst destroyed and keeps what survived", () => {
-  const knowledgeWith = (): DarknetKnowledge => ({
-    generation: "test:1",
-    mutationsSeen: 5,
-    hosts: {
-      "dn-2-1": {
-        hostname: "dn-2-1",
-        identity: "10.0.0.1",
-        lastSeenAt: NOW,
-        facts: {
-          modelId: { value: "PlainVanilla", at: NOW },
-          passwordLength: { value: 8, at: NOW },
-          depth: { value: 2, at: NOW },
-          neighbours: { value: ["dn-3-1"], at: NOW },
-          blockedRam: { value: 32, at: NOW },
-          usedRam: { value: 4, at: NOW },
-          caches: { value: ["cache_1.cache"], at: NOW },
-          stormSeed: { value: false, at: NOW },
-        },
-        ring: { pendingAuthRecords: 3 },
-        attempts: { tried: 4, probes: 1 },
-      },
-      "dn-6-9": {
-        hostname: "dn-6-9",
-        lastSeenAt: NOW,
-        facts: {
-          depth: { value: 6, at: NOW },
-          neighbours: { value: ["th3_l4byr1nth"], at: NOW },
-          maxRam: { value: 128, at: NOW },
-        },
-        ring: { pendingAuthRecords: 1 },
-      },
-      darkweb: {
-        hostname: "darkweb",
-        lastSeenAt: NOW,
-        facts: {
-          isStationary: { value: true, at: NOW },
-          neighbours: { value: ["dn-2-1"], at: NOW },
-        },
-      },
-    },
-  });
+  const knowledgeWith = (): DnetHosts => new Map<string, DnetHost>([
+    ["dn-2-1", {
+      ...emptyHost("dn-2-1", NOW),
+      identity: "10.0.0.1",
+      identitySeenAt: NOW,
+      modelId: "PlainVanilla",
+      passwordLength: 8,
+      depth: 2,
+      neighbours: ["dn-3-1"],
+      blockedRam: 32,
+      caches: ["cache_1.cache"],
+      stormSeed: false,
+      seenAt: { position: NOW, topology: NOW, ram: NOW, files: NOW },
+      ring: { pendingAuthRecords: 3 },
+      attempts: { tried: 4, probes: 1 },
+    }],
+    ["dn-6-9", {
+      ...emptyHost("dn-6-9", NOW),
+      depth: 6,
+      neighbours: ["th3_l4byr1nth"],
+      maxRam: 128,
+      seenAt: { position: NOW, topology: NOW, ram: NOW },
+      ring: { pendingAuthRecords: 1 },
+    }],
+    ["darkweb", {
+      ...emptyHost("darkweb", NOW),
+      isStationary: true,
+      neighbours: ["dn-2-1"],
+      seenAt: { position: NOW, topology: NOW },
+    }],
+  ]);
 
   test("a movable host keeps identity facts and loses position, topology and resource", () => {
     const wiped = stormWipe(knowledgeWith());
-    const facts = wiped.hosts["dn-2-1"]!.facts;
-    expect(facts["modelId"]).toBeDefined();
-    expect(facts["passwordLength"]).toBeDefined();
-    expect(facts["depth"]).toBeUndefined();
-    expect(facts["neighbours"]).toBeUndefined();
-    expect(facts["blockedRam"]).toBeUndefined();
-    expect(facts["caches"]).toBeUndefined();
-    expect(facts["stormSeed"]).toBeUndefined();
+    const host = wiped.get("dn-2-1")!;
+    expect(host.modelId).toBe("PlainVanilla");
+    expect(host.passwordLength).toBe(8);
+    expect(host.depth).toBeUndefined();
+    expect(host.neighbours).toBeUndefined();
+    expect(host.blockedRam).toBeUndefined();
+    expect(host.caches).toBeUndefined();
+    expect(host.stormSeed).toBeUndefined();
   });
 
   test("the log ring goes with the restart; the attempt ledger does not", () => {
@@ -332,34 +372,25 @@ describe("stormWipe drops what the burst destroyed and keeps what survived", () 
     // change — restart and move touch no credential — so the cracking ledger
     // survives for a host that does.
     const wiped = stormWipe(knowledgeWith());
-    expect(wiped.hosts["dn-2-1"]!.ring).toBeUndefined();
-    expect(wiped.hosts["dn-2-1"]!.attempts).toBeDefined();
+    expect(wiped.get("dn-2-1")!.ring).toBeUndefined();
+    expect(wiped.get("dn-2-1")!.attempts).toBeDefined();
   });
 
   test("a stasis-linked host keeps everything", () => {
     const wiped = stormWipe(knowledgeWith(), { stasisLinked: new Set(["dn-6-9"]) });
-    expect(wiped.hosts["dn-6-9"]!.facts["neighbours"]).toBeDefined();
-    expect(wiped.hosts["dn-6-9"]!.ring).toBeDefined();
+    expect(wiped.get("dn-6-9")!.neighbours).toBeDefined();
+    expect(wiped.get("dn-6-9")!.ring).toBeDefined();
   });
 
   test("a stationary host keeps everything", () => {
     const wiped = stormWipe(knowledgeWith());
-    expect(wiped.hosts["darkweb"]!.facts["neighbours"]).toBeDefined();
-  });
-
-  test("an unclassified fact wipes rather than survives", () => {
-    // Unknown keys default to `topology` everywhere else too — the
-    // conservative side for a fact nobody classified.
-    expect(FACT_CLASS["someFutureFact"]).toBeUndefined();
-    const knowledge = knowledgeWith();
-    knowledge.hosts["dn-2-1"]!.facts["someFutureFact"] = { value: 1, at: NOW };
-    expect(stormWipe(knowledge).hosts["dn-2-1"]!.facts["someFutureFact"]).toBeUndefined();
+    expect(wiped.get("darkweb")!.neighbours).toBeDefined();
   });
 
   test("pure: the input knowledge is untouched", () => {
     const knowledge = knowledgeWith();
     stormWipe(knowledge);
-    expect(knowledge.hosts["dn-2-1"]!.facts["depth"]).toBeDefined();
-    expect(knowledge.hosts["dn-2-1"]!.ring).toBeDefined();
+    expect(knowledge.get("dn-2-1")!.depth).toBe(2);
+    expect(knowledge.get("dn-2-1")!.ring).toBeDefined();
   });
 });

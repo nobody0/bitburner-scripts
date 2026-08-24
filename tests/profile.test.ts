@@ -97,7 +97,9 @@ describe("simulation profiles", () => {
     expect(full.features?.career).toBeUndefined();
     expect(full.features?.hacknet).toBeUndefined();
     expect(full.features?.stock).toBeUndefined();
-    expect(full.features?.side).toBe("off");
+    // `side` joined the full-node surface with the coding-contract runtime: it
+    // is universal income and must compete with hacking and career here.
+    expect(full.features?.side).toBeUndefined();
     expect(findProfile("install-cadence").features?.career).toBeUndefined();
   });
 

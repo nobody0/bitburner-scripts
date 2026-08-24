@@ -5,14 +5,14 @@ bounded dictionaries, eight decode from server details, and eleven require a
 feedback conversation. This is the framework for the latter two groups, what
 its contract promises, and how a solve survives losing the host it was talking
 through. Everything here is `shared/strategy/dnet/solvers/`; the code is
-pure and the job that drives it is `attemptJob` in `game/dnet/jobs.ts`.
+pure and the job that drives it is `attemptJob` in `game/dnet/orders.ts`.
 
 For the models themselves — which is which, what each answers with, and the
 difficulty tiers — see [dnet.md](dnet.md#the-24-server-models).
 
 ## Why a state machine and not a list
 
-`planAttempt` (`shared/strategy/dnet/models.ts`) walks an ordered candidate list:
+`planAttempt` (`shared/strategy/dnet/plan.ts`) walks an ordered candidate list:
 hand it a COUNT of how many have been ruled out and it returns the next one. That
 is exactly right for the five dictionary models and useless for the rest, because
 their attacks are conversations — send a guess, the host answers with something
@@ -63,16 +63,14 @@ topic or a log, and `stripCredentials` is the enforcement point.
 
 ## Resume: why a lost vantage does not lose the solve
 
-The arithmetic that forces this. A round trip is `authenticate` plus a
-`heartbleed` at 1.5x its time — about 3.3 s at one thread, near-flat across
-progression. The ADJACENCY the conversation depends on lasts about 108 s
-(`msPerHostEventAny(["moved", "disconnected"])`), so one vantage buys roughly
-thirty exchanges, and several solvers need more. But the PASSWORD lasts far
-longer: only deletion mints a new one (~576 s), and a move or a restart leaves it
-alone.
+The adjacency can disappear on the next mutation or survive many mutations;
+the roughly 108 s value from `msPerHostEventAny(["moved", "disconnected"])` is
+only an expected-value staleness approximation for observations, never a
+vantage lifetime, deadline, or lower bound. The password, however, survives
+moves and restarts and changes only when deletion mints a new server identity.
 
 So the state has to outlive the process holding the session, which is why it
-lives in the overseer's knowledge — on the attempt ledger, which `foldReports`
+lives in the controller's knowledge — on the attempt ledger, which `foldReports`
 drops only when a host reports absent.
 
 **A state alone is not enough to resume.** The contract offers `first()` and
@@ -149,21 +147,23 @@ first three.
 ## What drives it
 
 `attemptJob` holds the whole conversation in ONE process, and that is deliberate:
-one attempt per job would pay the 2.0 GB spawn tax and a full overseer tick per
+one attempt per job would pay the 2.0 GB spawn tax and a full controller tick per
 guess, turning a nine-exchange solve into half a minute of scheduling. Inside it,
 `send` is one `authenticate` plus the log read its real answer may be hiding in,
 `resume` re-enters an unfinished conversation, and `converse` runs the exchanges
-until the solver stops or the wall clock does.
+until the finite solver budget, success, refusal, target/edge loss, exhaustion,
+or cooperative cancellation stops it. There is no strategic wall-clock box.
 
 The exception is `2G_cellular`: it needs no ring feedback, so its records may be
-drained in a batch. Its timing baseline and one-correct-character delta are both
-read from `formulas.dnet.getAuthenticateTime` with the attempt job's actual
-thread count; hardcoding one thread changes the inferred prefix length.
+drained in a batch. Its timing baseline and one-correct-character delta come
+from the shared transcription of the pinned game source with the attempt job's
+actual thread count and home's cached player/instability inputs. When those
+inputs are incomplete, the timing channel stays unknown and the existing
+mismatch-log fallback remains authoritative; the job makes no formulas probe.
 
-`ATTEMPT_WALL_MS` (36 s) is not a taste decision: it is comfortably under the
-~108 s a vantage lasts and well under `JOB_TIMEOUT_MS`, so the overseer never
-times out a job that is working, and a job never converses with a host it can no
-longer reach.
+Every completed exchange and next solver step is written through at a safe call
+boundary. Cancellation may replay an operation that never completed, but does
+not discard one that did.
 
 Two response codes are handled inside the loop rather than by the solver, because
 neither says anything about the password: **408** fires after the delay and

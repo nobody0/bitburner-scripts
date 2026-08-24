@@ -1,9 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  FILLER,
-  LARGE_PRIMES,
-  NUMBERS,
-  SMALL_PRIMES,
   cleanArithmeticExpression,
   encodeNumberInBaseN,
   getPassword,
@@ -14,45 +10,15 @@ import {
   romanNumeralEncoder,
 } from "../shared/strategy/dnet/codecs.ts";
 
-/** These are TRANSCRIPTIONS, so what has to be tested is not "does it compute a
- * sensible answer" but "does it compute upstream's answer".
- *
- * Two independent checks do that work. Round-tripping encoder against decoder
- * catches a transcription that is self-consistently wrong in one direction. And
- * for the arithmetic parser, comparing against real JavaScript evaluation on
- * SAFE generated expressions catches a parser that agrees with itself but not
- * with arithmetic — the failure that would silently cost us every `MathML` host.
+/** Exercise the transcribed codecs through their observable behavior.
+ * Round-tripping encoder against decoder and comparing the arithmetic parser
+ * against safe JavaScript evaluation catch failures that static table
+ * assertions cannot.
  *
  * The one thing deliberately NOT tested against a general implementation is
  * fractional-base encoding, because upstream's is lossy by construction and the
  * model's success check accepts a near-enough answer. That tolerance is the
  * subject of its own case below. */
-
-describe("the alphabets and tables are transcribed", () => {
-  test("the captcha filler contains no digit, which is what makes that model free", () => {
-    // The whole `CloudBlare(tm)` attack is "strip every non-digit". If upstream
-    // ever puts a digit in the filler, that stops being true and this fails
-    // here rather than on a darknet host at 3am.
-    for (const char of FILLER) expect(NUMBERS.includes(char), `filler contains the digit ${char}`).toBe(false);
-  });
-
-  test("the prime tables are the ones the two arithmetic models draw from", () => {
-    expect(SMALL_PRIMES[0]).toBe(2);
-    expect(SMALL_PRIMES[SMALL_PRIMES.length - 1]).toBe(97);
-    // Every entry must actually be prime, or a factoriser built on the table
-    // would "solve" a host to the wrong answer.
-    const isPrime = (n: number): boolean => {
-      if (n < 2) return false;
-      for (let d = 2; d * d <= n; d++) if (n % d === 0) return false;
-      return true;
-    };
-    for (const p of SMALL_PRIMES) expect(isPrime(p), `${p} is not prime`).toBe(true);
-    for (const p of LARGE_PRIMES) expect(isPrime(p), `${p} is not prime`).toBe(true);
-    // The two pools must not overlap: the largest-prime-factor attack assumes
-    // the residue after stripping small primes IS a large-prime entry.
-    for (const p of LARGE_PRIMES) expect(SMALL_PRIMES.includes(p)).toBe(false);
-  });
-});
 
 describe("roman numerals round-trip", () => {
   test("zero is 'nulla', not the empty string", () => {

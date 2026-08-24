@@ -494,11 +494,10 @@ canvas.microchart { height: 88px; }
 .netmap .node.gone .status { fill: var(--critical-text); }
 .netmap .node .ramtext { fill: var(--muted); }
 
-/* Blocked RAM is not "used" in any sense we control — it is the server owner's,
-   and freeing it is a separate grind — so it gets the critical colour rather
-   than sharing the ordinary in-use one. */
-.netmap .ram.free { fill: var(--good); }
-.netmap .ram.ours { fill: var(--series-1); }
+/* Our live use, idle capacity, and the owner's separately grindable block. */
+.netmap .ram.used { fill: var(--good); }
+.netmap .ram.unused { fill: var(--bb-warning); }
+.netmap .ram.unknown { fill: var(--muted); }
 .netmap .ram.blocked { fill: var(--critical); }
 
 /* "Believed, not confirmed". The net rewires itself every few seconds, so a
@@ -527,9 +526,10 @@ canvas.microchart { height: 88px; }
    whole swatch in a colour the box never takes. */
 .netkey .sw.stasis { border-left: 3px solid var(--series-5); }
 .netkey .sw.stale { opacity: 0.55; }
-.netkey .sw.ram-ours { background: var(--series-1); }
-.netkey .sw.ram-free { background: var(--good); }
+.netkey .sw.ram-used { background: var(--good); }
+.netkey .sw.ram-unused { background: var(--bb-warning); }
 .netkey .sw.ram-blocked { background: var(--critical); }
+.netkey .sw.ram-unknown { background: var(--muted); }
 .netkey .gl { font-family: var(--font-mono); color: var(--bb-secondary); }
 .netkey .gl.agentkey { color: var(--good); }
 /* Edge keys. Same tokens as the map's own strokes, so the two cannot drift. */

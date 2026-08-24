@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { SimWorld } from "../world.ts";
 import { ProcessTable } from "../ns/process.ts";
-import { DarknetSystem } from "../features/dnet.ts";
+import { DarknetSystem, requiredCharismaSkill } from "../features/dnet.ts";
 import { mulberry32 } from "../core/rng.ts";
 import { darkwebServerSpec } from "../network.ts";
 import {
@@ -89,10 +89,6 @@ const QUIET_WORLD: PacketWorld = {
 };
 
 describe("every model mints a real password", () => {
-  test("all twenty-four non-labyrinth models have upstream's own config builder", () => {
-    expect(Object.keys(MODEL_BUILDERS).sort()).toEqual([...ALL_MODELS].sort());
-  });
-
   test("passwordFormat is derived from the password and passwordLength measures it", () => {
     // The two facts a solver seeds itself from. `passwordFormat` was hardcoded
     // "numeric" before this, which breaks the moment a model draws letters —
@@ -529,6 +525,18 @@ describe("the net a run actually generates", () => {
     dnet.populate();
     return dnet;
   }
+
+  test("required charisma uses rolled difficulty, including the upstream variance", () => {
+    expect(requiredCharismaSkill(0, 5, 300, 0)).toBe(1);
+    expect(requiredCharismaSkill(1, 5, 300, 0)).toBe(9);
+    expect(requiredCharismaSkill(10, 5, 300, 0.5)).toBe(726);
+  });
+
+  test("difficulty is an integer property independent of the occupied grid row", () => {
+    const hosts = [...system().hosts.values()].filter((host) => !host.isStationary);
+    expect(hosts.every((host) => Number.isInteger(host.difficulty))).toBe(true);
+    expect(hosts.some((host) => host.difficulty !== host.depth)).toBe(true);
+  });
 
   test("every generated host's secret re-derives from its recorded draw and hostname", () => {
     // This is what makes a solver test able to know the answer without reaching

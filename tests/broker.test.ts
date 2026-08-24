@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import { DodgeBrokerDriver } from '../game/lib/ram.ts';
 import {
   COLD_HOME_ARENA_GB,
-  FARM_PREEMPTION_PRIORITY,
   HANDOFF_HOME_RESERVE_GB,
   planReclamation,
   RamBroker,
@@ -177,7 +176,7 @@ describe('RamBroker reclamation ladder', () => {
     const plan = planReclamation(wanted, [blockedHost], [
       { workerId: 1, hostname: 'omega-net', gb: 7.2, stopping: false },
       { workerId: 2, hostname: 'omega-net', gb: 19.2, stopping: false },
-    ], [], 0);
+    ], []);
     expect(plan).toMatchObject({
       action: 'release-share',
       shareWorkerIds: [1],
@@ -191,8 +190,8 @@ describe('RamBroker reclamation ladder', () => {
     ]);
   });
 
-  test('rung 2 lets install-freeze work preempt the least-value worker that unblocks it', () => {
-    const wanted = request('install', 8, FARM_PREEMPTION_PRIORITY);
+  test('active hacking work is never a reclamation candidate', () => {
+    const wanted = request('install', 8, 110);
     const plan = planReclamation(wanted, [{ ...blockedHost, freeGb: 1 }], [], [
       {
         workerId: 10, opId: 100, hostname: 'omega-net', kind: 'hack',
@@ -202,16 +201,14 @@ describe('RamBroker reclamation ladder', () => {
         workerId: 11, opId: 101, hostname: 'omega-net', kind: 'weaken',
         segment: 'farm', gb: 10, landing: 1_000, active: true,
       },
-    ], 900);
+    ]);
     expect(plan).toMatchObject({
-      action: 'preempt',
-      threshold: FARM_PREEMPTION_PRIORITY,
-      reason: 'priority-at-or-above-install-freeze',
-      victim: { workerId: 11, kind: 'weaken' },
+      action: 'wait',
+      reason: 'no-single-victim-unblocks',
     });
   });
 
-  test('rung 2 reclaims an idle pooled worker without requiring install priority', () => {
+  test('reclaims an idle pooled worker without requiring install priority', () => {
     const wanted = request('ordinary-go-turn', 5, 1);
     const plan = planReclamation(wanted, [blockedHost], [], [{
       workerId: 12,
@@ -220,7 +217,7 @@ describe('RamBroker reclamation ladder', () => {
       segment: 'farm',
       gb: 7,
       active: false,
-    }], 1_000);
+    }]);
     expect(plan).toMatchObject({
       action: 'preempt',
       reason: 'idle-pooled-worker',
@@ -228,22 +225,6 @@ describe('RamBroker reclamation ladder', () => {
     });
   });
 
-  test('rung 3 never preempts below install-freeze and leaves the request queued', () => {
-    const broker = new RamBroker();
-    const arena = new RamBroker().arena(hosts(), 0, 0);
-    const wanted = request('ordinary-probe', 8, FARM_PREEMPTION_PRIORITY - 1);
-    broker.request(wanted, [blockedHost], arena, 0);
-    const plan = planReclamation(wanted, [blockedHost], [], [{
-      workerId: 10, opId: 100, hostname: 'omega-net', kind: 'grow',
-      segment: 'farm', gb: 32, landing: 2_000, active: true,
-    }], 1_000);
-    expect(plan).toMatchObject({
-      action: 'wait',
-      reason: 'priority-below-threshold',
-      threshold: FARM_PREEMPTION_PRIORITY,
-    });
-    expect(broker.snapshot(1_000).waits.map((entry) => entry.id)).toEqual(['ordinary-probe']);
-  });
 });
 
 describe('RamBroker placement', () => {

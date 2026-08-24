@@ -10,7 +10,7 @@ import {
   foldLogDrain,
   foldReports,
   forgetMs,
-  freeRam,
+  usableRam,
   fresh,
   groupFresh,
   groupStaleness,
@@ -118,7 +118,7 @@ describe("every group carries an observation time", () => {
   });
 
   test("a dirty group reads unknown until its refresh channel clears it", () => {
-    const hosts = mapOf(report("dn-1", 1_000, { depth: 3, blockedRam: 4, usedRam: 4, maxRam: 16 }));
+    const hosts = mapOf(report("dn-1", 1_000, { depth: 3, blockedRam: 4, maxRam: 16 }));
     const host = hosts.get("dn-1")!;
     expect(fresh<number>(host, "blockedRam", 1_000)).toBe(4);
 
@@ -131,9 +131,27 @@ describe("every group carries an observation time", () => {
     expect(fresh<number>(host, "depth", 1_000)).toBe(3);
 
     // A newer observation through the group's channel clears the bit.
-    foldReports(hosts, [report("dn-1", 2_000, { blockedRam: 2, usedRam: 2 })], 2_000);
+    foldReports(hosts, [report("dn-1", 2_000, { blockedRam: 2 })], 2_000);
     expect(host.dirty.ram).toBeUndefined();
     expect(fresh<number>(host, "blockedRam", 2_000)).toBe(2);
+  });
+
+  test("a report invalidation hides a durable group until that group is observed again", () => {
+    const hosts = mapOf(report("dn-1", 1_000, { caches: ["a.cache"], stormSeed: false }));
+    foldReports(hosts, [{
+      hostname: "dn-1",
+      at: 2_000,
+      present: true,
+      invalidates: ["files"],
+    }], 2_000);
+
+    const host = hosts.get("dn-1")!;
+    expect(host.dirty.files).toBe(true);
+    expect(planningView(host, 2_000).caches).toBeUndefined();
+
+    foldReports(hosts, [report("dn-1", 3_000, { caches: [], contracts: [], stormSeed: false })], 3_000);
+    expect(host.dirty.files).toBeUndefined();
+    expect(planningView(host, 3_000).caches).toEqual([]);
   });
 
   test("an IP change replaces the whole server lifetime, and a late old IP cannot replace it back", () => {
@@ -279,7 +297,7 @@ describe("a storm wipes what it can reach, the moment we believe it is over", ()
   test("a movable host keeps identity and the ledger, loses position, topology, ram and files", () => {
     const hosts = mapOf(report("dn-1", 1_000, {
       identity: "10.0.0.1", modelId: "TopPass", difficulty: 4, maxRam: 32,
-      depth: 5, neighbours: ["dn-2"], blockedRam: 8, usedRam: 8,
+      depth: 5, neighbours: ["dn-2"], blockedRam: 8,
       caches: ["a.cache"], contracts: [], stormSeed: false,
     }));
     const before = hosts.get("dn-1")!;
@@ -330,7 +348,7 @@ describe("the fields the spreading agents added", () => {
     // record cannot carry an unclassified field at all — a new field must be
     // placed in a group at its declaration site — so the check becomes: the
     // fold only moves fields the groups name.
-    expect(fieldGroup("usedRam")).toBe("ram");
+    expect(fieldGroup("usedRam")).toBeUndefined();
     expect(fieldGroup("hasSession")).toBeUndefined();
     expect(fieldGroup("stormSeed")).toBe("files");
   });
@@ -345,37 +363,29 @@ describe("the fields the spreading agents added", () => {
     expect(hosts.get("dn-1")!.credentialKnown).toBeUndefined();
   });
 
-  test("freeRam does not double-count owner-blocked RAM", () => {
-    // Blocked RAM presents AS used RAM upstream: updateRamUsed(blockedRam) runs
-    // at construction and again on every recalculation. A naive
-    // max - blocked - used therefore subtracts the block twice and can go
-    // negative on a host doing nothing wrong.
+  test("usableRam retains durable capacity without runtime occupancy", () => {
     const at = 1_000;
-    const hosts = mapOf(report("dn-1", at, { maxRam: 16, blockedRam: 4, usedRam: 4 }));
-    expect(freeRam(hosts.get("dn-1"), at)).toBe(12);
-
-    // ...but a host observed before updateRamUsed ran reports used < blocked,
-    // and there the block really is unaccounted for.
-    const early = mapOf(report("dn-1", at, { maxRam: 16, blockedRam: 4, usedRam: 0 }));
-    expect(freeRam(early.get("dn-1"), at)).toBe(12);
+    const hosts = mapOf(report("dn-1", at, { maxRam: 16, blockedRam: 4 }));
+    expect(usableRam(hosts.get("dn-1"), at)).toBe(12);
 
     // An unknown capacity must never read as "room for an agent" — and neither
-    // may a known capacity whose ram group has gone stale or dirty.
-    expect(freeRam(undefined, at)).toBe(0);
-    expect(freeRam(emptyHost("x", at), at)).toBe(0);
-    const stale = mapOf(report("dn-1", at, { maxRam: 16, blockedRam: 0, usedRam: 0 }));
-    expect(freeRam(stale.get("dn-1"), at + expiryMs("ram") + 1)).toBe(0);
+    // may a known capacity whose ram group is dirty. RAM does not age: restart preserves it.
+    expect(usableRam(undefined, at)).toBe(0);
+    expect(usableRam(emptyHost("x", at), at)).toBe(0);
+    const stale = mapOf(report("dn-1", at, { maxRam: 16, blockedRam: 0 }));
+    expect(expiryMs("ram")).toBe(Infinity);
+    expect(usableRam(stale.get("dn-1"), at + 1_000_000)).toBe(16);
     stale.get("dn-1")!.dirty.ram = true;
-    expect(freeRam(stale.get("dn-1"), at)).toBe(0);
+    expect(usableRam(stale.get("dn-1"), at)).toBe(0);
   });
 
   test("coverage separates what we opened from what we can actually stand on", () => {
     const at = 1_000;
     const hosts = mapOf(
-      report("roomy", at, { maxRam: 16, blockedRam: 0, usedRam: 0 }),
+      report("roomy", at, { maxRam: 16, blockedRam: 0 }),
       // A big host can arrive with ALL of its RAM blocked, which is a
       // different problem from not having the password.
-      report("blocked", at, { maxRam: 128, blockedRam: 128, usedRam: 128 }),
+      report("blocked", at, { maxRam: 128, blockedRam: 128 }),
     );
     hosts.get("roomy")!.credentialKnown = true;
     hosts.get("blocked")!.credentialKnown = true;

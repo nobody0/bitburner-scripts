@@ -108,6 +108,10 @@ function billableSurface(source: string): Map<string, number> {
 }
 
 describe("in-game static RAM budget", () => {
+  test("the deployed attempt surface has no formulas timing call", () => {
+    expect(KIND_CALLS.attempt).not.toContain("formulas.dnet.getAuthenticateTime");
+  });
+
   test("an unpriceable dodged method cannot be mistaken for a cheap call", () => {
     const ns = { getFunctionRamCost: () => { throw new Error("unknown method"); } } as unknown as NS;
     expect(priceCalls(ns, ["renamed.method"])).toBe(UNKNOWN_CALL_GB + 0.5);
@@ -224,11 +228,13 @@ describe("in-game static RAM budget", () => {
     // The worker is billed per launch via ramOverride, not by its own static
     // cost — but only because it references nothing with a RAM charge beyond
     // the ops it actually invokes. Billed by the game's own analyzer: base
-    // plus exactly hack, grow, weaken, share.
+    // plus exactly hack, grow, weaken, share, and Stanek charge.
     const analysis = analyzeScriptRam(worker.content);
     expect(analysis.overridden).toBe(false);
-    expect(analysis.entries.map((entry) => entry.name).sort()).toEqual(["grow", "hack", "share", "weaken"]);
-    expect(analysis.cost).toBeCloseTo(BASE_GB + 0.1 + 0.15 + 0.15 + 2.4, 10);
+    expect(analysis.entries.map((entry) => entry.name).sort()).toEqual([
+      "chargeFragment", "grow", "hack", "share", "weaken",
+    ]);
+    expect(analysis.cost).toBeCloseTo(BASE_GB + 0.4 + 0.1 + 0.15 + 0.15 + 2.4, 10);
   });
 
   /** Billable names short enough for the minifier to invent by accident.
@@ -252,7 +258,7 @@ describe("in-game static RAM budget", () => {
    *
    * Filtering them out is a hole, though, and the test below it closes: with `ls`
    * struck from the built artifact's list, a REAL `ns.ls(...)` added to
-   * `overseer.ts` would pass here and then die on its first call, because that
+   * `controller.ts` would pass here and then die on its first call, because that
    * member is absent from the controller's declared dynamic-RAM surface.
    * So the allowance is paired with a source check that only `jobNs` — the ns a
    * job body is HANDED, which carries its own override — may reach them. */
@@ -285,12 +291,12 @@ describe("in-game static RAM budget", () => {
 
   test("the darknet controller decides and cannot act", async () => {
     const artifacts = await buildScripts(config, { telemetry: true });
-    const overseer = artifacts.find((a) => a.filename === "dnet/controller.js")!;
-    const analysis = analyzeScriptRam(overseer.content);
+    const controller = artifacts.find((a) => a.filename === "dnet/controller.js")!;
+    const analysis = analyzeScriptRam(controller.content);
     expect(analysis.overridden).toBe(false);
 
-    // STATIC figure stays base + one getter: the overseer's own reads
-    // (`probe`, `getServerDetails`, `getServerMaxRam`, `isRunning`,
+    // STATIC figure stays base + one getter: the controller's own reads
+    // (`getServerDetails`, `getServerMaxRam`, `getServerUsedRam`, `isRunning`,
     // `kill`) are all BRACKET notation, so the analyser does not charge them and
     // the static number is unchanged. The launch allocation is
     // `priceAgent(CONTROLLER_METHODS)` (~2 GB), which is what actually covers the
@@ -300,19 +306,21 @@ describe("in-game static RAM budget", () => {
       .filter((name) => !MANGLE_COLLISIONS.includes(name))
       .sort();
     expect(referenced).toEqual(["getServerMaxRam"]);
-    // The overseer now OBSERVES — but only through SYNCHRONOUS, instant reads
-    // (`probe` for darkweb's own adjacency, `getServerDetails` + `getServerMaxRam`
-    // for any host from anywhere), never a blocking `authenticate`. The map-holder
+    // The controller now OBSERVES — but only through SYNCHRONOUS, instant reads
+    // (`getServerDetails` plus the two RAM getters for any host from anywhere), never
+    // a blocking `authenticate`. Darkweb has the same dedicated prober as every
+    // other planted host. The map-holder
     // stays responsive; "never block" is preserved, "never observe" relaxed.
     expect(CONTROLLER_METHODS).toEqual([
       "isRunning",
       "kill",
-      "dnet.probe",
       "dnet.getServerDetails",
       "dnsLookup",
       "getServerMaxRam",
+      "getServerUsedRam",
     ]);
     expect(getFunctionRamCost("getServerMaxRam")).toBe(0.05);
+    expect(getFunctionRamCost("getServerUsedRam")).toBe(0.05);
 
     // The ABSENCES that remain the design: it can OBSERVE now, but it still cannot
     // CRACK or LAUNCH. It describes the jobs in this very file — authenticate, scp,
@@ -359,7 +367,7 @@ describe("in-game static RAM budget", () => {
     // its ONLY billed call is that. `nextMutation` (its clock) is 0 GB, so it is a
     // member of PROBER_METHODS but never a billed entry. Critically ABSENT are
     // `spawn` (2.0) and `getServerMaxRam` (0.05): the prober carries no self-
-    // revival, so its whole cost is base + probe = exactly 1.8 GB. The overseer
+    // revival, so its whole cost is base + probe = exactly 1.8 GB. The controller
     // re-execs a dead one through its worker instead.
     expect(
       analysis.entries
@@ -379,7 +387,7 @@ describe("in-game static RAM budget", () => {
   test("the declared method lists cover every call the job bodies make", async () => {
     // THE test that keeps this design honest. A job's allocation is declared by
     // the controller from `JOB_METHODS`, but the calls are made by the bodies in
-    // game/dnet/jobs.ts, and the two are connected only by these lists. Get one
+    // game/dnet/orders.ts, and the two are connected only by these lists. Get one
     // wrong and the engine kills the process on its first unlisted call.
     //
     // The simulator cannot catch that — it does not model the dynamic-RAM check
@@ -387,7 +395,7 @@ describe("in-game static RAM budget", () => {
     // game. Reading the source is the only place the drift is visible.
     //
     // Every file in the directory, not one named file: the bodies moved out of
-    // overseer.ts once and a grep pinned to a filename would have gone quietly
+    // controller.ts once and a grep pinned to a filename would have gone quietly
     // to zero matches rather than failing. They all bundle into the same
     // artifact, so the rule is a property of the directory.
     const sources = await Promise.all(
@@ -447,7 +455,14 @@ describe("in-game static RAM budget", () => {
       // withIdentity is arg 5. Line-bounded so a later `true` is not misread.
       const listed = /describeHost\(\s*jobNs\s*,\s*[^,\r\n)]+\s*,\s*[^,\r\n)]+\s*,\s*true(?:\s*,|\s*\))/.test(slice);
       const identified = /describeHost\(\s*jobNs\s*,\s*[^,\r\n)]+\s*,\s*[^,\r\n)]+\s*,\s*(?:true|false)\s*,\s*true\s*\)/.test(slice);
-      if (slice.includes("listingOn(") || listed) wanted.add("ls");
+      // `listingOn` does not just list: it READS every darknet data file it
+      // walks past and REMOVES it (and every `.lit`), so a caller inherits the
+      // whole `ls`/`read`/`rm` surface, not just the `ls`.
+      if (slice.includes("listingOn(") || listed) {
+        wanted.add("ls");
+        wanted.add("read");
+        wanted.add("rm");
+      }
       if (identified) wanted.add("dnsLookup");
       return wanted;
     };
@@ -482,11 +497,12 @@ describe("in-game static RAM budget", () => {
     // the controller. The source-level greps above cannot see that, because it
     // happens after them; only the artifact can.
     const artifacts = await buildScripts(config, { telemetry: true });
-    const overseer = artifacts.find((a) => a.filename === "dnet/controller.js")!;
-    expect(overseer.content).toContain('["dnet"]');
+    const controller = artifacts.find((a) => a.filename === "dnet/controller.js")!;
+    expect(controller.content).toContain('["dnet"]');
     // ...and the same for the two ordinary getters a job describes a host with,
     // which have no `dnet` prefix to hide behind.
-    expect(overseer.content).toContain('["getServerMaxRam"]');
+    expect(controller.content).toContain('["getServerMaxRam"]');
+    expect(controller.content).toContain('["getServerUsedRam"]');
   });
 
   test("a resident and the heaviest job both fit a darknet host", () => {
@@ -506,11 +522,12 @@ describe("in-game static RAM budget", () => {
       return total;
     };
     const controllerGb = cost(CONTROLLER_METHODS);
+    const proberGb = BASE_GB + getFunctionRamCost("dnet.probe");
     const residentGb = cost(RESIDENT_METHODS);
     const plantGb = cost(JOB_METHODS["plant"]!);
 
-    expect(controllerGb + residentGb).toBeLessThanOrEqual(16);
-    expect(controllerGb + plantGb).toBeLessThanOrEqual(16);
+    expect(controllerGb + proberGb + residentGb).toBeLessThanOrEqual(16);
+    expect(controllerGb + proberGb + plantGb).toBeLessThanOrEqual(16);
 
     // And the whole reason for spawning rather than exec'ing: a resident that
     // exec'd its jobs would need BOTH at once. Spawn costs 2.0 against exec's
@@ -519,12 +536,13 @@ describe("in-game static RAM budget", () => {
       + cost(JOB_METHODS["plant"]!.filter((method) => method !== "spawn"));
     expect(plantGb).toBeLessThan(execPeak);
 
-    // Every ROUTINE kind has to fit beside the controller on `darkweb`, because
+    // Every ROUTINE kind has to fit beside the controller and dedicated prober
+    // on `darkweb`, because
     // that is the one host home can reach and the only one it can re-seed.
     for (const kind of ROUTINE_JOB_KINDS) {
       const methods = JOB_METHODS[kind];
       if (!methods) continue;
-      expect(controllerGb + cost(methods), `${kind} does not fit darkweb beside the controller`)
+      expect(controllerGb + proberGb + cost(methods), `${kind} does not fit darkweb beside its controller and prober`)
         .toBeLessThanOrEqual(16);
     }
   });

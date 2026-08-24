@@ -221,8 +221,8 @@ export function mutationBudget(backdoored = 0): MutationBudget {
   const survivesBackdoorDelete = backdoored > 0 ? 0.95 : 1;
   const reachesLate = survivesAdd * survivesBackdoorRestart * survivesBackdoorDelete;
   const reachesDisconnect = reachesLate * 0.5;
-  // deleteRandomDarknetServers(Math.random() * 3 + 1) averages 2.5 servers.
-  const batch = 2.5;
+  // The fractional loop bound rounds each positive request up, averaging 3.
+  const batch = 3;
   return {
     moved: 0.3 /* islands */ + reachesLate * 0.3 * 3 /* moveRandomDarknetServers(3) */,
     disconnected: reachesDisconnect * 0.5,
@@ -266,6 +266,89 @@ export function msPerHostEventAny(
   if (perTick <= 0) return Infinity;
   const perHostPerTick = perTick / expectedServerCount(netDepth);
   return mutationIntervalMs(netDepth, bitNode) / perHostPerTick;
+}
+
+// --- delayed Netscript operations, transcribed -----------------------------
+
+/** Player/global inputs used by every authentication delay. Home already
+ * caches each field; game-side callers must not acquire them just for timing. */
+export interface DnetTimingProfile {
+  charisma: number;
+  intelligence: number;
+  hasBoots: boolean;
+  sf15Level: number;
+  authenticationDurationMultiplier: number;
+}
+
+/** The subset of getServerDetails consumed by calculateAuthenticationTime. */
+export interface DnetTimingTarget {
+  modelId?: string;
+  difficulty: number;
+  depth: number;
+  requiredCharismaSkill: number;
+}
+
+/** Every early refusal implemented through a short netscriptDelay upstream. */
+export const DNET_REFUSAL_WAIT_MS = 100;
+
+export interface DnetKnownRefusalFacts {
+  targetGone?: boolean;
+  direct?: boolean;
+  selfTarget?: boolean;
+  stationary?: boolean;
+  blockedRam?: number;
+  heartbleedUnderleveled?: boolean;
+  stasisLimitReached?: boolean;
+}
+
+/** Return the pinned 100 ms delay only when cached facts prove an upstream
+ * early-refusal branch. Unknown facts deliberately remain unknown. */
+export function knownDnetRefusalWaitMs(operation: string, facts: DnetKnownRefusalFacts): number | undefined {
+  if (facts.targetGone === true) return DNET_REFUSAL_WAIT_MS;
+  if (["authenticate", "heartbleed", "memoryReallocation", "induceServerMigration"].includes(operation)
+    && facts.direct === false) return DNET_REFUSAL_WAIT_MS;
+  if (operation === "heartbleed" && facts.heartbleedUnderleveled === true) return DNET_REFUSAL_WAIT_MS;
+  if (operation === "memoryReallocation" && facts.blockedRam !== undefined && facts.blockedRam <= 0) return DNET_REFUSAL_WAIT_MS;
+  if (operation === "induceServerMigration" && (facts.selfTarget === true || facts.stationary === true)) return DNET_REFUSAL_WAIT_MS;
+  if (operation === "setStasisLink" && facts.stasisLimitReached === true) return DNET_REFUSAL_WAIT_MS;
+  return undefined;
+}
+
+/** v3.0.1 calculateAuthenticationTime, including its counter-intuitive
+ * intelligence MULTIPLICATION. Source: src/DarkNet/effects/effects.ts:60-89. */
+export function authenticateWaitMs(
+  target: DnetTimingTarget,
+  profile: DnetTimingProfile,
+  threads = 1,
+  correctChars = 0,
+): number {
+  const threadsFactor = 1 / (1 + 0.2 * (threads - 1));
+  const skillFactor = (5 * target.requiredCharismaSkill + (target.difficulty + 1) * 100)
+    / (profile.charisma + 150);
+  const underleveled = profile.charisma <= target.requiredCharismaSkill && target.depth > 1
+    ? 1.5 + (target.requiredCharismaSkill + 50) / (profile.charisma + 50)
+    : 1;
+  const bootsFactor = profile.hasBoots ? 0.8 : 1;
+  const sf15Factor = profile.sf15Level > 2 ? 0.8 : 1;
+  const intelligenceBonus = 1 + (0.25 * Math.pow(profile.intelligence, 0.8)) / 600;
+  const base = 850
+    * skillFactor
+    * profile.authenticationDurationMultiplier
+    * underleveled
+    * bootsFactor
+    * sf15Factor
+    * threadsFactor;
+  const sharedChars = target.modelId === "2G_cellular" ? correctChars : 0;
+  return base * intelligenceBonus + sharedChars * 50 * threadsFactor;
+}
+
+/** Heartbleed is the zero-prefix authentication delay multiplied by 1.5. */
+export function heartbleedWaitMs(
+  target: DnetTimingTarget,
+  profile: DnetTimingProfile,
+  threads = 1,
+): number {
+  return authenticateWaitMs(target, profile, threads, 0) * 1.5;
 }
 
 // --- the two farm calls, transcribed ---------------------------------------
@@ -385,7 +468,7 @@ export function phishMoneyChance(charisma: number, crimeSuccessMult = 1): number
 // --- the storm ---------------------------------------------------------------
 //
 // `STORM_SEED.exe` and the webstorm it fires are the whole reason these numbers
-// exist in one place: the trigger policy (`storm.ts`), the overseer's quiet
+// exist in one place: the trigger policy (`plan.ts`), the controller's quiet
 // period and the sim's burst model all have to agree on them, and they are
 // engine state no ns call exposes — a storm can only be timed from our own
 // stamps. Source: src/DarkNet/effects/ramblock.ts:50-66 (the seed drop),

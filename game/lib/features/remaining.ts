@@ -11,7 +11,11 @@ import { PRIORITY, type Claim, type ClaimValueCurve } from "../../../shared/stra
 import { stepBladeburner } from "../../../shared/strategy/bladeburner/decide.ts";
 import { successChance, type CrimeStats } from "../../../shared/strategy/career/crimes.ts";
 import { stepCorp } from "../../../shared/strategy/corp/stages.ts";
-import { DARKSCAPE_TOTAL_COST, stepDarkscape } from "../../../shared/strategy/dnet/unlock.ts";
+import {
+  DARKSCAPE_EARLY_BN1_ROUTE_SECONDS,
+  DARKSCAPE_TOTAL_COST,
+  stepDarkscape,
+} from "../../../shared/strategy/dnet/unlock.ts";
 import {
   isSoA,
   NEUROFLUX,
@@ -854,10 +858,7 @@ type GoActionOutcome = {
   decision?: GoDecision;
   prediction?: GoTurnPrediction;
   predictionParentId?: string;
-  responsePlayer?: ReturnType<NS["getPlayer"]>;
-  responseObservedAt?: number;
   responseReadyAt?: number;
-  responseBonusCycles?: number;
 };
 
 function normalizeGoResponse(response: RawGoResponse): GoResponse {
@@ -1206,22 +1207,32 @@ const go: FeatureDriver = {
   everyMs: 5_000,
   wake: () => goContinuationReady || goCompletionReady,
   requires: "go",
-  async tick(ctx: DriverContext) {
+  tick(ctx: DriverContext) {
+    // Go is a self-contained asynchronous lifecycle. The controller's only
+    // responsibility is to start (or poke) that lifecycle; it must never wait
+    // for worker readiness, neural evaluation, engine-phase alignment, or an
+    // opponent response. Those waits can legitimately span an entire 200 ms
+    // engine cycle, and awaiting them here delays every other feature — most
+    // importantly the JIT dispatcher — by the same amount.
+    //
+    // `goPlanning` admits exactly one lifecycle task. Once a move is issued,
+    // `goTurnRunning` owns its response promise, and the task chains the next
+    // prepared move directly when that promise settles. `goGeneration`
+    // invalidates work that crosses a prestige reset.
     // Hold one guard across the whole asynchronous body, including planning.
     if (goTurnRunning || goPlanning) return;
     const generation = goGeneration;
     goPlanning = true;
-    try {
-      await goTick(ctx, generation);
-    } finally {
+    void goTick(ctx, generation).catch((error: unknown) => {
+      if (!isScriptDeath(error)) record("go", "lifecycle", false, String(error));
+    }).finally(() => {
       goPlanning = false;
-    }
+    });
   },
 };
 
 async function goTick(ctx: DriverContext, generation: number): Promise<void> {
     if (generation !== goGeneration) return;
-    if (goTurnRunning) return;
     // A completed game/new-game transition needs a fresh central claim. A
     // failed turn uses this pass only to release the stale claim, then retains
     // the five-second retry backoff.
@@ -1606,7 +1617,11 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         currentPlayer: view.currentPlayer,
         komi: view.komi,
       },
-      planning: { finalistCount: decision.finalists, positionValue: decision.positionValue },
+      planning: {
+        finalistCount: decision.finalists,
+        positionValue: decision.positionValue,
+        ...(decision.passReason ? { passReason: decision.passReason } : {}),
+      },
       selection: {
         preferred,
         candidates,
@@ -2045,43 +2060,6 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
             throw new Error(`invalid Go turn action ${action.type}`);
           }
           const responseReadyAt = Date.now();
-          // Predictions are intentionally absent on the latency-bounded 19x19
-          // cheat path. Observe this public state unconditionally so offline
-          // bonus-cycle accounting never depends on speculative continuations.
-          const observePlayer = Boolean(
-            predictionParentId || (response?.type === "gameOver" && action.type !== "resume"),
-          );
-          const responseObservation = await turnDodge(
-            ["go.getGameState", ...(observePlayer ? ["getPlayer"] : [])],
-            (stubNs) => ({
-              bonusCycles: stubNs["go"]["getGameState"]().bonusCycles,
-              ...(observePlayer ? { player: stubNs["getPlayer"]() } : {}),
-            }),
-          );
-          const responseBonusCycles = responseObservation.bonusCycles;
-          // Two unrelated reasons to sample the player here, and the union is
-          // deliberate: the compact clock confirmation a neural move's armed
-          // worker needs, and the multiplier step a FINISHED game just applied.
-          //
-          // Upstream recomputes the Go bonuses exactly once, at game end
-          // (Go/boardAnalysis/scoring.ts calls Player.applyEntropy, which runs
-          // updateGoMults), so this is the only instant at which the new
-          // hacking_speed exists and the cheapest one at which to observe it.
-          // Waiting for the controller's 2 s player cadence instead leaves the
-          // batcher planning hack/grow/weaken durations that are too LONG, and
-          // an overstated duration understates additionalMsec, so every op
-          // launched in that window lands early -- weaken by four times the
-          // hack, which shears the batch out of order rather than shifting it.
-          // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/scoring.ts#L86-L98
-          //
-          // A RESUME turn is the one exclusion, and it is a HARD one: its grant
-          // (goMethods) is deliberately free of getPlayer, so calling it here
-          // would spend the whole of PRICE_MARGIN_GB on an undeclared 0.5 GB
-          // call and leave the stub with nothing between it and a RAM USAGE
-          // ERROR. A resume that ends the game raises `playerDirty` after the
-          // merge instead, which is exactly what that flag exists for.
-          const responsePlayer = responseObservation.player;
-          const responseObservedAt = responsePlayer ? Date.now() : undefined;
           return {
             response,
             ...(dispatchPlayer ? { player: dispatchPlayer } : {}),
@@ -2090,10 +2068,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
             ...(dispatchedDecision ? { decision: dispatchedDecision } : {}),
             ...(dispatchPrediction ? { prediction: dispatchPrediction } : {}),
             ...(predictionParentId ? { predictionParentId } : {}),
-            ...(responsePlayer ? { responsePlayer } : {}),
-            ...(responseObservedAt !== undefined ? { responseObservedAt } : {}),
             responseReadyAt,
-            responseBonusCycles,
           } satisfies GoActionOutcome;
         },
         (value) => ({
@@ -2108,7 +2083,11 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         decision = rawOutcome.decision;
         plan.action = goActionDigest(decision.action);
         plan.ranked = decision.ranked;
-        plan.planning = { finalistCount: decision.finalists, positionValue: decision.positionValue };
+        plan.planning = {
+          finalistCount: decision.finalists,
+          positionValue: decision.positionValue,
+          ...(decision.passReason ? { passReason: decision.passReason } : {}),
+        };
       }
       const dispatched = rawOutcome?.prediction;
       if (rawOutcome?.player) {
@@ -2138,7 +2117,6 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         return;
       }
       const response = normalizeGoResponse(rawOutcome.response);
-      const bonusCyclesAfterResponse = rawOutcome.responseBonusCycles;
 
       // makeMove/passTurn returns the AI's actual public response. Advance the
       // held board immediately so the driver never replays a stale move while
@@ -2164,48 +2142,16 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         previousBoards.unshift(board.rows);
         board = theirs.board;
       }
-      if (rawOutcome.predictionParentId && rawOutcome.responsePlayer && rawOutcome.responseObservedAt !== undefined) {
-        const confirmedPositionId = goNeuralPositionIdentity({
-          ...view,
-          board,
-          previousBoards,
-          currentPlayer: response.type === "gameOver" ? "None" : "Black",
-          status: response.type === "gameOver" ? "gameOver" : "inProgress",
-          consecutivePasses: response.type === "move" ? 0 : action.type === "pass" ? 2 : 1,
-          ...(bonusCyclesAfterResponse !== undefined ? { bonusCycles: bonusCyclesAfterResponse } : {}),
-          ...(view.cheat ? { cheat: {
-            ...view.cheat,
-            count: view.cheat.count + (isGoCheatAction(action) ? 1 : 0),
-          } } : {}),
-        }).id;
-        neuralRuntime.confirm(
-          rawOutcome.predictionParentId,
-          response,
-          confirmedPositionId,
-          rawOutcome.responsePlayer.totalPlaytime,
-          rawOutcome.responseObservedAt,
-        );
-      }
-      // Outside the confirm block on purpose. The worker commit needs a
-      // predictionParentId; the STORE only needs a fresher snapshot than the
-      // one it holds, and a game-over turn produces one with no prediction to
-      // confirm. The store is the write target for every acquisition path
-      // (game/lib/state.ts), so publishing here is what lets the batcher's
-      // launch context see the new hacking_speed on its very next pass instead
-      // of up to a full player cadence later.
-      if (rawOutcome.responsePlayer && rawOutcome.responseObservedAt !== undefined) {
-        set(ctx.state, "player", rawOutcome.responsePlayer);
-        ctx.state.playerObservedAt = rawOutcome.responseObservedAt;
-      }
-      // Deliberately NOT followed by a `signalWake`. The dispatcher re-derives
-      // durations once per pass, so a fresh snapshot still leaves up to one
-      // TICK_MS of batches planned on the old speed, and poking the landing
-      // wake here would collapse that to the next continuation. Measured on the
-      // scenario-jit hacking_speed-step row it did not: intra-batch shear was
-      // 3.45 ms without the wake and 4.18 ms with it, which is run-to-run noise
-      // on a fixture whose fleet trajectory differs between runs. A coupling
-      // from the Go driver into the hacking wake channel has to be paid for by
-      // a measurement, and this one was not.
+      // Start the one authoritative settled-state read as soon as the local
+      // board exists. Stub startup overlaps the pure scoring/telemetry work
+      // below; awaiting it only where its values are first needed keeps that
+      // bookkeeping off the next move's critical path.
+      const settledPromise = observeGoSettledState(
+        ctx,
+        action.type,
+        rawOutcome.predictionParentId !== undefined || (response.type === "gameOver" && action.type !== "resume"),
+        response.type === "gameOver" ? undefined : { board: board.rows, history: previousBoards },
+      );
       const predicted = decision.forecast ?? [];
       const predictionTotal = predicted.reduce((sum, candidate) => sum + candidate.count, 0);
       const matching = predicted.reduce((sum, candidate) => {
@@ -2232,7 +2178,6 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         board: board.rows,
         previousBoards,
         moveCount: previousBoards.length,
-        ...(bonusCyclesAfterResponse !== undefined ? { bonusCycles: bonusCyclesAfterResponse } : {}),
         ...(topic.cheat ? { cheat: {
           ...topic.cheat,
           count: topic.cheat.count + (isGoCheatAction(action) ? 1 : 0),
@@ -2248,25 +2193,45 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         status: response.type === "gameOver" ? "gameOver" : "inProgress",
         plan,
         lastTurn,
+        // The board above is locally advanced. The settled read clears this
+        // only after the game agrees with both rows and superko history.
+        boardUnverified: response.type !== "gameOver",
       });
 
-      // The mirror was advanced by applying rules LOCALLY. Prove it against the
-      // game before the next turn plans on it.
-      //
-      // Its own small dodge, deliberately: go.getBoardState is 4 GB and must
-      // not enlarge the move call's contiguous grant, and
-      // nothing may be inserted between the verified clock read and makeMove
-      // (go-neural.ts, runGoNeuralSeedDispatch). Running it here costs neither —
-      // the game board is settled, White has already replied, and no Go promise
-      // is outstanding.
-      //
-      // ORDERING: verifyGoMirror calls act(), which overwrites results["go"].
-      // That is safe only because requireResult("go") was consumed above and
-      // `lastTurn` was already built from it.
-      const verified = response.type === "gameOver"
-        ? { result: "skipped" as const, ms: 0, scope: undefined }
-        : await verifyGoMirror(ctx, board.rows, previousBoards);
+      const {
+        verification: verified,
+        bonusCycles: bonusCyclesAfterResponse,
+        player: responsePlayer,
+        playerObservedAt: responsePlayerObservedAt,
+      } = await settledPromise;
       if (generation !== goGeneration) return;
+
+      if (rawOutcome.predictionParentId && responsePlayer && responsePlayerObservedAt !== undefined) {
+        const confirmedPositionId = goNeuralPositionIdentity({
+          ...view,
+          board,
+          previousBoards,
+          currentPlayer: response.type === "gameOver" ? "None" : "Black",
+          status: response.type === "gameOver" ? "gameOver" : "inProgress",
+          consecutivePasses: response.type === "move" ? 0 : action.type === "pass" ? 2 : 1,
+          ...(bonusCyclesAfterResponse !== undefined ? { bonusCycles: bonusCyclesAfterResponse } : {}),
+          ...(view.cheat ? { cheat: {
+            ...view.cheat,
+            count: view.cheat.count + (isGoCheatAction(action) ? 1 : 0),
+          } } : {}),
+        }).id;
+        neuralRuntime.confirm(
+          rawOutcome.predictionParentId,
+          response,
+          confirmedPositionId,
+          responsePlayer.totalPlaytime,
+          responsePlayerObservedAt,
+        );
+      }
+      if (responsePlayer && responsePlayerObservedAt !== undefined) {
+        set(ctx.state, "player", responsePlayer);
+        ctx.state.playerObservedAt = responsePlayerObservedAt;
+      }
       if (verified.result === "match" || verified.result === "skipped") {
         goRehydrate = false;
         goRehydrateReason = undefined;
@@ -2284,6 +2249,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         invalidateGoMirror("the post-turn board verification could not be placed");
       }
       merge(ctx.state, "go", {
+        ...(bonusCyclesAfterResponse !== undefined ? { bonusCycles: bonusCyclesAfterResponse } : {}),
         boardUnverified: goRehydrate,
         lastTurn: { ...lastTurn, boardVerify: { ms: verified.ms, result: verified.result } },
         // Live state, not the `topic` snapshot: merge replaced the topic object.
@@ -2307,10 +2273,9 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       // multipliers moved; it also covers a move/pass turn whose snapshot was
       // lost. Either way the Node Power effect is already applied to the real
       // player, so the held one is wrong until the controller re-reads it.
-      if (response.type === "gameOver" && !rawOutcome.responsePlayer) ctx.state.playerDirty = true;
+      if (response.type === "gameOver" && !responsePlayer) ctx.state.playerDirty = true;
       turnCompleted = true;
       continueImmediately = response.type !== "gameOver";
-      goContinuationReady = false;
     };
     void runTurn().catch((error: unknown) => {
       if (!isScriptDeath(error)) record("go", action.type, false, String(error));
@@ -2320,9 +2285,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       if (continueImmediately) {
         // The opponent and worker cleanup are complete; dispatch the next turn
         // without waiting for the controller cadence.
-        void Promise.resolve().then(() => go.tick(ctx)).catch((error: unknown) => {
-          if (!isScriptDeath(error)) record("go", "continue", false, String(error));
-        });
+        go.tick(ctx);
         return;
       }
       goCompletionReady = true;
@@ -2336,20 +2299,18 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
 
 const stanek: FeatureDriver = {
   id: "stanek",
-  // Normal charging takes 1,000 ms; stored cycles shorten the API delay to
-  // 200 ms. This driver is awaited in the controller's serial feature loop,
-  // so charging on that same one-second cadence would monopolise the loop and
-  // starve the 200 ms hacking dispatcher. Thirty seconds is a policy tradeoff:
-  // it charges opportunistically without making a long Netscript call hot.
-  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Stanek.ts#L45-L54
+  // Packing is advisory and changes only with the probed grid. Charge
+  // execution itself is owned by hacking's 200 ms fleet scheduler.
   everyMs: 30_000,
   requires: "stanek",
-  async tick(ctx: DriverContext) {
+  tick(ctx: DriverContext) {
     const topic = ctx.state.topics.stanek;
     if (!topic) return;
 
-    // Old telemetry records did not include shape. Skip those definitions;
-    // treating an unknown footprint as one cell would fabricate a packing.
+    // `shape` is required by the topic TYPE but a persisted record from an older
+    // build carries none, and `packFragments` maps over it unguarded — an absent
+    // footprint throws rather than packing. Skip those definitions; treating an
+    // unknown footprint as one cell would fabricate a packing instead.
     const fragments = (topic.availableTypes ?? []).flatMap((entry) => entry.shape ? [{
       id: entry.id,
       shape: entry.shape,
@@ -2360,50 +2321,17 @@ const stanek: FeatureDriver = {
     }] : []);
 
     const packed = packFragments(fragments, topic.width, topic.height);
-    // Packing is advisory until clear/place execution is modeled. Charging a
-    // hypothetical root can throw or charge the wrong fragment; use observed
-    // active roots and exclude boosters, which the API rejects.
-    const order = (topic.fragments ?? [])
-      .filter((fragment) => fragment.chargeable !== false)
-      .slice()
-      .sort((a, b) => b.power - a.power || a.id - b.id)
-      .map((fragment) => fragment.id);
-
     merge(ctx.state, "stanek", {
       plan: {
         placements: packed.placements,
         value: packed.value,
         approximated: packed.approximated,
-        chargeOrder: order,
-        ...(results["stanek"] ? { lastResult: results["stanek"] } : {}),
       },
     });
 
-    // Charge the highest-value placed fragment.
-    const first = order[0];
-    if (first === undefined) return;
-    const placement = topic.fragments.find((entry) => entry.id === first && entry.chargeable !== false);
-    if (!placement) return;
-    const charged = await act(
-      ctx,
-      "stanek",
-      "charge",
-      ["stanek.chargeFragment"],
-      async (stubNs: NS) => {
-        await stubNs["stanek"]["chargeFragment"](placement.x, placement.y);
-        return true;
-      },
-      () => ({ ok: true, detail: `charged fragment ${first}` }),
-    );
-    // A charge raises the gift's power, and the gift multiplies hacking_speed
-    // among everything else, so the held player snapshot's operation durations
-    // are now wrong. Unlike the Go driver this action's grant has no getPlayer
-    // to hand over, so it asks the controller for one.
-    //
-    // Only on a charge that actually RAN: a queued or refused dodge changed no
-    // multiplier, and flagging it anyway would ask the controller for a fresh
-    // getPlayer on every tick for as long as the broker keeps denying stanek.
-    if (charged) ctx.state.playerDirty = true;
+    // Execution belongs to hacking's fleet scheduler. The feature retains
+    // packing/observability only; a serial feature tick must never await the
+    // one-second charge call or maintain a second RAM allocator.
   },
 };
 
@@ -3831,12 +3759,6 @@ export const goModule: FeatureModule = {
 export const stanekModule: FeatureModule = {
   driver: stanek,
   reset: resetWithTopic("stanek"),
-  claims: (ctx) => maybeActionClaim(
-    "stanek",
-    ctx,
-    ctx.state.topics.stanek?.plan?.chargeOrder?.length ? "charge" : undefined,
-    ["stanek.chargeFragment"],
-  ),
 };
 
 
@@ -3881,46 +3803,71 @@ function sameGoHistory(live: readonly string[][], mirror: readonly string[][]): 
   });
 }
 
-type GoVerification = "match" | "drift" | "unavailable" | "skipped";
+type GoVerification = {
+  result: "match" | "drift" | "unavailable" | "skipped";
+  ms: number;
+  scope?: "board" | "history";
+};
 
-/** Read the game's own rows and compare them with the mirror we just merged.
- *
- * Kept as a separate synchronous dodge: go.getBoardState is 4 GB, so folding
- * it into the move invocation would enlarge the contiguous grant for no gain.
- * The generic broker may place either call on home or a fleet arena host.
- *
- * Deliberately NOT declared in goModule.claims: that returns exactly one claim
- * per pass, and a permanent 4.5 GB claim would inflate Go's continuous
- * reservation and fight goActionAdmitted. A queued verification degrades into a
- * hydrate, which is the correct behaviour. */
-async function verifyGoMirror(
+type GoSettledObservation = {
+  bonusCycles?: number;
+  player?: ReturnType<NS["getPlayer"]>;
+  playerObservedAt?: number;
+  verification: GoVerification;
+};
+
+/** Observe everything needed after White replies in one synchronous dodge.
+ * An ordinary turn already reserves 4.5 GB for makeMove + getPlayer; the
+ * settled read has the same 4.5 GB peak for getBoardState + getPlayer. */
+async function observeGoSettledState(
   ctx: DriverContext,
-  expected: readonly string[],
-  expectedHistory: readonly string[][],
-): Promise<{ result: GoVerification; ms: number; scope?: "board" | "history" }> {
+  action: string,
+  observePlayer: boolean,
+  expected?: { board: readonly string[]; history: readonly string[][] },
+): Promise<GoSettledObservation> {
   const startedAt = Date.now();
-  // go.getMoveHistory is 0 GB, so reading it here is FREE and keeps the whole
-  // check to a single consistent post-turn observation. It is also the only
-  // thing that can validate `previousBoards` — the positional-superko set —
-  // which the board rows alone cannot.
-  const live = await act(
+  const verifyMirror = expected !== undefined;
+  // getMoveHistory is free and is the authoritative check of the local
+  // positional-superko history; keep it in the same settled observation.
+  const outcome = await featureDodge(
     ctx,
     "go",
-    "verify",
-    ["go.getBoardState", "go.getMoveHistory"],
-    (stubNs: NS) => ({
-      board: stubNs["go"]["getBoardState"](),
-      history: stubNs["go"]["getMoveHistory"](),
-    }),
-    (value) => ({ ok: value.board.length > 0, detail: `verified ${value.board.length}x${value.board.length} board` }),
+    goActionClaimId(action),
+    [
+      "go.getGameState",
+      ...(observePlayer ? ["getPlayer"] : []),
+      ...(verifyMirror ? ["go.getBoardState", "go.getMoveHistory"] : []),
+    ],
+    (stubNs: NS) => {
+      const player = observePlayer ? stubNs["getPlayer"]() : undefined;
+      return {
+        bonusCycles: stubNs["go"]["getGameState"]().bonusCycles,
+        ...(player ? { player, playerObservedAt: Date.now() } : {}),
+        ...(verifyMirror ? {
+          board: stubNs["go"]["getBoardState"](),
+          history: stubNs["go"]["getMoveHistory"](),
+        } : {}),
+      };
+    },
   );
   const ms = Date.now() - startedAt;
-  if (!live?.board.length) return { result: "unavailable", ms };
-  const sameBoard = live.board.length === expected.length
-    && live.board.every((column, index) => column === expected[index]);
-  if (!sameBoard) return { result: "drift", ms, scope: "board" };
-  if (!sameGoHistory(live.history, expectedHistory)) return { result: "drift", ms, scope: "history" };
-  return { result: "match", ms };
+  if (!outcome.ok) return { verification: { result: verifyMirror ? "unavailable" : "skipped", ms } };
+  const live = outcome.value;
+  const observed = {
+    bonusCycles: live.bonusCycles,
+    ...(live.player && live.playerObservedAt !== undefined
+      ? { player: live.player, playerObservedAt: live.playerObservedAt }
+      : {}),
+  };
+  if (!verifyMirror) return { ...observed, verification: { result: "skipped", ms } };
+  if (!live.board?.length) return { ...observed, verification: { result: "unavailable", ms } };
+  const sameBoard = live.board.length === expected.board.length
+    && live.board.every((column, index) => column === expected.board[index]);
+  if (!sameBoard) return { ...observed, verification: { result: "drift", ms, scope: "board" } };
+  if (!sameGoHistory(live.history ?? [], expected.history)) {
+    return { ...observed, verification: { result: "drift", ms, scope: "history" } };
+  }
+  return { ...observed, verification: { result: "match", ms } };
 }
 
 function goMethods(
@@ -4117,15 +4064,11 @@ export const progressionModule: FeatureModule = {
         priority: PRIORITY["income:investment"],
         mode: "spend",
         // Indivisible: there is no smaller version of a program, and it cannot
-        // be written (`create: null` upstream). Hard rather than economic
-        // because its payoff — the .cache reward table — is unmodelled, and
-        // asserting an income rate we have never measured would be worse than
-        // admitting we are buying it on affordability. The 10% affordability
-        // guard in stepDarkscape is what keeps an unpriced claim from
-        // displacing a priced investment.
+        // be written (`create: null` upstream). Its complete cache payoff is
+        // priced by the conservative early-BN1 matched-pair calibration.
         shape: "step",
-        pricing: "hard",
-        value: { state: "unknown", reason: "darknet cache yield is not modelled" },
+        pricing: "economic",
+        value: { state: "measured", value: DARKSCAPE_EARLY_BN1_ROUTE_SECONDS },
       });
     }
 

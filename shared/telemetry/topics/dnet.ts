@@ -5,15 +5,14 @@
 
 /** An agent we believe is alive out there. */
 export interface DarknetAgentDigest {
-  /** "overseer" is the controller; "resident" is the one agent a host keeps. */
-  role: "overseer" | "resident";
+  role: "resident";
   lastBeatAt: number;
   alive: boolean;
   /** Jobs waiting in this host's queue. */
   pending?: number;
   /** The job the agent has spawned into, by kind, if any. */
   active?: string;
-  /** Free RAM the resident last measured on its host. */
+  /** Capacity available to the next job after fixed controller/prober reserves. */
   freeGb?: number;
   /** Jobs finished and failed here since the controller booted. */
   completed?: number;
@@ -42,11 +41,18 @@ export interface DarknetKnownHost {
   neighbours?: string[];
   maxRam?: number;
   blockedRam?: number;
-  usedRam?: number;
-  /** What an agent could actually claim here. Not `max - blocked - used`:
-   *  blocked RAM presents AS used upstream, so a naive subtraction
-   *  double-counts. Computed once, centrally, in `knowledge.freeRam`. */
-  freeRam?: number;
+  /** Total script capacity after the owner's durable RAM block. Runtime
+   * occupancy belongs to the controller's live handles, not host knowledge. */
+  usableRam?: number;
+  /** A volatile, same-instant RAM sample. The engine's `ramUsed` includes the
+   * owner's block, so `used` is player-script RAM after subtracting `blocked`.
+   * The UI derives genuinely idle RAM as `total - blocked - used`. */
+  ram?: {
+    at: number;
+    total: number;
+    blocked: number;
+    used: number;
+  };
   requiredCharisma?: number;
   difficulty?: number;
   isStationary?: boolean;
@@ -67,8 +73,10 @@ export interface DarknetKnownHost {
    *  mutation clock, and the model's name, oracle and reason-untouched are a
    *  pure function of `modelId`, so `ui/` derives both rather than being sent
    *  ~120 fields per host per tick. What cannot be derived travels: this, and
-   *  `freeRam` below. */
+   *  `usableRam` below. */
   facts: Record<string, number>;
+  /** Groups invalidated after their last observation. */
+  dirty?: Partial<Record<"position" | "topology" | "ram" | "files", true>>;
   agent?: DarknetAgentDigest;
   attempt?: {
     modelId?: string;
@@ -118,7 +126,8 @@ export interface DarknetKnowledgeDigest {
    *  that actually matters out there: the transport does not drop data, hosts
    *  drop agents. */
   agents: { live: number; seenEver: number; lostSinceBoot: number };
-  overseer?: { host: string; pid?: number; lastBeatAt: number; alive: boolean; seedAttempts: number };
+  /** Controller process health at the time this digest was published. */
+  controller?: { host: string; pid?: number; lastBeatAt: number; alive: boolean; seedAttempts: number };
   /** Work in flight across every resident, summed from their last reports:
    *  jobs queued, jobs being run right now, and the running ones by kind. */
   queue?: { pending: number; active: number; byKind: Record<string, number> };
@@ -172,6 +181,31 @@ export interface DarknetLabDigest {
   walkers: DarknetLabWalker[];
 }
 
+/** Cumulative returns observed from completed darknet farm calls this install.
+ * No additional Netscript reads are made for this: agents classify the result
+ * already returned by phishingAttack/openCache/promoteStock. Promotion is
+ * activity, not cash profit—the API changes volatility and exposes no realized
+ * P&L attribution. */
+export interface DarknetProfit {
+  phishAttempts: number;
+  phishSuccesses: number;
+  /** Cash parsed at the display precision returned in the API message. */
+  phishCash: number;
+  phishCaches: number;
+  cachesOpened: number;
+  /** Cash parsed at the display precision returned in the API message. */
+  cacheCash: number;
+  cacheShares: number;
+  /** Exact compact reward labels, for example `program: BruteSSH.exe` or
+   * `shares: ECP`. Counts keep the payload bounded without shipping log lines. */
+  cacheRewards: Record<string, number>;
+  promotionAttempts: number;
+  promotionBatches: number;
+  promotionThreads: number;
+  /** Successful batches by symbol. */
+  promotionSymbols: Record<string, number>;
+}
+
 export interface DarknetState {
   /** Script host from which the latest local probe was made. */
   observedFrom?: string;
@@ -181,7 +215,7 @@ export interface DarknetState {
    *  rather than a row that sorts above the root. */
   maxDepth: number;
   /** The three below are the only darknet facts HOME reads directly, and the
-   *  only ones it must: each is a 0 GB call the overseer cannot afford, so the
+   *  only ones it must: each is a 0 GB call the controller cannot afford, so the
    *  DIRECT probe `dnet.facts` reads them inline (no dodge) and ships them over
    *  the order channel. The driver tick publishes `knowledge` without them, so
    *  a panel that guarded on `knowledge` and then read these threw on the first
@@ -312,6 +346,8 @@ export interface DarknetState {
    *  progress toward the gang's -54000 rather than a cost. Published for `gang`
    *  to read rather than left in a log line. */
   karmaLoss?: number;
+  /** Direct cash plus non-cash rewards and promotion activity this install. */
+  profit?: DarknetProfit;
   /** The labyrinth cache, and whether it can be opened RIGHT NOW.
    *
    *  It is the one cache that is deferred: `getLabReward` queues an

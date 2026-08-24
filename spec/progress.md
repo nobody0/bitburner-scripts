@@ -36,7 +36,7 @@ The acceptance bar for a feature is the full vertical slice:
 | 8 | sleeves | **done** |
 | 9 | go | **done** |
 | 10 | stanek | **done** |
-| 11 | dnet | **done** — the overseer/agent pipeline (`game/dnet/`) surveys, bleeds, cracks and plants on live darknet hosts; every one of the 24 password models has a solver (`shared/strategy/dnet/solvers/`), the labyrinth walker included; and the feature acts on the net: memoryReallocation (reclaim), phishing, caches, stock propaganda (promote), stasis pins and induced migrations are wired as jobs in `game/dnet/jobs.ts`, and backdoors — the one darknet action that can only be taken from home's terminal — as a dodge in `game/lib/features/dnet.ts`. The storm is farmed too: `shared/strategy/dnet/storm.ts` gates `unleashStormSeed` on the prepared net (links spent, walker pinned, phish window freshly dead), the farm's seed hunt grinds blocks for the 15% roll, the overseer quiet-periods and `stormWipe`s after a fire, and the sim models the seed drop and the phased burst (`dnet.webstorm` in `DNET_ASSUMPTIONS`). Stasis spares sit per air-gapped band (`stasisTargetDepths` — depth-mass allocation, band-center placement) and `planInduce` files every worthwhile push in parallel, `ferry` included: the only deliberate way across an air gap is pushing a credentialed host with its resident riding |
+| 11 | dnet | **done** — the controller/prober/agent pipeline (`game/dnet/`) surveys, bleeds, cracks and plants on live darknet hosts; every one of the 24 password models has a solver (`shared/strategy/dnet/solvers/`), the labyrinth walker included; and the feature acts on the net: memoryReallocation (reclaim), phishing, caches, stock propaganda (promote), stasis pins and induced migrations are wired as orders in `game/dnet/orders.ts`, and backdoors — the one darknet action that can only be taken from home's terminal — as a dodge in `game/lib/features/dnet.ts`. The storm is farmed too: `shared/strategy/dnet/plan.ts` gates `unleashStormSeed` on the prepared net (links spent, walker pinned, phish window freshly dead), the farm's seed hunt grinds blocks for the 15% roll, the controller quiet-periods and `stormWipe`s after a fire, and the sim models the seed drop and the phased burst (`dnet.webstorm` in `DNET_ASSUMPTIONS`). Stasis spares sit per air-gapped band (`stasisTargetDepths` — depth-mass allocation, band-center placement) and `planInduce` files every worthwhile push in parallel, `ferry` included: the only deliberate way across an air gap is pushing a credentialed host with its resident riding |
 | 12 | side | **done** |
 | 13 | progression | **done** — endgame route, install barrier, two-pass arm/execute, and post-install restart are live |
 | 14 | endgame route + refresh/act split | **done** — see below |
@@ -403,7 +403,7 @@ Every feature now has a real driver module; `inert()` is gone from
 | 8 | sleeves | Allocate N sleeves across the task menu | Exact per-sleeve argmax (sleeves do not interfere). Shock scales output down linearly, so recovery dominates. |
 | 9 | go | Wins, territory, streaks | Upstream-oracle arena; trained value network over legal candidates and their seeded faction replies, executed as a WebGPU compute shader. See `spec/go-ai.md`. |
 | 10 | stanek | Pack the grid, then charge | **Exhaustive packing is PROVABLY optimal** — the strongest evidence in the roster. Correctly leaves out a large fragment to fit two smaller ones. |
-| 11 | dnet | Traverse under a stasis-link budget | **The search runs; nothing acts on it.** `topologyComplete` is derived from the agents' folded adjacency (no longer the probe's hard-coded false), so `stepDarknet`'s max-reachable search runs each tick — but it proposes no action, because neither of the two it once did was ever the driver's to take: authentication happens on the agents next door to their targets, and `setStasisLink` pins the calling host. |
+| 11 | dnet | Traverse under a stasis-link budget | The controller/prober/agent pipeline explores and authenticates from resident processes, farms cache sources, reclaims RAM, promotes stocks, pins and migrates hosts, fires prepared storms, and walks the labyrinth. The simulator implements all 23 APIs and the complete cache/clue/contract reward lifecycle. |
 | 12 | side | Solve every coding contract | **All 30 v3.0.1 contract types implemented** with exact registry coverage and known-answer tests. Discovery is ls-only; staged batches peak at `attempt` RAM, and a first rejection is logged and quarantined rather than retried. Infiltration stays manual. |
 | 13 | progression | Install timing, reset cadence, node order | Exact favor crossover (`addRepToFavor`); directly tested live milestone selector, with a small-set ordering oracle retained for offline comparisons. |
 
@@ -1237,9 +1237,9 @@ starting point of the next improvement.
 tracks 2.43–2.46 h from an older generation. Measured on this branch by stashing
 only this pass's changes, seed 1 takes **7.44 h without them and 6.23 h with
 them** — so the route work recovered 16%, and the ~3× loss against the tracked
-number predates it and is outstanding. Both runs report `invalid-for-goal`
-because coding-contract generation is unmodeled; that is the known simulator gap,
-not a run failure.
+number predates it and is outstanding. Those archived runs predate the
+controller-facing coding-contract runtime; current runs model the ten-minute
+generation interval and its reward lifecycle.
 
 ## Dispatcher pass cost at depth (2026-08-21)
 
@@ -1716,20 +1716,11 @@ the *strategy* level without full end-to-end execution:
 - **Corporation actions are not executed.** The stage machine, its
   preconditions and its digest are complete and tested; issuing the calls
   against an unmodelled world is the one thing this project refuses to do.
-- **Darknet exploration acts; the traversal strategy still waits.** The
-  overseer/agent pipeline (`game/dnet/`) does authenticate, heartbleed, scp and
-  exec on live darknet hosts — with discovered credentials, never invented ones.
-  What the arbiter-facing `stepDarknet` contributes is a ranking and a charisma
-  need, not an action: both actions it once proposed were mechanically
-  impossible from home — authentication happens on the agents, next door to
-  their targets, and `setStasisLink()` takes **no host**, pinning the calling
-  script's own server, so spending a link means running a 12 GB script on the
-  host being pinned. The proposals and the standing refusals that recorded them
-  went together, rather than filling the panel with work nobody was going to
-  attempt. See `spec/dnet.md`.
-- **Sim models exist for factions, crime, hacknet, stock, Go and dnet** (the
-  darknet grid, mutation clock and session rules live in `sim/features/dnet.ts`,
-  with its unmodelled gaps declared in `DNET_ASSUMPTIONS`). Gang, corp,
+- **Sim models exist for factions, crime, hacknet, stock, Go and dnet.** The
+  darknet model covers all 23 APIs, mutation/restart, sessions, labyrinth and
+  storms, cache/clue rewards, live stock grants and coding contracts for fresh
+  and multi-install controller runs. Its declared boundary is save/offline/UI
+  state, not a fabricated controller-visible value. Gang, corp,
   bladeburner, sleeves and stanek have pure strategy + driver + tests, but no
   complete system model — so their ns calls report `unmodeled()` rather than
   fabricating. Go additionally runs differential strategy tournaments against
@@ -1806,9 +1797,9 @@ the *strategy* level without full end-to-end execution:
   funded third of the remaining node-relative gate. The corrected run had no
   install at 2 h with seven augs banked, then installed twelve at 2.59 h
   (`runs/1786550754662-sim-sf12-30-count-cadence-release-seed1.jsonl`).
-- **The labyrinth walk is a pure guess** (`LABYRINTH_WALK_SEC`): the darknet
-  labyrinth mechanic is unmodelled, so the route's estimate carries an
-  explicit unmeasured constant until a walk is implemented and measured.
+- **The labyrinth route fallback is uncalibrated** (`LABYRINTH_WALK_SEC`). The
+  walk is implemented and simulated; the route ETA still marks its fallback
+  unmeasured until completed walks provide a stable calibration.
 - **`POOL_PRESSURE_OPS` is unmeasured, and blocked on a broken fixture.** Its
   own comment states that the -20% result behind it was taken while `planTake`
   was quadratic, so "always on" was also "always quadratic" and stranding was

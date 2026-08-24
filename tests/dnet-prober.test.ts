@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
 import { main as proberMain } from "../game/dnet/prober.ts";
-import type { DnetProberLaunch } from "../game/dnet/launch.ts";
+import type { DnetProbeRefresh, DnetProbeReport, DnetProberLaunch } from "../game/dnet/launch.ts";
 import { handoffLaunch } from "../game/lib/launch-shared.ts";
 import {
   DNET_PROTOCOL,
@@ -30,10 +30,11 @@ function installController(): { controller: ControllerHandle; wakes: () => numbe
       return controller.mutationEpoch;
     },
     wake() { wakeCount++; },
-    reportProbe(host: string, neighbours: readonly string[], at: number, pid: number) {
+    reportProbe(host: string, neighbours: readonly string[], at: number, pid: number, refresh?: DnetProbeRefresh) {
       const entry = hosts.get(host) ?? { hostname: host, lastSeenAt: at, seenAt: {}, dirty: {}, staged: [] };
       entry.prober = { neighbours: [...neighbours], at, pid, epoch: controller.mutationEpoch };
       hosts.set(host, entry);
+      refresh?.settle({ host, neighbours, at, pid });
       wakeCount++;
     },
   } as unknown as ControllerHandle;
@@ -66,9 +67,14 @@ describe("the darknet prober", () => {
     } as unknown as NS;
 
     delete dnetRealm().dnet_controller;
+    let resolveRefresh!: (value: DnetProbeReport | undefined) => void;
+    const refresh: DnetProbeRefresh = {
+      refreshed: new Promise<DnetProbeReport | undefined>((resolve) => { resolveRefresh = resolve; }),
+      settle(value) { if (value !== undefined) ready++; resolveRefresh(value); },
+    };
     let running!: Promise<void>;
     await handoffLaunch<DnetProberLaunch>(
-      { kind: "dnet-prober", host: HOST, firstReport: () => { ready++; } },
+      { kind: "dnet-prober", host: HOST, refresh },
       () => { running = proberMain(ns); return PROBER_PID; },
     );
     expect(ready).toBe(0);
@@ -81,6 +87,12 @@ describe("the darknet prober", () => {
     await Promise.resolve();
     expect(ready).toBe(1);
     expect(live.controller.hosts.get(HOST)?.prober?.neighbours).toEqual(NEIGHBOURS);
+    expect(await refresh.refreshed).toEqual({
+      host: HOST,
+      neighbours: NEIGHBOURS,
+      at: expect.any(Number),
+      pid: PROBER_PID,
+    });
 
     stopping = true;
     gate.fire();
@@ -102,15 +114,17 @@ describe("the darknet prober", () => {
 
     const first = installController();
     let firstReports = 0;
+    let resolveRefresh!: (value: DnetProbeReport | undefined) => void;
+    const refresh: DnetProbeRefresh = {
+      refreshed: new Promise<DnetProbeReport | undefined>((resolve) => { resolveRefresh = resolve; }),
+      settle(value) { if (value !== undefined) firstReports++; resolveRefresh(value); },
+    };
     let running!: Promise<void>;
     expect(await handoffLaunch<DnetProberLaunch>(
       {
         kind: "dnet-prober",
         host: HOST,
-        firstReport: () => {
-          expect(first.controller.hosts.get(HOST)?.prober?.neighbours).toEqual(NEIGHBOURS);
-          firstReports++;
-        },
+        refresh,
       },
       () => { running = proberMain(ns); return PROBER_PID; },
     )).toBe(PROBER_PID);

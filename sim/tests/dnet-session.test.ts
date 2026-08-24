@@ -114,6 +114,22 @@ function neighbourOf(h: Harness, from: string): string {
 }
 
 laneDescribe("darknet sessions and the gates that shaped the agents", () => {
+  test("ungated stasis readings answer without darknet access", () => {
+    const h = harness(1);
+    expect(h.ns.dnet.getStasisLinkedServers()).toEqual([]);
+  });
+
+  test("heartbleed grants charisma XP after its full delay", async () => {
+    const h = harness();
+    const before = h.world.person.exp.charisma;
+    const pending = h.ns.dnet.heartbleed("darkweb", { peek: true });
+    let finished = false;
+    void pending.then(() => { finished = true; });
+    expect(await h.world.clock.runAsync(() => finished)).toBe("goal");
+    expect((await pending).success).toBe(true);
+    expect(h.world.person.exp.charisma - before).toBeCloseTo(50.1, 8);
+  });
+
   describe("who may copy, and who may run", () => {
     test("scp TO a darknet host needs a session, and copies nothing without one", () => {
       const h = harness();
@@ -150,7 +166,7 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
 
       // Now break the adjacency but keep the session. `scp` still works — it has
       // no connection requirement — and `exec` stops. This is THE constraint the
-      // whole overseer/breaker split exists to satisfy: a credential buys you
+      // whole controller/breaker split exists to satisfy: a credential buys you
       // file transfer at any distance and a running process only next door.
       h.host.network.set("darkweb", ["home"]);
       expect(ns.scp("agent.js", neighbour, "darkweb")).toBe(true);
@@ -214,13 +230,12 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
       expect(h.dnet.isAuthenticated(neighbour, recycled)).toBe(false);
     });
 
-    test("a process is always authenticated to its own host, and to darkweb", () => {
-      // Upstream: "We always are authed to ourselves and DarkWeb."
+    test("the action gate trusts self, but hasSession only reports stored sessions and darkweb", () => {
       const h = harness();
       const pid = h.start("agent.js", "darkweb");
       expect(h.dnet.isAuthenticated("darkweb", pid, "darkweb")).toBe(true);
       const neighbour = neighbourOf(h, "darkweb");
-      expect(h.dnet.isAuthenticated(neighbour, pid, neighbour)).toBe(true);
+      expect(h.dnet.isAuthenticated(neighbour, pid, neighbour)).toBe(false);
       expect(h.dnet.isAuthenticated(neighbour, pid, "darkweb")).toBe(false);
     });
   });
@@ -426,6 +441,9 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
       firstServer.backdoorInstalled = true;
       first.blockedRam = 0;
       const cache = restarts.addCache(first.hostname, false)!;
+      // Cache filename generation legitimately consumed the gameplay stream;
+      // restart the deliberately indexed mutation block at its boundary.
+      call = 0;
 
       restarts.darknetProcess(10_000);
 
@@ -625,7 +643,7 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
       expect(record.blockedRam).toBe(8 - freed.freed);
       // The two writes are SEPARATE upstream and both have to land: blocked RAM
       // presents AS used RAM, so a model that moved one without the other would
-      // have `freeRam` disagree with what `exec` would actually accept.
+      // make reported availability disagree with what `exec` accepts.
       expect(server.ramUsed).toBeCloseTo(record.blockedRam, 6);
       // Every call pays charisma, scaled by the difficulty that makes it slow.
       expect(freed.charismaExp).toBeGreaterThan(0);
@@ -689,7 +707,8 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
         .map((host) => host.hostname)
         .slice(0, 2);
       expect(hosts.length).toBe(2);
-      const now = h.world.clock.now();
+      const now = h.world.clock.now() + 3 * 60 * 1000 + 1;
+      expect(h.dnet.phishCooldownReached(h.world.clock.now())).toBe(false);
       expect(h.dnet.phishCooldownReached(now)).toBe(true);
       let claimed = false;
       for (let i = 0; i < 4000 && !claimed; i++) {
@@ -712,23 +731,13 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
   });
 
   describe("the gaps did not silently shrink", () => {
-    test("the actions nobody calls still report themselves rather than answering", () => {
+    test("the complete dnet surface has no fabricated catch-all members", () => {
       // An ns member this does not model must be ABSENT, so the root proxy
       // reports it and throws. A stub that returned a plausible value would let
       // a strategy be measured against behaviour that does not exist.
       const h = harness();
       const dnet = (h.ns as unknown as { dnet: Record<string, unknown> }).dnet;
-      // Three members have LEFT this list, and every one left because it was
-      // modelled rather than because the rule was relaxed.
-      // `induceServerMigration` is on the deploy path as the only thing that can
-      // move a host toward the labyrinth's row; `setStasisLink` is what makes a
-      // walker's host survivable at all; `unleashStormSeed` became the deploy
-      // path's cache engine the day the storm trigger policy shipped — the
-      // catastrophe is now the point, prepared for and fired on purpose.
-      // `labreport` stays: it answers the same walls the free render carries.
-      for (const name of ["labreport"]) {
-        expect(() => (dnet[name] as () => unknown)(), `ns.dnet.${name} must stay unmodelled`).toThrow();
-      }
+      expect(() => (dnet.notARealMember as () => unknown)()).toThrow();
     });
 
     test("a stasis link is now a reading rather than a constant", () => {
@@ -742,6 +751,7 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
       const host = [...h.dnet.hosts.values()].find((entry) => entry.online && !entry.isStationary)!;
       expect(h.dnet.setStasisLink(host.hostname, true)).toBe(200);
       expect(h.ns.dnet.getStasisLinkedServers()).toEqual([host.hostname]);
+      expect(h.ns.dnet.getStasisLinkedServers(true)).toEqual([h.world.servers.get(host.hostname)!.ip]);
     });
 
     test("the storm seed and the webstorm — reroll the net, spare the pinned", async () => {
@@ -820,7 +830,7 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
 
     test("the seed drop honours all four of the engine's gates", () => {
       const h = harness();
-      const grind = [...h.dnet.hosts.values()].filter((entry) => entry.online && !entry.isStationary);
+      let grind = [...h.dnet.hosts.values()].filter((entry) => entry.online && !entry.isStationary);
       const clearOn = (hostname: string, nowMs: number): void => {
         const host = h.dnet.hosts.get(hostname)!;
         host.blockedRam = 0.01;
@@ -837,6 +847,7 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
       // delete the very hosts the rest of this test grinds.
       const stormAt = 60 * 60 * 1000;
       h.dnet.prestige(stormAt);
+      grind = [...h.dnet.hosts.values()].filter((entry) => entry.online && !entry.isStationary);
       for (let i = 0; i < 60; i++) clearOn(grind[1]!.hostname, stormAt + 60_000);
       expect(seedAnywhere()).toBeUndefined();
 
@@ -862,12 +873,9 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
       expect(h.ns.ls(grind[2]!.hostname)).toContain("STORM_SEED.exe");
     });
 
-    test("instability is still exactly neutral, because no backdoor path exists", () => {
-      // Unchanged and still honest: the surplus is over BACKDOORED darknet
-      // servers, `ns.dnet` has no member that installs one, so zero is a truth
-      // rather than a stub. It is also why `authenticate` can never answer 408
-      // in a sim run — anything handling a timeout needs a unit test that
-      // injects one.
+    test("initial instability is neutral before any darknet backdoor is installed", () => {
+      // Instability is based on surplus backdoored darknet servers. A fresh
+      // session has none; other tests install backdoors and exercise 408s.
       const h = harness();
       expect(h.ns.dnet.getDarknetInstability()).toEqual({
         authenticationDurationMultiplier: 1,

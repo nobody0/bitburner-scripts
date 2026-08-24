@@ -5,8 +5,9 @@ import { armWake, signalWake } from "../game/lib/wake.ts";
 describe("dispatcher wake rendezvous", () => {
   test("a signal between arms is latched and consumed by the next arm", async () => {
     const globals = {} as WorkerGlobalThis;
-    signalWake(globals);
+    signalWake(globals, "n00dles");
     expect(globals.dispatch_wake_pending).toBe(true);
+    expect([...globals.dispatch_wake_targets!]).toEqual(["n00dles"]);
 
     await armWake(globals);
     expect(globals.dispatch_wake_pending).toBe(false);

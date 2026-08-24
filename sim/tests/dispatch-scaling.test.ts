@@ -47,6 +47,8 @@ const GRID_MS = 5;
 interface Seeded {
   world: SimWorld;
   memory: FarmMemory;
+  host: string;
+  span: number;
 }
 
 /** A world with a settled directive and `depth` synthetic operations in flight
@@ -81,7 +83,7 @@ function seed(depth: number): Seeded {
     // desynchronise the heap from the RAM the world actually has.
     //
     // Support only, and that is load-bearing: `planJitBatches` stops planning
-    // once `jitPending.length + inFlight.hack` reaches the depth cap, so
+    // once the target pipeline plus in-flight hacks reaches the depth cap, so
     // seeding hacks would make the DEEP case skip the planning half of the
     // pass entirely and measure less work than the shallow one. Support is
     // also what the ledger is mostly made of — a live pipeline held 8,010
@@ -105,7 +107,55 @@ function seed(depth: number): Seeded {
     trackOp(memory.dispatch, 1_000_000 + i, tracked);
     memory.dispatch.inFlight[kind]++;
   }
-  return { world, memory };
+  // Also give the target's scheduler the requested number of concrete batch
+  // cursors. They are far-future one-job batches: a hot wake must inspect the
+  // root and stop, regardless of whether the heap contains 1k or 100k items.
+  // The cast is deliberately test-local because PendingJitBatch is an
+  // implementation detail; the public invariant under test is DispatchMemory.
+  type SyntheticBatch = {
+    target: string;
+    batchId: number;
+    decisionId: number;
+    wakeRevision: number;
+    ops: Array<{
+      target: string;
+      role: "w2";
+      kind: "weaken";
+      threads: number;
+      startAt: number;
+      reserveAt: number;
+      landing: number;
+      stock: boolean;
+    }>;
+  };
+  type SyntheticWakeQueue = {
+    heap: Array<{ at: number; revision: number; batch: SyntheticBatch }>;
+  };
+  const wakeMap = memory.dispatch.jitWakeByTarget as unknown as Map<string, SyntheticWakeQueue>;
+  const wakeQueue = wakeMap.get(host) ?? { heap: [] };
+  wakeMap.set(host, wakeQueue);
+  for (let i = 0; i < depth; i++) {
+    const at = now + span + 10_000 + i * GRID_MS;
+    const batch = {
+      target: host,
+      batchId: 10_000_000 + i,
+      decisionId: 1,
+      wakeRevision: 1,
+      ops: [{
+        target: host,
+        role: "w2" as const,
+        kind: "weaken" as const,
+        threads: 1,
+        startAt: at,
+        reserveAt: at,
+        landing: at + 1_000,
+        stock: false,
+      }],
+    };
+    wakeQueue.heap.push({ at, revision: 1, batch });
+  }
+  wakeQueue.heap.sort((a, b) => a.at - b.at || a.batch.batchId - b.batch.batchId);
+  return { world, memory, host, span };
 }
 
 /** Fastest of several passes. The minimum is the right statistic here: GC and
@@ -124,20 +174,75 @@ function passMs(depth: number): number {
   return best;
 }
 
+/** A realistic completion interrupt: one tracked weaken settles, its RAM and
+ * landing entry are released, the target-local batch cursor queue advances,
+ * and the next target deadline is emitted. The synthetic depth is otherwise
+ * untouched, so this isolates the requirement that a 100k-deep pipeline must
+ * not be searched to service one newly opened window. */
+function completionWakeMs(depth: number): number {
+  const { world, memory, host, span } = seed(depth);
+  const view = world.view();
+  const samples: number[] = [];
+  for (let i = 0; i < 15; i++) {
+    const opId = 2_000_000 + i;
+    trackOp(memory.dispatch, opId, {
+      hostname: "home",
+      target: host,
+      kind: "weaken",
+      segment: "farm",
+      gb: 1.75,
+      wave: false,
+      landing: view.time + span / 2 + i / 1_000,
+      workerId: opId,
+      jitRole: "w2",
+      strengthThreads: 1,
+      effectThreads: 1,
+    });
+    memory.dispatch.inFlight.weaken++;
+    const started = performance.now();
+    planFarm(view, memory, [{
+      kind: "weaken",
+      opId,
+      target: host,
+      threads: 1,
+      at: view.time,
+      result: {},
+    }], { trigger: { kind: "target-wake", target: host, source: "completion" } });
+    samples.push(performance.now() - started);
+  }
+  samples.sort((a, b) => a - b);
+  return samples[samples.length >>> 1]!;
+}
+
 soak.describe("dispatcher pass cost", () => {
+  soak.test("services a completion wake at 100k depth in about 2ms", () => {
+    const shallow = completionWakeMs(1_000);
+    const deep = completionWakeMs(100_000);
+    const ratio = deep / shallow;
+    console.log(
+      `bench: completion wake 1k=${shallow.toFixed(3)}ms 100k=${deep.toFixed(3)}ms ratio=${ratio.toFixed(1)} (100x depth)`,
+    );
+    expect(deep).toBeLessThan(2.5);
+    expect(ratio).toBeLessThan(8);
+  });
+
   soak.test("does not grow super-linearly with in-flight depth", () => {
     const shallow = passMs(1_000);
     const deep = passMs(20_000);
+    const maxDepth = passMs(100_000);
     const ratio = deep / shallow;
+    const maxRatio = maxDepth / shallow;
     console.log(
-      `bench: pass 1k=${shallow.toFixed(3)}ms 20k=${deep.toFixed(3)}ms ratio=${ratio.toFixed(1)} (20x depth)`,
+      `bench: pass 1k=${shallow.toFixed(3)}ms 20k=${deep.toFixed(3)}ms 100k=${maxDepth.toFixed(3)}ms`
+      + ` ratios=${ratio.toFixed(1)}x/${maxRatio.toFixed(1)}x`,
     );
     // The ratchet, and it is a RATIO because the absolute figure belongs to
     // whichever machine ran it. A 20x depth increase costing more than 20x is
-    // superlinear by definition. Observed today: ~0.55ms and ~6.8ms, ratio
-    // ~12.5 — linear-with-a-constant, dominated by the whole-ledger rebuild
-    // and sort that `launchDueJit` performs twice per pass. Tighten this as
-    // that work is removed; never loosen it to make a lane green.
-    expect(ratio).toBeLessThan(25);
+    // superlinear by definition. After the rolling maintenance fold this is
+    // ~0.15ms and ~0.4ms, ratio ~3 for a 20x depth increase. Keep enough room
+    // for timing noise, but pin the removal of the repeated whole-ledger fold.
+    expect(ratio).toBeLessThan(8);
+    expect(maxDepth).toBeLessThan(2.5);
+    expect(maxRatio).toBeLessThan(40);
   });
 });

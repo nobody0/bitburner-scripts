@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  DARKSCAPE_AFFORDABLE_SHARE,
   DARKSCAPE_TOTAL_COST,
   stepDarkscape,
   type DarkscapeView,
@@ -9,17 +8,13 @@ import { applyOverrides, disabledByProfile, only } from "../shared/features/prof
 import { deriveCapabilities } from "../shared/features/unlock.ts";
 
 /** Enough cash that the affordability guard is satisfied. */
-const RICH = DARKSCAPE_TOTAL_COST / DARKSCAPE_AFFORDABLE_SHARE;
+const RICH = DARKSCAPE_TOTAL_COST;
 
 function view(over: Partial<DarkscapeView> = {}): DarkscapeView {
   return { dnetDisabled: false, bitNode: 1, sf15: 0, hasProgram: false, money: RICH, ...over };
 }
 
 describe("buying DarkscapeNavigator.exe", () => {
-  test("bought when affordable and absent", () => {
-    expect(stepDarkscape(view())).toBe(true);
-  });
-
   test("never bought in BN15 or with an active SF15", () => {
     // Prestige.ts re-grants the program, and TOR, at every install under
     // canAccessBitNodeFeature(15). Buying would be a straight loss.
@@ -41,10 +36,8 @@ describe("buying DarkscapeNavigator.exe", () => {
   });
 
   test("access is bought as soon as TOR plus Darkscape are affordable", () => {
-    // The claim is `pricing: "hard"` because the .cache payoff is unmodelled, and
-    // an unpriced step resolves off the top of its band without ROI ranking. So
-    // the guard is the protection: bid only while holding ten times the cost.
-    expect(stepDarkscape(view({ money: DARKSCAPE_TOTAL_COST }))).toBe(true);
+    // The arbiter prices the indivisible claim economically; this guard ensures
+    // the executor cannot bid until it can pay for both TOR and the program.
     expect(stepDarkscape(view({ money: RICH - 1 }))).toBe(false);
     expect(stepDarkscape(view({ money: RICH }))).toBe(true);
     expect(stepDarkscape(view({ money: 0 }))).toBe(false);

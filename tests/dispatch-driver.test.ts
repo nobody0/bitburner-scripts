@@ -96,22 +96,49 @@ describe("dispatcher heap reconciliation", () => {
     state.globals.worker_info!.set(9, { kind: "share", target: "", threads: 3, mode: "share" });
 
     expect(resyncHeap(state, { foodnstuff: server(9.2) })).toEqual([]);
+    // atExit removes the registry entry and queues the exit in one synchronous
+    // step; a fleet snapshot in the drain interval sees exactly this state.
     state.globals.worker_info!.delete(9);
-    expect(resyncHeap(state, { foodnstuff: server(2) })).toEqual([]);
-    expect(memory.heap.host("foodnstuff")?.used).toBe(9.2);
-
     state.globals.dispatch_done!.push({
       opId: 9, kind: 'workerExit', target: '', threads: 3,
     });
+    expect(resyncHeap(state, { foodnstuff: server(2) })).toEqual([]);
+    expect(memory.heap.host("foodnstuff")?.used).toBe(9.2);
+
     expect(settleBrokerShareExits(state)).toEqual([9]);
     expect(settleBrokerShareExits(state)).toEqual([]);
+    expect(memory.heap.host("foodnstuff")?.used).toBeCloseTo(2, 12);
+    expect(memory.segmentGb.share).toBe(0);
+  });
+
+  test("releases a reload-orphaned share worker that can never report an exit", () => {
+    const state = driver();
+    const memory = state.memory.dispatch;
+    memory.heap.upsert("foodnstuff", 16, 2);
+    const allocation = memory.heap.allocate({ blockSize: 2.4, threads: 3, policy: "contiguous" });
+    expect(allocation.ok).toBe(true);
+    memory.shareWorkers.set(9, {
+      workerId: 9,
+      hostname: "foodnstuff",
+      threads: 3,
+      gb: 7.2,
+      effectiveThreads: 3,
+      stopping: false,
+    });
+    memory.segmentGb.share = 7.2;
+
+    // A realm reset discarded worker_info before the worker's atExit could
+    // register: no entry, no queued exit, and none ever coming. The sweep must
+    // free the reservation instead of preserving it forever.
+    expect(resyncHeap(state, { foodnstuff: server(2) })).toEqual([]);
+    expect(memory.shareWorkers.size).toBe(0);
     expect(memory.heap.host("foodnstuff")?.used).toBeCloseTo(2, 12);
     expect(memory.segmentGb.share).toBe(0);
   });
 });
 
 describe('broker farm preemption adapter', () => {
-  test('kills the selected process and frees its dispatcher reservation exactly once', () => {
+  test('leaves an active process and its invested reservation intact', () => {
     const state = driver();
     const memory = state.memory.dispatch;
     memory.heap.upsert('foodnstuff', 16, 0);
@@ -140,12 +167,12 @@ describe('broker farm preemption adapter', () => {
     }]);
 
     expect(result).toMatchObject({
-      preempted: true,
-      plan: { action: 'preempt', victim: { workerId: 9, opId: 10, kind: 'grow' } },
+      preempted: false,
+      plan: { action: 'wait', reason: 'no-single-victim-unblocks' },
     });
-    expect(killed).toEqual([123]);
-    expect(memory.pool.workers.size).toBe(0);
-    expect(memory.tracked.size).toBe(0);
-    expect(memory.heap.freeOn('foodnstuff', true)).toBe(16);
+    expect(killed).toEqual([]);
+    expect(memory.pool.workers.size).toBe(1);
+    expect(memory.tracked.size).toBe(1);
+    expect(memory.heap.freeOn('foodnstuff', true)).toBe(9);
   });
 });

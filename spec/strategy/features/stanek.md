@@ -8,7 +8,7 @@ one player statistic; Boosters multiply their neighbours instead of acting.
 > then schedule charging so the fragments that matter reach high charge first."
 > (`shared/features/registry.ts:160-161`)
 
-**Theme** BN13 (`registry.ts:158`) · **Status** done (`spec/progress.md:38`) — packing is published, not executed; only charging acts (`remaining.ts:2293`)
+**Theme** BN13 (`registry.ts:158`) · **Status** done (`spec/progress.md:38`) — packing is published, while charge execution is owned by the fleet scheduler.
 
 ## Unlock
 
@@ -97,8 +97,8 @@ optimization. A charge blocks 1000 ms, 200 ms while `storedCycles >= 5` (`ns/sta
 - **Gives** multipliers to everything that reads them: `hacking`
   (`hacking_speed`, `hacking_money`, `hacking_grow`), `career`, `hacknet`,
   `bladeburner`, `factions` (`sim/features/stanek.ts:148-216`).
-- **Contends** fleet RAM: each charge is a `ram` claim through the dodge
-  (`game/lib/features/dodge.ts:118`), against `hacking` ([`graph.md`](../graph.md)).
+- **Contends** fleet RAM through the same farm/prep/charge/share segment plan as
+  hacking. A charge is a 2 GB/thread one-shot worker; it is not a dodge claim.
 
 ## Challenges
 
@@ -106,10 +106,13 @@ optimization. A charge blocks 1000 ms, 200 ms while `storedCycles >= 5` (`ns/sta
   no greedy heuristic is correct; our solver enumerates every (subset × rotation ×
   position), optimal below a 2e6-node cap (`pack.ts:74`). Its objective is the summed
   `weight` of fitted fragments and ignores Booster adjacency (`remaining.ts:2289`).
-- Charging is a 1000 ms awaited call in a serial feature loop, so a one-second
-  cadence starves the 200 ms hacking dispatcher; the driver charges every 30 s
-  (`remaining.ts:2275`). A charge changes `hacking_speed` and returns no player, so
-  the driver sets `playerDirty` when one ran (`remaining.ts:2336`).
+- `shared/strategy/stanek/charge.ts` prices the exact accumulator step against
+  the fleet's measured share of one second of lost production. The scheduler fills the largest
+  residual host blocks first and uses every whole 2 GB thread on each selected
+  host. Calls in progress finish; only share is freely evictable.
+- A successful charge invalidates the held player multiplier context. Target
+  wakes remain latched until the next heartbeat refreshes Player and bumps the
+  evaluator generation, so a changed `hacking_speed` cannot mix landing grids.
 - Acceptance forecloses every other early augmentation, and nothing in our model
   expresses it: no driver calls `acceptGift` (`sim/ns/stanek.ts:14-16`).
 
@@ -140,8 +143,8 @@ Gift, you must do that before calling this API."
 
 | Concern | File |
 |---|---|
-| strategy | `shared/strategy/stanek/pack.ts` |
-| driver | `game/lib/features/remaining.ts` (`stanek`, line 2267) |
+| strategy | `shared/strategy/stanek/pack.ts`, `shared/strategy/stanek/charge.ts` |
+| driver | `game/lib/features/remaining.ts` (packing), `game/lib/features/hacking.ts` and `game/worker/worker.ts` (charging) |
 | probe | `game/lib/probes/dodged.ts` (`stanek.core`, line 1685) |
 | telemetry topic | `shared/telemetry/topics/stanek.ts` |
 | tab | `ui/app/tabs/stanek.ts` |

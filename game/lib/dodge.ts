@@ -31,6 +31,16 @@ export function dodgeStubScript(): string {
  * yields a macrotask to the game's scheduler — the same bare `setTimeout(0)`
  * that `ns.asleep(0)` was upstream, minus the ns surface. */
 const EXEC_RETRIES = 10;
+/** How long the caller waits for the stub to HAND BACK its envelope — not for
+ * an async result, which settles outside the gate.
+ *
+ * `startDodge` holds a realm-wide FIFO across this wait, so a stub that is
+ * captured and then dies without calling `resolve` or `reject` (a dynamic-RAM
+ * overrun kills it mid-call, a killall catches it) would wedge every later
+ * dodge in the realm — probes, gate, every feature action — until a cold boot.
+ * The handoff itself is synchronous once the stub is running, so ten seconds is
+ * pure slack. */
+const DODGE_HANDOFF_TIMEOUT_MS = 10_000;
 /** Default dynamic budget for the dodged calls themselves — fits scan +
  * getServer + stock getters. (The predecessor scripts default to 6.6 GB and
  * carry a table of per-call exceptions; see spec/dodging.md.) */
@@ -182,7 +192,19 @@ async function runCall<T>(
       fail(error);
       throw error;
     }
-    return await promise;
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    const expiry = new Promise<never>((_, expire) => {
+      watchdog = setTimeout(
+        () => expire(new DodgeExecError(`${stubScript} on ${host} never handed back its result`)),
+        DODGE_HANDOFF_TIMEOUT_MS,
+      );
+    });
+    void expiry.catch(() => {});
+    try {
+      return await Promise.race([promise, expiry]);
+    } finally {
+      if (watchdog !== undefined) clearTimeout(watchdog);
+    }
   } finally {
     // The engine awaits main() and only then queues its cleanup handler, so
     // two microtask turns are required before that handler has synchronously

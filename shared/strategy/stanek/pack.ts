@@ -133,18 +133,3 @@ export function packFragments(
   recurse(0);
   return { ...best, approximated: capped };
 }
-
-/** Charge ordering: highest weighted effect first.
- *
- * Charging raises a fragment's effect, so the run's objective weights decide
- * which fragment is worth the charge time. Read from the needs board by the
- * driver, so a run that needs hacking charges the hacking fragment. */
-// Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/CotMG/formulas/effect.ts
-export function chargeOrder(fragments: readonly Fragment[], placed: readonly Placement[]): number[] {
-  const placedIds = new Set(placed.map((placement) => placement.id));
-  return fragments
-    .filter((fragment) => placedIds.has(fragment.id))
-    .slice()
-    .sort((a, b) => b.weight * b.power - a.weight * a.power || a.id - b.id)
-    .map((fragment) => fragment.id);
-}

@@ -44,7 +44,7 @@ const result = await runGame({
   features: only("progression", "dnet"),
   onRecord: (line) => {
     const record = JSON.parse(line) as { key?: string; data?: DarknetState };
-    if (typeof record.key === "string" && record.key.startsWith("dnet.overseer")) {
+    if (typeof record.key === "string" && record.key.startsWith("dnet.controller")) {
       controllerSays = JSON.stringify(record.data);
     }
     if (record.key !== "dnet" || !record.data) return;
@@ -81,10 +81,10 @@ console.log(
 );
 console.log(`last action: ${JSON.stringify(latest.plan?.lastResult)}`);
 console.log(`codes: ${JSON.stringify(latest.codes)}`);
-console.log(`overseer: ${JSON.stringify(latest.knowledge?.overseer)}`);
+console.log(`controller digest: ${JSON.stringify(latest.knowledge?.controller)}`);
 console.log(`channel: ${JSON.stringify(latest.channel)}`);
 console.log(`crashes: ${result.crashes.length}, unmodeled: ${JSON.stringify(result.unmodeled)}`);
 console.log(JSON.stringify(result.crashes.slice(0,3), null, 1));
 console.log(`trail (hosts/known cracked agents): ${trail.join(" ")}`);
-console.log(`controller: ${controllerSays.slice(0, 900)}`);
+console.log(`controller trace: ${controllerSays.slice(0, 900)}`);
 console.log(`-> ${out}`);

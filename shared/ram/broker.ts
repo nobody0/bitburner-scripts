@@ -1,5 +1,4 @@
 import { roundSigFigs } from '../format.ts';
-import { PRIORITY } from '../strategy/arbiter.ts';
 
 export const STUB_BASE_GB = 1.6;
 export const COLD_HOME_ARENA_GB = 4.1;
@@ -10,10 +9,6 @@ export const STARVATION_MS = 5_000;
 /** Sentinel for "no planner pass observed yet". Real pass ids start at 1, so
  * the first observation is never mistaken for a repeat of this one. */
 const NO_POOLING_PASS = 0;
-/** Only run-defining irreversible work may discard an in-flight farm op. The
- * threshold is the arbiter's existing final-install freeze, not a second RAM-
- * specific priority scale. */
-export const FARM_PREEMPTION_PRIORITY = PRIORITY['progression:install-freeze'];
 const DEMAND_HALF_LIFE_MS = 10 * 60_000;
 const POOLING_DEMOTION_OBSERVATIONS = 3;
 
@@ -114,15 +109,13 @@ export type ReclamationPlan =
       shareWorkerIds: number[];
       shareGb: number;
       victim: PreemptibleFarmWorker;
-      threshold: number;
-      reason: 'idle-pooled-worker' | 'priority-at-or-above-install-freeze';
+      reason: 'idle-pooled-worker';
     }
   | {
       action: 'wait';
       request: BrokerRequest;
       neededGb: number;
-      threshold: number;
-      reason: 'share-exit-pending' | 'priority-below-threshold' | 'no-single-victim-unblocks';
+      reason: 'share-exit-pending' | 'no-single-victim-unblocks';
     };
 
 interface Queued {
@@ -151,7 +144,6 @@ export function planReclamation(
   hosts: readonly BrokerHost[],
   shareWorkers: readonly ReclaimableShareWorker[],
   farmWorkers: readonly PreemptibleFarmWorker[],
-  now: number,
 ): ReclamationPlan {
   const neededGb = executableGb(request);
   const usable = hosts.filter((host) => host.rooted && host.deployed && host.maxRam >= neededGb);
@@ -181,10 +173,13 @@ export function planReclamation(
     };
   }
   if (pendingCouldPlace) {
-    return { action: 'wait', request, neededGb, threshold: FARM_PREEMPTION_PRIORITY, reason: 'share-exit-pending' };
+    return { action: 'wait', request, neededGb, reason: 'share-exit-pending' };
   }
   const candidates: { victim: PreemptibleFarmWorker; share: ShareChoice }[] = [];
+  // An active HGW/prep call represents elapsed wall time that a kill destroys.
+  // Priority can reclaim share and idle pool shells, never invested hacking.
   for (const victim of farmWorkers) {
+    if (victim.active) continue;
     const host = usable.find((candidate) => candidate.hostname === victim.hostname);
     if (!host) continue;
     const shares = sharesByHost.get(host.hostname) ?? [];
@@ -195,13 +190,13 @@ export function planReclamation(
       : chooseShareWorkers(shares.filter((worker) => !worker.stopping), shareDeficit);
     if (share) candidates.push({ victim, share });
   }
-  candidates.sort((a, b) => compareVictims(a.victim, b.victim, now)
+  candidates.sort((a, b) => a.victim.gb - b.victim.gb
     || a.share.gb - b.share.gb
     || a.share.workers.length - b.share.workers.length
     || a.victim.hostname.localeCompare(b.victim.hostname)
     || a.victim.workerId - b.victim.workerId);
   const selected = candidates[0];
-  if (selected && !selected.victim.active) {
+  if (selected) {
     return {
       action: 'preempt',
       request,
@@ -209,25 +204,14 @@ export function planReclamation(
       shareWorkerIds: selected.share.workers.map((worker) => worker.workerId),
       shareGb: selected.share.gb,
       victim: selected.victim,
-      threshold: FARM_PREEMPTION_PRIORITY,
       reason: 'idle-pooled-worker',
     };
   }
-  if (request.priority < FARM_PREEMPTION_PRIORITY) {
-    return { action: 'wait', request, neededGb, threshold: FARM_PREEMPTION_PRIORITY, reason: 'priority-below-threshold' };
-  }
-  if (!selected) {
-    return { action: 'wait', request, neededGb, threshold: FARM_PREEMPTION_PRIORITY, reason: 'no-single-victim-unblocks' };
-  }
   return {
-    action: 'preempt',
+    action: 'wait',
     request,
     neededGb,
-    shareWorkerIds: selected.share.workers.map((worker) => worker.workerId),
-    shareGb: selected.share.gb,
-    victim: selected.victim,
-    threshold: FARM_PREEMPTION_PRIORITY,
-    reason: 'priority-at-or-above-install-freeze',
+    reason: 'no-single-victim-unblocks',
   };
 }
 
@@ -287,17 +271,6 @@ function betterShareChoice(choice: ShareChoice, incumbent: ShareChoice | undefin
 /** Fewest discarded ops first (idle pooled worker = zero), then support ops
  * before the money-carrying hack. Within a class, a later landing has less
  * elapsed in-flight value; only then do we minimize released RAM. */
-function compareVictims(a: PreemptibleFarmWorker, b: PreemptibleFarmWorker, now: number): number {
-  const active = Number(a.active) - Number(b.active);
-  if (active !== 0) return active;
-  const value = Number(a.kind === 'hack') - Number(b.kind === 'hack');
-  if (value !== 0) return value;
-  const aRemaining = a.landing === undefined ? Infinity : Math.max(0, a.landing - now);
-  const bRemaining = b.landing === undefined ? Infinity : Math.max(0, b.landing - now);
-  if (aRemaining !== bRemaining) return bRemaining - aRemaining;
-  return a.gb - b.gb;
-}
-
 /** Pure owner of dodge placement, measured demand, and queue ordering. It
  * never leases RAM itself: the game adapter commits each returned placement
  * to the shared Heap, while tests and the simulator exercise plain values. */

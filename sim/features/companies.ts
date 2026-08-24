@@ -45,6 +45,12 @@ export class CompanySystem {
     return this.standings.get(name)?.favor ?? 0;
   }
 
+  gainReputation(name: string, amount: number): void {
+    const standing = this.standings.get(name);
+    if (!standing) throw new Error(`Invalid company: '${name}'`);
+    standing.rep += amount;
+  }
+
   positions(name: string): string[] {
     const company = this.company(name);
     return Object.keys(COMPANY_TABLE.positions).filter((position) => company.positions.includes(position));

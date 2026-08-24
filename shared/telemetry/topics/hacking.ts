@@ -164,7 +164,7 @@ export interface FarmRollup {
   minSecurity?: number;
   money?: number;
   moneyMax?: number;
-  ramPie?: { farm: number; prep: number; share: number; free: number; reserve: number };
+  ramPie?: { farm: number; prep: number; charge?: number; share: number; free: number; reserve: number };
   allocFails?: number;
   allocFailsByPhase?: { jit: number; prep: number; eager: number };
   /** Fresh processes started (one-shots + pool spawns). Pooling keeps this
@@ -193,6 +193,14 @@ export interface FarmRollup {
     /** Share is running on the free tail because the ACTIVE work earns
      * faction rep, independent of the route pricing rep as critical. */
     freeTail?: boolean;
+  };
+  /** Current one-shot Stanek charge decision and live occupancy. */
+  chargeDecision?: {
+    fragmentId: number;
+    threads: number;
+    allotmentGb: number;
+    valueSeconds: number;
+    opportunitySeconds: number;
   };
   /** additionalMsec actually carried by launched ops: mean and worst. The
    * launch guard should be tuned down until `maxMs` nears it and misses start,
@@ -247,17 +255,17 @@ export interface FarmRollup {
    * signature with a large count. A reorder — the `h-h-g-w2` case, two hacks
    * landing before their cover — appears as a second key, with examples. */
   landingOrder?: {
-    /** Intended order, as the roles sort by planned landing time. */
-    planned: string;
-    /** COMPLETE batches verified. The denominator for every count below. */
+    /** COMPLETE hack-bearing batches verified. */
     batches: number;
+    /** Batches whose observed signature matched that batch's own plan. */
+    inOrder: number;
     /** Batches that landed having never launched a hack — support paid for
      * with nothing stolen. Kept out of `observed` so it cannot dilute the
      * "landed as planned" share; it is a different, costlier failure. */
     incomplete?: number;
-    /** Observed order -> batches that landed that way. Bounded: the tail of
-     * rare signatures is truncated and reported as `otherBatches`. */
-    observed: Record<string, number>;
+    /** Planned/observed pairs. Plans remain attached to the batches that used
+     * them, so a legitimate split weaken is not compared with a later shape. */
+    patterns: { planned: string; observed: string; batches: number }[];
     otherBatches?: number;
     /** The most recent mis-ordered batches, for inspection. Bounded, and
      * naturally small — an anomaly rate high enough to fill it is itself the
@@ -288,8 +296,8 @@ export interface FarmRollup {
     paddingGbMs: number;
     nativeGbMsByKind: { hack: number; grow: number; weaken: number };
     paddingGbMsByKind: { hack: number; grow: number; weaken: number };
-    nativeGbMsBySegment: { farm: number; prep: number; share: number };
-    paddingGbMsBySegment: { farm: number; prep: number; share: number };
+    nativeGbMsBySegment: { farm: number; prep: number; charge?: number; share: number };
+    paddingGbMsBySegment: { farm: number; prep: number; charge?: number; share: number };
     /** The cross product. `nativeGbMsByKind` folds a prep wave's grows in with
      * the farm's, which is precisely when the farm's own split matters most. */
     nativeGbMsBySegmentKind?: Record<string, FarmByKind>;

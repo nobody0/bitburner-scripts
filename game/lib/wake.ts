@@ -28,7 +28,7 @@ import type { WorkerGlobalThis } from "./worker-shared.ts";
  * `ns.sleep` is actively dangerous in any script with a second async arm: it
  * holds the Netscript concurrency lock (`netscriptDelay` sets
  * `ws.env.runningFn`), and the engine KILLS a script whose other arm makes any
- * ns call while it is pending — the bug that killed every darknet overseer at
+ * ns call while it is pending — the bug that killed every darknet controller at
  * its first mutation event. `ns.asleep` is lock-free but is itself just a bare
  * `setTimeout` upstream (NetscriptFunctions.ts:259-265), so it buys nothing a
  * realm timer does not, while still LOOKING like an ns call that might hold
@@ -46,7 +46,8 @@ export function realmSleep(ms: number): Promise<void> {
 
 /** Signal a controller wake without losing it when the controller is inside
  * another feature tick and has not armed its promise yet. */
-export function signalWake(globals: WorkerGlobalThis): void {
+export function signalWake(globals: WorkerGlobalThis, target?: string): void {
+  if (target) (globals.dispatch_wake_targets ??= new Set()).add(target);
   const resolve = globals.dispatch_wake;
   if (resolve) resolve();
   else globals.dispatch_wake_pending = true;

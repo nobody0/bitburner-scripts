@@ -43,6 +43,7 @@ import { installHorizonSec, nodeHorizonSec, usableForecastSec } from "../../../s
 import { growingProgressSecondsPerRelativeRate, linearSecondsPerRelativeRate } from "../../../shared/strategy/progression/marginal.ts";
 import type { MeasuredMarginal } from "../../../shared/strategy/progression/marginal.ts";
 import { hackMarginalValue, hackRungValue, relativeGainSaving, type HackMarginalInput } from "../../../shared/strategy/share.ts";
+import type { ChargePricingInput } from "../../../shared/strategy/stanek/charge.ts";
 import type { FarmPipeline, FarmRollup } from "../../../shared/telemetry/topics/hacking.ts";
 import {
   marginalCostPerGb,
@@ -104,11 +105,12 @@ export function resetHackingState(): void {
   globals.dispatch_done!.length = 0;
   globals.dispatch_wake = undefined;
   globals.dispatch_wake_pending = false;
+  globals.dispatch_wake_targets?.clear();
   if (globals.dispatch_weaken_timer !== undefined) clearTimeout(globals.dispatch_weaken_timer);
   globals.dispatch_weaken_timer = undefined;
-  if (globals.dispatch_jit_timer !== undefined) clearTimeout(globals.dispatch_jit_timer);
-  globals.dispatch_jit_timer = undefined;
-  globals.dispatch_jit_at = undefined;
+  globals.charge_context_pending = false;
+  for (const deadline of globals.dispatch_jit_timers?.values() ?? []) clearTimeout(deadline.timer);
+  globals.dispatch_jit_timers?.clear();
   state = initDriver();
   pumpMaxMs = 0;
   pumpMsSum = 0;
@@ -128,6 +130,7 @@ export function resetHackingState(): void {
   plannerPasses = 0;
   routeHackingSkillGoal = undefined;
   latestShareValue = undefined;
+  latestChargeValue = undefined;
   switched = undefined;
   backdoorBackoff.clear();
   backdoorInFlight = false;
@@ -188,6 +191,22 @@ let plannerPasses = 0;
 let routeHackingSkillGoal: number | undefined;
 type ShareValue = NonNullable<Parameters<typeof pump>[4]>["shareValue"];
 let latestShareValue: ShareValue | undefined;
+let latestChargeValue: ChargePricingInput | undefined;
+
+function chargeValue(game: GameState): ChargePricingInput | undefined {
+  const marginals = game.topics.progression?.plan?.marginals;
+  const fragments = game.topics.stanek?.fragments?.filter((fragment) => fragment.chargeable !== false);
+  if (!marginals || !fragments?.length) return undefined;
+  return {
+    fragments,
+    moneySecondsPerRelativeRate: marginals.money.secondsPerRelativeRate,
+    hackingSecondsPerRelativeRate: marginals.hacking.secondsPerRelativeRate,
+    ...(game.topics.fleet?.scriptIncome ? { totalMoneyPerSec: game.topics.fleet.scriptIncome[0] } : {}),
+    ...(game.topics.fleet?.scriptExpGain !== undefined
+      ? { totalHackingExpPerSec: game.topics.fleet.scriptExpGain }
+      : {}),
+  };
+}
 
 function shareValue(game: GameState, caps: DriverContext["caps"]): ShareValue | undefined {
   // Share buys faction-rep rate, and every point of faction rep (and the
@@ -286,22 +305,23 @@ function shareValue(game: GameState, caps: DriverContext["caps"]): ShareValue | 
 /** Arm the planner's earliest native-invocation deadline on a realm timer.
  * The ordinary heartbeat remains the fallback, while this wake avoids paying
  * another feature's variable frame time as worker padding. */
-function scheduleJitWake(at: number | undefined): void {
+function scheduleJitWake(at: number | undefined, target?: string): void {
   const globals = workerGlobals();
+  const key = target ?? "";
+  const timers = globals.dispatch_jit_timers ??= new Map();
+  const current = timers.get(key);
   if (at === undefined) {
-    if (globals.dispatch_jit_timer !== undefined) clearTimeout(globals.dispatch_jit_timer);
-    globals.dispatch_jit_timer = undefined;
-    globals.dispatch_jit_at = undefined;
+    if (current) clearTimeout(current.timer);
+    timers.delete(key);
     return;
   }
-  if (globals.dispatch_jit_timer !== undefined && (globals.dispatch_jit_at ?? Infinity) <= at + 1) return;
-  if (globals.dispatch_jit_timer !== undefined) clearTimeout(globals.dispatch_jit_timer);
-  globals.dispatch_jit_at = at;
-  globals.dispatch_jit_timer = setTimeout(() => {
-    globals.dispatch_jit_timer = undefined;
-    globals.dispatch_jit_at = undefined;
-    signalWake(globals);
+  if (current && current.at <= at + 1) return;
+  if (current) clearTimeout(current.timer);
+  const timer = setTimeout(() => {
+    timers.delete(key);
+    signalWake(globals, target);
   }, Math.max(0, at - performance.now()));
+  timers.set(key, { timer, at });
 }
 
 interface PumpCostReport {
@@ -363,15 +383,17 @@ export function takeTargetSwitch(): { from: string; to: string } | undefined {
 const LANDING_SIGNATURES_PUBLISHED = 6;
 
 function landingOrderDigest(stats: DispatchStats): FarmRollup["landingOrder"] {
-  if (stats.landingOrderBatches === 0 || stats.landingOrderPlanned === undefined) return undefined;
-  const ranked = [...stats.landingOrder.entries()].sort(([, a], [, b]) => b - a);
+  if (stats.landingOrderBatches === 0) return undefined;
+  const ranked = [...stats.landingOrders.values()].sort((a, b) => b.batches - a.batches);
   const published = ranked.slice(0, LANDING_SIGNATURES_PUBLISHED);
-  const other = ranked.slice(LANDING_SIGNATURES_PUBLISHED).reduce((sum, [, count]) => sum + count, 0);
+  const other = ranked.slice(LANDING_SIGNATURES_PUBLISHED).reduce((sum, entry) => sum + entry.batches, 0);
+  let inOrder = 0;
+  for (const entry of ranked) if (entry.observed === entry.planned) inOrder += entry.batches;
   return {
-    planned: stats.landingOrderPlanned,
     batches: stats.landingOrderBatches,
+    inOrder,
     ...(stats.landingOrderIncomplete > 0 ? { incomplete: stats.landingOrderIncomplete } : {}),
-    observed: Object.fromEntries(published),
+    patterns: published.map((entry) => ({ ...entry })),
     ...(other > 0 ? { otherBatches: other } : {}),
     anomalies: stats.landingOrderAnomalies.map((entry) => ({ ...entry })),
   };
@@ -428,7 +450,10 @@ function pipelines(game: GameState, driver: DriverState): FarmPipeline[] {
   const out: FarmPipeline[] = [];
   const farm = directive.farm;
   if (farm) {
-    const solution = farm.solution;
+    // During a small solve transition the scheduler may deliberately keep the
+    // last executable shape alive while it places the replacement. Report the
+    // shape actually feeding the target queue, not the evaluator's candidate.
+    const solution = dispatch.jitRuntimeByTarget.get(farm.host)?.solution ?? farm.solution;
     out.push({
       host: farm.host,
       role: "farm",
@@ -491,6 +516,7 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
   const farmSolution = driver.memory.dispatch.evaluator.directive.farm?.solution;
   const prepBudgetGb = driver.memory.dispatch.evaluator.directive.segments.find((segment) => segment.kind === "prep")?.gb ?? 0;
   const share = driver.memory.dispatch.evaluator.directive.share;
+  const charge = driver.memory.dispatch.evaluator.directive.charge;
   const landingOrder = landingOrderDigest(stats);
   const pumpCost = takePumpCost();
   const lateness = takeTickLateness();
@@ -527,6 +553,7 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
     ramPie: {
       farm: segmentGb.farm,
       prep: segmentGb.prep,
+      charge: segmentGb.charge,
       share: segmentGb.share,
       free: heap.freeTotal(),
       reserve: heap.reservedTotal,
@@ -550,6 +577,13 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
       ...(latestShareValue?.currentWorkEarnsRep && !(share.reputationSecondsPerBonus > 0)
         ? { freeTail: true }
         : {}),
+    } } : {}),
+    ...(charge?.fragment ? { chargeDecision: {
+      fragmentId: charge.fragment.id,
+      threads: [...driver.memory.dispatch.chargeWorkers.values()].reduce((sum, worker) => sum + worker.threads, 0),
+      allotmentGb: roundSigFigs(charge.allotmentGb, 3),
+      valueSeconds: roundSigFigs(charge.valueSeconds, 3),
+      opportunitySeconds: roundSigFigs(charge.opportunitySeconds, 3),
     } } : {}),
     ...(stats.padding.count > 0 ? { padding: {
       meanMs: roundSigFigs(stats.padding.sumMs / stats.padding.count, 3),
@@ -637,8 +671,8 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
     // together is what makes "cost grows with depth" readable off the panel.
     ledger: {
       tracked: driver.memory.dispatch.tracked.size,
-      pendingBatches: driver.memory.dispatch.jitPending.length,
-      pendingOps: driver.memory.dispatch.jitPending.reduce((sum, batch) => sum + batch.ops.length, 0),
+      pendingBatches: driver.memory.dispatch.pendingJitBatchCount,
+      pendingOps: driver.memory.dispatch.pendingJitOpCount,
       onTarget: driver.memory.dispatch.byTarget.get(target)?.size ?? 0,
     },
     totals: { moneyEarned: stats.moneyEarned, hacks: stats.hacks },
@@ -1683,6 +1717,8 @@ async function runPump(
   arenaReserves: Readonly<Record<string, number>>,
   installSec: number | undefined,
   sharePricing: ShareValue | undefined,
+  chargePricing: ChargePricingInput | undefined,
+  trigger?: { kind: "target-wake"; target: string; source: "completion" | "deadline" },
 ): Promise<Awaited<ReturnType<typeof pump>> | undefined> {
   const servers = game.topics.servers;
   const player = game.topics.player;
@@ -1693,7 +1729,9 @@ async function runPump(
   // Only the farm and prep targets get live reads; everything else comes
   // from the sweep snapshot.
   const active = driver.memory.dispatch.evaluator.directive;
-  const hot = [active.farm?.host, active.prep?.host].filter((h): h is string => Boolean(h));
+  const hot = trigger
+    ? [trigger.target]
+    : [active.farm?.host, active.prep?.host].filter((h): h is string => Boolean(h));
   // The stock feature's manipulation intent rides along: hack pushes a
   // symbol's forecast down and grow pushes it up, so in a node where the
   // market matters the farm's best target is not the richest server but the
@@ -1713,7 +1751,8 @@ async function runPump(
     game.topics.stock?.manipulation,
     expRateEma,
   );
-  const completions = drainCompletions(driver);
+  const completions = drainCompletions(driver, trigger?.target);
+  if (!trigger) driver.globals.dispatch_wake_targets?.clear();
   const reinvestmentReturnPerDollarSec = bestReinvestmentReturnPerDollarSec(game);
 
   const started = performance.now();
@@ -1726,9 +1765,22 @@ async function runPump(
     ...(installSec !== undefined ? { horizonMs: installSec * 1_000 } : {}),
     ...(reinvestmentReturnPerDollarSec > 0 ? { reinvestmentReturnPerDollarSec } : {}),
     ...(routeHackingSkillGoal !== undefined ? { hackingSkillGoal: routeHackingSkillGoal } : {}),
+    ...(trigger ? { trigger } : {}),
     ...(sharePricing ? { shareValue: sharePricing } : {}),
+    ...(chargePricing ? { chargeValue: chargePricing } : {}),
   });
-  scheduleJitWake(result.nextWakeMs === undefined ? undefined : view.time + result.nextWakeMs);
+  if (trigger) {
+    const next = result.nextWakes.find((wake) => wake.target === trigger.target);
+    scheduleJitWake(next ? view.time + next.ms : undefined, trigger.target);
+  } else {
+    const wanted = new Set(result.nextWakes.map((wake) => wake.target ?? ""));
+    for (const key of driver.globals.dispatch_jit_timers?.keys() ?? []) {
+      if (!wanted.has(key)) scheduleJitWake(undefined, key || undefined);
+    }
+    for (const wake of result.nextWakes) {
+      scheduleJitWake(view.time + wake.ms, wake.target);
+    }
+  }
   const elapsed = performance.now() - started;
   if (elapsed > pumpMaxMs) pumpMaxMs = elapsed;
   if (pumpWindowAt === 0) pumpWindowAt = started;
@@ -1767,24 +1819,53 @@ export async function pumpOnWake(
   arenaReserves: Readonly<Record<string, number>>,
   installSec: number | undefined,
 ): Promise<void> {
-  const now = performance.now();
-  // Ordinary completions are throughput hints and may be coalesced. A queued
-  // weaken is different: after a spread weaken's trailing debounce, this is
-  // the only guaranteed observation point at minimum security. Never discard
-  // that launch window merely because another op woke us a few ms earlier.
-  const weakenWindow = hackingState().globals.dispatch_done?.some((done) => done.kind === "weaken") ?? false;
-  if (!weakenWindow && now - lastPumpAt < WAKE_MIN_MS) {
-    wakeSkipGap++;
-    return;
+  const driver = hackingState();
+  // A target wake may race the engine turn which applies a completed charge's
+  // multiplier. Leave the target queues latched for the heartbeat that first
+  // refreshes Player; launching with the old hacking_speed would misplace the
+  // whole landing grid.
+  if (driver.globals.charge_context_pending) return;
+  const done = driver.globals.dispatch_done ?? [];
+  const targets = new Set(driver.globals.dispatch_wake_targets ?? []);
+  for (const completion of done) if (completion.target) targets.add(completion.target);
+
+  // Each target gets its own pass. A weaken on B can bypass throttling for B,
+  // but cannot make A's farm queue eligible or refresh A's live state.
+  for (const target of targets) {
+    const now = performance.now();
+    const targetDone = done.filter((completion) => completion.target === target);
+    const weakenWindow = targetDone.some((completion) => completion.kind === "weaken");
+    // A wake with no completion behind it is a SCHEDULED launch deadline: the
+    // JIT grid armed a realm timer for this exact instant. The throttles below
+    // exist to coalesce completion floods; refusing a deadline wake instead
+    // moves the launch to a later frame, which caps the whole pipeline at
+    // (WAKE_MAX_PER_FRAME + heartbeats)/sec batches — measured 24.1 launched
+    // of 50 planned per second on the one-server lane, with landings sliding
+    // 0.4-0.9 s late on the skill-jump lane.
+    const scheduled = targetDone.length === 0;
+    if (!weakenWindow && !scheduled && now - lastPumpAt < WAKE_MIN_MS) {
+      wakeSkipGap++;
+      continue;
+    }
+    if (!weakenWindow && !scheduled && wakesThisFrame >= WAKE_MAX_PER_FRAME) {
+      wakeSkipFrame++;
+      continue;
+    }
+    driver.globals.dispatch_wake_targets?.delete(target);
+    if (weakenWindow) weakenWindowPumps++;
+    wakesThisFrame++;
+    wakePumps++;
+    await runPump(
+      ns,
+      game,
+      caps,
+      arenaReserves,
+      installSec,
+      latestShareValue,
+      latestChargeValue,
+      { kind: "target-wake", target, source: targetDone.length > 0 ? "completion" : "deadline" },
+    );
   }
-  if (!weakenWindow && wakesThisFrame >= WAKE_MAX_PER_FRAME) {
-    wakeSkipFrame++;
-    return;
-  }
-  if (weakenWindow) weakenWindowPumps++;
-  wakesThisFrame++;
-  wakePumps++;
-  await runPump(ns, game, caps, arenaReserves, installSec, latestShareValue);
 }
 
 export const hacking: FeatureDriver = {
@@ -1792,6 +1873,15 @@ export const hacking: FeatureDriver = {
   everyMs: 200,
   async tick(ctx: DriverContext) {
     const { ns, state: game } = ctx;
+    // Stanek applies multiplier changes on the engine turn after a successful
+    // charge. Refresh before this heartbeat can launch target work under the
+    // old duration context; target-local wakes never perform this realm-wide
+    // maintenance.
+    const globals = workerGlobals();
+    if (globals.charge_context_pending) {
+      set(game, "player", ns.getPlayer());
+      globals.charge_context_pending = false;
+    }
     wakesThisFrame = 0;
     routeHackingSkillGoal = ctx.board.open
       .filter((need) => need.kind === "skill" && need.subject === "hacking")
@@ -1821,7 +1911,16 @@ export const hacking: FeatureDriver = {
     // everything below planFarm is ms-native.
     const installSec = usableForecastSec(ctx.horizons.install);
     latestShareValue = shareValue(game, ctx.caps);
-    const result = await runPump(ns, game, ctx.caps, ctx.arena.reserves, installSec, latestShareValue);
+    latestChargeValue = chargeValue(game);
+    const result = await runPump(
+      ns,
+      game,
+      ctx.caps,
+      ctx.arena.reserves,
+      installSec,
+      latestShareValue,
+      latestChargeValue,
+    );
     if (!result) return;
     const driver = hackingState();
     const target = result.directive.farm?.host ?? "";

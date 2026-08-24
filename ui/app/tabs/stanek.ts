@@ -1,5 +1,5 @@
 import { rotate } from "../../../shared/strategy/stanek/pack.ts";
-import { NONE, card, dot, hint, note, outcome, table, tiles, waiting, waitingPanel } from "../lib/dom.ts";
+import { card, dot, hint, note, table, tiles, waiting, waitingPanel } from "../lib/dom.ts";
 import { esc, fmtNum } from "../lib/format.ts";
 import { html } from "../lib/html.ts";
 import type { ProjectedState } from "../project.ts";
@@ -101,12 +101,8 @@ export const stanekTab: Tab = {
       ],
       s.fragments.map((f) => [
         `<span class="swatch f${f.id % 6}"></span>${f.id}`,
-        // A booster is in the gift and can never be in the charge queue: the
-        // API rejects chargeFragment on it, so the driver filters it out of
-        // `chargeOrder`. This dot is what reconciles the "fragments placed"
-        // tile (observed, boosters included) with "charge queue" — NOT with
-        // "candidate packing", which is short for the unrelated reason that it
-        // is a hypothetical layout. `=== false` because the field is optional:
+        // The API rejects chargeFragment on boosters. `=== false` because the
+        // field is optional:
         // an older record omits it, and "cannot be charged" would then be a
         // claim made from an absent field.
         f.chargeable === false ? html`${dot("off", "boosters cannot be charged through the API")}${f.type}` : esc(f.type),
@@ -146,41 +142,7 @@ export const stanekTab: Tab = {
             label: hint("candidate packing", "best layout of the FULL fragment catalogue on an EMPTY grid — a target to compare the gift against, not a queue: nothing in game/ places or clears a fragment"),
             value: String(plan.placements.length),
           },
-          {
-            label: hint("charge queue", "the observed fragments the API accepts a charge for; boosters are excluded, so this is shorter than fragments placed"),
-            value: String(plan.chargeOrder.length),
-          },
-        ]) +
-        table(
-          [
-            hint("order", "the driver orders by power alone — how charged a fragment already is does not move it"),
-            "fragment",
-            "packs at",
-            "rotation",
-            "observed charges",
-            "peak charge",
-          ],
-          plan.chargeOrder.map((id, index) => {
-            const placement = plan.placements.find((entry) => entry.id === id);
-            const observed = s.fragments.find((entry) => entry.id === id);
-            return [
-              String(index + 1),
-              String(id),
-              // "packs at" and NONE, not "planned at" and "observed only":
-              // every row here is observed by construction (`chargeOrder` is
-              // built from the observed fragments), so "observed only" implied
-              // the other rows were planned into place. The coordinate is the
-              // candidate packing's, computed against an empty grid — where the
-              // packer would put the fragment, not an intention to move it.
-              placement ? `${placement.x},${placement.y}` : NONE,
-              placement ? String(placement.rotation) : NONE,
-              observed ? fmtNum(observed.numCharge, 0) : NONE,
-              observed ? fmtNum(observed.highestCharge, 0) : NONE,
-            ];
-          }),
-          { empty: "no chargeable fragments selected", left: [2] },
-        ) +
-        (plan.lastResult ? outcome(plan.lastResult) : "")
+        ])
       : waiting("the first packing decision");
 
     return (

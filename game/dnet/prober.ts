@@ -8,9 +8,9 @@ import { live } from "./shared.ts";
  * `probe()` is host-local — it returns the neighbours of the calling script's own
  * host and nothing else (`spec/dnet.md`) — so adjacency can only be learned by a
  * process standing there. Everything else about a host (its model, RAM, caches)
- * the overseer reads for itself from darkweb with no connection, so this process
+ * the controller reads for itself from darkweb with no connection, so this process
  * does that ONE thing and nothing more: on boot, and on every net mutation, it
- * probes and files the result to the overseer, then blocks on the mutation clock.
+ * probes and files the result to the controller, then blocks on the mutation clock.
  *
  * It never competes with the worker for the host's single job slot, which is the
  * whole point — while the worker is seconds deep in an `authenticate`, this keeps
@@ -21,10 +21,10 @@ import { live } from "./shared.ts";
  * `probe` = 1.8 GB, the fixed reserve every host holds for it (`proberReserveGb`).
  * So it cannot revive itself, and it does not try — it has no atExit at all. Its
  * report stamps a timestamp into the shared `probes` map every mutation; when a
- * host RESTART kills it, that stamp simply stops advancing, and the overseer
+ * host RESTART kills it, that stamp simply stops advancing, and the controller
  * reads the stale `at`, sees the prober is gone, and re-`exec`s a fresh one
  * through the host's worker (a max-priority `relaunchProbe` job). A host DELETE or
- * a prestige destroys the host outright, and the successor overseer never
+ * a prestige destroys the host outright, and the successor controller never
  * re-plants a host that no longer exists. Death is an ABSENCE, not an event.
  *
  * The one rule it shares with `agent.ts`: no billable `ns` member beyond
@@ -39,22 +39,21 @@ export async function main(ns: NS): Promise<void> {
 
   // Probe once immediately (a freshly planted host must appear on the map now,
   // not at the next mutation), then on every mutation. Each report stamps this
-  // host's neighbours, the time, and OUR pid — the pid so the overseer can kill
+  // host's neighbours, the time, and OUR pid — the pid so the controller can kill
   // us if this host becomes a lab walker.
   let first = true;
   for (;;) {
     // Resolved from the LIVE rendezvous every pass, never held across the await:
-    // an overseer dies with darkweb and a re-seed installs a fresh one of the
+    // a controller dies with darkweb and a re-seed installs a fresh one of the
     // same generation. A gap between the two is "not yet", not "never" — skip the
     // report and try again after the next mutation. The prober keeps running
-    // across a re-seed untouched, so the successor overseer just starts receiving
+    // across a re-seed untouched, so the successor controller just starts receiving
     // its reports again; no death, no revival.
     const controller = live();
     if (controller) {
-      controller.reportProbe(host, ns.dnet.probe(), Date.now(), ns.pid);
+      controller.reportProbe(host, ns.dnet.probe(), Date.now(), ns.pid, first ? launch.refresh : undefined);
       if (first) {
         first = false;
-        launch.firstReport?.();
       }
     }
     // Block until the net changes. 0 GB, and a kill delivered while awaiting is a

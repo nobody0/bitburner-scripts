@@ -6,6 +6,7 @@ import {
   GoNeuralEngine,
   prepareNeuralGoDecision,
   neuralGoContinuations,
+  type GoFinalizeOptions,
   type GoNeuralPrepared,
   type GoValueBackendFactory,
 } from "../../shared/strategy/go/neural/engine.ts";
@@ -22,6 +23,10 @@ import { goOpponentSeedCandidates } from "../../shared/strategy/go/rng.ts";
 export class TestGoNeuralRuntime implements GoNeuralRuntime {
   readonly engine: GoNeuralEngine;
   readonly positions = new Map<string, GoNeuralPrepared>();
+  /** Optional finalize configuration a test pins for every evaluation, e.g.
+   * a pass-when-lost trigger the stub backend's neutral value head would
+   * otherwise veto. Absent, production per-profile defaults resolve. */
+  finalizeOptions?: GoFinalizeOptions;
   #nextTurn = 1;
 
   constructor(factory: GoValueBackendFactory) {
@@ -41,7 +46,8 @@ export class TestGoNeuralRuntime implements GoNeuralRuntime {
     if (!prepared) throw new Error(`test Go runtime does not hold position ${positionId}`);
     const startedAt = Date.now();
     const seeds = goOpponentSeedCandidates(dispatchPlaytime, prepared.view.bonusCycles ?? 0);
-    const decision = await finalizeNeuralGoDecision(prepared, seeds, this.engine, dispatchPlaytime);
+    const decision = await finalizeNeuralGoDecision(
+      prepared, seeds, this.engine, dispatchPlaytime, this.finalizeOptions);
     const backend = await this.engine.backendFor(prepared.view.board.size);
     return {
       decision,

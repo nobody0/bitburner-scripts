@@ -181,10 +181,11 @@ benchmarks, and the normal telemetry path when inspecting detailed decisions.
   grafting, Hacknet and the stock lifecycle used by the shipped controller.
   Career and progression are partial; user-created stock order mutation/fills,
   gang, corporation, Bladeburner and sleeves remain unmodeled. The Darknet is
-  PARTIAL rather than absent: population, the access gate, the read-only getters,
-  the mutation clock and cache rewards are modeled; sessions, authentication,
-  heartbleed and the password models are not, and `DNET_ASSUMPTIONS` is the
-  authoritative list.
+  full for fresh and multi-install controller runs: all 23 APIs, passwords and
+  sessions, mutation/restart, labyrinth/storms, clue/cache rewards, live stock
+  grants, and coding-contract generation/solve/reward are modeled.
+  `DNET_ASSUMPTIONS` records the remaining entropy-stream and save/offline/UI
+  boundary choices.
   Stanek's placement, charging, effects, battery and multiplier lifecycle are
   modeled for fresh/controller worlds; gift acceptance, sleeves and
   save-seeded gift state remain explicit gaps. Go has a controller-facing
@@ -192,8 +193,8 @@ benchmarks, and the normal telemetry path when inspecting detailed decisions.
   seeded arena-calibrated endpoint result (measured win probability, black
   score and upstream-AI virtual duration); exact per-move mechanics remain in
   `sim/go-arena.ts`, `sim/features/go-system.ts`'s exact mode, and their parity
-  suites. Coding
-  contracts remain oracle-only. A save-seeded Go probe fails loudly because the
+  suites. Coding contracts have a controller-facing runtime backed by the
+  vendored problem definitions. A save-seeded Go probe fails loudly because the
   decoder cannot reconstruct the live board and history from the current seed.
 - Unprofiled runs use the small deterministic early-game fixture. `bn1-full`
   instead generates the complete vanilla v3.0.1 foreign-server population and

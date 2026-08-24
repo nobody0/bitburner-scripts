@@ -12,16 +12,12 @@
  *
  * ## Why the state lives in knowledge and not in the job
  *
- * A round trip out there is `authenticate` plus a `heartbleed` at 1.5x its time
- * — about 3.3 s at one thread, and nearly flat across progression. The
- * ADJACENCY the conversation depends on lasts about 108 s (`rates.ts`,
- * `msPerHostEventAny(["moved", "disconnected"])`), so one vantage buys roughly
- * thirty exchanges. Several of these solvers need more than that.
- *
- * But the PASSWORD lasts far longer: only deletion mints a new one (~576 s), and
- * a move or a restart leaves it alone. So a solve that outlives its vantage must
+ * The adjacency can disappear on the next random mutation or survive many;
+ * the event-rate estimate in `rates.ts` is staleness guidance, not a lifetime
+ * or deadline. The password survives moves and restarts and changes only when
+ * deletion mints a new identity. So a solve that outlives its vantage must
  * be resumable from a different one, which means the state has to survive in the
- * overseer's knowledge rather than in the process holding the session. That is
+ * controller's knowledge rather than in the process holding the session. That is
  * already how the ledger behaves — `foldReports` drops `attempts` only when a
  * host reports absent — so the state rides along with it.
  *
@@ -179,6 +175,8 @@ export const PENDING_ATTEMPT = "__pendingAttempt";
  * beside the password because solver-wide `needsOracle` is deliberately
  * pessimistic and can differ from a later candidate step. */
 export const PENDING_NEEDS_ORACLE = "__pendingNeedsOracle";
+/** Distinguishes a decoded final answer from an ordinary solver exchange. */
+export const PENDING_STEP_KIND = "__pendingStepKind";
 
 /** The phase a solver's state is parked in once its search space is GONE.
  *
@@ -199,6 +197,7 @@ export function withoutPending(state: SolverState): SolverState {
   const {
     [PENDING_ATTEMPT]: _pending,
     [PENDING_NEEDS_ORACLE]: _pendingNeedsOracle,
+    [PENDING_STEP_KIND]: _pendingStepKind,
     ...scratch
   } = state.scratch;
   return { ...state, scratch };
@@ -225,15 +224,17 @@ export function resumableState(
   carried: SolverState | undefined,
   modelId: string | undefined,
   facts: PasswordFacts,
-): { state?: SolverState; pending?: string; pendingNeedsOracle?: boolean } {
+): { state?: SolverState; pending?: string; pendingNeedsOracle?: boolean; pendingKind?: "attempt" | "answer" } {
   if (carried === undefined || carried.model !== modelId || !stateMatches(carried, facts)) return {};
   const pending = carried.scratch[PENDING_ATTEMPT];
   const pendingNeedsOracle = carried.scratch[PENDING_NEEDS_ORACLE];
+  const pendingKind = carried.scratch[PENDING_STEP_KIND];
   return typeof pending === "string"
     ? {
         state: carried,
         pending,
         ...(typeof pendingNeedsOracle === "boolean" ? { pendingNeedsOracle } : {}),
+        ...(pendingKind === "answer" ? { pendingKind } : {}),
       }
     : { state: carried };
 }

@@ -6,7 +6,7 @@ import {
   promoteStockWaitMs,
   type DarknetSystem,
 } from "../features/dnet.ts";
-import { phishWaitMs, reclaimWaitMs, stasisWaitMs } from "../../shared/strategy/dnet/rates.ts";
+import { authenticateWaitMs, phishWaitMs, reclaimWaitMs, stasisWaitMs } from "../../shared/strategy/dnet/rates.ts";
 import { SymbolToStockMap } from "../vendor/bitburner/src/StockMarket/MarketAdapter.ts";
 import { Stock } from "../vendor/bitburner/src/StockMarket/Stock.ts";
 
@@ -28,8 +28,7 @@ export interface DnetNsOptions {
   sf15Level: () => number;
   servers: Map<string, SimServer>;
   /** `Player.mults.charisma_exp`, and `Player.gainCharismaExp` — which adds raw
-   *  experience and recomputes the skill. Only `promoteStock` needs them; every
-   *  other member reads charisma through `skills()`. */
+   *  experience and recomputes the skill for every rewarding DNet action. */
   charismaExpMult: () => number;
   gainCharismaExp: (amount: number) => void;
 }
@@ -47,43 +46,24 @@ export function calculateDnetAuthenticateTime(
   correctChars = 0,
 ): number {
   const { charisma, intelligence } = options.skills();
-  const skillFactor = (5 * details.requiredCharismaSkill + (details.difficulty + 1) * 100) / (charisma + 150);
-  const threadsFactor = 1 / (1 + 0.2 * (threads - 1));
-  const underleveled = charisma <= details.requiredCharismaSkill && details.depth > 1
-    ? 1.5 + (details.requiredCharismaSkill + 50) / (charisma + 50)
-    : 1;
-  const bootsFactor = options.hasBoots() ? 0.8 : 1;
-  const backdoorFactor = options.system.instability().authenticationDurationMultiplier;
-  const sf15Factor = options.sf15Level() > 2 ? 0.8 : 1;
-  const base = 850 * skillFactor * backdoorFactor * underleveled * bootsFactor * sf15Factor * threadsFactor;
-  const intelligenceBonus = 1 + (Math.pow(intelligence, 0.8) * 0.25) / 600;
-  return base / intelligenceBonus
-    + (details.modelId === "2G_cellular" ? correctChars : 0) * 50 * threadsFactor;
+  return authenticateWaitMs(details, {
+    charisma,
+    intelligence,
+    hasBoots: options.hasBoots(),
+    sf15Level: options.sf15Level(),
+    authenticationDurationMultiplier: options.system.instability().authenticationDurationMultiplier,
+  }, threads, correctChars);
 }
-/** v3.0.1 `src/NetscriptFunctions/Darknet.ts`, restricted to the members the
- * controller and its agents actually call. Everything else is absent, so the
- * root namespace's unknown-member proxy reports it and throws rather than
- * answering.
- *
- * The access gate is faithful and load-bearing: 19 of the 22 real members call
- * `expectDarknetAccess`, which throws *"You do not have access to the dnet
- * api"*. Without that, buying DarkscapeNavigator.exe would have no observable
- * effect and the purchase could not be tested at all.
- *
- * Deliberately still absent, and still throwing: `labreport` — it answers the
- * same walls the free render already carries, and nothing deploys it.
- * `labradar` IS modelled, because the walker pays for one whenever a single
- * render can decide the exit or scout a seam's door candidates.
- * `unleashStormSeed` left that list the day the storm became the deploy path's
- * cache engine — modelled rather than the rule relaxed, exactly as the
- * enforcing test's comment prescribes.
- *
- * `setStasisLink` IS modelled, and modelling it is what makes
- * `getStasisLinkedServers()` a reading rather than a constant: the link pins the
- * calling host against move, delete and restart, so it changes the pool every
- * mutation branch draws from. */
+/** Pinned v3.0.1 `src/NetscriptFunctions/Darknet.ts` surface. All 23 members are
+ * implemented; unknown names remain absent so the root namespace reports them. */
 export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
   const { system, process, delay, skills, servers } = options;
+
+  const resolveHost = (rawHost: unknown, fallback = process.host): string => {
+    const value = rawHost === undefined ? fallback : String(rawHost);
+    if (servers.has(value)) return value;
+    return [...servers.values()].find((server) => server.ip === value)?.hostname ?? value;
+  };
 
   const requireAccess = (): void => {
     if (system.hasAccess()) return;
@@ -160,21 +140,17 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
     // Not access-gated upstream — it just cannot see anything until a darknet
     // exists. Source: NetscriptFunctions/Darknet.ts:314.
     probe: (returnByIP?: unknown): string[] => {
-      const names = system.probeFrom(process.host);
-      // Upstream shuffles this "to avoid clues to the network structure".
-      // We do NOT: lodash's shuffle consumes a variable number of draws, and
-      // taking those from the shared stream would let topology perturb stock
-      // prices. Declared in DNET_ASSUMPTIONS.
+      const names = system.shuffleProbe(system.probeFrom(process.host));
       if (returnByIP !== true) return names;
       return names.map((name) => servers.get(name)?.ip ?? name);
     },
 
     getServerDetails: (rawHost?: unknown) => {
       requireAccess();
-      const hostname = rawHost === undefined ? process.host : String(rawHost);
+      const hostname = resolveHost(rawHost);
       const record = system.record(hostname);
-      if (!record) throw new Error(`${hostname} is not a darknet server.`);
-      if (!record.online) {
+      if (!record && servers.has(hostname)) throw new Error(`${hostname} is not a darknet server.`);
+      if (!record?.online) {
         // Upstream answers with a DUMMY object rather than throwing, and the
         // only field that describes anything is isOnline.
         return {
@@ -214,9 +190,10 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
 
     /** Grants a session to the CALLING PID and to nothing else. */
     authenticate: async (rawHost: unknown, rawPassword: unknown, rawExtra?: unknown) => {
-      const hostname = String(rawHost);
+      const hostname = resolveHost(rawHost);
       const password = String(rawPassword);
       const additional = rawExtra === undefined ? 0 : Number(rawExtra);
+      if (!Number.isFinite(additional)) throw new Error(`authenticate: additionalMsec must be a number`);
       if (additional < 0) throw new Error(`authenticate: additionalMsec must be non-negative`);
       // No password is ever this long; upstream throws rather than letting a
       // buggy script build ever-longer attempts.
@@ -240,7 +217,10 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
       // 351 or 503, not 401. That is BN15's actual hazard, and the reason the
       // mutation clock has to be modelled for this to mean anything.
       const after = check(hostname, { requireDirectConnection: true });
-      if (!after.success) return { success: false, code: after.code, message: after.message };
+      if (!after.success) {
+        await delay(100, "dnet.authenticate");
+        return { success: false, code: after.code, message: after.message };
+      }
 
       // The timeout roll sits exactly here upstream: AFTER the delay and BEFORE
       // the model is ever consulted, so a 408 writes no log line and teaches
@@ -268,7 +248,7 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
         // model answers a GENERIC failure and hides its response in the log
         // ring, which is the whole reason `attempt` carries `heartbleed`.
         return system.isLab(hostname)
-          ? { success: false, code, message: verdict.message, data: verdict.data }
+          ? { success: false, code: AUTH_FAILURE, message: verdict.message, data: verdict.data }
           : { success: false, code, message: "Unauthorized" };
       }
       system.addSession(hostname, process.pid);
@@ -285,6 +265,9 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
      * Source: src/NetscriptFunctions/Darknet.ts:671-704 */
     labradar: async () => {
       requireAccess();
+      if (servers.get(process.host)?.simKind !== "DarknetServer") {
+        throw new Error(`This API can only be used on a darknet server, but it was called on ${process.host}.`);
+      }
       const stage = system.currentLab();
       if (!stage || !system.record(stage.hostname)) {
         return { success: false, message: "You feel blind..." };
@@ -296,6 +279,20 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
       return system.labRadar(process.pid);
     },
 
+    labreport: async () => {
+      requireAccess();
+      if (servers.get(process.host)?.simKind !== "DarknetServer") {
+        throw new Error(`This API can only be used on a darknet server, but it was called on ${process.host}.`);
+      }
+      const stage = system.currentLab();
+      if (!stage || !system.record(stage.hostname)) return { success: false, message: "You feel lost..." };
+      if (!system.isDirectConnected(process.host, stage.hostname)) {
+        return { success: false, message: "You feel disconnected..." };
+      }
+      await delay(authTimeMs(stage.hostname, process.threads, 0), "dnet.labreport");
+      return system.labReport(process.pid);
+    },
+
     /** Re-open a session at ANY distance, with the password.
      *
      * 0.05 GB, no delay, and no direct-connection requirement — it needs only
@@ -305,13 +302,13 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
      * would otherwise have to pay 0.4 GB and seconds of `authenticate` again.
      * Source: src/NetscriptFunctions/Darknet.ts:179-215 */
     connectToSession: (rawHost: unknown, rawPassword: unknown) => {
-      const hostname = String(rawHost);
+      const hostname = resolveHost(rawHost);
       const password = String(rawPassword);
       if (password.length > 100) throw new Error(`connectToSession: "password" is too long.`);
       const gate = check(hostname, { requireAdminRights: true });
       if (!gate.success) return { success: false, code: gate.code, message: gate.message };
-      const record = system.record(hostname);
-      if (!record || record.password !== password) {
+      const verdict = system.checkPassword(hostname, password, process.threads, process.pid);
+      if (!verdict.ok) {
         return { success: false, code: AUTH_FAILURE, message: "Unauthorized" };
       }
       system.addSession(hostname, process.pid);
@@ -321,12 +318,19 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
     /** Scrape the log ring. Needs a direct connection and charisma, but NO
      * session — which is what lets a 2.55 GB surveyor do it. */
     heartbleed: async (rawHost: unknown, rawOptions?: unknown) => {
-      const hostname = rawHost === undefined ? process.host : String(rawHost);
+      const hostname = resolveHost(rawHost);
+      if (rawOptions != null && typeof rawOptions !== "object") {
+        throw new Error(`heartbleed: "options" is not an object`);
+      }
       const opts = (rawOptions ?? {}) as { peek?: boolean; logsToCapture?: number; additionalMsec?: number };
-      const peek = opts.peek === true;
+      const peek = Boolean(opts.peek ?? false);
       const count = opts.logsToCapture === undefined ? 1 : Number(opts.logsToCapture);
       if (!Number.isInteger(count) || count <= 0) {
         throw new Error(`heartbleed: "options.logsToCapture" must be a positive integer`);
+      }
+      const additionalMsec = opts.additionalMsec === undefined ? 0 : Number(opts.additionalMsec);
+      if (!Number.isInteger(additionalMsec) || additionalMsec < 0) {
+        throw new Error(`heartbleed: "options.additionalMsec" must be a non-negative integer`);
       }
       const gate = check(hostname, { requireDirectConnection: true });
       if (!gate.success) {
@@ -339,7 +343,8 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
         return { success: false, code: NOT_ENOUGH_CHARISMA, message: "Not Enough Charisma", logs: [] };
       }
       // Formulas.ts:492-498 — heartbleed time is authentication time x 1.5.
-      await delay(authTimeMs(hostname, process.threads, 0) * 1.5 + (opts.additionalMsec ?? 0), "dnet.heartbleed");
+      await delay(authTimeMs(hostname, process.threads, 0) * 1.5 + additionalMsec, "dnet.heartbleed");
+      options.gainCharismaExp(options.charismaExpMult() * 50 * ((500 + skills().charisma) / 500));
       const after = check(hostname, { requireDirectConnection: true });
       if (!after.success) return { success: false, code: after.code, message: after.message, logs: [] };
       return {
@@ -360,34 +365,40 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
 
     getDepth: (rawHost?: unknown): number => {
       requireAccess();
-      const record = system.record(rawHost === undefined ? process.host : String(rawHost));
+      const hostname = resolveHost(rawHost);
+      if (servers.has(hostname) && servers.get(hostname)?.simKind !== "DarknetServer") throw new Error(`${hostname} is not a darknet server.`);
+      const record = system.record(hostname);
       return record?.online ? record.depth : -1;
     },
 
     getBlockedRam: (rawHost?: unknown): number => {
       requireAccess();
-      const record = system.record(rawHost === undefined ? process.host : String(rawHost));
+      const hostname = resolveHost(rawHost);
+      if (servers.has(hostname) && servers.get(hostname)?.simKind !== "DarknetServer") throw new Error(`${hostname} is not a darknet server.`);
+      const record = system.record(hostname);
       return record?.online ? record.blockedRam : 0;
     },
 
     getServerRequiredCharismaLevel: (rawHost?: unknown): number => {
       requireAccess();
-      const record = system.record(rawHost === undefined ? process.host : String(rawHost));
+      const hostname = resolveHost(rawHost);
+      if (servers.has(hostname) && servers.get(hostname)?.simKind !== "DarknetServer") throw new Error(`${hostname} is not a darknet server.`);
+      const record = system.record(hostname);
       return record?.online ? record.requiredCharismaSkill : -1;
     },
 
     // The one member with NO access gate and no checkDarknetServer at all —
     // pure `instanceof` upstream.
     isDarknetServer: (rawHost?: unknown): boolean => {
-      const hostname = rawHost === undefined ? process.host : String(rawHost);
+      const hostname = resolveHost(rawHost);
       return servers.get(hostname)?.simKind === "DarknetServer";
     },
 
     getStasisLinkLimit: (): number => system.stasisLinkLimit(),
 
-    getStasisLinkedServers: (): string[] => {
-      requireAccess();
-      return system.stasisLinkedServers();
+    getStasisLinkedServers: (rawReturnByIP?: unknown): string[] => {
+      const byIp = rawReturnByIP === undefined ? false : Boolean(rawReturnByIP);
+      return system.stasisLinkedServers().map((hostname) => byIp ? servers.get(hostname)?.ip ?? hostname : hostname);
     },
 
     /** Takes NO host: it pins the CALLING script's own server.
@@ -397,8 +408,16 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
      * candidate it has picked. `453 StasisLinkLimitReached` when the global
      * limit is already spent. */
     setStasisLink: async (rawShould?: unknown) => {
-      requireAccess();
       const shouldLink = rawShould === undefined ? true : Boolean(rawShould);
+      const gate = check(process.host, {});
+      if (!gate.success) {
+        await delay(100, "dnet.setStasisLink");
+        return { success: false, code: gate.code, message: gate.message };
+      }
+      if (shouldLink && system.stasisLinkedServers().length >= system.stasisLinkLimit()) {
+        await delay(100, "dnet.setStasisLink");
+        return { success: false, code: 453, message: "Stasis link limit reached" };
+      }
       // `getSetStasisLinkDuration`, not a token wait: 30 s at charisma 0 down to
       // 3 s at 9000. It is half of what makes a pin expensive — the job costs
       // 12 GB AND holds its host — and a flat 100 ms reported pinning as free in
@@ -425,7 +444,7 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
      * `preventUseOnStationaryServers` is what stops darkweb and the labyrinth
      * being pushed at all. */
     induceServerMigration: async (rawHost: unknown) => {
-      const hostname = String(rawHost);
+      const hostname = resolveHost(rawHost);
       const gate = check(hostname, { requireDirectConnection: true });
       if (!gate.success) {
         await delay(100, "dnet.induceServerMigration");
@@ -477,7 +496,7 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
      * or died mid-grind answers 351 or 503 rather than freeing anything.
      * Source: src/NetscriptFunctions/Darknet.ts:509-561 */
     memoryReallocation: async (rawHost?: unknown) => {
-      const hostname = rawHost === undefined ? process.host : String(rawHost);
+      const hostname = resolveHost(rawHost);
       const gate = check(hostname, { requireDirectConnection: true, requireAdminRights: true });
       if (!gate.success) {
         await delay(100, "dnet.memoryReallocation");
@@ -534,7 +553,7 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
      * other destructive members, and 404 rather than a throw when the seed is
      * absent. The system consumes the seed and stamps its clock BEFORE the
      * lock check, upstream's own hazard: a second fire mid-burst burns the
-     * seed for nothing. Source: src/NetscriptFunctions/Darknet.ts:4650-4659,
+     * seed for nothing. Source: src/NetscriptFunctions/Darknet.ts:475-497,
      * src/DarkNet/effects/webstorm.ts:25-79 */
     unleashStormSeed: () => {
       requireAccess();

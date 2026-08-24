@@ -6,7 +6,7 @@ export type FeatureCoverage = "full" | "partial" | "oracle-only" | "unmodeled";
 
 /** Increment whenever handwritten simulator semantics change in a way that can
  * alter an outcome. It is part of every comparison fingerprint. */
-export const SIMULATOR_MODEL_VERSION = 8;
+export const SIMULATOR_MODEL_VERSION = 9;
 /** Pinned upstream revision mirrored by sim/vendor/manifest.json. */
 export const SIMULATOR_VENDOR_COMMIT = "3162fd2590e221eadd0c0fbd46151913f7c4c41c";
 
@@ -47,30 +47,14 @@ export const SIM_FEATURE_COVERAGE: Readonly<Record<FeatureId, FeatureCoverage>> 
   // Core placement/charge/effect/process lifecycle is modeled. acceptGift,
   // sleeves, and save-seeded gift state remain explicit gaps.
   stanek: "partial",
-  // Population, the probed getters, the access gate, the labyrinth ladder
-  // (depth, reward order, the lab server) and the .cache reward table were
-  // already here. Model version 8 adds the half the controller actually needs to
-  // run: passwords, per-PID SESSIONS with upstream's lazy prune, authenticate
-  // with its transcribed timing formula (including the 2G_cellular per-character
-  // leak), heartbleed over a lazily back-filled log ring, nextMutation as the
-  // agents' clock, and the session gates on scp and exec — which is what makes
-  // "exec onto darkweb works only from home" fall out rather than be asserted.
-  //
-  // The mutation tick applies every kind upstream rolls — moves, connects and
-  // disconnects included, the rates every knowledge expiry is derived from — so
-  // a sim run does exercise the staleness policy, and promoteStock is
-  // transcribed exactly (see DNET_ASSUMPTIONS). Model version 9 adds the two
-  // farm calls the net pays with: memoryReallocation, with its clamped per-call
-  // figure and the two SEPARATE writes it makes to blockedRam and ramUsed, and
-  // phishingAttack, with the three-minute net-wide cache cooldown, both chance
-  // formulas and the quarter-rate charisma on the failure path. Stasis links,
-  // induced migration, the maze and the storm seed with its webstorm have all
-  // since been modelled as each reached the deploy path (see DNET_ASSUMPTIONS,
-  // dnet.webstorm for the storm's declared divergences). Still absent, and
-  // still throwing: labreport, plus the reward kinds cacheRewards narrows away
-  // — which is why this stays "partial".
-  dnet: "partial",
-  side: "oracle-only",
+  // Full for fresh and multi-install controller runs: all 23 ns.dnet members,
+  // mutation/restart, sessions, labyrinth/storms, exact cache/clue rewards,
+  // live stock grants, and coding-contract generation/solve/reward lifecycle.
+  // Save/offline/UI-only state is intentionally outside this coverage claim.
+  dnet: "full",
+  // Generated and cache-minted contracts use the vendored problem definitions;
+  // the real side driver discovers, solves and claims them through Netscript.
+  side: "full",
 };
 
 export function scenarioClass(hasSave: boolean, seededVanilla = false): ScenarioClass {

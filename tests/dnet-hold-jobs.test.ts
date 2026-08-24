@@ -64,11 +64,8 @@ function rig(over: {
   charismaGate?: number;
   exit?: [number, number];
   promoteFails?: boolean;
-  /** Refuse from this call onward, so a batch bounded by WALL CLOCK in the game
-   *  is bounded by the fake engine here. Every farm batch runs until its next
-   *  call would overrun `FARM_BATCH_MS`, and against an `ns` that answers
-   *  instantly that is forty seconds of spinning — so these tests end their
-   *  batches the way a real one usually ends: the engine says no. */
+  /** Refuse from this call onward. Atomic orders make at most one call; this
+   * remains useful for proving that refusal is reported honestly. */
   promoteFailAfter?: number;
   pinCode?: number;
   induceCodes?: number[];
@@ -204,11 +201,13 @@ function makeDeps(over: Partial<ControllerDeps> = {}, charisma = 1000): Controll
     labField: () => undefined,
     publishLabField: () => {},
     ...over,
+    timing: over.timing ?? (() => ({ charisma, intelligence: 0, hasBoots: false, sf15Level: 0, authenticationDurationMultiplier: 1 })),
+    expectedDelayMs: over.expectedDelayMs ?? (() => 0),
   };
 }
 
 function makeIo(over: Partial<AgentIo> = {}, charisma = 1000): AgentIo {
-  return { beat: () => {}, cancelled: () => undefined, deps: makeDeps({}, charisma), ...over };
+  return { beat: () => {}, cancelled: () => undefined, deps: makeDeps({}, charisma), ...over, setExpectedDoneAt: over.setExpectedDoneAt ?? (() => {}) };
 }
 
 describe("the walker", () => {
@@ -270,7 +269,7 @@ describe("the walker", () => {
     expect(KIND_CALLS["walk"]).not.toContain("dnet.heartbleed");
     // Its ONLY job is to walk to completion — no `ls` (the exit cache is read by
     // the ordinary worker re-planted afterwards) and no `getServer` (2.0 GB of ip
-    // the overseer never uses), so its per-thread price is as small as possible
+    // the controller never uses), so its per-thread price is as small as possible
     // and the thread count as large as possible.
     expect(KIND_CALLS["walk"]).not.toContain("ls");
     expect(KIND_CALLS["walk"]).not.toContain("getServer");
@@ -373,7 +372,7 @@ describe("the pin", () => {
 });
 
 describe("the push", () => {
-  test("it charges the NEIGHBOUR, in a bounded batch, and notices a landing", async () => {
+  test("it charges the NEIGHBOUR exactly once and notices a landing", async () => {
     // `induceServerMigration` refuses its own host, so `order.host` is the
     // target and `order.from` is where the process stands. The accumulated
     // charge is engine state no member reads back, so the only evidence a move
@@ -383,22 +382,22 @@ describe("the push", () => {
     // bounded by wall clock — six seconds a call against forty of batch — so a
     // fake engine that answers instantly has to be bounded by a refusal
     // instead.
-    const r = rig({ depths: [3, 1], induceCodes: [200, 200, 351] });
+    const r = rig({ depths: [3, 1], induceCodes: [200] });
     const result = await runOrder(r.ns, makeOrder("induce", { host: "dn-2", from: "dn-1" }), makeIo());
     expect(result.ok).toBe(true);
-    expect(r.calls.filter((call) => call.startsWith("induce:")).length).toBe(3);
-    expect(r.calls[1]).toBe("induce:dn-2");
+    expect(r.calls.filter((call) => call.startsWith("induce:")).length).toBe(1);
+    expect(r.calls[0]).toBe("induce:dn-2");
     // The landing, inferred from the only evidence there is.
     expect(result.detail).toContain("migrated from depth 3 to 1");
   });
 
-  test("it stops on the first refusal rather than spending the batch", async () => {
+  test("a refusal still consumes only the order's one call", async () => {
     // A 351 is the vantage gone, and every later call in the batch would answer
     // the same thing six seconds apart.
-    const r = rig({ induceCodes: [200, 351] });
+    const r = rig({ induceCodes: [351] });
     const result = await runOrder(r.ns, makeOrder("induce", { host: "dn-2", from: "dn-1" }), makeIo());
-    expect(r.calls.filter((call) => call.startsWith("induce:")).length).toBe(2);
-    expect(result.codes).toEqual({ "200": 1, "351": 1 });
+    expect(r.calls.filter((call) => call.startsWith("induce:")).length).toBe(1);
+    expect(result.codes).toEqual({ "351": 1 });
   });
 });
 
@@ -413,13 +412,13 @@ describe("propaganda", () => {
     expect(r.calls).toEqual([]);
   });
 
-  test("it spreads in a bounded batch and stops on a refusal", async () => {
+  test("each order spreads exactly once", async () => {
     const r = rig({ promoteFailAfter: 3 });
     const result = await runOrder(r.ns, makeOrder("promote", { host: "dn-1", from: "dn-1", symbol: "ECP" }), makeIo());
     expect(result.ok).toBe(true);
     // Three that paid, and the fourth — the refusal — ends the batch.
-    expect(r.calls.filter((call) => call === "promoteStock:ECP").length).toBe(4);
-    expect(result.detail).toContain("3 promotions of ECP");
+    expect(r.calls.filter((call) => call === "promoteStock:ECP").length).toBe(1);
+    expect(result.detail).toContain("one promotion of ECP");
 
     const refused = rig({ promoteFails: true });
     const stopped = await runOrder(refused.ns, makeOrder("promote", { host: "dn-1", from: "dn-1", symbol: "ECP" }), makeIo());
@@ -481,7 +480,7 @@ describe("the storm job", () => {
     expect(result.hosts).toBeUndefined();
   });
 
-  test("an engine refusal carries no stamp, so the overseer's pessimistic one rolls back", async () => {
+  test("an engine refusal carries no stamp, so the controller's pessimistic one rolls back", async () => {
     const r = stormRig({ fireOk: false });
     const result = await runOrder(r.ns, makeOrder("storm", { host: "dn-1", from: "dn-1" }), makeIo());
     expect(result.ok).toBe(false);

@@ -14,6 +14,7 @@ import { unknownForecast } from "../shared/strategy/progression/forecast.ts";
 import { scoreBoard, territory } from "../shared/strategy/go/rules.ts";
 import type { GoDecision } from "../shared/strategy/go/rules.ts";
 import type { GoWorkerEvaluation } from "../shared/strategy/go/neural/worker-protocol.ts";
+import type { GoTurnResult } from "../shared/telemetry/topics/go.ts";
 
 function goState(): GameState {
   return {
@@ -91,7 +92,7 @@ async function runGrantedTurn(
       ? 8 : method === "go.makeMove" || method === "go.getBoardState" ? 4
         : method === "getPlayer" ? 0.5 : 0,
     // Every launch carries one unique scalar process key. There is one generic
-    // FIFO; a pending Go API promise is awaited by the controller after its
+    // FIFO; the detached Go lifecycle retains a pending API promise after its
     // stub has handed the promise over and exited.
     exec: (_script: string, _host: string, options: { ramOverride?: number }) => {
       if (options.ramOverride !== undefined) ramOverrides.push(options.ramOverride);
@@ -125,12 +126,19 @@ async function runGrantedTurn(
     acquireDodge: () => ({ host: "home", release: () => {} }),
   } as unknown as DriverContext);
   // Go intentionally finishes outside the controller's serial driver loop so
-  // the opponent's wait cannot stall HWGW dispatch. Wait for that detached
-  // action here; the production loop observes the same completion via wake().
-  for (let turns = 0; turns < 20 && !state.topics.go?.lastTurn; turns++) {
+  // neither neural planning nor the opponent's wait can stall HWGW dispatch.
+  // Wait for that detached lifecycle here; the production loop observes the
+  // same completion via wake(). Use a wall deadline rather than a microtask
+  // count: WebGPU/backend work is intentionally outside this call stack.
+  const deadline = Date.now() + 2_000;
+  while (!state.topics.go?.lastTurn && Date.now() < deadline) {
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
   if (!state.topics.go?.lastTurn) throw new Error("detached Go action did not complete");
+  // `lastTurn` is published immediately before the detached task's finally
+  // releases its lifecycle guard. Let that finalizer run before a test starts
+  // another explicit driver pass.
+  await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 /** Reads consumed by the anchoring dodge, which polls until totalPlaytime
@@ -142,6 +150,56 @@ const ANCHOR_READS = [9_800, 10_000] as const;
 const dispatchSleeps = (sleeps: readonly number[]) => sleeps.filter((ms) => ms > GO_ANCHOR_POLL_MS);
 
 describe("Go live seed observation", () => {
+  test("returns control while an uncached worker plan is still pending", async () => {
+    let markInstallStarted!: () => void;
+    const installStarted = new Promise<void>((resolve) => { markInstallStarted = resolve; });
+    let releaseInstall!: () => void;
+    const installReleased = new Promise<void>((resolve) => { releaseInstall = resolve; });
+    setGoNeuralRuntimeForTest({
+      async install() {
+        markInstallStarted();
+        await installReleased;
+        return { positionId: "pending", preparationMs: 0, cached: false };
+      },
+      async evaluate() { throw new Error("reset generation must stop before evaluation"); },
+      async playbook() { return undefined; },
+      async playbookRoute() { return undefined; },
+      commit: () => "pending:test",
+      confirm() {},
+      async reset() {},
+      dispose() {},
+    });
+    const state = goState();
+    const result = emptyArbitration();
+    const tickResult = goModule.driver.tick({
+      ns: {} as NS,
+      state,
+      caps: { bitNode: 14, sourceFiles: {}, unlocked: {}, reason: {}, restrictions: {} },
+      board: emptyBoard(),
+      grants: {
+        money: 0,
+        ramClaims: new Map([["action:turn", {
+          by: "go", id: "action:turn", resource: "ram", amount: 10, priority: 50,
+        }]]),
+        slot: false,
+        result,
+      },
+      horizons: { node: unknown, install: unknown },
+      acquireDodge: () => ({ host: "home", release: () => {} }),
+    } as unknown as DriverContext);
+
+    await installStarted;
+    // A FeatureDriver may return a promise, so wrapping the result models the
+    // controller's `await driver.tick(...)`. It must settle even though the Go
+    // worker request has deliberately not resolved.
+    await Promise.resolve(tickResult);
+
+    goModule.reset?.(state, "bitnode");
+    releaseInstall();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(state.topics.go).toBeUndefined();
+  });
+
   test("finalizes and dispatches in the current public playtime slot", async () => {
     const state = goState();
     // Anchored at the start of tick 10,000, so the whole 200 ms cycle is
@@ -341,6 +399,45 @@ describe("Go live seed observation", () => {
     expect(state.topics.go?.lastTurn?.prediction?.boundaryRetries).toBe(1);
   });
 
+  test("banks a lost position by passing and publishes why", async () => {
+    const runtime = new TestGoNeuralRuntime((weights) => new StubGoValueBackend(weights));
+    // The stub backend's neutral value head reports predictedWin 0.5, so the
+    // production winAbort of 0.05 would veto the swap; raise it to let the
+    // exact banking test decide, exactly as a genuinely lost live game would.
+    runtime.finalizeOptions = { passWhenLost: { winAbort: 0.6, rolloutConfirm: false } };
+    setGoNeuralRuntimeForTest(runtime);
+    const state = goState();
+    const go = state.topics.go!;
+    // Behind with every legal Black move an own-eye fill, and White's pass on
+    // the table: the spiral position where passing banks the standing score.
+    go.board = ["X.X.X", "XXXXX", "OOOOO", "OO.OO", "OOOO."];
+    go.lastTurn = {
+      at: 0,
+      durationMs: 0,
+      action: { type: "move", x: 0, y: 0 },
+      opponentResponse: { type: "pass", x: null, y: null },
+    } as GoTurnResult;
+    const clock = { playtimes: [...ANCHOR_READS, 10_000], sleeps: [] as number[] };
+    let passes = 0;
+    const seeded = go.lastTurn;
+    await runGrantedTurn(state, {
+      go: {
+        makeMove: async () => { throw new Error("a banked loss must pass, not move"); },
+        passTurn: async () => { passes++; return { type: "gameOver", x: null, y: null }; },
+      },
+    } as unknown as NS, clock);
+    // The harness's completion wait is satisfied by the seeded lastTurn, so
+    // wait for THIS turn's record to replace it before asserting.
+    const turnDeadline = Date.now() + 2_000;
+    while (state.topics.go?.lastTurn === seeded && Date.now() < turnDeadline) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    expect(passes).toBe(1);
+    expect(state.topics.go?.lastTurn?.action).toEqual({ type: "pass" });
+    expect(state.topics.go?.plan?.planning.passReason).toBe("banking-lost-position");
+  });
+
   test("dispatches a predicted successful cheat and advances the local count", async () => {
     const state = goState();
     state.topics.go!.cheat = { unlocked: true, count: 0, successChance: 1 };
@@ -369,8 +466,8 @@ describe("Go live seed observation", () => {
     expect(state.topics.go?.bonusCycles).toBe(17);
     // 1.6 GB stub + 8 GB cheat + 0.5 GB player read + pricing margin.
     // This catches execution accidentally resizing the granted cheat dodge to
-    // the cheaper ordinary-move method list. Not `.at(-1)`: the post-turn board
-    // verification runs its own smaller stub after the turn, so the cheat grant
+    // the cheaper ordinary-move method list. Not `.at(-1)`: the settled-state
+    // observation runs its own smaller stub after the turn, so the cheat grant
     // is no longer necessarily the last exec.
     expect(ramOverrides.some((gb) => gb > 10)).toBe(true);
     // This turn ends the game, where the post-turn verification is skipped by

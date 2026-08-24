@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { isOnAirGap } from "../shared/strategy/dnet/rates.ts";
-import { deriveTasks } from "../shared/strategy/dnet/queue.ts";
-import { emptyKnowledge } from "../shared/strategy/dnet/knowledge.ts";
+import { deriveTasks } from "../shared/strategy/dnet/plan.ts";
 import {
   BACKDOOR_RECYCLER_LIMIT,
   canReachBottomRow,
@@ -387,6 +386,15 @@ describe("induced migration is anchored on difficulty, not depth", () => {
     expect(plan.pushes[0]?.purpose).toBe("frontier");
   });
 
+  test("completed atomic migration is rederived until a report changes the target state", () => {
+    const snapshot = view([
+      host({ hostname: "pusher", agentAlive: true, neighbours: ["edge"] }),
+      host({ hostname: "edge", depth: 2, difficulty: 1, maxRam: 16, hasCredential: true }),
+    ], { netDepth: 12 });
+    expect(planInduce(snapshot).pushes[0]?.host).toBe("edge");
+    expect(planInduce(snapshot).pushes[0]?.host).toBe("edge");
+  });
+
   test("...but a host already below its band's centre is left alone: the roll would likely lift it", () => {
     const plan = planInduce(view([
       host({ hostname: "pusher", agentAlive: true, neighbours: ["sunk"] }),
@@ -654,7 +662,7 @@ describe("the queue files pushes per vantage", () => {
   // legitimately charge one host at once — the dedup that must survive is
   // per (kind, target, vantage), like the walk's, never per target.
   test("two vantages may charge one target; the same vantage never twice", () => {
-    const tasks = deriveTasks(emptyKnowledge("t"), 0, {
+    const tasks = deriveTasks(new Map(), 0, {
       agents: new Set(["v1", "v2"]),
       hold: [
         { kind: "induce", host: "t1", from: "v1", reason: "push" },

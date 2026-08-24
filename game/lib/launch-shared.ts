@@ -99,10 +99,16 @@ export function resetLaunchState(): void {
   realm.script_launch_tail = undefined;
   realm.script_launch_id = undefined;
   const slots = globalThis as Record<string, unknown>;
-  for (const timer of ["dispatch_jit_timer", "dispatch_weaken_timer"]) {
+  for (const timer of ["dispatch_weaken_timer"]) {
     const handle = slots[timer] as ReturnType<typeof setTimeout> | undefined;
     if (handle !== undefined) clearTimeout(handle);
   }
+  // The per-target JIT deadlines are a MAP of live handles. Deleting the slot
+  // alone leaves every armed timer running: it would fire on the new realm's
+  // globals and wake a target that no longer has a pipeline behind it.
+  const jitTimers = slots["dispatch_jit_timers"] as
+    Map<string, { timer: ReturnType<typeof setTimeout> }> | undefined;
+  for (const deadline of jitTimers?.values() ?? []) clearTimeout(deadline.timer);
   for (const key of [
     "worker_info",
     "worker_jobs",
@@ -110,9 +116,10 @@ export function resetLaunchState(): void {
     "dispatch_done",
     "dispatch_wake",
     "dispatch_wake_pending",
-    "dispatch_jit_timer",
-    "dispatch_jit_at",
+    "dispatch_wake_targets",
+    "dispatch_jit_timers",
     "dispatch_weaken_timer",
+    "charge_context_pending",
     "dodge_tail",
     "dnet_controller",
   ]) delete slots[key];

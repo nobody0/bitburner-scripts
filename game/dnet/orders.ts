@@ -1,15 +1,14 @@
 import type { NS } from "@ns";
 import { LOCAL_CODE, type ReportHost } from "../../shared/strategy/dnet/courier.ts";
-import { FARM_BATCH_MS, batchHasRoom } from "../../shared/strategy/dnet/farm.ts";
 import { isDarknetDataFile, parseDarknetFileClue } from "../../shared/strategy/dnet/file-clues.ts";
 import { harvestLogs, logShape } from "../../shared/strategy/dnet/oracle.ts";
 import { SOLVER_CODES } from "../../shared/strategy/dnet/solvers/types.ts";
-import { INDUCE_WAIT_MS } from "../../shared/strategy/dnet/rates.ts";
 import { handoffLaunch, temporaryRunOptions } from "../lib/launch-shared.ts";
 import type { DnetAgentLaunch, DnetProberLaunch } from "./launch.ts";
 import {
   KIND_CALLS,
   live,
+  orderCalls,
   priceCalls,
   proberReserveGb,
   type AgentIo,
@@ -18,17 +17,20 @@ import {
   type Report,
 } from "./shared.ts";
 import { runAttempt } from "./attempt.ts";
+import { awaitDnetOperation } from "./timing.ts";
 import { runWalk } from "./walk.ts";
+import { cacheProfit, phishProfit, promotionProfit } from "./profit.ts";
 
 /** What every order body DOES, dispatched by a `switch` in the AGENT's process.
  *
- * These were closures the overseer shipped through the realm; now they are
+ * These were closures the old controller shipped through the realm; now they are
  * direct `ns.*` calls the agent makes itself. The RAM is controlled purely by
  * the `ramOverride` the controller sized for each kind — the static analyser is
  * bypassed at spawn — so the only thing that matters is that a kind's dynamic
  * surface stays inside `KIND_CALLS[kind]`. Bracket notation everywhere so an
- * accidental dot-reference cannot smuggle a member past that budget, and never
- * a `RegExp` (`RegExp.prototype.exec` bills the full 1.3 GB of `ns.exec`). */
+ * accidental dot-reference cannot smuggle a member past that budget. Regexes
+ * are safe, but a method call named `exec` is not: the static analyser mistakes
+ * `RegExp.exec` for the 1.3 GB Netscript member. */
 
 type OrderResult = Omit<Report, "id" | "kind" | "host" | "from">;
 
@@ -115,8 +117,16 @@ async function inventoryOrder(jobNs: NS, order: Order, io: AgentIo): Promise<Ord
 async function bleedOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderResult> {
   const deps = io.deps;
   const jobCodes: Record<string, number> = {};
+  if (order.followAttemptIds !== undefined) {
+    await live()?.afterOrders(order.followAttemptIds);
+    if (io.cancelled() !== undefined) {
+      return { ok: false, targetState: "cancelled", detail: io.cancelled() };
+    }
+  }
   const attemptedAt = Date.now();
-  const bled = await jobNs["dnet"]["heartbleed"](order.host, { peek: false, logsToCapture: LOG_LINES });
+  const bled = await awaitDnetOperation(io, {
+    operation: "heartbleed", host: order.host, from: order.from, threads: order.jobThreads ?? order.threads,
+  }, () => jobNs["dnet"]["heartbleed"](order.host, { peek: false, logsToCapture: LOG_LINES }));
   jobCodes[String(bled.code)] = 1;
   if (!bled.success) {
     deps.recordLogDrain(order.host, {
@@ -163,7 +173,7 @@ async function plantOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
     return { ok: false, targetState: fallback, hosts: [observed], codes: jobCodes, detail };
   };
   let session = jobNs["dnet"]["connectToSession"](order.host, order.password);
-  let dirtied = false;
+  let filesDirty = false;
   jobCodes[String(session.code)] = (jobCodes[String(session.code)] ?? 0) + 1;
   if (!session.success && order.sessionOnly) {
     if (session.code === 401) {
@@ -172,8 +182,10 @@ async function plantOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
     }
     return { ok: false, codes: jobCodes, ...targetStateFor(session.code), detail: session.message };
   } else if (!session.success) {
-    session = await jobNs["dnet"]["authenticate"](order.host, order.password);
-    dirtied = session.success;
+    session = await awaitDnetOperation(io, {
+      operation: "authenticate", host: order.host, from: order.from, threads: order.jobThreads ?? order.threads,
+    }, () => jobNs["dnet"]["authenticate"](order.host, order.password!));
+    filesDirty = session.success;
     jobCodes[String(session.code)] = (jobCodes[String(session.code)] ?? 0) + 1;
   }
   if (!session.success) {
@@ -191,10 +203,11 @@ async function plantOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
     const threads = Math.max(1, order.bootstrapThreads ?? 1);
     const pid = await handoffLaunch<DnetAgentLaunch>(
       { kind: "dnet-agent", host: order.host, bootstrapReclaim: true },
-      () => jobNs["exec"](
+      (launchId) => jobNs["exec"](
         (order.payloads ?? [])[0]!,
         order.host,
         temporaryRunOptions({ threads, ramOverride: priceCalls(jobNs, KIND_CALLS.bootstrapReclaim) }),
+        launchId,
       ),
     );
     if (pid === 0) {
@@ -205,32 +218,54 @@ async function plantOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
     return {
       ok: true,
       codes: jobCodes,
-      hosts: [describeHost(jobNs, order.host, deps)],
-      ...(dirtied ? { dirtied: true } : {}),
+      hosts: [{ ...describeHost(jobNs, order.host, deps), ...(filesDirty ? { invalidates: ["files" as const] } : {}) }],
       detail: `local reclaim pid ${pid}, ${threads} thread${threads === 1 ? "" : "s"}`,
     };
   }
   const proberFile = (order.payloads ?? [])[1];
-  let firstProbe!: () => void;
-  const firstProbeReported = new Promise<void>((resolve) => { firstProbe = resolve; });
-  const proberPid = order.omitProber === true
+  const controller = live();
+  // Claim the queued successor before sizing the exec. Stasis-linked targets
+  // are remotely recoverable, and may already own the ordinary constant probe.
+  const prepared = controller?.preparePlant(order.host) ?? {
+    controllerManaged: order.targetControllerManaged === true,
+    reuseProber: false,
+  };
+  const omitProber = order.omitProber === true || prepared.reuseProber;
+  const claim = omitProber ? undefined : controller?.beginProbeRefresh(order.host);
+  const proberPid = omitProber
     ? -1
-    : proberFile === undefined ? 0 : await handoffLaunch<DnetProberLaunch>(
-      { kind: "dnet-prober", host: order.host, firstReport: firstProbe },
-      () => jobNs["exec"](proberFile, order.host, temporaryRunOptions({ threads: 1, ramOverride: proberReserveGb(jobNs) })),
-    );
+    : proberFile === undefined || controller === undefined || claim === undefined
+      ? 0
+      : claim.launch
+        ? await handoffLaunch<DnetProberLaunch>(
+          { kind: "dnet-prober", host: order.host, refresh: claim.refresh },
+          (launchId) => jobNs["exec"](proberFile, order.host, temporaryRunOptions({ threads: 1, ramOverride: proberReserveGb(jobNs) }), launchId),
+        )
+        : -1;
   if (proberPid === 0) {
+    if (claim !== undefined) controller?.cancelProbeRefresh(order.host, claim.refresh);
     jobCodes[LOCAL_CODE.LaunchRefused] = 1;
     return diagnose("exec refused while launching the reserved prober", "launch-refused");
   }
-  if (proberPid > 0) await firstProbeReported;
-  live()?.preparePlant(order.host);
+  if (claim !== undefined && await claim.refresh.refreshed === undefined) {
+    jobCodes[LOCAL_CODE.LaunchRefused] = 1;
+    return diagnose("reserved prober refresh was cancelled", "launch-refused");
+  }
+  const next = prepared.next;
+  const agentThreads = next?.threads ?? 1;
+  const agentRam = next?.ramOverrideGb
+    ?? priceCalls(jobNs, orderCalls("idle", prepared.controllerManaged));
   const pid = await handoffLaunch<DnetAgentLaunch>(
-    { kind: "dnet-agent", host: order.host },
-    () => jobNs["exec"](
+    {
+      kind: "dnet-agent",
+      host: order.host,
+      ...(prepared.controllerManaged ? { controllerManaged: true } : {}),
+    },
+    (launchId) => jobNs["exec"](
       (order.payloads ?? [])[0]!,
       order.host,
-      temporaryRunOptions({ threads: 1, ramOverride: priceCalls(jobNs, KIND_CALLS.idle) }),
+      temporaryRunOptions({ threads: agentThreads, ramOverride: agentRam }),
+      launchId,
     ),
   );
   if (pid === 0) {
@@ -241,8 +276,7 @@ async function plantOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
   return {
     ok: true,
     codes: jobCodes,
-    hosts: [describeHost(jobNs, order.host, deps)],
-    ...(dirtied ? { dirtied: true } : {}),
+    hosts: [{ ...describeHost(jobNs, order.host, deps), ...(filesDirty ? { invalidates: ["files" as const] } : {}) }],
     detail: order.omitProber === true
       ? `resident pid ${pid}, prober reserved for lab walk`
       : `resident pid ${pid}, prober pid ${proberPid}`,
@@ -255,40 +289,23 @@ async function reclaimOrder(jobNs: NS, order: Order, io: AgentIo): Promise<Order
   const deps = io.deps;
   const jobCodes: Record<string, number> = {};
   const count = (code: number | string): void => { jobCodes[String(code)] = (jobCodes[String(code)] ?? 0) + 1; };
-  const startedAt = Date.now();
-  let calls = 0;
-  let cleared = false;
-  let resized = false;
-  for (;;) {
-    if (!batchHasRoom("reclaim", startedAt, Date.now(), deps.charisma())) break;
-    const freed = await jobNs["dnet"]["memoryReallocation"](order.host);
-    count(freed.code);
-    if (!freed.success) {
-      cleared = freed.code === 454;
-      break;
-    }
-    calls++;
-    if (order.resizeAtBlockedRam !== undefined) {
-      const details = jobNs["dnet"]["getServerDetails"](order.host);
-      cleared = details.blockedRam <= 0;
-      if (details.blockedRam <= order.resizeAtBlockedRam || cleared) {
-        resized = !cleared;
-        break;
-      }
-    }
-  }
+  const freed = await awaitDnetOperation(io, {
+    operation: "memoryReallocation", host: order.host, from: order.from, threads: order.jobThreads ?? order.threads,
+  }, () => jobNs["dnet"]["memoryReallocation"](order.host));
+  count(freed.code);
   const report = describeHost(jobNs, order.host, deps);
-  cleared = cleared || (report.present === true && report.blockedRam !== undefined && report.blockedRam <= 0);
+  const cleared = freed.code === 454 || (report.present === true && report.blockedRam !== undefined && report.blockedRam <= 0);
+  const resized = !cleared && freed.success && order.resizeAtBlockedRam !== undefined
+    && report.present === true && report.blockedRam !== undefined && report.blockedRam <= order.resizeAtBlockedRam;
   return {
-    ok: calls > 0 || cleared,
+    ok: freed.success || cleared,
     codes: jobCodes,
-    hosts: [report],
-    ...(cleared ? { dirtied: true } : {}),
+    hosts: [{ ...report, ...(cleared ? { invalidates: ["files" as const] } : {}) }],
     detail: cleared
-      ? `${order.host}: block cleared after ${calls} calls`
+      ? `${order.host}: block cleared`
       : resized
-        ? `${order.host}: ${calls} calls opened another worker thread`
-        : `${calls} calls against ${order.host}'s block`,
+        ? `${order.host}: opened another worker thread`
+        : `${order.host}: ${freed.message}`,
   };
 }
 
@@ -298,28 +315,18 @@ async function phishOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
   const deps = io.deps;
   const jobCodes: Record<string, number> = {};
   const count = (code: number | string): void => { jobCodes[String(code)] = (jobCodes[String(code)] ?? 0) + 1; };
-  const startedAt = Date.now();
-  let calls = 0;
-  let paid = 0;
-  let wonCache = false;
-  for (;;) {
-    if (!batchHasRoom("phish", startedAt, Date.now(), deps.charisma())) break;
-    const phished = await jobNs["dnet"]["phishingAttack"]();
-    count(phished.code);
-    calls++;
-    if (phished.success) paid++;
-    if (phished.success && phished.message.includes("Found a cache file")) {
-      count(LOCAL_CODE.PhishingCacheWon);
-      wonCache = true;
-      break;
-    }
-  }
+  const phished = await awaitDnetOperation(io, {
+    operation: "phishingAttack", host: order.host, from: order.from, threads: order.jobThreads ?? order.threads,
+  }, () => jobNs["dnet"]["phishingAttack"]());
+  count(phished.code);
+  const wonCache = phished.success && phished.message.includes("Found a cache file");
+  if (wonCache) count(LOCAL_CODE.PhishingCacheWon);
   return {
-    ok: calls > 0,
+    ok: phished.success,
+    profit: phishProfit(phished.message, phished.success),
     codes: jobCodes,
-    hosts: [describeHost(jobNs, order.host, deps)],
-    ...(wonCache ? { dirtied: true } : {}),
-    detail: wonCache ? `${calls} phishes, one claimed the cache window` : `${calls} phishes, ${paid} paid`,
+    hosts: [{ ...describeHost(jobNs, order.host, deps), ...(wonCache ? { invalidates: ["files" as const] } : {}) }],
+    detail: wonCache ? "one phish claimed the cache window" : `one phish: ${phished.message}`,
   };
 }
 
@@ -355,6 +362,7 @@ async function cacheOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
     ok: opened.success,
     codes: { [String(opened.success ? 200 : 404)]: 1 },
     ...(opened.success ? { karmaLoss: opened.karmaLoss } : {}),
+    ...(opened.success ? { profit: cacheProfit(opened.message) } : {}),
     hosts: [{ ...describeHost(jobNs, order.host, deps, false, true), ...listingOn(jobNs, order.host, deps) }],
     detail: opened.message.slice(0, 200),
   };
@@ -370,16 +378,17 @@ async function promoteOrder(jobNs: NS, order: Order, io: AgentIo): Promise<Order
   }
   const jobCodes: Record<string, number> = {};
   const count = (code: number | string): void => { jobCodes[String(code)] = (jobCodes[String(code)] ?? 0) + 1; };
-  const startedAt = Date.now();
-  let calls = 0;
-  for (;;) {
-    if (!batchHasRoom("promote", startedAt, Date.now(), deps.charisma())) break;
-    const spread = await jobNs["dnet"]["promoteStock"](symbol);
-    count(spread.code);
-    if (!spread.success) break;
-    calls++;
-  }
-  return { ok: calls > 0, codes: jobCodes, hosts: [describeHost(jobNs, order.host, deps)], detail: `${calls} promotions of ${symbol}` };
+  const spread = await awaitDnetOperation(io, {
+    operation: "promoteStock", host: order.host, from: order.from, threads: order.jobThreads ?? order.threads,
+  }, () => jobNs["dnet"]["promoteStock"](symbol));
+  count(spread.code);
+  return {
+    ok: spread.success,
+    profit: promotionProfit(symbol, order.jobThreads ?? order.threads, spread.success),
+    codes: jobCodes,
+    hosts: [describeHost(jobNs, order.host, deps)],
+    detail: `one promotion of ${symbol}: ${spread.message}`,
+  };
 }
 
 // --- induce ------------------------------------------------------------------
@@ -389,34 +398,24 @@ async function induceOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderR
   const jobCodes: Record<string, number> = {};
   const count = (code: number | string): void => { jobCodes[String(code)] = (jobCodes[String(code)] ?? 0) + 1; };
   const before = jobNs["dnet"]["getServerDetails"](order.host);
-  const startedAt = Date.now();
-  let calls = 0;
-  let stopped: { code: number; message: string } | undefined;
-  for (;;) {
-    const cancellation = io.cancelled();
-    if (cancellation !== undefined) {
-      return { ok: false, targetState: "cancelled", codes: jobCodes, detail: `${order.host}: ${cancellation}` };
-    }
-    if (Date.now() + INDUCE_WAIT_MS > startedAt + FARM_BATCH_MS) break;
-    const pushed = await jobNs["dnet"]["induceServerMigration"](order.host);
-    count(pushed.code);
-    if (!pushed.success) {
-      stopped = pushed;
-      break;
-    }
-    calls++;
-    io.beat({ calls });
+  const cancellation = io.cancelled();
+  if (cancellation !== undefined) {
+    return { ok: false, targetState: "cancelled", codes: jobCodes, detail: `${order.host}: ${cancellation}` };
   }
+  const pushed = await awaitDnetOperation(io, {
+    operation: "induceServerMigration", host: order.host, from: order.from, threads: order.jobThreads ?? order.threads,
+  }, () => jobNs["dnet"]["induceServerMigration"](order.host));
+  count(pushed.code);
   const after = describeHost(jobNs, order.host, deps);
   const moved = before.isOnline && after.present === true && after.depth !== before.depth;
   return {
-    ok: calls > 0,
+    ok: pushed.success,
     codes: jobCodes,
-    ...(stopped === undefined ? {} : targetStateFor(stopped.code)),
+    ...targetStateFor(pushed.code),
     hosts: [after],
     detail: moved
-      ? `${order.host} migrated from depth ${before.depth} to ${after.depth} after ${calls} calls`
-      : `${calls} calls of charge against ${order.host}${stopped ? `; ${stopped.message}` : ""}`,
+      ? `${order.host} migrated from depth ${before.depth} to ${after.depth}`
+      : `one migration charge against ${order.host}; ${pushed.message}`,
   };
 }
 
@@ -425,7 +424,9 @@ async function induceOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderR
 async function pinOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderResult> {
   const deps = io.deps;
   if (order.unpin === true) {
-    const released = await jobNs["dnet"]["setStasisLink"](false);
+    const released = await awaitDnetOperation(io, {
+      operation: "setStasisLink", host: order.host, from: order.from, threads: order.threads, shouldLink: false,
+    }, () => jobNs["dnet"]["setStasisLink"](false));
     return {
       ok: released.success,
       codes: { [String(released.code)]: 1 },
@@ -441,7 +442,9 @@ async function pinOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderResu
       detail: `${order.host}: the edge to ${order.edge} is severed; the link was NOT spent`,
     };
   }
-  const pinned = await jobNs["dnet"]["setStasisLink"](true);
+  const pinned = await awaitDnetOperation(io, {
+    operation: "setStasisLink", host: order.host, from: order.from, threads: order.threads, shouldLink: true,
+  }, () => jobNs["dnet"]["setStasisLink"](true));
   return {
     ok: pinned.success,
     codes: { [String(pinned.code)]: 1 },
@@ -477,14 +480,26 @@ async function stormOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
 async function relaunchProbeOrder(jobNs: NS, order: Order): Promise<OrderResult> {
   const proberFile = order.filename;
   if (proberFile === undefined) return { ok: false, codes: {}, detail: "no prober file on the order" };
-  const pid = await handoffLaunch<DnetProberLaunch>(
-    { kind: "dnet-prober", host: order.host },
-    () => jobNs["exec"](proberFile, order.host, temporaryRunOptions({ threads: 1, ramOverride: proberReserveGb(jobNs) })),
-  );
+  // `exec` only proves that the process was admitted. Until its first probe is
+  // stored, the controller still sees the old stale stamp and can derive a
+  // second relaunch on the very next agent handoff. Keep this order active
+  // until the replacement has claimed the host entry, exactly as plant does.
+  const controller = live();
+  if (controller === undefined) return { ok: false, codes: {}, detail: "controller unavailable while repairing prober" };
+  const claim = controller.beginProbeRefresh(order.host);
+  const pid = claim.launch
+    ? await handoffLaunch<DnetProberLaunch>(
+      { kind: "dnet-prober", host: order.host, refresh: claim.refresh },
+      (launchId) => jobNs["exec"](proberFile, order.host, temporaryRunOptions({ threads: 1, ramOverride: proberReserveGb(jobNs) }), launchId),
+    )
+    : -1;
+  if (pid === 0) controller.cancelProbeRefresh(order.host, claim.refresh);
+  const report = pid !== 0 ? await claim.refresh.refreshed : undefined;
+  const refreshed = report !== undefined;
   return {
-    ok: pid !== 0,
-    codes: pid === 0 ? { [LOCAL_CODE.NotEnoughRam]: 1 } : {},
-    detail: pid === 0 ? "prober exec refused: no room" : `prober pid ${pid}`,
+    ok: refreshed,
+    codes: refreshed ? {} : { [LOCAL_CODE.NotEnoughRam]: 1 },
+    detail: !refreshed ? "prober exec refused or refresh cancelled" : pid < 0 ? "prober refresh already in flight" : `prober pid ${pid}`,
   };
 }
 

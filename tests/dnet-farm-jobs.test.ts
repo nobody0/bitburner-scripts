@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
 import { captureLaunch, handoffLaunch } from "../game/lib/launch-shared.ts";
-import type { DnetAgentLaunch, DnetProberLaunch } from "../game/dnet/launch.ts";
+import type { DnetAgentLaunch, DnetProbeRefresh, DnetProbeReport, DnetProberLaunch } from "../game/dnet/launch.ts";
 import { main as agentMain } from "../game/dnet/agent.ts";
 import { runOrder } from "../game/dnet/orders.ts";
 import {
@@ -49,11 +49,35 @@ function makeDeps(over: Partial<ControllerDeps> = {}): ControllerDeps {
     labField: () => undefined,
     publishLabField: () => {},
     ...over,
+    timing: over.timing ?? (() => ({ charisma: 1_000, intelligence: 0, hasBoots: false, sf15Level: 0, authenticationDurationMultiplier: 1 })),
+    expectedDelayMs: over.expectedDelayMs ?? (() => 0),
   };
 }
 
 function makeIo(over: Partial<ControllerDeps> = {}): AgentIo {
-  return { beat: () => {}, cancelled: () => undefined, deps: makeDeps(over) };
+  return { beat: () => {}, setExpectedDoneAt: () => {}, cancelled: () => undefined, deps: makeDeps(over) };
+}
+
+function probeRefreshMethods() {
+  const pending = new Map<string, DnetProbeRefresh>();
+  return {
+    beginProbeRefresh(host: string) {
+      const existing = pending.get(host);
+      if (existing !== undefined) return { refresh: existing, launch: false };
+      let resolve!: (value: DnetProbeReport | undefined) => void;
+      let settled = false;
+      const refresh: DnetProbeRefresh = {
+        refreshed: new Promise<DnetProbeReport | undefined>((done) => { resolve = done; }),
+        settle(value) { if (!settled) { settled = true; resolve(value); } },
+      };
+      pending.set(host, refresh);
+      return { refresh, launch: true };
+    },
+    cancelProbeRefresh(host: string, refresh: DnetProbeRefresh) {
+      if (pending.get(host) === refresh) pending.delete(host);
+      refresh.settle(undefined);
+    },
+  };
 }
 
 describe('unnamed first-auth clue epochs', () => {
@@ -95,6 +119,42 @@ function winningPhish(files: readonly string[]): NS {
 }
 
 describe("darknet farm job cache observations", () => {
+  test("a follower bleed waits for the complete authentication wave", async () => {
+    let release!: () => void;
+    const waveDone = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    let followed: readonly string[] = [];
+    dnetRealm().dnet_controller = {
+      protocol: DNET_PROTOCOL,
+      afterOrders: (ids: readonly string[]) => { followed = ids; return waveDone; },
+    } as unknown as ControllerHandle;
+    const ns = {
+      dnet: {
+        heartbleed: async () => {
+          calls++;
+          return { success: true, code: 200, message: "drained", logs: [] };
+        },
+        getServerDetails: () => ({
+          isOnline: true, depth: 1, blockedRam: 0, requiredCharismaSkill: 0,
+          difficulty: 1, isStationary: false, modelId: "AccountsManager_4.2",
+          passwordLength: 2, passwordFormat: "numeric", passwordHint: "", data: "", logTrafficInterval: 30,
+        }),
+      },
+    } as unknown as NS;
+
+    const running = runOrder(
+      ns,
+      makeOrder("bleed", { host: "target", from: "listener", followAttemptIds: ["a", "b", "c"] }),
+      makeIo(),
+    );
+    await Promise.resolve();
+    expect(followed).toEqual(["a", "b", "c"]);
+    expect(calls).toBe(0);
+    release();
+    expect((await running).ok).toBe(true);
+    expect(calls).toBe(1);
+  });
+
   test("inventory consumes every actionable clue and removes generated files", async () => {
     const removed: string[] = [];
     const neighbours: { source: string; password: string }[] = [];
@@ -161,9 +221,10 @@ describe("darknet farm job cache observations", () => {
 
     expect(result.ok).toBe(true);
     // No inline listing — that would be 0.2 GB on every phishing thread. The win
-    // sets `dirtied`, and the overseer files one instant inventory job.
-    expect(result.dirtied).toBe(true);
+    // invalidates files, and the controller files one instant inventory job.
+    expect(result.hosts?.[0]?.invalidates).toEqual(["files"]);
     expect(result.hosts?.[0]?.caches).toBeUndefined();
+    expect(result.profit).toMatchObject({ phishAttempts: 1, phishSuccesses: 1, phishCaches: 1 });
     expect(KIND_CALLS.phish).not.toContain("ls");
     // The dedicated inventory job is the one that lists.
     expect(KIND_CALLS.inventory).toContain("ls");
@@ -227,10 +288,10 @@ describe("darknet farm job cache observations", () => {
     );
 
     expect(result.hosts?.[0]?.blockedRam).toBe(0);
-    expect(result.dirtied).toBe(true);
+    expect(result.hosts?.[0]?.invalidates).toEqual(["files"]);
   });
 
-  test("plant waits for the prober's first report before preparing and launching the resident", async () => {
+  test("plant claims recovery first but waits for the prober report before launching the resident", async () => {
     const launches: { file: string; options: { temporary?: boolean } }[] = [];
     const order: string[] = [];
     const killed: number[] = [];
@@ -239,7 +300,11 @@ describe("darknet farm job cache observations", () => {
     let reportFirst: (() => void) | undefined;
     dnetRealm().dnet_controller = {
       protocol: DNET_PROTOCOL,
-      preparePlant: (host: string) => { order.push(`prepare:${host}`); },
+      ...probeRefreshMethods(),
+      preparePlant: (host: string) => {
+        order.push(`prepare:${host}`);
+        return { controllerManaged: false, reuseProber: false };
+      },
     } as unknown as ControllerHandle;
     const ns = {
       dnet: {
@@ -259,7 +324,7 @@ describe("darknet farm job cache observations", () => {
           const launch = captureLaunch<DnetProberLaunch>("dnet-prober");
           const report = () => {
             order.push("first-probe");
-            launch?.firstReport?.();
+            launch?.refresh?.settle({ host: launch.host, neighbours: [], at: Date.now(), pid: 41 });
           };
           if (autoFirstReport) report();
           else reportFirst = report;
@@ -287,13 +352,13 @@ describe("darknet farm job cache observations", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(launches.map((entry) => entry.file)).toEqual(["dnet/prober.js"]);
-    expect(order).toEqual(["scp", "prober"]);
+    expect(order).toEqual(["scp", "prepare:dn-1", "prober"]);
 
     reportFirst?.();
     const result = await planting;
     expect(result.ok).toBe(true);
     expect(launches.map((entry) => entry.file)).toEqual(["dnet/prober.js", "dnet/agent.js"]);
-    expect(order).toEqual(["scp", "prober", "first-probe", "prepare:dn-1", "agent"]);
+    expect(order).toEqual(["scp", "prepare:dn-1", "prober", "first-probe", "agent"]);
     expect(launches.every((entry) => entry.options.temporary === true)).toBe(true);
 
     // If the second launch loses a RAM race, the first launch must not poison
@@ -312,6 +377,44 @@ describe("darknet farm job cache observations", () => {
     );
     expect(refused.ok).toBe(false);
     expect(killed).toEqual([1]);
+  });
+
+  test("prober repair stays active until the replacement has filed its first probe", async () => {
+    let reportFirst: (() => void) | undefined;
+    dnetRealm().dnet_controller = {
+      protocol: DNET_PROTOCOL,
+      ...probeRefreshMethods(),
+    } as unknown as ControllerHandle;
+    const ns = {
+      exec: () => {
+        const launch = captureLaunch<DnetProberLaunch>("dnet-prober");
+        reportFirst = () => launch?.refresh?.settle({ host: launch.host, neighbours: [], at: Date.now(), pid: 41 });
+        return 91;
+      },
+      getFunctionRamCost: (method: string) => method === "dnet.probe" ? 0.2 : method === "spawn" ? 2 : 0,
+    } as unknown as NS;
+
+    let settled = false;
+    const repairing = runOrder(
+      ns,
+      makeOrder("relaunchProbe", {
+        host: "dn-1",
+        from: "dn-1",
+        filename: "dnet/prober.js",
+      }),
+      makeIo(),
+    ).then((result) => {
+      settled = true;
+      return result;
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(reportFirst).toBeFunction();
+    expect(settled).toBe(false);
+
+    reportFirst?.();
+    await expect(repairing).resolves.toMatchObject({ ok: true, detail: "prober pid 91" });
   });
 
   test("a cramped plant launches only the thread-scaled local reclaimer", async () => {

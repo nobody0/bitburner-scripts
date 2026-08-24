@@ -41,6 +41,12 @@ import {
   type TargetStatics,
 } from "./targeting.ts";
 import { hackMarginalValue, shareCutover, type ShareCutover, type SharePricingInput } from "./share.ts";
+import {
+  chargeCutover,
+  type ChargeCutover,
+  type ChargeHostBlock,
+  type ChargePricingInput,
+} from "./stanek/charge.ts";
 import { projectedSkill } from "./prediction.ts";
 
 /** The multiplier the skill curve actually uses: the player's own hacking mult
@@ -240,20 +246,29 @@ export function minimumFarmEnvelopeGb(
  * entire remainder and may deadline-borrow idle prep RAM. Keeping this tiny
  * policy pure makes the no-static-ratio invariant explicit and independently
  * testable. */
-export function allocateSegments(fleetGb: number, prepDemandGb = 0, shareDemandGb = 0): Segment[] {
+export function allocateSegments(
+  fleetGb: number,
+  prepDemandGb = 0,
+  shareDemandGb = 0,
+  chargeDemandGb = 0,
+): Segment[] {
   const fleet = Math.max(0, fleetGb);
   const prep = Math.min(fleet, Math.max(0, prepDemandGb));
   const share = Math.min(fleet - prep, Math.max(0, shareDemandGb));
+  const charge = Math.min(fleet - prep - share, Math.max(0, chargeDemandGb));
+  const tail = charge > 0
+    ? [{ kind: "charge" as const, gb: charge }, { kind: "share" as const, gb: share }]
+    : [{ kind: "share" as const, gb: share }];
   return prep > 0
     ? [
         { kind: "prep", gb: prep },
-        { kind: "farm", gb: fleet - prep - share },
-        { kind: "share", gb: share },
+        { kind: "farm", gb: fleet - prep - share - charge },
+        ...tail,
       ]
     : [
-        { kind: "farm", gb: fleet - share },
+        { kind: "farm", gb: fleet - share - charge },
         { kind: "prep", gb: 0 },
-        { kind: "share", gb: share },
+        ...tail,
       ];
 }
 
@@ -267,11 +282,14 @@ export function adaptSegmentsToFleet(segments: readonly Segment[], fleetGb: numb
   const plannedPrep = Math.max(0, segments.find((segment) => segment.kind === "prep")?.gb ?? 0);
   const plannedFarm = Math.max(0, segments.find((segment) => segment.kind === "farm")?.gb ?? 0);
   const plannedShare = Math.max(0, segments.find((segment) => segment.kind === "share")?.gb ?? 0);
+  const plannedCharge = Math.max(0, segments.find((segment) => segment.kind === "charge")?.gb ?? 0);
   const prep = Math.min(fleet, plannedPrep);
-  const plannedTail = plannedFarm + plannedShare;
+  const plannedTail = plannedFarm + plannedCharge + plannedShare;
   const shareFraction = plannedTail > 0 ? plannedShare / plannedTail : 0;
+  const chargeFraction = plannedTail > 0 ? plannedCharge / plannedTail : 0;
   const share = Math.max(0, fleet - prep) * shareFraction;
-  return allocateSegments(fleet, prep, share);
+  const charge = Math.max(0, fleet - prep) * chargeFraction;
+  return allocateSegments(fleet, prep, share, charge);
 }
 
 /** Keep an atomic prep wave's capacity claim stable between its grow landing
@@ -292,6 +310,8 @@ export interface FleetCapacity {
    * pipeline-aware launch-rate bound. Optional so hand-built capacities in
    * tests keep working; without it the solver scores per RAM-second only. */
   hostBlocksGb?: number[];
+  /** Host-local blocks available to a one-shot Stanek charge. */
+  chargeBlocks?: ChargeHostBlock[];
   /** Maximum GB one prep wave can place after host fragmentation and the
    * dispatcher's per-pass op cap. Optional test fixtures fall back to fleetGb. */
   prepWaveGb?: number;
@@ -323,6 +343,8 @@ export interface EvaluatorMemory {
   ctx?: HackContext;
   generation: number;
   ctxSkill: number;
+  /** Farm-relevant player multipliers used by the cached HackContext. */
+  ctxMultKey?: string;
   fleetGb: number;
   lastSliceAt: number;
   lastGateAt: number;
@@ -439,18 +461,30 @@ export function stepEvaluator(
     /** Existing ETA/forecast currency inputs. The evaluator supplies the
      * chosen farm's marginal money/experience curves. */
     shareValue?: SharePricingInput;
+    /** Goal-aware Stanek fragment values. Absent means charge is disabled. */
+    chargeValue?: ChargePricingInput;
   },
 ): { memory: EvaluatorMemory; directive: TargetDirective; switched?: { from?: string; to: string } } {
   const now = view.time;
+  const ctxMultKey = [
+    view.player.mults.hacking,
+    view.player.mults.hacking_exp,
+    view.player.mults.hacking_money,
+    view.player.mults.hacking_grow,
+    view.player.mults.hacking_speed,
+    view.player.mults.hacking_chance,
+  ].join("|");
 
   // Context generation: a meaningful skill change invalidates every score.
   if (
     !memory.ctx ||
+    memory.ctxMultKey !== ctxMultKey ||
     memory.ctxSkill <= 0 ||
     Math.abs(view.player.hackingSkill - memory.ctxSkill) / Math.max(1, memory.ctxSkill) > SKILL_DELTA
   ) {
     memory.ctx = contextFor(view);
     memory.ctxSkill = view.player.hackingSkill;
+    memory.ctxMultKey = ctxMultKey;
     memory.generation++;
     memory.forceGate = true;
   }
@@ -949,16 +983,21 @@ export function stepEvaluator(
     prepReservationGb = retainPrepReservation(prepReservationGb, previousReservation, true);
   }
   let share: ShareCutover | undefined;
+  let charge: ChargeCutover | undefined;
+  let hackMarginal;
+  const solution = farmEntry?.solution;
   if (opts?.shareValue) {
-    const solution = farmEntry?.solution;
-    const hackMarginal = hackMarginalValue({
-      ...opts.shareValue,
+    const pricing = opts.shareValue;
+    hackMarginal = hackMarginalValue({
+      ...pricing,
       moneyPerSecPerGb: solution?.score ?? 0,
       hackingExpPerSecPerGb: solution?.experienceScore ?? 0,
     });
+  }
+  if (opts?.shareValue) {
     share = shareCutover(
       {
-        hackMarginal,
+        hackMarginal: hackMarginal!,
         reputationSecondsPerBonus: opts.shareValue.reputationSecondsPerBonus,
         effectiveThreadsPerGb: capacity.effectiveShareThreadsPerGb ?? 0,
       },
@@ -966,7 +1005,29 @@ export function stepEvaluator(
       solution ? depthCapGb(solution) : 0,
     );
   }
-  const segments = allocateSegments(fleetGb, prepReservationGb, share?.allotmentGb ?? 0);
+  if (opts?.chargeValue) {
+    const totalMoney = opts.chargeValue.totalMoneyPerSec;
+    const totalHacking = opts.chargeValue.totalHackingExpPerSec;
+    charge = chargeCutover(
+      {
+        ...opts.chargeValue,
+        moneySourceShare: solution && totalMoney !== undefined && totalMoney > 0
+          ? Math.min(1, farmIncomeRate(solution, fleetGb) / totalMoney)
+          : 0,
+        hackingSourceShare: solution && totalHacking !== undefined && totalHacking > 0
+          ? Math.min(1, experienceRate(solution) / totalHacking)
+          : 0,
+      },
+      capacity.chargeBlocks ?? [],
+      Math.max(0, fleetGb - prepReservationGb - (share?.allotmentGb ?? 0)),
+    );
+  }
+  const segments = allocateSegments(
+    fleetGb,
+    prepReservationGb,
+    share?.allotmentGb ?? 0,
+    charge?.allotmentGb ?? 0,
+  );
 
   memory.directive = {
     farm:
@@ -976,6 +1037,7 @@ export function stepEvaluator(
     prep: prepEntry && prepPlan ? { host: prepEntry.statics.hostname, statics: prepEntry.statics, plan: prepPlan } : undefined,
     segments,
     ...(share ? { share } : {}),
+    ...(charge ? { charge } : {}),
     ctxGeneration: memory.generation,
     decidedAt: now,
   };

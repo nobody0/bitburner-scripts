@@ -2,8 +2,9 @@ import type { NS, Player, Server } from "@ns";
 // stable helper filenames are overwritten in place; loaded old scripts drain.
 import type { HackNodeMults } from "../../shared/formulas.ts";
 import type { SharePricingInput } from "../../shared/strategy/share.ts";
+import type { ChargePricingInput } from "../../shared/strategy/stanek/charge.ts";
 import { initFarm, planFarm, reportFailed, type FarmMemory } from "../../shared/strategy/farm-planner.ts";
-import type { CompletionEvent, HgwAction, ServerView, ShareAction, StockInfluence, WorldView } from "../../shared/world.ts";
+import type { ChargeAction, CompletionEvent, HgwAction, ServerView, ShareAction, StockInfluence, WorldView } from "../../shared/world.ts";
 import { WORKER_RAM } from "../../shared/world.ts";
 import { handoffLaunch, temporaryRunOptions } from "./launch-shared.ts";
 import { workerGlobals, type WorkerGlobalThis } from "./worker-shared.ts";
@@ -40,10 +41,20 @@ export function initDriver(): DriverState {
 }
 
 /** Drain worker completions into planner events. */
-export function drainCompletions(state: DriverState): CompletionEvent[] {
+export function drainCompletions(state: DriverState, target?: string): CompletionEvent[] {
   const done = state.globals.dispatch_done ?? [];
   if (done.length === 0) return [];
-  const events: CompletionEvent[] = done.map((entry) =>
+  // Untargeted events (workerExit, share and charge exits carry target "")
+  // drain on EVERY pump: dispatch absorbs them before its hot-path branch, and
+  // retaining them here deferred every share/pool RAM release to the next full
+  // tick — under wake-driven load, potentially forever.
+  const matches = (entry: (typeof done)[number]): boolean =>
+    target === undefined || entry.target === target || entry.target === "";
+  const selected = done.filter(matches);
+  const retained = done.filter((entry) => !matches(entry));
+  done.length = 0;
+  done.push(...retained);
+  const events: CompletionEvent[] = selected.map((entry) =>
     entry.kind === "workerExit"
       ? { kind: "workerExit", opId: entry.opId, threads: entry.threads }
       : {
@@ -58,7 +69,7 @@ export function drainCompletions(state: DriverState): CompletionEvent[] {
           // Undefined is the worker protocol's failure marker (kill, reset or
           // exception). Preserve it so a failed weaken cannot masquerade as a
           // proven min-security landing window.
-          ...(entry.result === undefined
+          ...(entry.kind === "charge" || entry.result === undefined
             ? {}
             : { result:
                 entry.kind === "hack"
@@ -68,7 +79,6 @@ export function drainCompletions(state: DriverState): CompletionEvent[] {
                     : { growth: entry.result } }),
         },
   );
-  done.length = 0;
   return events;
 }
 
@@ -169,8 +179,17 @@ export async function pump(
     reinvestmentReturnPerDollarSec?: number;
     hackingSkillGoal?: number;
     shareValue?: SharePricingInput;
+    chargeValue?: ChargePricingInput;
+    trigger?: { kind: "tick" } | { kind: "target-wake"; target: string; source: "completion" | "deadline" };
   } = {},
-): Promise<{ launched: number; failed: number; directive: ReturnType<typeof planFarm>["directive"]; nextWakeMs?: number }> {
+): Promise<{
+  launched: number;
+  failed: number;
+  directive: ReturnType<typeof planFarm>["directive"];
+  nextWakes: Array<{ ms: number; target?: string }>;
+  nextWakeMs?: number;
+  nextWakeTarget?: string;
+}> {
   const result = planFarm(view, state.memory, completions, {
     ...(options.arenaReserves ? { arenaReserves: options.arenaReserves } : {}),
     ...(options.reinvestmentReturnPerDollarSec !== undefined
@@ -180,6 +199,8 @@ export async function pump(
     ...(options.horizonMs !== undefined ? { horizonMs: options.horizonMs } : {}),
     ...(options.pooling ? { pooling: true } : {}),
     ...(options.shareValue ? { shareValue: options.shareValue } : {}),
+    ...(options.chargeValue ? { chargeValue: options.chargeValue } : {}),
+    ...(options.trigger ? { trigger: options.trigger } : {}),
     sourceHosts: state.deployed,
   });
   state.memory = result.memory;
@@ -188,11 +209,16 @@ export async function pump(
   let launched = 0;
   for (const action of result.actions) {
     if (action.type === "stopShare") {
-      state.globals.worker_info?.get(action.opId)?.stop?.();
+      executeShareStop(state, action.opId);
       continue;
     }
     if (action.type === "share") {
       if (await startShare(ns, state, action)) launched++;
+      else failed.push(action.opId);
+      continue;
+    }
+    if (action.type === "charge") {
+      if (await startCharge(ns, state, action)) launched++;
       else failed.push(action.opId);
       continue;
     }
@@ -202,16 +228,46 @@ export async function pump(
     else failed.push(action.opId);
   }
   if (failed.length > 0) reportFailed(state.memory, failed);
-  const nextWakeMs = result.actions.reduce(
-    (earliest, action) => action.type === "sleep" ? Math.min(earliest, action.ms) : earliest,
-    Infinity,
+  const nextWake = result.actions.reduce<{ ms: number; target?: string }>(
+    (earliest, action) => action.type === "sleep" && action.ms < earliest.ms
+      ? { ms: action.ms, ...(action.target ? { target: action.target } : {}) }
+      : earliest,
+    { ms: Infinity },
   );
+  const wakeByTarget = new Map<string, { ms: number; target?: string }>();
+  for (const action of result.actions) {
+    if (action.type !== "sleep") continue;
+    const key = action.target ?? "";
+    const previous = wakeByTarget.get(key);
+    if (!previous || action.ms < previous.ms) {
+      wakeByTarget.set(key, { ms: action.ms, ...(action.target ? { target: action.target } : {}) });
+    }
+  }
   return {
     launched,
     failed: failed.length,
     directive: result.directive,
-    ...(Number.isFinite(nextWakeMs) ? { nextWakeMs } : {}),
+    nextWakes: [...wakeByTarget.values()],
+    ...(Number.isFinite(nextWake.ms) ? { nextWakeMs: nextWake.ms } : {}),
+    ...(nextWake.target ? { nextWakeTarget: nextWake.target } : {}),
   };
+}
+
+/** Deliver a cooperative share stop. `stop` is assigned by the worker after
+ * exec + module load, so a stop inside that window must be latched on the
+ * descriptor (worker.ts honors it at boot) or it is a silent no-op and the
+ * worker — and its RAM — outlives the request forever. A stop with no live
+ * descriptor frees the ledger directly: the worker already exited (its queued
+ * workerExit makes this a harmless duplicate) or the realm was reset and no
+ * exit can ever arrive. */
+function executeShareStop(state: DriverState, opId: number): void {
+  const info = state.globals.worker_info?.get(opId);
+  if (info) {
+    info.stopRequested = true;
+    info.stop?.();
+  } else {
+    releaseWorkerExits(state.memory.dispatch, [opId]);
+  }
 }
 
 async function startShare(ns: NS, state: DriverState, action: ShareAction): Promise<boolean> {
@@ -236,6 +292,35 @@ async function startShare(ns: NS, state: DriverState, action: ShareAction): Prom
   if (pid !== 0) {
     const info = state.globals.worker_info.get(action.opId);
     if (info) info.pid = pid;
+    return true;
+  }
+  state.globals.worker_info.delete(action.opId);
+  state.execFails++;
+  return false;
+}
+
+async function startCharge(ns: NS, state: DriverState, action: ChargeAction): Promise<boolean> {
+  if (!state.deployed.has(action.source) || !state.globals.worker_info) return false;
+  state.globals.worker_info.set(action.opId, {
+    kind: "charge",
+    target: "",
+    threads: action.threads,
+    x: action.x,
+    y: action.y,
+  });
+  const info = state.globals.worker_info.get(action.opId)!;
+  const pid = await handoffLaunch(
+    { kind: "worker", id: action.opId, worker: info },
+    (launchId) => ns.exec(
+      workerScript(),
+      action.source,
+      temporaryRunOptions({ threads: action.threads, ramOverride: WORKER_RAM.charge }),
+      launchId,
+    ),
+  );
+  if (pid !== 0) {
+    const launched = state.globals.worker_info.get(action.opId);
+    if (launched) launched.pid = pid;
     return true;
   }
   state.globals.worker_info.delete(action.opId);
@@ -360,14 +445,13 @@ export function reclaimForDodge(
   const dispatch = state.memory.dispatch;
   const shares = [...dispatch.shareWorkers.values()];
   const farmWorkers = preemptibleWorkers(state);
-  const plan = planReclamation(request, hosts, shares, farmWorkers, performance.now());
+  const plan = planReclamation(request, hosts, shares, farmWorkers);
   if (plan.action === 'wait') return { plan, preempted: false };
 
   const actions: import('../../shared/world.ts').Action[] = [];
   requestShareStops(dispatch, actions, plan.shareGb, new Set(plan.shareWorkerIds));
   for (const action of actions) {
-    if (action.type !== 'stopShare') continue;
-    state.globals.worker_info?.get(action.opId)?.stop?.();
+    if (action.type === 'stopShare') executeShareStop(state, action.opId);
   }
   if (plan.action !== 'preempt') return { plan, preempted: false };
 
@@ -393,7 +477,7 @@ function preemptibleWorkers(state: DriverState): PreemptibleFarmWorker[] {
       activeByWorker.set(tracked.workerId, { opId, tracked });
       continue;
     }
-    if (tracked.segment === 'share') continue;
+    if (tracked.segment === 'share' || tracked.segment === 'charge') continue;
     if (state.globals.worker_info?.get(opId)?.pid === undefined) continue;
     oneShot.push({
       workerId: opId,
@@ -451,6 +535,34 @@ export function settleBrokerShareExits(state: DriverState): number[] {
 export function resyncHeap(state: DriverState, servers: Record<string, Server>): string[] {
   const dispatch = state.memory.dispatch;
   const info = state.globals.worker_info;
+
+  // A realm reset (game reload) tears workers down before their atExit ever
+  // runs — worker.ts exits at its identity check without pushing a workerExit
+  // — so a share, charge or pooled worker that is absent from the live registry
+  // AND has no exit queued is an orphan: no completion can ever arrive to free
+  // its reservation. Release those through the ordinary exit path (idempotent)
+  // BEFORE reconciling; the accounting below would otherwise preserve their
+  // "accounted" RAM forever. A worker whose exit IS queued keeps its
+  // reservation until the drain, exactly as before. A charge worker's exit is
+  // its own `charge` completion, never a workerExit, so both kinds count.
+  const queuedExits = new Set(
+    (state.globals.dispatch_done ?? [])
+      .filter((completion) => completion.kind === 'workerExit' || completion.kind === 'charge')
+      .map((completion) => completion.opId),
+  );
+  const orphaned = (workerId: number): boolean =>
+    !(info?.has(workerId) ?? false) && !queuedExits.has(workerId);
+  const deadWorkerIds: number[] = [];
+  for (const worker of dispatch.shareWorkers.values()) {
+    if (orphaned(worker.workerId)) deadWorkerIds.push(worker.workerId);
+  }
+  for (const worker of dispatch.chargeWorkers.values()) {
+    if (orphaned(worker.opId)) deadWorkerIds.push(worker.opId);
+  }
+  for (const worker of dispatch.pool.workers.values()) {
+    if (orphaned(worker.workerId)) deadWorkerIds.push(worker.workerId);
+  }
+  if (deadWorkerIds.length > 0) releaseWorkerExits(dispatch, deadWorkerIds);
 
   // A worker's process releases real RAM before the controller can drain its
   // atExit completion. A fleet scan in that interval therefore observes less

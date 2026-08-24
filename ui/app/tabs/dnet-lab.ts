@@ -149,7 +149,7 @@ export function labPriorFor(lab: DarknetLabDigest): LabPrior | undefined {
 }
 
 /** The maze as SVG, or an empty string for a grid that does not match its own
- * dimensions — which is a shape change between a running overseer and a rebuilt
+ * dimensions — which is a shape change between a running controller and a rebuilt
  * panel, and is better drawn as nothing than as a maze read off the wrong
  * stride. The caller keys the legend off the same emptiness. */
 export function labMaze(lab: DarknetLabDigest, prior?: LabPrior): string {

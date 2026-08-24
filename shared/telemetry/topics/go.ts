@@ -97,7 +97,13 @@ export interface GoPlan {
     currentPlayer: GoCurrentPlayer;
     komi?: number;
   };
-  planning: { finalistCount: number; positionValue: number };
+  planning: {
+    finalistCount: number;
+    positionValue: number;
+    /** Set when the engine swapped a losing move for a game-ending pass to
+     * bank the standing score ("passing: position lost, banking score"). */
+    passReason?: string;
+  };
   /** Full opponent/board comparison in the same ETA units used to decide. */
   selection: {
     preferred: GoGameCandidate;
@@ -203,10 +209,9 @@ export interface GoTurnResult {
    * resume, or the unseeded fallback. Its presence is what distinguishes
    * those from an aligned turn, so nothing else needs to record alignment. */
   prediction?: GoTurnPrediction;
-  /** Post-turn proof of the mirror against the game board, and what it cost.
-   * That cost is paid before the NEXT turn's plan begins, so it lands in the
-   * next turn's `admitMs`; it is published here because this is the only place
-   * a reader can find the explanation for that segment. */
+  /** Result and total cost of the consolidated settled-state read: board and
+   * history proof plus bonus-cycle/player observation. It is paid before the
+   * NEXT turn's plan, so it lands in that turn's `admitMs`. */
   boardVerify?: { ms: number; result: "match" | "drift" | "unavailable" | "skipped" };
   ok: boolean;
   detail: string;

@@ -720,6 +720,11 @@ function decideFactions(
   const invitations: FactionStanding[] = [];
   if (!drainLatched) {
     for (const candidate of inviteOrder) {
+      // An UNPLANNED invitation is pure upside only while there is still a run
+      // to spend it in. During an install request it must not preempt the
+      // transaction — the guard the old free-join step carried, and the reason
+      // it existed. A planned faction still joins: the package may need it.
+      if (!protectedFactions.has(candidate.name) && view.installRequested) continue;
       if (view.factions.some((member) => member.joined && conflictsWith(candidate, member))) continue;
       if (
         !protectedFactions.has(candidate.name) &&

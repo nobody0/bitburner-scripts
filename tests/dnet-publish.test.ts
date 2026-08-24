@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   emptyKnowledge,
-  foldReports,
-  type DarknetKnowledge,
-} from "../shared/strategy/dnet/knowledge.ts";
+  foldKnowledgeReports,
+  type DnetKnowledge,
+} from "../shared/strategy/dnet/host.ts";
 import type { ReportHost } from "../shared/strategy/dnet/courier.ts";
 import { KNOWLEDGE_MAX_HOSTS, publishKnowledge } from "../shared/strategy/dnet/publish.ts";
 import { modelEntry } from "../shared/strategy/dnet/models.ts";
@@ -20,14 +20,14 @@ const NOW = 10_000_000;
 
 type Seen = { hostname: string; present: boolean; facts?: Record<string, unknown> };
 
-function fold(hosts: Seen[], at = NOW): DarknetKnowledge {
+function fold(hosts: Seen[], at = NOW): DnetKnowledge {
   const reports: ReportHost[] = hosts.map((host) => ({
     hostname: host.hostname,
     at,
     present: host.present,
     ...(host.present ? host.facts : {}),
   } as ReportHost));
-  return foldReports(emptyKnowledge(GEN), reports, at).knowledge;
+  return foldKnowledgeReports(emptyKnowledge(GEN), reports, at).knowledge;
 }
 
 describe("the wire carries only what cannot be derived", () => {
@@ -57,9 +57,8 @@ describe("the wire carries only what cannot be derived", () => {
     const host = publishKnowledge(knowledge, NOW + 1_000).hosts[0]!;
 
     expect(host.caches).toEqual(["loot.cache", "phish.d.cache"]);
-    // `resource` is the shortest expiry we have, and it is the honest one:
-    // acting on a stale listing means calling openCache on a filename the host
-    // no longer holds, and that call THROWS rather than refusing.
+    // Acting on a stale listing means calling openCache on a filename the host
+    // no longer holds, and that call throws rather than refusing.
     expect(host.facts["caches"]).toBe(NOW);
   });
 
@@ -120,7 +119,7 @@ describe("a credential never reaches the panel", () => {
     // progress. Publishing the second without leaking the first is the whole
     // reason `attempt.solve` is built by an allow-list rather than a spread.
     const knowledge = fold([{ hostname: "dn-1", present: true, facts: { depth: 0, modelId: "DeepGreen" } }]);
-    knowledge.hosts["dn-1"]!.attempts = {
+    knowledge.hosts.get("dn-1")!.attempts = {
       tried: 4,
       probes: 2,
       solver: {
@@ -155,7 +154,7 @@ describe("a credential never reaches the panel", () => {
     // exists. The two are not alternatives: `solve` is published BECAUSE the
     // redaction below stays absolute.
     const knowledge = fold([{ hostname: "dn-1", present: true, facts: { depth: 0, modelId: "DeepGreen" } }]);
-    knowledge.hosts["dn-1"]!.attempts = {
+    knowledge.hosts.get("dn-1")!.attempts = {
       tried: 1,
       probes: 0,
       solver: { model: "DeepGreen", fingerprint: "f", phase: "p", spent: 1, scratch: { secret: "s3cr3t" } },
@@ -169,7 +168,7 @@ describe("a credential never reaches the panel", () => {
     // `phase` is solver-defined free text. A solver that wrote password material
     // into it would be a bug, but the cap means it could not write MUCH.
     const knowledge = fold([{ hostname: "dn-1", present: true, facts: { depth: 0, modelId: "DeepGreen" } }]);
-    knowledge.hosts["dn-1"]!.attempts = {
+    knowledge.hosts.get("dn-1")!.attempts = {
       tried: 0,
       probes: 0,
       solver: { model: "DeepGreen", fingerprint: "f", phase: "x".repeat(200), spent: 0, scratch: {} },
@@ -282,7 +281,7 @@ describe("the map's layout inputs are unambiguous", () => {
 
   test("a gone host keeps its name and its death, and loses everything else", () => {
     let knowledge = fold([{ hostname: "dn-1", present: true, facts: { depth: 0, modelId: "TopPass" } }]);
-    knowledge = foldReports(knowledge, [{ hostname: "dn-1", at: NOW + 1, present: false }], NOW + 1).knowledge;
+    knowledge = foldKnowledgeReports(knowledge, [{ hostname: "dn-1", at: NOW + 1, present: false }], NOW + 1).knowledge;
     const host = publishKnowledge(knowledge, NOW + 1).hosts[0]!;
     expect(host.goneAt).toBe(NOW + 1);
     expect(host.authState).toBe("offline");
@@ -318,11 +317,22 @@ describe("what the panel still needs the controller to decide", () => {
     expect(stillFresh.depth).toBe(1);
   });
 
-  test("free RAM is published, and does not double-count the owner's block", () => {
+  test("usable RAM is published from durable capacity", () => {
     const knowledge = fold([
-      { hostname: "dn-1", present: true, facts: { maxRam: 16, blockedRam: 4, usedRam: 4 } },
+      { hostname: "dn-1", present: true, facts: { maxRam: 16, blockedRam: 4 } },
     ]);
-    expect(publishKnowledge(knowledge, NOW).hosts[0]!.freeRam).toBe(12);
+    expect(publishKnowledge(knowledge, NOW).hosts[0]!.usableRam).toBe(12);
+    knowledge.hosts.get("dn-1")!.dirty.ram = true;
+    expect(publishKnowledge(knowledge, NOW).hosts[0]!.usableRam).toBe(12);
+  });
+
+  test("runtime RAM stays separate from durable capacity and expires", () => {
+    const knowledge = fold([
+      { hostname: "dn-1", present: true, facts: { maxRam: 16, blockedRam: 4 } },
+    ]);
+    const ram = new Map([["dn-1", { at: NOW, total: 16, blocked: 4, used: 5 }]]);
+    expect(publishKnowledge(knowledge, NOW, { ram }).hosts[0]!.ram).toEqual(ram.get("dn-1"));
+    expect(publishKnowledge(knowledge, NOW + 60_001, { ram }).hosts[0]!.ram).toBeUndefined();
   });
 });
 
@@ -342,7 +352,7 @@ describe("agent mortality, and the caps", () => {
   });
 
   test("a very large net is capped, and says that it was", () => {
-    // The deepest labyrinth builds ~163 servers, so the cap clears the largest
+    // The deepest labyrinth builds ~173 servers, so the cap clears the largest
     // real net; it exists to bound a runaway, not to hide data. Truncating
     // silently would read as "we know of 220 hosts" when we know of more.
     const hosts = Array.from({ length: KNOWLEDGE_MAX_HOSTS + 30 }, (_, i) => ({

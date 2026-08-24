@@ -2,7 +2,7 @@
  *
  * `2G_cellular` is documented — by us and by upstream's own formula parameter —
  * as a TIMING attack. The failure log states the first mismatch index directly;
- * when charisma blocks that log, `formulas.dnet.getAuthenticateTime` supplies
+ * when charisma blocks that log, the shared pinned timing transcription supplies
  * the zero-prefix baseline and the measured call duration supplies the same
  * index. Either channel turns it into an ordinary prefix walk.
  *
@@ -449,7 +449,7 @@ function pairCandidates(facts: PasswordFacts, small: bigint, first: number): str
  * own log NOISE emits `"Logging in with passcode: <password>"` unprompted, which
  * `harvestLogs` already parses — so a `bleed` against one of these hosts can
  * hand over the credential with no attempt at all. That is a scheduling change
- * in `queue.ts` (which today only bleeds hosts we already hold), not a solver. */
+ * in `plan.ts` (which today only bleeds hosts we already hold), not a solver. */
 const PACKET_BLOBS_WANTED = 3;
 
 const packetSnifferSolver: Solver = {

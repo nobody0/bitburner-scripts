@@ -17,7 +17,8 @@ import type { Action, CompletionEvent, ServerView, StockInfluence, WorldView } f
 import { WORKER_RAM } from "../world.ts";
 import { intelligenceBonus } from "./factions/rep.ts";
 import type { SharePricingInput } from "./share.ts";
-import type { SegmentKind, TargetDirective } from "./directive.ts";
+import type { ChargePricingInput } from "./stanek/charge.ts";
+import type { Segment, SegmentKind, TargetDirective } from "./directive.ts";
 import {
   FARM_SOLVE_SHARE,
   WORKER_RAM_FLOOR,
@@ -93,6 +94,10 @@ export const OVERDUE_RETRY_MS = TIMING_WORKER_STARTUP_GUARD_MS;
 export const JIT_LAUNCH_WINDOW_MS = TIMING_JIT_LAUNCH_GUARD_MS - TIMING_WORKER_STARTUP_GUARD_MS;
 /** Cap launches per pass so one scheduler call stays inside the tick budget. */
 export const MAX_BATCHES_PER_PASS = 8;
+/** Heartbeat-only producer budget. At a 5 ms landing cadence a 200 ms
+ * heartbeat consumes forty batches, so the old eight-batch limit could only
+ * stay full because completion wakes incorrectly performed planning too. */
+export const MAX_JIT_BATCHES_PER_MAINTENANCE = 512;
 /** Shotgun emits a whole wave per pass — every batch lands the same engine
  * tick, so there is no interleave to protect, only the pump budget. */
 export const SHOTGUN_BATCHES_PER_PASS = 256;
@@ -264,12 +269,12 @@ export interface Tracked {
   /** Steady-state JIT pipeline role. Capacity is reserved per role so a long
    * weaken can never consume the RAM a later grow or hack is counting on. */
   jitRole?: JitRole["role"];
-  /** The batch this op belongs to. Every launch group has one — a JIT cycle,
-   * a shotgun cycle, a prep wave — so completions can be attributed back to
-   * the unit of work that is actually meaningful to reason about. Ids are
-   * globally unique, which is also what lets a failed exec drop exactly the
-   * unlaunched remainder of the JIT batch it belonged to. */
+  /** Telemetry identity of the batch this op belongs to. Scheduling and
+   * failure recovery deliberately do not route through this id. */
   batchId?: number;
+  /** Direct owner for a pending JIT suffix. Batch-local exec recovery follows
+   * this reference; batchId remains telemetry identity, never a scheduler key. */
+  pendingBatch?: PendingJitBatch;
 }
 
 interface PendingJitOp {
@@ -319,11 +324,18 @@ interface PendingJitOp {
   /** A due contiguous allocation already failed. If its window expires, the
    * miss is fragmentation/placement rather than scheduler lateness. */
   placementBlocked?: boolean;
+  /** Owning target. Kept directly on the op so reservation accounting never
+   * has to recover ownership through a batch-id lookup. */
+  target: string;
 }
 
 interface PendingJitBatch {
   target: string;
   ops: PendingJitOp[];
+  /** Irrevocable once the first operation is emitted. Planning may discard an
+   * unstarted batch, but after its leading weaken consumes RAM the remaining
+   * grow/hack suffix must be launched so that support is cashed in. */
+  started?: boolean;
   /** Identifies THIS batch (decisionId is shared by every batch of a planning
    * decision). A failed exec can then drop the one batch it belonged to
    * instead of the whole pipeline. */
@@ -331,6 +343,34 @@ interface PendingJitBatch {
   decisionId: number;
   /** Cause counters describe a batch decision, not scheduler attempts. */
   countedMisses?: Partial<Record<MissedWindowReason, true>>;
+  /** Monotonic revision used by the target-local deadline heap. Heap entries
+   * are immutable snapshots; advancing this batch invalidates the old one. */
+  wakeRevision?: number;
+}
+
+interface BatchWakeEntry {
+  at: number;
+  revision: number;
+  batch: PendingJitBatch;
+}
+
+interface TargetWakeQueue {
+  heap: BatchWakeEntry[];
+}
+
+interface CachedJitRuntime {
+  /** Last executable solve for this target. A newly selected, larger solve may
+   * not fit the current topology; retaining this one lets the farm downscale
+   * instead of abandoning JIT for the padded atomic path. */
+  solution: CycleSolution;
+  schedule: JitSchedule;
+  segmentCapGb: number;
+  pooling: boolean;
+  reservationMode: JitReservationMode;
+  /** RAM of one invocation for each role. Together with the incrementally
+   * maintained pending counts this makes a draining pipeline's remaining peak
+   * computable in O(roles), independent of queue depth. */
+  roleGb: Record<JitRole["role"], number>;
 }
 
 type JitReservationMode = "protected" | "launch";
@@ -460,17 +500,14 @@ export interface DispatchStats {
    * static core count can give: it depends on which hosts the placer chose.
    * Hack is unaffected by cores, so its ratio stays at 1 and is the control. */
   effectThreadsBySegmentKind: Record<SegmentKind, ByKind>;
-  /** Observed intra-batch landing order, counted by signature.
+  /** Planned/observed intra-batch landing-order pairs, counted by signature.
    *
    * Per-op telemetry is impossible here — landings run at ~1 per 20 ms at
    * scale — but the QUESTION per-op telemetry would answer is small: did this
    * batch's effects land in the order the cycle planned? That collapses to a
-   * counter per distinct observed order, so a healthy run publishes one key
-   * with a large count and a reorder shows up as a second key. */
-  landingOrder: Map<string, number>;
-  /** The intended order, as the roles sort by landing time. Recorded from the
-   * batches themselves rather than assumed, so a mode switch is visible. */
-  landingOrderPlanned?: string;
+   * counter per distinct pair, so batches planned under different cycle shapes
+   * cannot be misgraded against whichever plan happened to run most recently. */
+  landingOrders: Map<string, { planned: string; observed: string; batches: number }>;
   /** COMPLETE batches whose landing order was verified (the denominator). */
   landingOrderBatches: number;
   /** Batches that landed having never launched a hack.
@@ -611,7 +648,7 @@ function emptyByKind(): ByKind {
 }
 
 function emptyBySegmentKind(): Record<SegmentKind, ByKind> {
-  return { farm: emptyByKind(), prep: emptyByKind(), share: emptyByKind() };
+  return { farm: emptyByKind(), prep: emptyByKind(), charge: emptyByKind(), share: emptyByKind() };
 }
 
 function emptyBatchAggregate(): BatchAggregate {
@@ -640,6 +677,17 @@ export interface ShareWorker {
   gb: number;
   effectiveThreads: number;
   stopping: boolean;
+  /** When the stop was (last) sent. A stop can race the worker's boot and land
+   * before its mailbox exists; ageing the request lets the dispatcher re-send
+   * instead of treating `stopping` as settled forever. */
+  stopRequestedAt?: number;
+}
+
+export interface ChargeWorker {
+  opId: number;
+  hostname: string;
+  threads: number;
+  gb: number;
 }
 
 export interface DispatchMemory {
@@ -657,6 +705,10 @@ export interface DispatchMemory {
    * engine's timers for 63 s at a stretch. `tests/dispatch-index.test.ts` holds
    * each index against a full recompute after every mutation. */
   byTarget: Map<string, Map<number, Tracked>>;
+  /** Per-target landing queue, kept in landing/op-id order. Unlike byTarget,
+   * this is scheduler order and removes the full-ledger sort from every wake. */
+  landingByTarget: Map<string, LandingQueue>;
+
   /** SOURCE host -> GB held by non-pooled tracked ops. A pooled op's RAM
    * belongs to its worker, which the pool ledger counts instead. */
   ourGbByHost: Map<string, number>;
@@ -668,6 +720,8 @@ export interface DispatchMemory {
   segmentGb: Record<SegmentKind, number>;
   /** Long-lived, cooperatively stoppable fragment consumers. */
   shareWorkers: Map<number, ShareWorker>;
+  /** Non-cancellable one-shot Stanek calls. */
+  chargeWorkers: Map<number, ChargeWorker>;
   /** host -> op count in flight, so prep fires in non-overlapping waves. */
   prepInFlight: Map<string, number>;
   /** Logical distributed weaken landings which have lost at least one
@@ -694,9 +748,31 @@ export interface DispatchMemory {
   /** Last observed pure clock, used when a driver reports an exec failure
    * immediately after a planning pass. */
   lastDispatchAt: number;
-  /** Batches whose slow support has been planned but whose shorter operations
-   * have not reached their just-in-time launch windows yet. */
-  jitPending: PendingJitBatch[];
+  /** Long-lived target pipelines. This is the sole pending-batch source of
+   * truth: targets never share a scheduling queue. */
+  jitByTarget: Map<string, PendingJitBatch[]>;
+  pendingJitBatchCount: number;
+  pendingJitOpCount: number;
+  /** Unstarted batch count by target. Downscale checks this before touching a
+   * queue, so a fully committed 100k-deep pipeline remains O(1) per heartbeat. */
+  unstartedJitBatchCountByTarget: Map<string, number>;
+  /** Target/role counts for unlaunched JIT work. This is the compact forecast
+   * index used when farm capacity is transferred to prep: no heartbeat may
+   * walk a 100k-deep queue merely to learn its remaining envelope. */
+  pendingJitRoleCountByTarget: Map<string, Record<JitRole["role"], number>>;
+  /** Target-owned scheduler queues. They contain batch cursors, never jobs
+   * from another server, and are read from the head on a completion wake. */
+  jitWakeByTarget: Map<string, TargetWakeQueue>;
+  /** Heartbeat-derived launch policy consumed by the target wake hot path. */
+  jitRuntimeByTarget: Map<string, CachedJitRuntime>;
+  /** Pending one-shot reservations maintained incrementally per target/role. */
+  pendingReservedGbByTarget: Map<string, Record<JitRole["role"], number>>;
+  /** Targets intentionally draining at the batch boundary after a live safety
+   * reduction. They admit no leading weakens until every started suffix lands. */
+  drainingJitTargets: Set<string>;
+  /** Last directive after fleet adaptation; target wakes never recompute it. */
+  activeDirective?: TargetDirective;
+
   /** Batches still collecting their landings, keyed by batch id. An entry is
    * created when the batch's first op launches and settled when its last one
    * lands; see `stats.batchesByKind`. */
@@ -740,10 +816,22 @@ export interface DispatchMemory {
    * share-churn lane: whole envelope 0.007 idle / $1.89e7/s, one pass (this)
    * 0.058 / $2.65e7/s, one batch 0.049 / $1.45e7/s. */
   farmPassDemandGb?: number;
+  /** `stats.allocFails` as of the last FULL pass's share-eviction gate. The
+   * gate compares against this rather than a same-pass snapshot so allocation
+   * failures on target-wake hot passes (which return before the gate) still
+   * register as real contention on the next heartbeat. */
+  allocFailsHandled: number;
   stats: DispatchStats;
 }
 
 export interface DispatchOptions {
+  /** Why this pass is running. A target wake is deliberately narrower than a
+   * heartbeat: it absorbs that target's completions and may advance only that
+   * target's already-selected pipeline. In particular, a weaken landing on a
+   * prep target can never launch farm work for another server. */
+  trigger?:
+    | { kind: "tick" }
+    | { kind: "target-wake"; target: string; source: "completion" | "deadline" };
   /** Per-host executable dodge arena withheld from farm allocation. */
   arenaReserves?: Readonly<Record<string, number>>;
   /** Money still needed for the active goal — sets the switch horizon. */
@@ -778,6 +866,7 @@ export interface DispatchOptions {
   sourceHosts?: ReadonlySet<string>;
   /** Existing forecast/ETA currency for marginal farm-vs-share sizing. */
   shareValue?: SharePricingInput;
+  chargeValue?: ChargePricingInput;
 }
 
 export function initDispatch(): DispatchMemory {
@@ -785,24 +874,35 @@ export function initDispatch(): DispatchMemory {
     heap: new Heap(),
     evaluator: initEvaluator(),
     tracked: new Map(),
+    landingByTarget: new Map(),
     byTarget: new Map(),
     ourGbByHost: new Map(),
     weakenPending: new Map(),
     heldGbByRole: { h: 0, w1: 0, g: 0, w2: 0 },
     inFlight: { hack: 0, grow: 0, weaken: 0 },
-    segmentGb: { farm: 0, prep: 0, share: 0 },
+    segmentGb: { farm: 0, prep: 0, charge: 0, share: 0 },
     shareWorkers: new Map(),
+    chargeWorkers: new Map(),
     prepInFlight: new Map(),
     failedWeakenGroups: new Set(),
     nextOpId: 1,
     nextBatchId: 1,
     nextServerIndex: 0,
+    allocFailsHandled: 0,
     lastAnchor: -Infinity,
     hackZeroStreak: 0,
     jitDecisionId: 0,
     countedJitDecisionMisses: new Set(),
     lastDispatchAt: 0,
-    jitPending: [],
+    jitByTarget: new Map(),
+    pendingJitBatchCount: 0,
+    pendingJitOpCount: 0,
+    unstartedJitBatchCountByTarget: new Map(),
+    pendingJitRoleCountByTarget: new Map(),
+    jitWakeByTarget: new Map(),
+    jitRuntimeByTarget: new Map(),
+    pendingReservedGbByTarget: new Map(),
+    drainingJitTargets: new Set(),
     batches: new Map(),
     prepPending: [],
     mode: "hwgw",
@@ -835,13 +935,13 @@ export function initDispatch(): DispatchMemory {
       paddingRamMs: 0,
       nativeRamMsByKind: { hack: 0, grow: 0, weaken: 0 },
       paddingRamMsByKind: { hack: 0, grow: 0, weaken: 0 },
-      nativeRamMsBySegment: { farm: 0, prep: 0, share: 0 },
-      paddingRamMsBySegment: { farm: 0, prep: 0, share: 0 },
+      nativeRamMsBySegment: { farm: 0, prep: 0, charge: 0, share: 0 },
+      paddingRamMsBySegment: { farm: 0, prep: 0, charge: 0, share: 0 },
       nativeRamMsBySegmentKind: emptyBySegmentKind(),
       paddingRamMsBySegmentKind: emptyBySegmentKind(),
       threadsBySegmentKind: emptyBySegmentKind(),
       effectThreadsBySegmentKind: emptyBySegmentKind(),
-      landingOrder: new Map(),
+      landingOrders: new Map(),
       landingOrderBatches: 0,
       landingOrderIncomplete: 0,
       landingOrderAnomalies: [],
@@ -879,7 +979,10 @@ function syncTopology(
   for (const worker of memory.shareWorkers.values()) {
     ours.set(worker.hostname, (ours.get(worker.hostname) ?? 0) + worker.gb);
   }
-  for (const batch of memory.jitPending) {
+  for (const worker of memory.chargeWorkers.values()) {
+    ours.set(worker.hostname, (ours.get(worker.hostname) ?? 0) + worker.gb);
+  }
+  for (const batch of allJitBatches(memory)) {
     for (const op of batch.ops) {
       for (const block of op.reservation?.blocks ?? []) {
         const gb = block.threads * WORKER_RAM[op.kind];
@@ -891,6 +994,7 @@ function syncTopology(
   let largestBlockGb = 0;
   const hostBlocksGb: number[] = [];
   const freeNowBlocksGb: number[] = [];
+  const chargeBlocks: NonNullable<FleetCapacity["chargeBlocks"]> = [];
   let effectiveShareThreads = 0;
   let allocatableShareGb = 0;
   for (const server of view.servers) {
@@ -929,6 +1033,7 @@ function syncTopology(
     fleetGb += placeable;
     if (placeable > largestBlockGb) largestBlockGb = placeable;
     if (placeable >= WORKER_RAM.hack) hostBlocksGb.push(placeable);
+    if (placeable >= WORKER_RAM.charge) chargeBlocks.push({ hostname: server.hostname, gb: placeable, cores: server.cpuCores });
     const shareThreads = Math.floor(placeable / WORKER_RAM.share);
     effectiveShareThreads += shareThreads * intelligenceBonus(view.player.intelligence, 2) * coreEffect(server.cpuCores);
     allocatableShareGb += shareThreads * WORKER_RAM.share;
@@ -947,7 +1052,7 @@ function syncTopology(
   const prepWaveInFlight = previousPrepHost !== undefined && (memory.prepInFlight.get(previousPrepHost) ?? 0) > 0;
   if (hostBlocksGb.length > HOST_BLOCKS_LIMIT) hostBlocksGb.length = HOST_BLOCKS_LIMIT;
   const effectiveShareThreadsPerGb = allocatableShareGb > 0 ? effectiveShareThreads / allocatableShareGb : 0;
-  return { fleetGb, largestBlockGb, hostBlocksGb, prepWaveGb, prepFreeGb, prepWaveInFlight, effectiveShareThreadsPerGb };
+  return { fleetGb, largestBlockGb, hostBlocksGb, chargeBlocks, prepWaveGb, prepFreeGb, prepWaveInFlight, effectiveShareThreadsPerGb };
 }
 
 /** The last landing still expected on a target, or -Infinity when nothing is in
@@ -982,6 +1087,78 @@ function weakenGroupKey(target: string, landing: number): string {
  * registered, so no index can drift except through these two functions.
  * Exported so tests seed the ledger through the same door rather than
  * writing `tracked` directly and leaving every index empty behind them. */
+interface LandingQueue {
+  chunks: LedgerEntry[][];
+  size: number;
+}
+
+const LANDING_CHUNK_MAX = 256;
+
+function flattenLandingQueue(queue: LandingQueue | undefined): LedgerEntry[] {
+  if (!queue) return [];
+  const entries: LedgerEntry[] = [];
+  for (const chunk of queue.chunks) entries.push(...chunk);
+  return entries;
+}
+
+function insertTrackedLanding(memory: DispatchMemory, opId: number, tracked: Tracked): void {
+  if (tracked.landing === undefined) return;
+  const threads = trackedStrength(tracked);
+  const entry: LedgerEntry = {
+    op: {
+      kind: tracked.kind,
+      threads,
+      effectThreads: tracked.effectThreads ?? threads,
+      landing: tracked.landing,
+      opId,
+    },
+  };
+  let queue = memory.landingByTarget.get(tracked.target);
+  if (!queue) {
+    queue = { chunks: [[]], size: 0 };
+    memory.landingByTarget.set(tracked.target, queue);
+  }
+  let chunkAt = 0;
+  let chunkHi = queue.chunks.length;
+  while (chunkAt < chunkHi) {
+    const mid = (chunkAt + chunkHi) >>> 1;
+    const last = queue.chunks[mid]!.at(-1);
+    if (last && compareLedgerOps(last.op, entry.op) < 0) chunkAt = mid + 1;
+    else chunkHi = mid;
+  }
+  if (chunkAt === queue.chunks.length) chunkAt--;
+  const chunk = queue.chunks[Math.max(0, chunkAt)]!;
+  let lo = 0;
+  let hi = chunk.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (compareLedgerOps(chunk[mid]!.op, entry.op) <= 0) lo = mid + 1;
+    else hi = mid;
+  }
+  chunk.splice(lo, 0, entry);
+  queue.size++;
+  if (chunk.length > LANDING_CHUNK_MAX) {
+    queue.chunks.splice(Math.max(0, chunkAt) + 1, 0, chunk.splice(chunk.length >>> 1));
+  }
+}
+
+function removeTrackedLanding(memory: DispatchMemory, opId: number, tracked: Tracked): void {
+  if (tracked.landing === undefined) return;
+  const queue = memory.landingByTarget.get(tracked.target);
+  if (!queue) return;
+  for (let chunkAt = 0; chunkAt < queue.chunks.length; chunkAt++) {
+    const chunk = queue.chunks[chunkAt]!;
+    if ((chunk.at(-1)?.op.landing ?? -Infinity) < tracked.landing) continue;
+    if ((chunk[0]?.op.landing ?? Infinity) > tracked.landing) break;
+    const at = chunk.findIndex((entry) => entry.op.opId === opId);
+    if (at < 0) continue;
+    chunk.splice(at, 1);
+    queue.size--;
+    if (chunk.length === 0 && queue.chunks.length > 1) queue.chunks.splice(chunkAt, 1);
+    break;
+  }
+  if (queue.size === 0) memory.landingByTarget.delete(tracked.target);
+}
 export function trackOp(memory: DispatchMemory, opId: number, tracked: Tracked): void {
   memory.tracked.set(opId, tracked);
   let onTarget = memory.byTarget.get(tracked.target);
@@ -993,6 +1170,7 @@ export function trackOp(memory: DispatchMemory, opId: number, tracked: Tracked):
   // ledger folds depend on: opId order decides which of two same-instant ops
   // folds first, and that is observable.
   onTarget.set(opId, tracked);
+  insertTrackedLanding(memory, opId, tracked);
   if (tracked.workerId === undefined) {
     addGb(memory.ourGbByHost, tracked.hostname, tracked.gb);
     if (tracked.segment === "farm" && tracked.jitRole) memory.heldGbByRole[tracked.jitRole] += tracked.gb;
@@ -1008,6 +1186,7 @@ function untrackOp(memory: DispatchMemory, opId: number, tracked: Tracked): void
   const onTarget = memory.byTarget.get(tracked.target);
   if (onTarget) {
     onTarget.delete(opId);
+    removeTrackedLanding(memory, opId, tracked);
     if (onTarget.size === 0) memory.byTarget.delete(tracked.target);
   }
   if (tracked.workerId === undefined) {
@@ -1060,15 +1239,34 @@ function releaseShareWorker(memory: DispatchMemory, workerId: number): void {
   memory.segmentGb.share -= worker.gb;
 }
 
+function releaseChargeWorker(memory: DispatchMemory, opId: number): void {
+  const worker = memory.chargeWorkers.get(opId);
+  if (!worker) return;
+  memory.chargeWorkers.delete(opId);
+  memory.heap.free(worker.hostname, worker.gb);
+  memory.segmentGb.charge -= worker.gb;
+}
+
 export function currentShareBonus(memory: DispatchMemory): number {
   const effectiveThreads = 1 + [...memory.shareWorkers.values()]
     .reduce((sum, worker) => sum + worker.effectiveThreads, 0);
   return 1 + Math.log(effectiveThreads) / 25;
 }
 
+/** How long a requested stop may go unanswered before it is re-sent. A share
+ * slice is 10 s but the worker races it against the stop mailbox, so an
+ * honored stop resolves in milliseconds; anything slower means the request was
+ * lost (classically: it raced the worker's boot). */
+const SHARE_STOP_RETRY_MS = 2_000;
+
 /** Ask enough divisible workers to leave for hacking's currently unfilled
  * budget. The mailbox action is cooperative: worker.ts races the active share
- * slice against it, then atExit produces the sole heap-release completion. */
+ * slice against it, then atExit produces the sole heap-release completion.
+ *
+ * Workers already stopping COUNT toward `wantedGb`: their RAM is on the way,
+ * and ignoring it made every repeated call evict a fresh worker on top of the
+ * pending ones. Re-sending stale stops is the full pass's job (see the retry
+ * sweep in `dispatch`), not this function's. */
 export function requestShareStops(
   memory: DispatchMemory,
   actions: Action[],
@@ -1077,9 +1275,12 @@ export function requestShareStops(
 ): number {
   let requested = 0;
   for (const worker of [...memory.shareWorkers.values()].sort((a, b) => b.gb - a.gb)) {
-    if (worker.stopping || (selected && !selected.has(worker.workerId))) continue;
-    worker.stopping = true;
-    actions.push({ type: "stopShare", opId: worker.workerId });
+    if (selected && !selected.has(worker.workerId)) continue;
+    if (!worker.stopping) {
+      worker.stopping = true;
+      worker.stopRequestedAt = memory.lastDispatchAt;
+      actions.push({ type: "stopShare", opId: worker.workerId });
+    }
     requested += worker.gb;
     if (requested + 1e-9 >= wantedGb) break;
   }
@@ -1092,6 +1293,7 @@ export function requestShareStops(
 export function releaseWorkerExits(memory: DispatchMemory, workerIds: Iterable<number>): void {
   for (const workerId of workerIds) {
     releaseShareWorker(memory, workerId);
+    releaseChargeWorker(memory, workerId);
     releaseWorker(memory, workerId);
   }
 }
@@ -1135,6 +1337,35 @@ function launchShare(
   }
 }
 
+/** Fill the largest residual host blocks with one-shot charge calls. Each call
+ * consumes every whole charge thread left on its selected host; it is never
+ * stopped or broker-preempted once launched. */
+function launchCharge(
+  memory: DispatchMemory,
+  actions: Action[],
+  fragment: { x: number; y: number },
+  maxGb: number,
+): void {
+  let remaining = Math.max(0, maxGb);
+  const hosts = [...memory.heap.hosts()]
+    .map((host) => ({ host, threads: Math.floor(memory.heap.freeOn(host.hostname) / WORKER_RAM.charge) }))
+    .filter((entry) => entry.threads > 0)
+    .sort((a, b) => b.threads - a.threads || b.host.cores - a.host.cores || a.host.hostname.localeCompare(b.host.hostname));
+  for (const { host, threads: available } of hosts) {
+    const threads = Math.min(available, Math.floor(remaining / WORKER_RAM.charge));
+    if (threads < 1) break;
+    const gb = threads * WORKER_RAM.charge;
+    const reservation = memory.heap.reserveOn(host.hostname, gb);
+    if (!reservation) continue;
+    const opId = memory.nextOpId++;
+    memory.chargeWorkers.set(opId, { opId, hostname: host.hostname, threads, gb });
+    memory.segmentGb.charge += gb;
+    memory.stats.execs++;
+    actions.push({ type: "charge", source: host.hostname, threads, opId, x: fragment.x, y: fragment.y });
+    remaining -= gb;
+  }
+}
+
 /** Roll back ops the driver could not actually start (sim rejection, ns.exec
  * returning pid 0). Without this the reservation would never be freed — the
  * exact leak the earlier rewrite's dispatcher had (`nobody0/bitburner`; see
@@ -1142,15 +1373,19 @@ function launchShare(
  * worker is gone (spawn failed) or dead (job post found no mailbox), so the
  * worker's reservation goes with it. */
 export function releaseFailed(memory: DispatchMemory, opIds: Iterable<number>): void {
-  const failedBatchIds = new Set<number>();
+  const failedBatches = new Set<PendingJitBatch>();
   for (const opId of opIds) {
     if (memory.shareWorkers.has(opId)) {
       releaseShareWorker(memory, opId);
       continue;
     }
+    if (memory.chargeWorkers.has(opId)) {
+      releaseChargeWorker(memory, opId);
+      continue;
+    }
     const tracked = memory.tracked.get(opId);
     if (!tracked) continue;
-    if (tracked.batchId !== undefined) failedBatchIds.add(tracked.batchId);
+    if (tracked.pendingBatch) failedBatches.add(tracked.pendingBatch);
     if (tracked.wave) {
       memory.prepPending = memory.prepPending.filter((op) => op.target !== tracked.target);
     }
@@ -1164,13 +1399,14 @@ export function releaseFailed(memory: DispatchMemory, opIds: Iterable<number>): 
   // weakens had already launched. Safe for the same reason the deadline path
   // is: hack starts last, so a dropped remainder only leaves support
   // over-covered, and the arrival-security brake re-validates each batch.
-  if (failedBatchIds.size > 0) {
-    for (const batch of memory.jitPending) {
-      if (!failedBatchIds.has(batch.batchId)) continue;
+  if (failedBatches.size > 0) {
+    const affectedTargets = new Set<string>();
+    for (const batch of failedBatches) {
       for (const op of batch.ops) releasePendingReservation(memory, op, memory.lastDispatchAt);
-      batch.ops.length = 0;
+      clearPendingJitBatch(memory, batch);
+      affectedTargets.add(batch.target);
     }
-    memory.jitPending = memory.jitPending.filter((batch) => batch.ops.length > 0);
+    for (const target of affectedTargets) compactJitPipeline(memory, target);
   }
 }
 
@@ -1181,12 +1417,9 @@ export function dispatch(
   completions: CompletionEvent[],
   options: DispatchOptions = {},
 ): { actions: Action[]; directive: TargetDirective; switched?: { from?: string; to: string } } {
+  const wakeTarget = options.trigger?.kind === "target-wake" ? options.trigger.target : undefined;
   const arenaReserves = options.arenaReserves ?? {};
   memory.lastDispatchAt = view.time;
-  /** Allocation failures BEFORE this pass planned, so the share-eviction gate
-   * below reacts to contention that happened in this pass, not history. */
-  const allocFailsAtPassStart = memory.stats.allocFails;
-
   const byHost = new Map(view.servers.map((s) => [s.hostname, s]));
   const weakenWakeTargets = new Set<string>();
   const successfulWeakenGroups = new Set<string>();
@@ -1194,6 +1427,10 @@ export function dispatch(
   const touchedWeakenGroups = new Map<string, string>();
   for (const completion of completions) {
     if (completion.kind === "sleep") continue;
+    if (completion.kind === "charge") {
+      if (completion.opId !== undefined) releaseChargeWorker(memory, completion.opId);
+      continue;
+    }
     if (completion.kind === "workerExit") {
       // Pooled and share workers both release only on process exit. Each map
       // is its own idempotence guard, so a duplicate cannot double-free.
@@ -1288,7 +1525,81 @@ export function dispatch(
     memory.failedWeakenGroups.delete(group);
   }
 
+  if (wakeTarget !== undefined) {
+    // Completion/deadline interrupts are the strict hot path. Everything
+    // below this branch (topology, evaluator, mode selection and planning) is
+    // heartbeat maintenance and must not scale a weaken window with depth.
+    const directive = memory.activeDirective ?? memory.evaluator.directive;
+    const actions: Action[] = [];
+    const server = byHost.get(wakeTarget);
+    if (server) {
+      const launchCtx = makeHackContext(
+        { skill: view.player.hackingSkill, intelligence: view.player.intelligence, mults: view.player.mults },
+        view.nodeMults ?? {},
+      );
+      const runtime = directive.farm?.host === wakeTarget
+        ? memory.jitRuntimeByTarget.get(wakeTarget)
+        : undefined;
+      if (runtime) {
+        const due = dueWakeBatches(
+          memory,
+          wakeTarget,
+          view.time + JIT_LAUNCH_WINDOW_MS,
+          MAX_LAUNCH_ACTIONS_PER_PASS,
+        );
+        if (due.length > 0) {
+          launchDueJit(
+            memory,
+            actions,
+            server,
+            view.time,
+            launchCtx,
+            runtime.schedule,
+            runtime.segmentCapGb,
+            runtime.pooling,
+            runtime.reservationMode,
+            landingCtxFactory(view, launchCtx),
+            due,
+            true,
+          );
+          // launchDueJit has early exits for placement/deadline recovery. The
+          // extracted concrete batches must retain their own next cursor in
+          // every case; duplicate snapshots are revision-invalidated.
+          for (const batch of due) queueBatchWake(memory, batch);
+        }
+      }
+      if (directive.prep?.host === wakeTarget && !isPrepped(server)) {
+        const segmentCap = directive.segments.find((segment) => segment.kind === "prep")?.gb ?? 0;
+        launchDuePrep(
+          memory,
+          actions,
+          server,
+          view.time,
+          launchCtx,
+          segmentCap,
+          weakenWakeTargets.has(wakeTarget),
+        );
+      }
+    }
+    let nextAt = nextTargetWakeAt(memory, wakeTarget);
+    for (const op of memory.prepPending) {
+      if (op.target === wakeTarget) nextAt = Math.min(nextAt, op.startAt);
+    }
+    if (Number.isFinite(nextAt)) {
+      actions.push({
+        type: "sleep",
+        ms: nextAt <= view.time ? OVERDUE_RETRY_MS : nextAt - view.time,
+        target: wakeTarget,
+      });
+    }
+    return { actions, directive };
+  }
+
   const capacity = syncTopology(memory, view, arenaReserves, options.sourceHosts);
+  const evaluatorGenerationAtPassStart = memory.evaluator.generation;
+  const modeAtPassStart = memory.mode;
+  // Target wakes are scheduling interrupts, not economic decision points.
+  // The 200 ms heartbeat remains the sole owner of target and segment changes.
   const stepped = stepEvaluator(
     view,
     memory.evaluator,
@@ -1301,26 +1612,45 @@ export function dispatch(
         : {}),
       ...(options.hackingSkillGoal !== undefined ? { hackingSkillGoal: options.hackingSkillGoal } : {}),
       ...(options.shareValue ? { shareValue: options.shareValue } : {}),
+      ...(options.chargeValue ? { chargeValue: options.chargeValue } : {}),
     },
   );
   memory.evaluator = stepped.memory;
-  const directive = {
-    ...stepped.directive,
-    segments: adaptSegmentsToFleet(stepped.directive.segments, capacity.fleetGb),
-  };
-  const activeTargets = new Set([directive.farm?.host, directive.prep?.host].filter((host): host is string => Boolean(host)));
-  memory.prepPending = memory.prepPending.filter((op) => activeTargets.has(op.target));
+  const requestedSegments = adaptSegmentsToFleet(stepped.directive.segments, capacity.fleetGb);
+  const requestedFarmCapGb = requestedSegments.find((segment) => segment.kind === "farm")?.gb ?? 0;
 
-  // An unlaunched JIT batch contains only support work at this point: hack is
-  // always the last native call to start. On a retarget, dropping those plans
-  // can therefore only leave harmless extra weaken/grow support in flight; it
-  // cannot expose a hack without its covers. Later plans depended on the same
-  // predicted ledger, so discard the whole pending suffix together.
+  // A target/mode decision may invalidate unlaunched work, but its already
+  // resident support still owns physical RAM until landing. Drop the suffix
+  // before sizing the retained claim so only work which can still execute is
+  // protected from prep.
   if (stepped.switched) {
     abandonJitPending(memory, view.time);
     memory.lastAnchor = -Infinity;
     memory.jitDecisionId++;
   }
+  if (stepped.directive.farm) {
+    const target = stepped.directive.farm.host;
+    const runtime = memory.jitRuntimeByTarget.get(target);
+    const requestedPrepGb = requestedSegments.find((segment) => segment.kind === "prep")?.gb ?? 0;
+    const prep = stepped.directive.prep ? byHost.get(stepped.directive.prep.host) : undefined;
+    const inactivePrepSpillGb = !prep || isPrepped(prep) ? requestedPrepGb : 0;
+    const admissionGb = requestedFarmCapGb + inactivePrepSpillGb;
+    if (runtime && runtime.schedule.totalGb > admissionGb + 1e-9) {
+      // Stop at the leading-weaken boundary before computing the retained
+      // claim, so prep can receive released reservations in this same pass.
+      cancelUnstartedJitTarget(memory, target, view.time);
+    }
+  }
+  const committedFarmGb = stepped.directive.farm
+    ? remainingFarmCommitmentGb(memory, stepped.directive.farm.host)
+    : memory.segmentGb.farm;
+  const directive = {
+    ...stepped.directive,
+    segments: protectFarmCommitment(requestedSegments, committedFarmGb),
+  };
+  memory.activeDirective = directive;
+  const activeTargets = new Set([directive.farm?.host, directive.prep?.host].filter((host): host is string => Boolean(host)));
+  memory.prepPending = memory.prepPending.filter((op) => activeTargets.has(op.target));
 
   const actions: Action[] = [];
   const now = view.time;
@@ -1372,9 +1702,13 @@ export function dispatch(
     memory.farmPassDemandGb = undefined;
   }
   let spillGb = 0;
+  let requestedSpillGb = 0;
   memory.pooling = false;
   for (const segment of directive.segments) {
     if (segment.kind === "prep" && !prepActive) spillGb += Math.max(0, segment.gb - memory.segmentGb.prep);
+  }
+  for (const segment of requestedSegments) {
+    if (segment.kind === "prep" && !prepActive) requestedSpillGb += Math.max(0, segment.gb - memory.segmentGb.prep);
   }
   const farmPriority = directive.segments.findIndex((segment) => segment.kind === "farm");
   const segmentIsActive = (segment: (typeof directive.segments)[number]): boolean =>
@@ -1400,7 +1734,7 @@ export function dispatch(
     // merely fixes topology on staler information. Active higher-priority prep
     // also wins. Release only reservations whose own launch window has not
     // opened; due farm work remains committed because its support is sunk.
-    for (const batch of memory.jitPending) {
+    for (const batch of allJitBatches(memory)) {
       for (const op of batch.ops) {
         if (op.reservation && jitLaunchAt(op) > now) releasePendingReservation(memory, op, now);
       }
@@ -1410,7 +1744,13 @@ export function dispatch(
   for (const segment of directive.segments) {
     let segmentCap = segment.kind === "farm" ? segment.gb + spillGb : segment.gb;
     let borrow: { gb: number; landingDeadline: number } | undefined;
-    if (segment.kind === "farm" && prepActive && directive.prep) {
+    // Proper JIT keeps a stable role envelope and must never be replaced by an
+    // eager wave merely because prep has temporary slack. Only modes which
+    // have no pending JIT suffix may borrow against prep's next landing.
+    if (
+      segment.kind === "farm" && prepActive && directive.prep &&
+      (options.jit === false || memory.mode === "shotgun")
+    ) {
       let landingDeadline = -Infinity;
       for (const tracked of memory.byTarget.get(directive.prep.host)?.values() ?? []) {
         if (tracked.wave && tracked.landing !== undefined) {
@@ -1438,7 +1778,7 @@ export function dispatch(
     if (segment.kind === "farm" && directive.farm) {
       const server = byHost.get(directive.farm.host);
       if (!server) continue;
-      if (isPrepped(server) || memory.jitPending.some((batch) => batch.target === server.hostname)) {
+      if (isPrepped(server) || targetJitQueue(memory, server.hostname).length > 0) {
         // Mode: HOW to farm this target (shared/strategy/mode.ts). Decided
         // here — where the farm server and live ctx are in hand — with the
         // dwell carried in memory. Shotgun is wired in launchBatches.
@@ -1474,6 +1814,39 @@ export function dispatch(
         // same-deadline FIFO wave: H/W1/G/W2. Dropping W1 from an HWGW solution
         // would leave hack security uncovered.
         const shotgun = memory.mode === "shotgun";
+        const requestedFarmAdmissionGb = requestedFarmCapGb + requestedSpillGb;
+        if (
+          memory.drainingJitTargets.has(server.hostname) &&
+          targetJitQueue(memory, server.hostname).length === 0 &&
+          memory.segmentGb.farm <= 1e-9
+        ) {
+          memory.drainingJitTargets.delete(server.hostname);
+        }
+        const committedFarmNowGb = remainingFarmCommitmentGb(memory, server.hostname);
+        const currentRuntime = memory.jitRuntimeByTarget.get(server.hostname);
+        const nextRoleGb = emptyJitRoleCounts();
+        for (const role of jitRoles(solution, server, launchCtx)) nextRoleGb[role.role] = role.gb;
+        // Upsizing is compatible with old, smaller batches: the new envelope
+        // dominates them. A downsize is not. Drain the old shape first so its
+        // larger atomic blocks are never protected by a smaller new quota.
+        const shapeDownscale = currentRuntime !== undefined && (
+          currentRuntime.solution.kind !== solution.kind ||
+          (["h", "w1", "g", "w2"] as const).some(
+            (role) => nextRoleGb[role] + 1e-9 < currentRuntime.roleGb[role],
+          )
+        );
+        const forcedDrain = memory.drainingJitTargets.has(server.hostname);
+        const drainingJit =
+          options.jit !== false && !shotgun &&
+          committedFarmNowGb > 1e-9 && (
+            committedFarmNowGb > requestedFarmAdmissionGb + 1e-9 || shapeDownscale || forcedDrain
+          );
+        if (drainingJit) {
+          // Reduction happens at the batch boundary. Planned leading weakens
+          // are cancellable; a batch whose first op was emitted is not.
+          cancelUnstartedJitTarget(memory, server.hostname, now);
+          budget = segmentCap - memory.segmentGb.farm;
+        }
         // Pooling only pays when a worker's NEXT job arrives before its idle
         // timeout. The steady-state launch period is weakenTime over the
         // achievable depth — depth from the SEGMENT total, not this pass's
@@ -1519,6 +1892,7 @@ export function dispatch(
           capacity.hostBlocksGb,
           farmReservationMode,
           landingCtxAt,
+          !drainingJit,
         );
       } else {
         launchDuePrep(memory, actions, server, now, launchCtx, segmentCap, weakenWakeTargets.has(server.hostname));
@@ -1565,10 +1939,48 @@ export function dispatch(
   // bit-identical, at -4.3% reputation on that single seed. Freeing at least
   // one whole block matters because a failed atomic hack/grow placement can be
   // a contiguity deficit rather than a total-capacity deficit.
+  // Compared against the count CONSUMED by the previous full pass, not this
+  // pass's start: most launching happens on target-wake hot passes that return
+  // long before this gate, and their alloc failures — plus ops the deadline
+  // path already dropped, destroying the placementBlocked evidence — were
+  // invisible to a same-pass delta. Share then never yielded to real
+  // contention it had itself caused.
   const farmPlacementBlocked =
-    memory.jitPending.some((batch) => batch.ops.some((op) => !op.reservation && op.placementBlocked)) ||
+    someJitBatch(memory, (batch) => batch.ops.some((op) => !op.reservation && op.placementBlocked)) ||
     memory.prepPending.some((op) => op.placementBlocked) ||
-    memory.stats.allocFails > allocFailsAtPassStart;
+    memory.stats.allocFails > memory.allocFailsHandled;
+  memory.allocFailsHandled = memory.stats.allocFails;
+
+  // Charge is a one-second, non-preemptible investment. Admit it only after
+  // hacking/prep have planned this heartbeat, while the pipeline is stable,
+  // and keep the entire stable farm envelope available. This is intentionally
+  // stronger than the share reserve: share can yield; charge cannot.
+  const chargeFragment = directive.charge?.fragment;
+  const chargeSuppressed =
+    stepped.switched !== undefined ||
+    memory.evaluator.generation !== evaluatorGenerationAtPassStart ||
+    memory.mode !== modeAtPassStart ||
+    memory.drainingJitTargets.size > 0 ||
+    memory.prepPending.length > 0 ||
+    farmPlacementBlocked ||
+    [...memory.shareWorkers.values()].some((worker) => worker.stopping);
+  const chargeSegmentGb = directive.segments.find((segment) => segment.kind === "charge")?.gb ?? 0;
+  const chargeDeficitGb = Math.max(0, chargeSegmentGb - memory.segmentGb.charge);
+  if (
+    chargeFragment && !chargeSuppressed &&
+    chargeDeficitGb > memory.heap.freeTotal() + 1e-9 && memory.shareWorkers.size > 0
+  ) {
+    requestShareStops(memory, actions, chargeDeficitGb - memory.heap.freeTotal());
+  }
+  if (chargeFragment && !chargeSuppressed) {
+    const farmReserveGb = Math.max(
+      memory.farmPassDemandGb ?? 0,
+      Math.max(0, (memory.farmEnvelopeGb ?? 0) - memory.segmentGb.farm),
+      nonShareDeficitGb,
+    );
+    const safeResidualGb = Math.max(0, memory.heap.freeTotal() - farmReserveGb);
+    launchCharge(memory, actions, chargeFragment, Math.max(chargeDeficitGb, safeResidualGb));
+  }
   // Deliberately NOT a predictive stop keyed on pending launch deadlines.
   // In a deep pipeline there is always work due inside any yield window, so it
   // degenerates into stopping share every pass: measured share-churn
@@ -1609,6 +2021,17 @@ export function dispatch(
     );
   }
 
+  // Re-send stops that have gone unanswered past the retry window. Without
+  // this, one stop lost to the boot race left `stopping` latched forever: the
+  // worker kept sharing, its RAM stayed held, launchShare stayed gated off,
+  // and the broker's share-exit-pending wait never resolved (observed live as
+  // share holding a 65 TB fleet with hacking starved).
+  for (const worker of memory.shareWorkers.values()) {
+    if (!worker.stopping) continue;
+    if (now - (worker.stopRequestedAt ?? now) < SHARE_STOP_RETRY_MS) continue;
+    worker.stopRequestedAt = now;
+    actions.push({ type: "stopShare", opId: worker.workerId });
+  }
   const shareStopping = [...memory.shareWorkers.values()].some((worker) => worker.stopping);
   if (shareEnabled && !shareStopping && !reserveShortfall && (!farmPlacementBlocked || !hadShareWorkers)) {
     // Reserve what the farm can launch in one pass; share takes the rest.
@@ -1621,8 +2044,24 @@ export function dispatch(
     // (live: hack in-flight hit 0 while share held most of a 24 TB fleet), and
     // capping it at a fraction of free RAM cost 10x income on share-churn
     // ($7.74e7 -> $7.24e6/s), because idle RAM is the farm's growth headroom.
-    const reserveGb = memory.farmPassDemandGb
-      ?? Math.max(0, (memory.farmEnvelopeGb ?? 0) - memory.segmentGb.farm);
+    // Batch-shaped demand covers the farm only once its pipeline exists.
+    // While the farm target is still PREPPING, its demand is a scheduled prep
+    // wave that never writes farmPassDemandGb, and a zero reserve here let
+    // share soak the whole fleet between waves — forcing an evict/re-soak
+    // churn in which prep crawled at $0/s. The same holds for an active prep
+    // segment: its waves are time-phased, so the RAM they are still owed is
+    // real demand even though nothing holds it this instant.
+    const farmServer = directive.farm ? byHost.get(directive.farm.host) : undefined;
+    const farmPrepping = farmServer !== undefined &&
+      !isPrepped(farmServer) && targetJitQueue(memory, farmServer.hostname).length === 0;
+    const farmSegmentGb = directive.segments.find((segment) => segment.kind === "farm")?.gb ?? 0;
+    const farmReserveGb = farmPrepping
+      ? Math.max(0, farmSegmentGb - memory.segmentGb.farm)
+      : memory.farmPassDemandGb
+        ?? Math.max(0, (memory.farmEnvelopeGb ?? 0) - memory.segmentGb.farm);
+    const prepSegmentGb = directive.segments.find((segment) => segment.kind === "prep")?.gb ?? 0;
+    const prepReserveGb = prepActive ? Math.max(0, prepSegmentGb - memory.segmentGb.prep) : 0;
+    const reserveGb = farmReserveGb + prepReserveGb;
     const surplusGb = memory.heap.freeTotal() - reserveGb;
     // Stanek is deliberately absent: charge strength favors one occasional
     // LARGE contiguous call (highestCharge under a log, repetitions^0.07), the
@@ -1636,26 +2075,34 @@ export function dispatch(
   // into a cancellable realm-timer wake alongside its 200 ms heartbeat. Both
   // paths therefore exercise the same schedule without injecting a clock into
   // strategy code.
-  if (memory.jitPending.length > 0 || memory.prepPending.length > 0) {
-    const pendingStarts = [
-      ...memory.jitPending.flatMap((batch) => batch.ops.map((op) =>
-        op.reservation ? jitLaunchAt(op) : jitReserveAt(op)
-      )),
-      ...memory.prepPending.map((op) => op.startAt),
-    ];
-    const overdue = pendingStarts.some((at) => at <= now);
-    const nextStart = Math.min(...pendingStarts.filter((at) => at > now));
-    const exactMs = Number.isFinite(nextStart) ? nextStart - now : Infinity;
+  if (memory.jitByTarget.size > 0 || memory.prepPending.length > 0) {
+    const deadlines = new Map<string, { overdue: boolean; next: number }>();
+    const noteDeadline = (target: string, at: number): void => {
+      const deadline = deadlines.get(target) ?? { overdue: false, next: Infinity };
+      if (at <= now) deadline.overdue = true;
+      else deadline.next = Math.min(deadline.next, at);
+      deadlines.set(target, deadline);
+    };
+    for (const batch of allJitBatches(memory)) {
+      for (const op of batch.ops) {
+        noteDeadline(batch.target, op.reservation ? jitLaunchAt(op) : jitReserveAt(op));
+      }
+    }
+    for (const op of memory.prepPending) noteDeadline(op.target, op.startAt);
     // An overdue op is one that could not be placed, almost always because its
     // RAM is not free yet. That frees on a completion, which wakes us anyway,
     // so this is a fallback retry rather than the primary path — and retrying
     // faster than a worker can start cannot succeed. Deliberately NOT the
     // landing gap: a backoff and a landing separation are unrelated, and tying
     // them together turns a tight grid into a spin.
-    actions.push({
-      type: "sleep",
-      ms: overdue ? Math.min(OVERDUE_RETRY_MS, exactMs) : exactMs,
-    });
+    for (const [target, deadline] of deadlines) {
+      const exactMs = Number.isFinite(deadline.next) ? deadline.next - now : Infinity;
+      actions.push({
+        type: "sleep",
+        ms: deadline.overdue ? Math.min(OVERDUE_RETRY_MS, exactMs) : exactMs,
+        target,
+      });
+    }
   }
 
   return { actions, directive, switched: stepped.switched };
@@ -1885,9 +2332,11 @@ function settleBatch(memory: DispatchMemory, batch: OpenBatch, at: number): void
     } else {
       planned = signature([...batch.planned].sort((a, b) => LANDING_RANK[a] - LANDING_RANK[b]));
       observed = signature(batch.observed);
-      memory.stats.landingOrderPlanned = planned;
       memory.stats.landingOrderBatches++;
-      memory.stats.landingOrder.set(observed, (memory.stats.landingOrder.get(observed) ?? 0) + 1);
+      const key = planned + "\u0000" + observed;
+      const order = memory.stats.landingOrders.get(key);
+      if (order) order.batches++;
+      else memory.stats.landingOrders.set(key, { planned, observed, batches: 1 });
       if (observed === planned) {
         aggregate.inOrder++;
       } else {
@@ -1974,20 +2423,362 @@ function accountReservedPadding(
 function releasePendingReservation(memory: DispatchMemory, op: PendingJitOp, now: number): void {
   if (!op.reservation) return;
   accountReservedPadding(memory, op, now);
+  const targetHeld = memory.pendingReservedGbByTarget.get(op.target);
+  if (targetHeld) targetHeld[op.role] = Math.max(0, targetHeld[op.role] - op.reservation.gb);
   memory.segmentGb.farm -= op.reservation.gb;
   op.reservation.release();
   op.reservation = undefined;
   op.reservedAt = undefined;
 }
 
+function pendingReservedByRole(
+  memory: DispatchMemory,
+  target: string,
+): Record<JitRole["role"], number> {
+  let held = memory.pendingReservedGbByTarget.get(target);
+  if (!held) {
+    held = { h: 0, w1: 0, g: 0, w2: 0 };
+    memory.pendingReservedGbByTarget.set(target, held);
+  }
+  return held;
+}
+
+function batchWakeAt(batch: PendingJitBatch): number {
+  let at = Infinity;
+  for (const op of batch.ops) {
+    at = Math.min(at, op.reservation ? op.startAt : op.reserveAt ?? op.startAt);
+  }
+  return at;
+}
+
+function wakeEntryLess(a: BatchWakeEntry, b: BatchWakeEntry): boolean {
+  return a.at < b.at || (a.at === b.at && a.batch.batchId < b.batch.batchId);
+}
+
+function pushWakeEntry(queue: TargetWakeQueue, entry: BatchWakeEntry): void {
+  const heap = queue.heap;
+  heap.push(entry);
+  let at = heap.length - 1;
+  while (at > 0) {
+    const parent = (at - 1) >>> 1;
+    if (!wakeEntryLess(entry, heap[parent]!)) break;
+    heap[at] = heap[parent]!;
+    at = parent;
+  }
+  heap[at] = entry;
+}
+
+function popWakeEntry(queue: TargetWakeQueue): BatchWakeEntry | undefined {
+  const heap = queue.heap;
+  const first = heap[0];
+  const last = heap.pop();
+  if (!first || !last || heap.length === 0) return first;
+  let at = 0;
+  while (true) {
+    const left = at * 2 + 1;
+    if (left >= heap.length) break;
+    const right = left + 1;
+    const child = right < heap.length && wakeEntryLess(heap[right]!, heap[left]!) ? right : left;
+    if (!wakeEntryLess(heap[child]!, last)) break;
+    heap[at] = heap[child]!;
+    at = child;
+  }
+  heap[at] = last;
+  return first;
+}
+
+function queueBatchWake(memory: DispatchMemory, batch: PendingJitBatch): void {
+  if (batch.ops.length === 0) return;
+  let queue = memory.jitWakeByTarget.get(batch.target);
+  if (!queue) {
+    queue = { heap: [] };
+    memory.jitWakeByTarget.set(batch.target, queue);
+  }
+  const revision = (batch.wakeRevision ?? 0) + 1;
+  batch.wakeRevision = revision;
+  pushWakeEntry(queue, { at: batchWakeAt(batch), revision, batch });
+}
+
+/** Pop only batch cursors whose next action is inside this wake's horizon.
+ * Stale heap snapshots are repaired lazily, so heartbeat launches and failed
+ * execs never require a depth-wide rebuild before the next completion wake. */
+function dueWakeBatches(
+  memory: DispatchMemory,
+  target: string,
+  horizon: number,
+  max: number,
+): PendingJitBatch[] {
+  const queue = memory.jitWakeByTarget.get(target);
+  if (!queue) return [];
+  const due: PendingJitBatch[] = [];
+  while (due.length < max) {
+    const entry = queue.heap[0];
+    if (!entry) break;
+    if (entry.revision !== (entry.batch.wakeRevision ?? 0) || entry.batch.ops.length === 0) {
+      popWakeEntry(queue);
+      continue;
+    }
+    const actual = batchWakeAt(entry.batch);
+    if (Math.abs(actual - entry.at) > 1e-9) {
+      popWakeEntry(queue);
+      queueBatchWake(memory, entry.batch);
+      continue;
+    }
+    if (entry.at > horizon) break;
+    popWakeEntry(queue);
+    // Invalidate this snapshot while the batch is being advanced.
+    entry.batch.wakeRevision = entry.revision + 1;
+    due.push(entry.batch);
+  }
+  if (queue.heap.length === 0) memory.jitWakeByTarget.delete(target);
+  return due;
+}
+
+function nextTargetWakeAt(memory: DispatchMemory, target: string): number {
+  const queue = memory.jitWakeByTarget.get(target);
+  if (!queue) return Infinity;
+  while (queue.heap.length > 0) {
+    const entry = queue.heap[0]!;
+    if (entry.revision !== (entry.batch.wakeRevision ?? 0) || entry.batch.ops.length === 0) {
+      popWakeEntry(queue);
+      continue;
+    }
+    const actual = batchWakeAt(entry.batch);
+    if (Math.abs(actual - entry.at) > 1e-9) {
+      popWakeEntry(queue);
+      queueBatchWake(memory, entry.batch);
+      continue;
+    }
+    return actual;
+  }
+  memory.jitWakeByTarget.delete(target);
+  return Infinity;
+}
+
+function targetJitQueue(memory: DispatchMemory, target: string): PendingJitBatch[] {
+  return memory.jitByTarget.get(target) ?? [];
+}
+
+function emptyJitRoleCounts(): Record<JitRole["role"], number> {
+  return { h: 0, w1: 0, g: 0, w2: 0 };
+}
+
+function pendingJitRoleCounts(
+  memory: DispatchMemory,
+  target: string,
+): Record<JitRole["role"], number> {
+  let counts = memory.pendingJitRoleCountByTarget.get(target);
+  if (!counts) {
+    counts = emptyJitRoleCounts();
+    memory.pendingJitRoleCountByTarget.set(target, counts);
+  }
+  return counts;
+}
+
+function bumpPendingJitRole(
+  memory: DispatchMemory,
+  target: string,
+  role: JitRole["role"],
+  delta: number,
+): void {
+  const counts = pendingJitRoleCounts(memory, target);
+  counts[role] = Math.max(0, counts[role] + delta);
+  if (counts.h + counts.w1 + counts.g + counts.w2 === 0) {
+    memory.pendingJitRoleCountByTarget.delete(target);
+  }
+}
+
+function* allJitBatches(memory: DispatchMemory): IterableIterator<PendingJitBatch> {
+  for (const pipeline of memory.jitByTarget.values()) yield* pipeline;
+}
+
+function someJitBatch(
+  memory: DispatchMemory,
+  predicate: (batch: PendingJitBatch) => boolean,
+): boolean {
+  for (const batch of allJitBatches(memory)) if (predicate(batch)) return true;
+  return false;
+}
+
+function enqueueJitBatch(memory: DispatchMemory, batch: PendingJitBatch): void {
+  let queue = memory.jitByTarget.get(batch.target);
+  if (!queue) {
+    queue = [];
+    memory.jitByTarget.set(batch.target, queue);
+  }
+  queue.push(batch);
+  memory.pendingJitBatchCount++;
+  memory.pendingJitOpCount += batch.ops.length;
+  memory.unstartedJitBatchCountByTarget.set(
+    batch.target,
+    (memory.unstartedJitBatchCountByTarget.get(batch.target) ?? 0) + 1,
+  );
+  const counts = pendingJitRoleCounts(memory, batch.target);
+  for (const op of batch.ops) counts[op.role]++;
+  queueBatchWake(memory, batch);
+}
+
+function removePendingJitOp(memory: DispatchMemory, batch: PendingJitBatch, op: PendingJitOp): void {
+  const at = batch.ops.indexOf(op);
+  if (at < 0) return;
+  batch.ops.splice(at, 1);
+  memory.pendingJitOpCount--;
+  bumpPendingJitRole(memory, batch.target, op.role, -1);
+  if (batch.ops.length === 0) {
+    memory.pendingJitBatchCount--;
+    if (!batch.started) bumpUnstartedJitBatch(memory, batch.target, -1);
+  }
+}
+
+function clearPendingJitBatch(memory: DispatchMemory, batch: PendingJitBatch): void {
+  if (batch.ops.length === 0) return;
+  memory.pendingJitOpCount -= batch.ops.length;
+  memory.pendingJitBatchCount--;
+  if (!batch.started) bumpUnstartedJitBatch(memory, batch.target, -1);
+  for (const op of batch.ops) bumpPendingJitRole(memory, batch.target, op.role, -1);
+  batch.ops.length = 0;
+  batch.wakeRevision = (batch.wakeRevision ?? 0) + 1;
+}
+
+function bumpUnstartedJitBatch(memory: DispatchMemory, target: string, delta: number): void {
+  const next = Math.max(0, (memory.unstartedJitBatchCountByTarget.get(target) ?? 0) + delta);
+  if (next > 0) memory.unstartedJitBatchCountByTarget.set(target, next);
+  else memory.unstartedJitBatchCountByTarget.delete(target);
+}
+
+function markJitBatchStarted(memory: DispatchMemory, batch: PendingJitBatch): void {
+  if (batch.started) return;
+  batch.started = true;
+  bumpUnstartedJitBatch(memory, batch.target, -1);
+}
+
+/** Cancel only batches which have not crossed the physical start boundary.
+ * This is the downscale primitive: stop admitting leading weakens, while
+ * every batch whose support is already running retains its complete suffix. */
+function cancelUnstartedJitTarget(memory: DispatchMemory, target: string, now: number): void {
+  if ((memory.unstartedJitBatchCountByTarget.get(target) ?? 0) === 0) return;
+  const pipeline = memory.jitByTarget.get(target);
+  if (!pipeline) return;
+  for (const batch of pipeline) {
+    if (batch.started || batch.ops.length === 0) continue;
+    for (const op of batch.ops) releasePendingReservation(memory, op, now);
+    clearPendingJitBatch(memory, batch);
+    // JIT opens its telemetry batch while planning. With no launched op there
+    // is no work to settle or classify as abandoned/no-hack.
+    const open = memory.batches.get(batch.batchId);
+    if (open?.ops === 0) memory.batches.delete(batch.batchId);
+  }
+  compactJitPipeline(memory, target);
+}
+
+function compactJitPipeline(memory: DispatchMemory, target: string): void {
+  const queue = targetJitQueue(memory, target).filter((batch) => batch.ops.length > 0);
+  if (queue.length > 0) memory.jitByTarget.set(target, queue);
+  else memory.jitByTarget.delete(target);
+}
+
 /** Abandon the predicted suffix through the same physical reservation handles
  * that a successful launch transfers to workerExit accounting. */
 function abandonJitPending(memory: DispatchMemory, now: number): void {
-  for (const batch of memory.jitPending) {
+  for (const batch of allJitBatches(memory)) {
     for (const op of batch.ops) releasePendingReservation(memory, op, now);
+    batch.wakeRevision = (batch.wakeRevision ?? 0) + 1;
   }
-  memory.jitPending = [];
+  memory.jitByTarget.clear();
+  memory.jitWakeByTarget.clear();
+  memory.jitRuntimeByTarget.clear();
+  memory.pendingReservedGbByTarget.clear();
+  memory.pendingJitRoleCountByTarget.clear();
+  memory.unstartedJitBatchCountByTarget.clear();
+  memory.drainingJitTargets.clear();
+  memory.pendingJitBatchCount = 0;
+  memory.pendingJitOpCount = 0;
   memory.hackZeroStreak = 0;
+}
+
+/** Drop one target's unlaunched suffix without disturbing any other target's
+ * queue or wake. A topology/segment change is target-local; turning it into a
+ * global flush recreates the cross-server coupling these queues exist to
+ * remove. */
+function abandonJitTarget(memory: DispatchMemory, target: string, now: number): void {
+  const batches = memory.jitByTarget.get(target);
+  if (!batches) return;
+  for (const batch of batches) {
+    for (const op of batch.ops) releasePendingReservation(memory, op, now);
+    if (batch.ops.length > 0) {
+      memory.pendingJitBatchCount--;
+      memory.pendingJitOpCount -= batch.ops.length;
+    }
+    batch.wakeRevision = (batch.wakeRevision ?? 0) + 1;
+  }
+  memory.jitByTarget.delete(target);
+  memory.jitWakeByTarget.delete(target);
+  memory.jitRuntimeByTarget.delete(target);
+  memory.pendingReservedGbByTarget.delete(target);
+  memory.pendingJitRoleCountByTarget.delete(target);
+  memory.unstartedJitBatchCountByTarget.delete(target);
+  memory.drainingJitTargets.delete(target);
+  memory.hackZeroStreak = 0;
+}
+
+/** Maximum farm RAM the already-committed pipeline can still need at one
+ * instant. This is O(roles), not O(depth): each role's fixed schedule quota is
+ * capped by the incrementally maintained number of remaining invocations.
+ * Current resident RAM is a hard floor, covering eager work and pooled workers
+ * which cannot be assigned a future release instant here. */
+function remainingFarmCommitmentGb(memory: DispatchMemory, target: string): number {
+  const runtime = memory.jitRuntimeByTarget.get(target);
+  if (!runtime) return memory.segmentGb.farm;
+  const pending = memory.pendingJitRoleCountByTarget.get(target) ?? emptyJitRoleCounts();
+  const reserved = memory.pendingReservedGbByTarget.get(target) ?? { h: 0, w1: 0, g: 0, w2: 0 };
+  let peak = 0;
+  for (const role of ["h", "w1", "g", "w2"] as const) {
+    const roleGb = runtime.roleGb[role];
+    const resident = memory.heldGbByRole[role] + memory.pool.gbByRole[role] + reserved[role];
+    if (roleGb <= 0) {
+      peak += resident;
+      continue;
+    }
+    // Reservations are already represented by their pending invocation, so
+    // only launched/pool RAM is converted back into occupied slot count.
+    const remainingSlots = pending[role] + Math.ceil(
+      (memory.heldGbByRole[role] + memory.pool.gbByRole[role]) / roleGb - 1e-12,
+    );
+    peak += Math.max(resident, Math.min(runtime.schedule.quotaGb[role], remainingSlots * roleGb));
+  }
+  return Math.max(memory.segmentGb.farm, peak);
+}
+
+/** Raise farm's effective cap to its sunk commitment and reclaim that space
+ * from the lowest-priority other segments first. The requested cap remains a
+ * separate admission boundary; this adjusted plan exists only so prep/share
+ * cannot consume RAM an old farm suffix still needs while it drains. */
+function protectFarmCommitment(segments: readonly Segment[], committedGb: number): Segment[] {
+  const adjusted = segments.map((segment) => ({ ...segment }));
+  const farmAt = adjusted.findIndex((segment) => segment.kind === "farm");
+  if (farmAt < 0) return adjusted;
+  const fleetGb = adjusted.reduce((sum, segment) => sum + segment.gb, 0);
+  const wanted = Math.min(fleetGb, Math.max(adjusted[farmAt]!.gb, committedGb));
+  let transfer = wanted - adjusted[farmAt]!.gb;
+  if (transfer <= 1e-9) return adjusted;
+  // Segment order is priority order. Work from the tail so share/lower-value
+  // prep yields before a higher-priority claim, while committed work still
+  // overrides every speculative allocation when necessary.
+  for (let at = adjusted.length - 1; at >= 0 && transfer > 1e-9; at--) {
+    if (at === farmAt) continue;
+    const take = Math.min(adjusted[at]!.gb, transfer);
+    adjusted[at]!.gb -= take;
+    transfer -= take;
+  }
+  adjusted[farmAt]!.gb = wanted - transfer;
+  // A cap protects quantity, not topology. During a drain, dispatch the
+  // retained farm envelope before speculative prep/share so divisible prep
+  // cannot fragment the atomic host blocks an already-committed H/G role
+  // still needs. Once the commitment fits the requested farm allotment this
+  // function takes the early return above and restores evaluator priority.
+  const [farm] = adjusted.splice(farmAt, 1);
+  adjusted.unshift(farm!);
+  return adjusted;
 }
 
 /** Highest security an invocation can observe in a correctly interleaved
@@ -2153,12 +2944,25 @@ function trackedStrength(tracked: Tracked): number {
  * entries. `prepPending` cannot contribute — its ops are all grows. */
 function nextWeakenLandingAfter(memory: DispatchMemory, host: string, now: number): number {
   let earliest = Infinity;
-  for (const tracked of memory.byTarget.get(host)?.values() ?? []) {
-    if (tracked.kind !== "weaken" || tracked.landing === undefined) continue;
-    if (tracked.landing > now && tracked.landing < earliest) earliest = tracked.landing;
+  const queue = memory.landingByTarget.get(host);
+  if (queue) {
+    // The chunks are landing-ordered, so the FIRST future weaken in them is the
+    // earliest tracked one — but it is only a candidate: an unlaunched pending
+    // weaken can still land sooner, and returning here outright dropped the
+    // pending scan below and reported a later boundary than the real one.
+    tracked:
+    for (const chunk of queue.chunks) {
+      if ((chunk.at(-1)?.op.landing ?? -Infinity) <= now) continue;
+      for (const entry of chunk) {
+        if (entry.op.landing <= now) continue;
+        if (entry.op.kind === "weaken") {
+          earliest = entry.op.landing;
+          break tracked;
+        }
+      }
+    }
   }
-  for (const batch of memory.jitPending) {
-    if (batch.target !== host) continue;
+  for (const batch of targetJitQueue(memory, host)) {
     for (const op of batch.ops) {
       if (op.kind !== "weaken") continue;
       if (op.landing > now && op.landing < earliest) earliest = op.landing;
@@ -2168,23 +2972,10 @@ function nextWeakenLandingAfter(memory: DispatchMemory, host: string, now: numbe
 }
 
 function jitLedgerEntries(memory: DispatchMemory, host: string): LedgerEntry[] {
+  const tracked = flattenLandingQueue(memory.landingByTarget.get(host));
   const entries: LedgerEntry[] = [];
-  for (const [opId, tracked] of memory.byTarget.get(host) ?? []) {
-    if (tracked.landing === undefined) continue;
-    const threads = trackedStrength(tracked);
-    entries.push({
-      op: {
-        kind: tracked.kind,
-        threads,
-        effectThreads: tracked.effectThreads ?? threads,
-        landing: tracked.landing,
-        opId,
-      },
-    });
-  }
   let pendingId = -1;
-  for (const batch of memory.jitPending) {
-    if (batch.target !== host) continue;
+  for (const batch of targetJitQueue(memory, host)) {
     for (const op of batch.ops) {
       entries.push({
         op: {
@@ -2211,7 +3002,22 @@ function jitLedgerEntries(memory: DispatchMemory, host: string): LedgerEntry[] {
       },
     });
   }
-  return entries;
+  entries.sort((a, b) => compareLedgerOps(a.op, b.op));
+  const merged: LedgerEntry[] = [];
+  let trackedAt = 0;
+  let pendingAt = 0;
+  while (trackedAt < tracked.length || pendingAt < entries.length) {
+    const left = tracked[trackedAt];
+    const right = entries[pendingAt];
+    if (!right || (left && compareLedgerOps(left.op, right.op) <= 0)) {
+      merged.push(left!);
+      trackedAt++;
+    } else {
+      merged.push(right);
+      pendingAt++;
+    }
+  }
+  return merged;
 }
 
 /** The ledger without back-references, optionally excluding one pending op.
@@ -2224,6 +3030,9 @@ function jitLedgerEntries(memory: DispatchMemory, host: string): LedgerEntry[] {
  * before dispatching a pending hack" fails on it. The duplication is the
  * cheaper of the two costs. */
 function jitLedger(memory: DispatchMemory, host: string, omit?: PendingJitOp): LedgerOp[] {
+  if (omit === undefined) {
+    return jitLedgerEntries(memory, host).map((entry) => entry.op);
+  }
   const ops: LedgerOp[] = [];
   for (const [opId, tracked] of memory.byTarget.get(host) ?? []) {
     if (tracked.landing === undefined) continue;
@@ -2237,8 +3046,7 @@ function jitLedger(memory: DispatchMemory, host: string, omit?: PendingJitOp): L
     });
   }
   let pendingId = -1;
-  for (const batch of memory.jitPending) {
-    if (batch.target !== host) continue;
+  for (const batch of targetJitQueue(memory, host)) {
     for (const op of batch.ops) {
       if (op === omit) continue;
       ops.push({
@@ -2457,12 +3265,15 @@ function launchDueJit(
   reservationMode: JitReservationMode,
   /** Hack context projected to a future instant — see landingCtxFactory. */
   ctxAt: (horizonMs: number) => HackContext = () => ctx,
+  pipelineOverride?: PendingJitBatch[],
+  hotWake = false,
 ): boolean {
+  const pipeline = pipelineOverride ?? targetJitQueue(memory, server.hostname);
   const required = server.requiredHackingSkill;
   // The hottest instance of the lazy build: this function runs twice per pass,
   // before and after planning.
-  const events = lazySecurityEvents(memory, server.hostname, ctx);
-  for (const batch of memory.jitPending) {
+  const events = hotWake ? undefined : lazySecurityEvents(memory, server.hostname, ctx);
+  for (const batch of hotWake ? [] : pipeline) {
     if (batch.target !== server.hostname) continue;
     // The initial worst-security deadline is a lower bound. Refine only when
     // that bound actually opens; later batches land after this op and cannot
@@ -2475,7 +3286,7 @@ function launchDueJit(
       // weaken landing is O(pending × ledger) and dominated long simulations
       // without changing which not-yet-due operation could launch.
       if (!op.reservation && jitReserveAt(op) <= now) {
-        op.startAt = jitStartAt(op, events(), server, now, ctx);
+        op.startAt = jitStartAt(op, events!(), server, now, ctx);
         op.reserveAt = op.startAt - (JIT_LAUNCH_GUARD_MS - WORKER_STARTUP_GUARD_MS);
       }
     }
@@ -2489,16 +3300,20 @@ function launchDueJit(
     g: memory.heldGbByRole.g + memory.pool.gbByRole.g,
     w2: memory.heldGbByRole.w2 + memory.pool.gbByRole.w2,
   };
-  for (const batch of memory.jitPending) {
-    for (const op of batch.ops) heldByRole[op.role] += op.reservation?.gb ?? 0;
+  const pendingHeld = pendingReservedByRole(memory, server.hostname);
+  if (!hotWake && pendingHeld.h + pendingHeld.w1 + pendingHeld.g + pendingHeld.w2 === 0) {
+    for (const batch of pipeline) {
+      for (const op of batch.ops) pendingHeld[op.role] += op.reservation?.gb ?? 0;
+    }
   }
+  for (const role of ["h", "w1", "g", "w2"] as const) heldByRole[role] += pendingHeld[role];
 
   // Commit due blocks before emitting any work. Pool workers are themselves
   // physical role reservations, so the early heap commitment is needed only
   // on the one-shot path.
   if (!pooling) {
     reservePending:
-    for (const batch of memory.jitPending) {
+    for (const batch of pipeline) {
       if (batch.target !== server.hostname) continue;
       const ordered = [...batch.ops].sort(
         (a, b) => a.startAt - b.startAt || JIT_ROLE_PRIORITY[a.role] - JIT_ROLE_PRIORITY[b.role],
@@ -2542,6 +3357,7 @@ function launchDueJit(
         }
         op.reservation = allocation.reservation;
         op.reservedAt = now;
+        pendingHeld[op.role] += allocation.reservation.gb;
         heldByRole[op.role] += allocation.reservation.gb;
         memory.segmentGb.farm += allocation.reservation.gb;
       }
@@ -2571,14 +3387,13 @@ function launchDueJit(
    * does fold it drains well under 1% before the pass hits its launch cap.
    * See sim/tests/dispatch-scaling.test.ts. */
   let builtLedger: LedgerEntry[] | undefined;
-  const ledgerEntriesOf = (): LedgerEntry[] => builtLedger ??= jitLedgerEntries(memory, server.hostname)
-    .sort((a, b) => compareLedgerOps(a.op, b.op));
+  const ledgerEntriesOf = (): LedgerEntry[] => builtLedger ??= jitLedgerEntries(memory, server.hostname);
 
   // Read HERE, not at the launch loop below that consumes it. This used to be
   // a `.find()` over the eagerly built ledger above, so it saw the pipeline as
   // it stood BEFORE the reservation pass; taking the reading at the point of
   // use instead would silently retime the launch horizon.
-  const nextWeakenLanding = nextWeakenLandingAfter(memory, server.hostname, now);
+  const nextWeakenLanding = hotWake ? Infinity : nextWeakenLandingAfter(memory, server.hostname, now);
 
   /** One forward cursor over the shared, already-sorted ledger.
    *
@@ -2605,6 +3420,20 @@ function launchDueJit(
     return {
       /** State at `at` with `skip` withheld. */
       predicted: (at: number, skip: PendingJitOp): PredictedState => {
+        if (hotWake) {
+          // A weaken wake proves the security boundary, but the instantaneous
+          // MONEY is not an arrival prediction: in a valid interleaved grid it
+          // is routinely low after an earlier H and before that batch's G.
+          // Treating that transient sample as this later hack's landing money
+          // cancelled the hack while all of its support was already paid for.
+          // The batch was sized against the ordered ledger and failures remove
+          // their own dependent suffix, so retain that plan cap here. Live
+          // duration and the startup/deadline check below remain authoritative.
+          return {
+            hackDifficulty: Math.max(server.minDifficulty, server.hackDifficulty),
+            moneyAvailable: server.moneyMax,
+          };
+        }
         // Landings should be non-decreasing; if that ever fails, fall back to
         // the exact whole-ledger fold rather than silently reusing a cursor
         // that has already advanced past `at`.
@@ -2666,7 +3495,7 @@ function launchDueJit(
 
   let emitted = 0;
   batches:
-  for (const batch of memory.jitPending) {
+  for (const batch of pipeline) {
     if (batch.target !== server.hostname) continue;
     // A batch with nothing inside the launch horizon has nothing to launch, and
     // copy-sorting its ops to discover that is pure allocation. At depth this
@@ -2706,11 +3535,19 @@ function launchDueJit(
         // error — and it composes with the plan-time cap below rather than
         // replacing it.
         const landingCtx = ctxAt(op.landing - now + JIT_LAUNCH_GUARD_MS);
-        const safeHackThreads = hackThreadsAtLanding(landingCtx, statics, predicted, baseHackThreads);
+        let safeHackThreads = hackThreadsAtLanding(landingCtx, statics, predicted, baseHackThreads);
+        if (safeHackThreads === undefined && batch.started) {
+          // Do not cancel a started batch, but do not launch its hack into an
+          // unsafe security state either. Keep the suffix pending; the
+          // already-flying weaken will wake this target at the safe boundary.
+          noteBatchMissedWindow(memory, batch, "arrival-security");
+          commitFolded(undefined);
+          continue;
+        }
         if (safeHackThreads === undefined) {
           heldByRole[op.role] -= op.reservation?.gb ?? 0;
           releasePendingReservation(memory, op, now);
-          batch.ops.splice(batch.ops.indexOf(op), 1);
+          removePendingJitOp(memory, batch, op);
           noteBatchSkipped(memory, "arrival-security");
           noteBatchMissedWindow(memory, batch, "arrival-security");
           commitFolded(undefined);
@@ -2718,7 +3555,7 @@ function launchDueJit(
         }
         // Never above the plan-time strength: that one already accounts for the
         // level lookahead against the steal this batch's grow was built for.
-        const shrunkThreads = Math.min(op.threads, op.planStrengthThreads ?? Infinity, safeHackThreads);
+        let shrunkThreads = Math.min(op.threads, op.planStrengthThreads ?? Infinity, safeHackThreads);
         if (shrunkThreads < op.threads - 1e-9) {
           // Ask the committed block for LESS rather than re-placing a smaller
           // one. `opts.threads` is fractional, so the same worker performs the
@@ -2736,12 +3573,21 @@ function launchDueJit(
         // worth a fraction of a thread is not worth an op, and the block it
         // would have run on is better released to the next batch.
         if (shrunkThreads < MIN_HACK_STRENGTH_THREADS) {
+          if (batch.started) {
+            // A started batch is irrevocable. Even a tiny remaining steal is
+            // preferable to paying for support and intentionally earning
+            // nothing; its grow remains over-covered by the planned W2.
+            shrunkThreads = Math.min(op.threads, MIN_HACK_STRENGTH_THREADS);
+            op.strengthThreads = shrunkThreads;
+            memory.drainingJitTargets.add(server.hostname);
+            cancelUnstartedJitTarget(memory, server.hostname, now);
+          } else {
           // The shrink path above no longer releases, so cancelling has to:
           // this op is leaving the batch and its block would otherwise stay
           // charged to the role until the reservation aged out.
           heldByRole[op.role] -= op.reservation?.gb ?? 0;
           releasePendingReservation(memory, op, now);
-          batch.ops.splice(batch.ops.indexOf(op), 1);
+          removePendingJitOp(memory, batch, op);
           noteBatchSkipped(memory, "arrival-money");
           noteBatchMissedWindow(memory, batch, "arrival-money");
           // A run of money-zeroed hacks is a desync, not bad luck: every
@@ -2757,6 +3603,7 @@ function launchDueJit(
           }
           commitFolded(undefined);
           continue;
+          }
         }
         memory.hackZeroStreak = 0;
         commitFolded(op.strengthThreads ?? op.threads);
@@ -2823,7 +3670,13 @@ function launchDueJit(
       // longer a safe launch even if the pure duration still fits on paper.
       if (padding < WORKER_STARTUP_GUARD_MS - 1e-9) {
         const reason = op.placementBlocked ? "placement" : "deadline";
-        if (noteBatchMissedWindow(memory, batch, reason)) noteBatchSkipped(memory, reason);
+        const firstMiss = noteBatchMissedWindow(memory, batch, reason);
+        if (batch.started) {
+          // The launch may land outside its ideal spacer, but discarding it
+          // guarantees a total loss on support already in flight. Complete
+          // the batch; landing telemetry exposes any resulting reorder.
+        } else {
+          if (firstMiss) noteBatchSkipped(memory, reason);
         // A miss costs exactly THIS batch: its unlaunched suffix is dropped
         // and every other batch keeps its own schedule. Dropping the suffix is
         // always security-safe — ops launch in W → G → H order, so whatever is
@@ -2843,8 +3696,9 @@ function launchDueJit(
           if (pending.reservation) heldByRole[pending.role] -= pending.reservation.gb;
           releasePendingReservation(memory, pending, now);
         }
-        batch.ops.length = 0;
+        clearPendingJitBatch(memory, batch);
         continue batches;
+        }
       }
 
       const requestedGb = op.threads * WORKER_RAM[op.kind];
@@ -2954,6 +3808,7 @@ function launchDueJit(
           ...(reduced ? { strengthThreads } : {}),
           jitRole: op.role,
           batchId: batch.batchId,
+          pendingBatch: batch,
           ...(worker ? { workerId: worker.id, spawned: worker.spawn } : {}),
         });
         memory.inFlight[op.kind]++;
@@ -2987,6 +3842,7 @@ function launchDueJit(
           ? Math.min(1, op.strengthThreads / plannedEffect)
           : 1;
 
+      markJitBatchStarted(memory, batch);
       for (const { worker, strengthEffect } of poolPlan.take) {
         noteJobStart(memory.pool, worker.workerId);
         track(worker.hostname, worker.threads, worker.effectThreads, worker.gb, {
@@ -3022,17 +3878,37 @@ function launchDueJit(
       }
       if (op.reservation) {
         accountReservedPadding(memory, op, now);
+        pendingHeld[op.role] = Math.max(0, pendingHeld[op.role] - op.reservation.gb);
         op.reservation = undefined;
         op.reservedAt = undefined;
       } else {
         heldByRole[op.role] += reservation?.gb ?? 0;
         memory.segmentGb.farm += reservation?.gb ?? 0;
       }
-      batch.ops.splice(batch.ops.indexOf(op), 1);
+      removePendingJitOp(memory, batch, op);
+      if (batch.ops.length > 0) {
+        const next = batch.ops.reduce((best, candidate) =>
+          candidate.startAt < best.startAt ? candidate : best
+        );
+        const actualLanding = now + liveDuration + Math.max(0, padding);
+        const relativeLanding = next.landing - op.landing;
+        next.landing = actualLanding + relativeLanding;
+        next.startAt = next.landing - opDurationMs(
+          next.kind,
+          ctx,
+          server.hackDifficulty,
+          required,
+        ) - JIT_LAUNCH_GUARD_MS;
+        next.reserveAt = next.startAt - (JIT_LAUNCH_GUARD_MS - WORKER_STARTUP_GUARD_MS);
+      }
       emitted += poolPlan.take.length + (reservation?.blocks.length ?? 0);
     }
   }
-  memory.jitPending = memory.jitPending.filter((batch) => batch.ops.length > 0);
+  if (hotWake) {
+    for (const batch of pipeline) queueBatchWake(memory, batch);
+  } else {
+    compactJitPipeline(memory, server.hostname);
+  }
   return true;
 }
 
@@ -3073,6 +3949,31 @@ function planJitBatches(
     }
     return builtPlanningLedger;
   };
+  let planningLedgerAt = 0;
+  let planningFoldAt = -Infinity;
+  let planningState: PredictedState = {
+    hackDifficulty: server.hackDifficulty,
+    moneyAvailable: server.moneyAvailable,
+  };
+  const predictedAt = (anchor: number): PredictedState => {
+    const ledger = planningLedgerOf();
+    if (anchor < planningFoldAt) {
+      return predictAtLanding(
+        ctx,
+        statics,
+        { hackDifficulty: server.hackDifficulty, moneyAvailable: server.moneyAvailable },
+        ledger,
+        anchor,
+        true,
+      );
+    }
+    planningFoldAt = anchor;
+    while (planningLedgerAt < ledger.length && ledger[planningLedgerAt]!.landing <= anchor) {
+      planningState = applyLedgerOp(ctx, statics, planningState, ledger[planningLedgerAt]!);
+      planningLedgerAt++;
+    }
+    return planningState;
+  };
   const pending = (
     role: JitRole["role"],
     kind: PendingJitOp["kind"],
@@ -3080,6 +3981,7 @@ function planJitBatches(
     landing: number,
     stock: boolean,
   ): PendingJitOp => ({
+    target: server.hostname,
     role,
     kind,
     threads,
@@ -3093,10 +3995,11 @@ function planJitBatches(
   // is COMMITTED rather than only where it is launched. Planning past it would
   // just build a queue that launchDueJit then refuses.
   const opsPerBatch = opsPerBatchFor(solution.kind);
-  for (let planned = 0; planned < MAX_BATCHES_PER_PASS; planned++) {
-    if (memory.jitPending.length + memory.inFlight.hack >= maxDepth) return;
+  for (let planned = 0; planned < MAX_JIT_BATCHES_PER_MAINTENANCE; planned++) {
+    const targetDepth = targetJitQueue(memory, server.hostname).length;
+    if (targetDepth + memory.inFlight.hack >= maxDepth) return;
     if (
-      liveProcessCount(memory) + memory.jitPending.length * opsPerBatch + opsPerBatch >
+      liveProcessCount(memory) + memory.pendingJitOpCount + opsPerBatch >
         MAX_LIVE_WORKERS
     ) {
       memory.stats.capped.processes++;
@@ -3127,13 +4030,7 @@ function planJitBatches(
       const tail = lastLandingOn(memory, server.hostname);
       if (tail > -Infinity) anchor = Math.max(anchor, tail + schedule.intervalMs);
     }
-    const predicted = predictAtLanding(
-      ctx,
-      statics,
-      { hackDifficulty: server.hackDifficulty, moneyAvailable: server.moneyAvailable },
-      planningLedgerOf(),
-      anchor,
-    );
+    const predicted = predictedAt(anchor);
     const sized = sizeBatchAtLanding(ctx, statics, predicted, solution);
     if (!sized) {
       if (noteJitDecisionMissedWindow(memory, memory.jitDecisionId, "arrival-security")) {
@@ -3219,13 +4116,13 @@ function planJitBatches(
       op.reserveAt = op.startAt - (JIT_LAUNCH_GUARD_MS - WORKER_STARTUP_GUARD_MS);
     }
     const retained = ops.filter((op) => op.threads >= 1);
-    memory.jitPending.push({
+    enqueueJitBatch(memory, {
       target: server.hostname,
       ops: retained,
       batchId: openBatch(memory, solution.kind === "hgw" ? "hgw" : "hwgw", server.hostname, "farm", now),
       decisionId: memory.jitDecisionId,
     });
-    for (const op of retained) {
+    for (const op of [...retained].sort((a, b) => a.landing - b.landing)) {
       planningLedgerOf().push({
         kind: op.kind,
         threads: op.threads,
@@ -3266,6 +4163,10 @@ function launchBatches(
    * there is no launch-to-landing gap for a level to move in. The default is
    * "no projection", for callers that have no exp-rate estimate yet. */
   ctxAt: (horizonMs: number) => HackContext = () => ctx,
+  /** False while a previously committed pipeline drains into a smaller farm
+   * segment. Existing cursors still launch; only creation of new batches is
+   * stopped, so prep gains capacity as the remaining role peak falls. */
+  admitJitBatches = true,
 ): void {
   const host = server.hostname;
   const difficulty = server.hackDifficulty;
@@ -3283,20 +4184,116 @@ function launchBatches(
   // shotgun deliberately relies on same-tick FIFO, so both retain the eager
   // batch-atomic implementation below.
   if (jit && memory.mode !== "shotgun" && !shotgun && borrow === undefined) {
-    const roles = jitRoles(solution, server, ctx, pooling);
-    const schedule = chooseJitSchedule(
-      roles,
-      segmentCapGb,
-      intervalMs,
-      hostBlocksGb ? { hostBlocksGb, divisibleBlockGb: WORKER_RAM.weaken } : undefined,
-    );
-    const worstWeakenMs = opDurationMs("weaken", ctx, jitWorstDifficulty(solution, server), required);
+    const drainingRuntime = !admitJitBatches && targetJitQueue(memory, host).length > 0
+      ? memory.jitRuntimeByTarget.get(host)
+      : undefined;
+    let jitSolution = drainingRuntime?.solution ?? solution;
+    let roles = jitRoles(jitSolution, server, ctx, pooling);
+    let schedule = drainingRuntime?.schedule ?? chooseJitSchedule(
+        roles,
+        segmentCapGb,
+        intervalMs,
+        hostBlocksGb ? { hostBlocksGb, divisibleBlockGb: WORKER_RAM.weaken } : undefined,
+      );
+    let worstWeakenMs = opDurationMs("weaken", ctx, jitWorstDifficulty(jitSolution, server), required);
+    // A solve can grow by a few hack threads after a level/fleet generation
+    // while the physical topology is unchanged. If that larger atomic hack no
+    // longer packs, keep the last executable solve and recompute its cadence
+    // against TODAY'S segment and hosts. This is the normal downscale path:
+    // preserve JIT windows and income instead of flushing support and falling
+    // into weaken-time hack padding merely because the newest optimum is too
+    // large to place.
+    if (!drainingRuntime && (!schedule || schedule.intervalMs >= worstWeakenMs)) {
+      const cached = memory.jitRuntimeByTarget.get(host);
+      // The cache belongs to this target and mode and is consulted only after
+      // the current optimum failed. Retargets/mode changes clear it, while a
+      // later topology expansion retries the optimum before this branch, so a
+      // substantially smaller executable solve is continuity, not pinning.
+      if (cached && cached.solution.kind === solution.kind) {
+        const fallbackRoles = jitRoles(cached.solution, server, ctx, pooling);
+        const fallback = chooseJitSchedule(
+          fallbackRoles,
+          segmentCapGb,
+          cached.solution.kind === "hgw" ? HGW_MIN_INTERVAL_MS : INTERVAL_MS,
+          hostBlocksGb ? { hostBlocksGb, divisibleBlockGb: WORKER_RAM.weaken } : undefined,
+        );
+        const fallbackWorstWeakenMs = opDurationMs(
+          "weaken",
+          ctx,
+          jitWorstDifficulty(cached.solution, server),
+          required,
+        );
+        if (fallback && fallback.intervalMs < fallbackWorstWeakenMs) {
+          jitSolution = cached.solution;
+          roles = fallbackRoles;
+          schedule = fallback;
+          worstWeakenMs = fallbackWorstWeakenMs;
+        }
+      }
+    }
+    if (!schedule || schedule.intervalMs >= worstWeakenMs) {
+      // Neither the optimum nor its last executable shape fits the new farm
+      // allotment. Solve the same target/mode under the actual segment and
+      // atomic-host caps. This is a genuine JIT downscale: it changes batch
+      // strength, not timing safety, and is attempted only on a rare capacity
+      // transition rather than on every pump.
+      const largestBlockGb = Math.min(segmentCapGb, hostBlocksGb?.[0] ?? segmentCapGb);
+      const manipulation = influence && influence.valuePerOp > 0
+        ? { valuePerOp: influence.valuePerOp, side: influence.side }
+        : undefined;
+      const downscaled = solveCycle(ctx, staticsOf(server), 1, {
+        batchGb: Math.max(WORKER_RAM_FLOOR, segmentCapGb),
+        hackBlockGb: Math.max(WORKER_RAM_FLOOR, largestBlockGb),
+        growBlockGb: Math.max(WORKER_RAM_FLOOR, largestBlockGb),
+        ...(hostBlocksGb ? { hostBlocksGb: [...hostBlocksGb] } : {}),
+        farmGb: Math.max(WORKER_RAM_FLOOR, segmentCapGb),
+      }, manipulation, solution.kind);
+      if (downscaled) {
+        const downscaledRoles = jitRoles(downscaled, server, ctx, pooling);
+        const downscaledSchedule = chooseJitSchedule(
+          downscaledRoles,
+          segmentCapGb,
+          downscaled.kind === "hgw" ? HGW_MIN_INTERVAL_MS : INTERVAL_MS,
+          hostBlocksGb ? { hostBlocksGb, divisibleBlockGb: WORKER_RAM.weaken } : undefined,
+        );
+        const downscaledWorstWeakenMs = opDurationMs(
+          "weaken",
+          ctx,
+          jitWorstDifficulty(downscaled, server),
+          required,
+        );
+        if (downscaledSchedule && downscaledSchedule.intervalMs < downscaledWorstWeakenMs) {
+          jitSolution = downscaled;
+          roles = downscaledRoles;
+          schedule = downscaledSchedule;
+          worstWeakenMs = downscaledWorstWeakenMs;
+        }
+      }
+    }
     if (schedule && schedule.intervalMs < worstWeakenMs) {
+      const roleGb = emptyJitRoleCounts();
+      for (const role of roles) roleGb[role.role] = role.gb;
+      if (drainingRuntime) {
+        // The hot wake consumes this cap without revisiting segment policy.
+        // Tighten it as the retained peak falls, while preserving the old role
+        // schedule which the remaining batches were committed against.
+        drainingRuntime.segmentCapGb = segmentCapGb;
+        drainingRuntime.reservationMode = reservationMode;
+      } else {
+        memory.jitRuntimeByTarget.set(host, {
+          solution: jitSolution,
+          schedule,
+          segmentCapGb,
+          pooling,
+          reservationMode,
+          roleGb,
+        });
+      }
       // Saturation is the minimum-interval role envelope, not the envelope of
       // the slower cadence today's fleet can afford. Infrastructure purchases
       // may unlock each faster step, so treating the present cadence as an
       // absolute cap creates a self-fulfilling RAM-growth stall.
-      memory.depthCapGb = solution.jitSaturationGb ?? jitCapacity(roles, intervalMs).totalGb;
+      memory.depthCapGb = jitSolution.jitSaturationGb ?? jitCapacity(roles, intervalMs).totalGb;
       memory.depthCapHost = host;
       // The executable envelope: what a sustained pipeline on this target
       // actually holds. Share reserves against it (see the share block in
@@ -3308,17 +4305,23 @@ function launchBatches(
       // immediately, so that RAM cannot be recovered by asking share for it
       // afterwards — which is precisely why a reserve is needed even though
       // share is preemptible and prep/other batches are not.
-      memory.farmPassDemandGb = MAX_BATCHES_PER_PASS * solution.ramPerBatch;
+      memory.farmPassDemandGb = MAX_BATCHES_PER_PASS * jitSolution.ramPerBatch;
       if (!launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, pooling, reservationMode, ctxAt)) return;
-      planJitBatches(memory, solution, server, now, ctx, schedule, ctxAt, influence);
+      if (admitJitBatches && !memory.drainingJitTargets.has(host)) {
+        planJitBatches(memory, jitSolution, server, now, ctx, schedule, ctxAt, influence);
+      }
       launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, pooling, reservationMode, ctxAt);
       return;
     }
+    // A shrinking allotment is a drain, never permission to open an eager
+    // replacement wave. With no pending cursor left, resident farm workers
+    // simply finish and the retained claim falls on their completions.
+    if (!admitJitBatches) return;
     // Pending batches have not launched their hack yet. If the farm segment
     // shrank below the executable role envelope, abandon them safely and let
     // the simple atomic path take over once the target is genuinely prepped.
-    if (memory.jitPending.some((batch) => batch.target === host)) {
-      abandonJitPending(memory, now);
+    if (targetJitQueue(memory, host).length > 0) {
+      abandonJitTarget(memory, host, now);
       memory.lastAnchor = -Infinity;
       if (!isPrepped(server)) return;
     }

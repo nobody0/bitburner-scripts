@@ -185,7 +185,11 @@ money ≥ 90 % max), +10 % hysteresis on same-generation scores, 60 s dwell. Whe
 every dollar score is zero, the evaluator instead chooses the best expected
 experience-rate target after the dwell even if it is cold; the farm dispatcher
 prepares it before batching.
-**Segment order** is fixed `[farm, prep, share]`. The old ≥25 % reorder rule
+**Segment order** is value-driven prep/farm followed by `[charge, share]` when
+those claimants have positive nominal allotments. Share is rounded down to
+whole 4 GB workers; its rounding remainder stays with farm. Charge is a
+host-local one-shot allocation and share remains the final, evictable tail.
+The old ≥25 % reorder rule
 (and an economics-driven 60 % prep share) was A/B-tested and LOST — the model
 prefers a big share because the farm's loss is share-invariant when RAM-bound,
 but the dispatcher's per-pass prep op cap means prep cannot actually use it.

@@ -114,8 +114,9 @@ experience of newly available targets plus the worker RAM of every newly rootabl
 `shared/strategy/arbiter.ts:42` contends exactly `money` and `time`; RAM is brokered separately. The broker
 carves a dodge *arena* out of the rooted fleet — ladder `home` → `n00dles` → `foodnstuff`, growing further only
 for a request starved past `STARVATION_MS = 5 s` (`shared/ram/broker.ts:327-395`) — and the rest is the
-dispatcher's; only work at or above `progression:install-freeze` may discard an in-flight farm op
-(`shared/ram/broker.ts:14`). The fleet's third segment is `share` (`shared/strategy/share.ts`).
+dispatcher’s. Reclamation may stop share or an idle pooled worker, but never an active HGW/prep/charge call;
+elapsed worker time is sunk and killing it loses the investment. The fleet’s residual tenants are one-shot
+`charge` and freely evictable `share` (`shared/strategy/stanek/charge.ts`, `shared/strategy/share.ts`).
 
 ## Challenges
 

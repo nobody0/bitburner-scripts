@@ -11,6 +11,7 @@ import {
 } from "../../shared/strategy/dnet/courier.ts";
 import { captureLaunch } from "../lib/launch-shared.ts";
 import type { DnetControllerLaunch } from "./launch.ts";
+import type { DnetProbeRefresh, DnetProbeReport } from "./launch.ts";
 import {
   coverage,
   foldLogDrain,
@@ -36,9 +37,9 @@ import {
   type Task,
   type TaskKind,
 } from "../../shared/strategy/dnet/plan.ts";
-import { DNET_PRIORITY, choosePreemptionVantage, type PreemptionCandidate } from "../../shared/strategy/dnet/priority.ts";
+import { DNET_PRIORITY, strategicQueueDepth, choosePreemptionVantage, compareQueuedDnetWork, isSameTurn, type PreemptionCandidate } from "../../shared/strategy/dnet/priority.ts";
 import { planFarm, type FarmHost, type FarmKind, type PromoteSymbol } from "../../shared/strategy/dnet/farm.ts";
-import { chooseLabVantage, holdHostFrom, planInduce, planStasis, stasisTargetDepths, unconqueredBands, type HoldHost, type HoldView } from "../../shared/strategy/dnet/hold.ts";
+import { chooseLabVantage, planInduce, planStasis, stasisTargetDepths, unconqueredBands, type HoldHost, type HoldView } from "../../shared/strategy/dnet/hold.ts";
 import { looseCandidates, type LooseTarget } from "../../shared/strategy/dnet/oracle.ts";
 import type { PasswordEvidence } from "../../shared/strategy/dnet/evidence.ts";
 import { exactNeighbourClueEpoch } from "../../shared/strategy/dnet/file-clues.ts";
@@ -47,10 +48,19 @@ import {
   STORM_BURST_MS,
   STORM_COOLDOWN_MS,
   STORM_QUIET_MS,
+  INDUCE_WAIT_MS,
+  authenticateWaitMs,
+  heartbleedWaitMs,
+  knownDnetRefusalWaitMs,
   isLabyrinth,
   labStage,
   msPerHostEvent,
   msPerHostEventAny,
+  phishWaitMs,
+  promoteWaitMs,
+  reclaimWaitMs,
+  stasisWaitMs,
+  type DnetTimingProfile,
 } from "../../shared/strategy/dnet/rates.ts";
 import {
   emptyField,
@@ -64,15 +74,14 @@ import {
   BEAT_WINDOW_MS,
   CONTROLLER_CALLS,
   DNET_PROTOCOL,
-  JOB_TIMEOUT_MS,
   KIND_CALLS,
-  LONG_JOB_BEAT_MS,
-  NO_RESPAWN_KINDS,
   THREAD_SCALED_KINDS,
   controllerIsLive,
   costOf,
   dnetRealm,
-  hardCancelEligible,
+  hardCancelReady,
+  jobWatchdogExpired,
+  orderCalls,
   priceCalls,
   proberReserveGb,
   signalWake,
@@ -80,6 +89,7 @@ import {
   type AgentHandle,
   type ControllerDeps,
   type ControllerHandle,
+  type DnetDelayRequest,
   type HostEntry,
   type Order,
   type Report,
@@ -98,14 +108,17 @@ import {
 } from "./wire.ts";
 import { initTelemetry } from "../lib/telemetry.ts";
 import { realmSleep } from "../lib/wake.ts";
+import { preemptionCandidateFromHandle } from "./priority.ts";
+import { emptyDnetProfit, hasDnetProfit, mergeDnetProfit } from "./profit.ts";
 
 /** The darknet controller: one long-lived script that decides, and never acts.
- * It replaces `overseer.ts`. The shape is the spec's: one `hosts` map holding
+ * Its shape follows the spec: one `hosts` map holding
  * both what we KNOW about each host and the process RUNNING on it. It stages
  * ORDERS as data; the agent runs them through a `switch` of direct calls. It
  * learns of completion the instant each agent's `done` promise settles, and it
- * cancels by resolving that agent's cancel promise from outside. It OBSERVES
- * only through synchronous reads and never BLOCKS. */
+ * requests cooperative cancellation and hard-kills a body that remains inside
+ * a blocking call. It OBSERVES only through synchronous reads and never
+ * BLOCKS. */
 
 const BEAT_INTERVAL_MS = 15_000;
 const TICK_MS = 2_000;
@@ -149,6 +162,7 @@ export async function main(ns: NS): Promise<void> {
   const proberFile = "dnet/prober.js";
   const payloads = ["dnet/agent.js", proberFile];
   let charisma = mission.charisma;
+  let timingProfile: DnetTimingProfile | undefined;
   let netDepth: number | undefined;
   let bitNode: number | undefined;
 
@@ -177,6 +191,7 @@ export async function main(ns: NS): Promise<void> {
   let labExpected = true;
   const backdoors = new Map<string, number>();
   let karmaLoss = 0;
+  let profit = emptyDnetProfit();
   let lastPhishCacheAt: number | undefined;
   let lastStormFiredAt: number | undefined;
   let stormStampPrior: number | undefined;
@@ -194,6 +209,37 @@ export async function main(ns: NS): Promise<void> {
   const needsInventory = new Set<string>();
   const labFields = new Map<string, LabField>();
   const orderById = new Map<string, Order>();
+  interface OrderCompletion {
+    promise: Promise<void>;
+    resolve: () => void;
+    settled: boolean;
+  }
+  const orderDone = new Map<string, OrderCompletion>();
+  const newCompletion = (id: string): OrderCompletion => {
+    let finish!: () => void;
+    const completion: OrderCompletion = {
+      promise: new Promise<void>((resolve) => { finish = resolve; }),
+      resolve: () => {
+        if (completion.settled) return;
+        completion.settled = true;
+        finish();
+      },
+      settled: false,
+    };
+    orderDone.set(id, completion);
+    return completion;
+  };
+  const completionFor = (id: string): OrderCompletion => {
+    const existing = orderDone.get(id);
+    if (existing !== undefined) return existing;
+    return newCompletion(id);
+  };
+  const settleCompletion = (id: string): void => {
+    const completion = orderDone.get(id);
+    if (completion === undefined) return;
+    completion.resolve();
+  };
+  let derivePass = 0;
   let residentsSeenEver = 0;
   let residentsLost = 0;
   let standDown = false;
@@ -235,14 +281,6 @@ export async function main(ns: NS): Promise<void> {
     return created;
   };
   const liveEntries = (): HostEntry[] => [...hosts.values()].filter((e) => e.agent !== undefined);
-  const agentLastLife = (entry: HostEntry): number => {
-    const agent = entry.agent;
-    if (agent === undefined) return 0;
-    if (agent.order.longLived) return Math.max(agent.beatAt, agent.beatAt + LONG_JOB_BEAT_MS);
-    if (agent.order.kind !== "idle" && agent.startedAt !== undefined) return Math.max(agent.beatAt, agent.startedAt + JOB_TIMEOUT_MS);
-    return agent.beatAt;
-  };
-
   const expiryOpts = (): ExpiryOpts => ({
     ...(netDepth !== undefined ? { netDepth } : {}),
     ...(bitNode !== undefined ? { bitNode } : {}),
@@ -271,7 +309,9 @@ export async function main(ns: NS): Promise<void> {
     if (agent === undefined || agent.order.kind === "idle") return;
     if (agent.cancelReason === undefined) {
       agent.cancelReason = reason;
-      agent.cancelFire?.();
+      // Give cooperative bodies one derive pass to return resumable state.
+      // A body blocked in one Darknet call is then stopped by the hard sweep.
+      agent.cancelRequestedPass = derivePass;
     }
   };
 
@@ -299,16 +339,35 @@ export async function main(ns: NS): Promise<void> {
     forgetGuesses(hostname);
     retireOrders(hostname, reason, (o) => o.kind === "attempt");
   };
+  /** True when the process was ours to kill and is now certainly gone. Never
+   * the controller's own pid, and a throw (host deleted) counts as gone. */
+  const killPid = (hostname: string, pid: number | undefined): void => {
+    if (pid === undefined || pid <= 0 || pid === ns.pid) return;
+    try { if (ns["isRunning"](pid, hostname)) ns["kill"](pid); } catch { /* host gone */ }
+  };
   const retireVantage = (hostname: string, reason: string): void => {
     const entry = hosts.get(hostname);
     if (entry !== undefined) {
       if (entry.agent !== undefined && entry.agent.order.kind !== "idle") {
         entry.agent.settle({ id: entry.agent.order.id, kind: entry.agent.order.kind, host: entry.agent.order.host, from: entry.agent.order.from, ok: false, died: true, detail: reason });
       }
-      for (const o of entry.staged ?? []) orderById.delete(o.id);
+      for (const o of entry.staged ?? []) {
+        orderById.delete(o.id);
+        settleCompletion(o.id);
+      }
+      if (entry.pendingOrder !== undefined && entry.pendingOrder.id !== entry.agent?.order.id) {
+        settleCompletion(entry.pendingOrder.id);
+      }
       entry.agent = undefined;
       entry.staged = [];
       entry.pendingOrder = undefined;
+      entry.probeRefresh?.settle(undefined);
+      entry.probeRefresh = undefined;
+      // A prober outlives the agent beside it (a finished `pin` leaves one
+      // standing alone), and forgetting its pid without killing it strands
+      // 1.8 GB the replant then has to exec a SECOND prober around. Kill it
+      // here so the re-plant starts from an empty host.
+      killPid(hostname, entry.prober?.pid);
       entry.prober = undefined;
       entry.bootstrap = undefined;
       entry.lastPlantAt = undefined;
@@ -418,8 +477,52 @@ export async function main(ns: NS): Promise<void> {
     foldLogDrain(hosts.get(hostname), outcome);
     pendingLogDrains.push({ hostname, outcome });
   };
+  const expectedDelayMs = (request: DnetDelayRequest): number | undefined => {
+    const target = hosts.get(request.host);
+    const direct = request.operation === "authenticate"
+      || request.operation === "heartbleed"
+      || request.operation === "memoryReallocation"
+      || request.operation === "induceServerMigration";
+    const neighbours = direct
+      ? fresh<string[]>(hosts.get(request.from), "neighbours", Date.now(), expiryOpts())
+      : undefined;
+    const knownRefusal = knownDnetRefusalWaitMs(request.operation, {
+      targetGone: target?.goneAt !== undefined,
+      ...(direct && neighbours !== undefined && request.host !== request.from ? { direct: neighbours.includes(request.host) } : {}),
+      selfTarget: request.host === request.from,
+      stationary: target?.isStationary,
+      blockedRam: target?.blockedRam,
+      heartbleedUnderleveled: request.operation === "heartbleed" && timingProfile !== undefined && target?.requiredCharisma !== undefined
+        ? timingProfile.charisma < target.requiredCharisma
+        : undefined,
+      stasisLimitReached: request.operation === "setStasisLink" && request.shouldLink === true
+        ? stasisLinked.size >= stasisLimit
+        : undefined,
+    });
+    if (knownRefusal !== undefined) return knownRefusal;
+
+    const profile = timingProfile;
+    if (request.operation === "induceServerMigration") return INDUCE_WAIT_MS;
+    if (profile === undefined) return undefined;
+    if (request.operation === "memoryReallocation") return reclaimWaitMs(profile.charisma);
+    if (request.operation === "phishingAttack") return phishWaitMs(profile.charisma);
+    if (request.operation === "promoteStock") return promoteWaitMs(profile.charisma);
+    if (request.operation === "setStasisLink") return stasisWaitMs(profile.charisma);
+
+    if (target?.difficulty === undefined || target.depth === undefined || target.requiredCharisma === undefined) return undefined;
+    const timingTarget = {
+      ...(target.modelId !== undefined ? { modelId: target.modelId } : {}),
+      difficulty: target.difficulty,
+      depth: target.depth,
+      requiredCharismaSkill: target.requiredCharisma,
+    };
+    if (request.operation === "heartbleed") return heartbleedWaitMs(timingTarget, profile, request.threads);
+    return authenticateWaitMs(timingTarget, profile, request.threads, request.correctChars ?? 0);
+  };
   const deps: ControllerDeps = {
     charisma: () => charisma,
+    timing: () => timingProfile,
+    expectedDelayMs,
     ledgerFor: (host) => hosts.get(host)?.attempts,
     ringFor: (host) => hosts.get(host)?.ring,
     recordAttempt, recordLogDrain, recordCredential, recordLoose, recordProvisional,
@@ -454,14 +557,20 @@ export async function main(ns: NS): Promise<void> {
     const view = planningView(host, at, expiry);
     if (view.maxRam === undefined) return 0;
     const blocked = view.blockedRam ?? 0;
-    const fixedReserve = reserveProber ? (hostname === selfHost ? controllerGb : proberGb) : 0;
+    // Darkweb keeps BOTH pieces of infrastructure beside its spawn-chain
+    // agent. Ordinary hosts keep only the prober; the lab walker keeps neither.
+    const fixedReserve = reserveProber ? proberGb + (hostname === selfHost ? controllerGb : 0) : 0;
     return Math.max(0, view.maxRam - blocked - fixedReserve);
   };
   const killWalkHostProber = (host: string): void => {
+    // The controller host is never a labyrinth walk vantage. Keep that
+    // topology invariant explicit so this helper can never kill infrastructure
+    // while making room for a walker.
+    if (host === selfHost) return;
     const entry = hosts.get(host);
     const probe = entry?.prober;
     if (probe === undefined || probe.pid <= 0) return;
-    ns["kill"](probe.pid);
+    killPid(host, probe.pid);
     entry!.prober = { ...probe, pid: 0 };
   };
 
@@ -491,6 +600,7 @@ export async function main(ns: NS): Promise<void> {
       }
     }
     if (result.karmaLoss !== undefined) karmaLoss += result.karmaLoss;
+    mergeDnetProfit(profit, result.profit);
     if (result.charismaNeeded !== undefined) charismaNeeded = Math.max(charismaNeeded ?? 0, result.charismaNeeded);
     if ((result.codes ?? {})[LOCAL_CODE.PhishingCacheWon] !== undefined) lastPhishCacheAt = at;
   };
@@ -524,8 +634,9 @@ export async function main(ns: NS): Promise<void> {
   const onReport = (report: Report): void => {
     const order = orderById.get(report.id);
     absorb(report);
-    if (report.dirtied && report.kind !== "inventory") {
-      needsInventory.add(report.host);
+    const filesInvalidated = report.hosts?.some((host) => host.invalidates?.includes("files")) === true;
+    if (filesInvalidated && report.kind !== "inventory") {
+      for (const host of report.hosts ?? []) if (host.invalidates?.includes("files")) needsInventory.add(host.hostname);
       fileListJobs();
       signalDerive();
     }
@@ -551,7 +662,8 @@ export async function main(ns: NS): Promise<void> {
       const linked = order?.unpin !== true;
       recordStasis(report.host, linked);
       if (linked && order?.edge !== undefined) killWalkHostProber(report.host);
-      retireVantage(report.host, "pin process ending");
+      // The pin process intentionally ends without spawn. Its staged queue is
+      // the controller's handoff contract, so do not retire/clear the vantage.
       signalDerive();
     }
     if (report.kind === "storm") {
@@ -581,32 +693,56 @@ export async function main(ns: NS): Promise<void> {
     } else if (report.ok === false && report.targetState === undefined) {
       note(LOCAL_CODE.JobDied);
     }
+    // Per-host work accounting, for the panel and the beat. `idle` is not
+    // work, and a retired STAGED order never ran on anyone.
+    if (report.kind !== "idle") {
+      const runner = hosts.get(report.from);
+      if (runner !== undefined) {
+        if (report.ok) runner.completed = (runner.completed ?? 0) + 1;
+        else {
+          runner.failed = (runner.failed ?? 0) + 1;
+          if (report.detail !== undefined) runner.lastError = report.detail.slice(0, 200);
+        }
+      }
+    }
     orderById.delete(report.id);
+    settleCompletion(report.id);
     // Completion may make new work possible; re-derive promptly.
     if (report.died !== true) signalDerive();
   };
 
   const stage = (entry: HostEntry, order: Order): boolean => {
     const staged = entry.staged ??= [];
-    if (staged.length >= MAX_STAGED_PER_HOST) return false;
     if (staged.some((o) => o.id === order.id) || entry.agent?.order.id === order.id) return false;
+    // The cap protects an agent from accumulating strategic work. Admission
+    // housekeeping neither blocks the lane nor counts against that cap; it may
+    // join a full blocking queue and sorts to its front below.
+    const strategicDepth = strategicQueueDepth(staged);
+    if (!isSameTurn(order.kind) && strategicDepth >= MAX_STAGED_PER_HOST) return false;
     if (order.kind === "storm") {
       stormStampPrior = lastStormFiredAt;
       lastStormFiredAt = Date.now();
       stormWipeAt = lastStormFiredAt + STORM_QUIET_MS;
     }
     orderById.set(order.id, order);
-    const at = staged.findIndex((o) => o.priority > order.priority);
+    // Only dependency targets have latches. A stable task id may be derived
+    // again, and that generation must not inherit an earlier settled promise.
+    const completion = orderDone.get(order.id);
+    if (completion?.settled) newCompletion(order.id);
+    const at = staged.findIndex((o) => compareQueuedDnetWork(order, o) < 0);
     if (at === -1) staged.push(order); else staged.splice(at, 0, order);
     signalWake(entry);
     return true;
   };
 
+  /** The backstop, never the first move: kill an agent that was asked to stop
+   * on an EARLIER pass and is still running, which means its body is parked in
+   * one blocking call and cannot see the flag itself. */
   const hardCancelSweep = (): number => {
     let killed = 0;
     for (const entry of hosts.values()) {
       const agent = entry.agent;
-      if (agent === undefined || agent.order.kind === "idle" || agent.pid <= 0 || agent.cancelReason === undefined || !hardCancelEligible(agent)) continue;
+      if (agent === undefined || agent.order.kind === "idle" || !hardCancelReady(agent, derivePass)) continue;
       let alive = false;
       try { alive = ns["isRunning"](agent.pid, entry.hostname); } catch { alive = false; }
       if (!alive) continue;
@@ -639,6 +775,10 @@ export async function main(ns: NS): Promise<void> {
     return {
       hostname: entry.hostname,
       ...(view.depth !== undefined ? { depth: view.depth } : {}),
+      // `planWalk` REFUSES a lab candidate whose blocked RAM is not fresh, and
+      // refuses again while any of it remains. Leaving it off the projection
+      // parks the whole labyrinth walk on `ram-unknown` for ever.
+      ...(view.blockedRam !== undefined ? { blockedRam: view.blockedRam } : {}),
       agentAlive: entry.agent !== undefined,
       hasCredential: vault.has(entry.hostname),
       ...(view.neighbours !== undefined ? { neighbours: view.neighbours } : {}),
@@ -653,6 +793,12 @@ export async function main(ns: NS): Promise<void> {
     for (const entry of hosts.values()) {
       const orders: Order[] = [];
       if (entry.agent !== undefined && entry.agent.order.kind !== "idle") orders.push(entry.agent.order);
+      // The CLAIMED order counts too. `preparePlant` moves it here for the whole
+      // length of a plant, and a target that is invisible to `busy()` for those
+      // seconds gets the same work derived again onto a second vantage.
+      if (entry.pendingOrder !== undefined && entry.pendingOrder.id !== entry.agent?.order.id) {
+        orders.push(entry.pendingOrder);
+      }
       orders.push(...(entry.staged ?? []));
       for (const o of orders) {
         if (o.kind === "idle" || o.kind === "bootstrapReclaim") continue;
@@ -711,7 +857,7 @@ export async function main(ns: NS): Promise<void> {
   const projectLooseTargets = (at: number, expiry: ExpiryOpts): LooseTarget[] =>
     [...hosts.keys()].map((hostname) => projectLooseTarget(hostname, at, expiry));
 
-  // --- the walk / pins / hold plan (ported from overseer) -------------------
+  // --- the walk / pins / hold plan ------------------------------------------
   const planWalk = (
     at: number, expiry: ExpiryOpts, holdHosts: readonly HoldHost[],
     refuse: (host: string, why: string, detail: string) => void,
@@ -818,23 +964,23 @@ export async function main(ns: NS): Promise<void> {
 
   // --- filing tasks as orders -----------------------------------------------
   const fileTask = (task: Task): boolean => {
-    const entry = hosts.get(task.from);
-    if (!entry || entry.agent === undefined) {
-      // Only a host with a live agent can run an order. A plant target may not
-      // have one yet; the plant runs on `from`, which does.
-      if (!entry || entry.agent === undefined) {
-        if (task.from !== task.host && hosts.get(task.from)?.agent === undefined) return false;
-        if (hosts.get(task.from)?.agent === undefined) return false;
-      }
-    }
+    // Only a host with a live agent can run an order. A plant TARGET may not
+    // have one yet; the plant runs on `from`, which does.
     const runner = hosts.get(task.from);
     if (!runner || runner.agent === undefined) return false;
-    const budget = budgets[task.kind] ?? budgets["inventory"]!;
     const isWalk = task.kind === "walk";
-    if (isWalk) killWalkHostProber(task.from);
+    // A stasis edge is a remote recovery guarantee. Spend that host's RAM on
+    // work, not spawn; unpin is the exception because success removes it.
+    const controllerManaged = isWalk
+      || (stasisLinked.has(task.from) && !(task.kind === "pin" && task.unpin === true));
+    const budget = priceCalls(ns, orderCalls(task.kind, controllerManaged));
     const room = usableGb(task.from, Date.now(), expiryOpts(), !isWalk);
     const threads = threadsFor(room, budget, THREAD_SCALED_KINDS.has(task.kind), task.threads ?? 1);
     if (threads < 1 || budget * threads > room) return false;
+    // Only once the order is certain to be staged: a refused walk that had
+    // already killed the prober would leave the lab candidate — the one host
+    // `reviveProbers` deliberately skips — blind for good.
+    if (isWalk && strategicQueueDepth(runner.staged ?? []) < MAX_STAGED_PER_HOST) killWalkHostProber(task.from);
     const order: Order = {
       id: task.id,
       kind: task.kind,
@@ -846,6 +992,7 @@ export async function main(ns: NS): Promise<void> {
       longLived: task.kind === "walk",
       label: task.reason,
       jobThreads: threads,
+      ...(controllerManaged ? { controllerManaged: true } : {}),
       ...(task.kind === "reclaim" && task.host === task.from ? (() => {
         const maxRam = fresh<number>(hosts.get(task.from), "maxRam", Date.now(), expiryOpts());
         const threshold = maxRam === undefined ? undefined : maxRam - proberGb - budget * (threads + 1);
@@ -858,12 +1005,15 @@ export async function main(ns: NS): Promise<void> {
       ...(task.edge !== undefined ? { edge: task.edge } : {}),
       ...(task.unpin === true ? { unpin: true } : {}),
       ...(task.guessId !== undefined && guessFor.has(task.guessId) ? { guess: guessFor.get(task.guessId)! } : {}),
+      ...(task.followAttemptIds !== undefined ? { followAttemptIds: [...task.followAttemptIds] } : {}),
+      ...(task.skipInitialBleed === true ? { skipInitialBleed: true } : {}),
       ...(task.kind === "bleed" || task.kind === "attempt" ? { knownHosts: [...hosts.keys()] } : {}),
       ...(task.kind === "plant" ? {
         ...(task.remote ? { sessionOnly: true } : {}),
         ...(task.bootstrapReclaim ? { bootstrapReclaim: true } : {}),
         ...(task.bootstrapThreads !== undefined ? { bootstrapThreads: task.bootstrapThreads } : {}),
         ...(task.omitProber ? { omitProber: true } : {}),
+        ...(stasisLinked.has(task.host) ? { targetControllerManaged: true } : {}),
         payloads,
       } : {}),
     };
@@ -900,18 +1050,9 @@ export async function main(ns: NS): Promise<void> {
     try { return describeHostLocal(host, neighbours, seenAt); } catch { return { hostname: host, at: seenAt, present: false }; }
   };
 
-  let lastDarkwebProbeAt = 0;
-  const probeDarkweb = (): void => {
-    if (lastDarkwebProbeAt !== 0 && (lastMutationAt ?? 0) <= lastDarkwebProbeAt) return;
-    lastDarkwebProbeAt = Date.now();
-    const entry = ensureEntry(selfHost);
-    entry.prober = { neighbours: [...ns["dnet"]["probe"]()], at: lastDarkwebProbeAt, pid: ns.pid, epoch: rendezvous.mutationEpoch };
-  };
-
   let lastProbeDrainAt = 0;
   let lastDetailSweepAt = 0;
   const drainProbes = (at: number): void => {
-    probeDarkweb();
     const foldFrom = lastProbeDrainAt;
     lastProbeDrainAt = Date.now();
     const observed: ReportHost[] = [];
@@ -953,14 +1094,14 @@ export async function main(ns: NS): Promise<void> {
     const observed = [...bootstrapDoneSet].map((h) => tryDescribe(h, undefined, at)).filter((h): h is ReportHost => h !== undefined);
     for (const h of bootstrapDoneSet) { const e = hosts.get(h); if (e) e.lastPlantAt = undefined; needsInventory.add(h); }
     bootstrapDoneSet.clear();
-    if (observed.length > 0) absorb({ id: "bootstrap-done", kind: "inventory", host: selfHost, from: selfHost, ok: true, hosts: observed, dirtied: true });
+    if (observed.length > 0) absorb({ id: "bootstrap-done", kind: "inventory", host: selfHost, from: selfHost, ok: true, hosts: observed });
   };
 
   const reviveProbers = (): void => {
     if (prevMutationAt === 0) return;
     for (const entry of hosts.values()) {
       const host = entry.hostname;
-      if (host === selfHost || host === labCandidateHost || entry.agent?.order.kind === "walk") continue;
+      if (host === labCandidateHost || entry.agent?.order.kind === "walk") continue;
       if (entry.agent === undefined) continue; // only a host with a resident can re-exec
       const probe = entry.prober;
       if (probe !== undefined && probe.at >= prevMutationAt) continue;
@@ -1060,8 +1201,12 @@ export async function main(ns: NS): Promise<void> {
     const stormExpiry = expiryOpts();
     const stormHosts = [...hosts.values()].map((entry) => {
       const view = planningView(entry, at, stormExpiry);
+      // `view` FIRST and `entry` never: `planningView` expresses staleness by
+      // DELETING keys, so spreading it over the raw entry resurrects every one
+      // of them — `planStorm` would read a twelve-minute-old `stormSeed`,
+      // `caches` or `blockedRam` as a fresh observation and fire into a net it
+      // has not actually harvested.
       return {
-        ...entry,
         ...view,
         agentAlive: entry.agent !== undefined,
         busy: new Set([...(entry.agent !== undefined && entry.agent.order.kind !== "idle" ? [entry.agent.order.kind] : []), ...(entry.staged ?? []).map((o) => o.kind)]) as ReadonlySet<string>,
@@ -1159,7 +1304,23 @@ export async function main(ns: NS): Promise<void> {
       ...(guesses.length > 0 ? { guesses } : {}),
     });
     routeUrgentTasks(tasks, at);
-    for (const task of tasks) fileTask(task);
+    // Register dependencies before filing anything. Filing wakes live agents,
+    // so a very fast authentication must still leave a settled latch behind
+    // for the follower that starts later.
+    for (const task of tasks) {
+      for (const id of task.followAttemptIds ?? []) completionFor(id);
+    }
+    const filed = new Set<string>();
+    for (const task of tasks) {
+      let filedTask = task;
+      if (task.followAttemptIds !== undefined) {
+        const followed = task.followAttemptIds.filter((id) => filed.has(id));
+        for (const id of task.followAttemptIds) if (!filed.has(id)) orderDone.delete(id);
+        if (followed.length === 0) continue;
+        filedTask = { ...task, followAttemptIds: followed };
+      }
+      if (fileTask(filedTask)) filed.add(task.id);
+    }
     return tasks;
   };
 
@@ -1176,22 +1337,16 @@ export async function main(ns: NS): Promise<void> {
         if (task.kind === "plant" && host === task.host) continue;
         const entry = hosts.get(host);
         if (entry === undefined || entry.agent === undefined) continue;
-        if ((entry.staged?.length ?? 0) + (assigned.get(host) ?? 0) >= MAX_STAGED_PER_HOST) continue;
+        const strategicDepth = strategicQueueDepth(entry.staged ?? []);
+        if (strategicDepth + (assigned.get(host) ?? 0) >= MAX_STAGED_PER_HOST) continue;
         const adjacent = task.kind !== "plant" || host === task.from || (fresh<string[]>(hosts.get(host), "neighbours", at, expiry) ?? []).includes(task.host) || targetNeighbours.includes(host);
         if (!adjacent) continue;
         const active = entry.agent?.order.kind !== "idle" ? entry.agent : undefined;
-        candidates.push({
-          host,
+        candidates.push(preemptionCandidateFromHandle(host, active, {
           usableGb: usableGb(host, at, expiry),
           ...(assigned.has(host) ? { assigned: assigned.get(host)! } : {}),
           ...(cancelled.has(host) ? { cancelling: true } : {}),
-          ...(active !== undefined ? {
-            activeKind: active.order.kind,
-            activePriority: active.order.priority,
-            ...(active.order.startedAt !== undefined ? { activeStartedAt: active.order.startedAt } : {}),
-            ...(active.order.expectedDoneAt !== undefined ? { activeExpectedDoneAt: active.order.expectedDoneAt } : {}),
-          } : {}),
-        });
+        }));
       }
       const choice = choosePreemptionVantage(task.kind, candidates, at);
       if (choice === undefined) continue;
@@ -1292,28 +1447,105 @@ export async function main(ns: NS): Promise<void> {
     adopt(host, handle) {
       const entry = ensureEntry(host);
       entry.agent = handle;
-      if (handle.order.kind !== "idle") orderById.set(handle.order.id, handle.order);
+      if (handle.order.kind !== "idle") {
+        orderById.set(handle.order.id, handle.order);
+        const completion = orderDone.get(handle.order.id);
+        if (completion?.settled) newCompletion(handle.order.id);
+      }
       handle.done.then(onReport).catch(() => {});
       signalDerive();
     },
-    reportProbe(host, neighbours, at, pid) {
+    afterOrders(ids) {
+      const completions = ids.map((id) => completionFor(id));
+      return Promise.all(completions.map((entry) => entry.promise)).then(() => {
+        for (let index = 0; index < ids.length; index++) {
+          if (orderDone.get(ids[index]!) === completions[index]) orderDone.delete(ids[index]!);
+        }
+      });
+    },
+    beginProbeRefresh(host) {
       const entry = ensureEntry(host);
+      if (entry.probeRefresh !== undefined) return { refresh: entry.probeRefresh, launch: false };
+      let settled = false;
+      let resolve!: (report: DnetProbeReport | undefined) => void;
+      const refresh: DnetProbeRefresh = {
+        refreshed: new Promise<DnetProbeReport | undefined>((done) => { resolve = done; }),
+        settle(value) {
+          if (settled) return;
+          settled = true;
+          resolve(value);
+        },
+      };
+      entry.probeRefresh = refresh;
+      return { refresh, launch: true };
+    },
+    cancelProbeRefresh(host, refresh) {
+      const entry = hosts.get(host);
+      if (entry?.probeRefresh !== refresh) return;
+      entry.probeRefresh = undefined;
+      refresh.settle(undefined);
+    },
+    reportProbe(host, neighbours, at, pid, refresh) {
+      const entry = ensureEntry(host);
+      // A repair launch can race an old process which was merely late, and an
+      // older build could already have accumulated duplicates. Whichever
+      // prober reports most recently owns the slot; retire the prior PID before
+      // publishing the replacement so the invariant converges to one process.
+      if (entry.prober?.pid !== pid) killPid(host, entry.prober?.pid);
       entry.prober = { neighbours: [...neighbours], at, pid, epoch: rendezvous.mutationEpoch };
+      if (refresh !== undefined && entry.probeRefresh === refresh) {
+        entry.probeRefresh = undefined;
+        refresh.settle({ host, neighbours: [...neighbours], at, pid });
+      }
       signalDerive();
     },
     preparePlant(host) {
       const entry = ensureEntry(host);
       needsInventory.add(host);
-      // The plant execs the resident right after this; file its inventory so the
-      // new agent's first look finds real work. But it has no agent yet, so
-      // fileListJobs will file it once the resident registers.
-      void entry;
+      const controllerManaged = stasisLinked.has(host);
+      const next = controllerManaged
+        ? entry.pendingOrder ?? (entry.staged ??= []).shift()
+        : undefined;
+      if (next !== undefined) {
+        next.controllerManaged = true;
+        entry.pendingOrder = next;
+      }
+      const proberPid = entry.prober?.pid;
+      const reuseProber = controllerManaged && proberPid !== undefined
+        && proberPid > 0 && ns["isRunning"](proberPid, host);
+      return { controllerManaged, ...(next !== undefined ? { next } : {}), reuseProber };
     },
     registerBootstrap(host, pid) { ensureEntry(host).bootstrap = { pid, startedAt: Date.now() }; },
     bootstrapDone(host) { const e = hosts.get(host); if (e) e.bootstrap = undefined; bootstrapDoneSet.add(host); signalDerive(); },
     deps,
     drain(): DnetDrain {
       const lab = labReport(Date.now());
+      const ramAt = Date.now();
+      // HOME calls `drain()` in its OWN process, so every ns call below runs
+      // against THIS script's ns from a foreign stack. A controller that has
+      // died (darkweb rebooted, an unhandled throw) leaves its rendezvous
+      // installed, and the next call then raises OUR ScriptDeath inside home's
+      // feature loop — which rethrows ScriptDeath by design and would take home
+      // down with us. The sample is a convenience; skipping it is not.
+      let ram: DnetDrain["ram"] = [];
+      try {
+        ram = [...hosts.keys()].flatMap((host) => {
+          const details = ns["dnet"]["getServerDetails"](host);
+          if (!details.isOnline) return [];
+          const total = Math.max(0, ns["getServerMaxRam"](host));
+          const occupied = Math.max(0, Math.min(ns["getServerUsedRam"](host), total));
+          const blocked = Math.max(0, Math.min(details.blockedRam, total));
+          return [{
+            host,
+            at: ramAt,
+            total,
+            blocked,
+            used: Math.max(0, occupied - blocked),
+          }];
+        });
+      } catch {
+        ram = [];
+      }
       const drained: DnetDrain = {
         hosts: pendingHosts.splice(0, pendingHosts.length),
         credentials: pendingCredentials.splice(0, pendingCredentials.length),
@@ -1332,6 +1564,7 @@ export async function main(ns: NS): Promise<void> {
         ...(lastStormFiredAt !== undefined ? { stormFiredAt: lastStormFiredAt } : {}),
         ...(grammarUnrecognised > 0 ? { grammar: { unrecognised: grammarUnrecognised, shapes: { ...grammarShapes } } } : {}),
         karmaLoss,
+        ...(hasDnetProfit(profit) ? { profit } : {}),
         residents: liveEntries().map((entry) => ({
           host: entry.hostname,
           lastBeatAt: entry.agent?.beatAt ?? Date.now(),
@@ -1342,12 +1575,14 @@ export async function main(ns: NS): Promise<void> {
           failed: entry.failed ?? 0,
           ...(entry.lastError !== undefined ? { lastError: entry.lastError } : {}),
         })),
+        ram,
         residentsLost,
         mutations: pendingMutations,
         ...(lab !== undefined ? { lab } : {}),
       };
       for (const key of Object.keys(codes)) delete codes[key];
       karmaLoss = 0;
+      profit = emptyDnetProfit();
       residentsLost = 0;
       pendingMutations = 0;
       pendingStasisSnapshot = undefined;
@@ -1358,6 +1593,7 @@ export async function main(ns: NS): Promise<void> {
     order(rawOrders) {
       const orders = rawOrders as DnetOrders;
       charisma = orders.charisma;
+      timingProfile = orders.timing;
       if (orders.netDepth !== undefined) netDepth = orders.netDepth;
       if (orders.bitNode !== undefined) bitNode = orders.bitNode;
       if (orders.vaultSnapshot !== undefined) {
@@ -1401,6 +1637,7 @@ export async function main(ns: NS): Promise<void> {
   while (true) {
     ns.getServerMaxRam(selfHost);
     const at = Date.now();
+    derivePass++;
     rendezvous.lastBeatAt = at;
 
     if (standDown) {
@@ -1430,29 +1667,42 @@ export async function main(ns: NS): Promise<void> {
         let alive = false;
         try { alive = ns["isRunning"](pid, entry.hostname); } catch { alive = false; }
         if (alive) continue;
-        residentsLost++;
+        // `retireVantage` settles an ACTIVE order with `died`, and `onReport`
+        // counts that loss itself — only a bare resident goes uncounted.
+        if (entry.agent === undefined || entry.agent.order.kind === "idle") residentsLost++;
         retireVantage(entry.hostname, `${entry.hostname} process died during a mutation`);
         invalidateBackdoor(entry.hostname);
       }
     }
 
-    // Sweep entries whose resident stopped beating.
+    // Sweep entries whose resident stopped beating. A live process is still
+    // authoritative: request cancellation, but never detach it while it can
+    // perform another side effect.
     for (const entry of [...hosts.values()]) {
-      if (entry.agent === undefined) continue;
-      if (at - agentLastLife(entry) <= BEAT_WINDOW_MS) continue;
+      if (entry.agent === undefined || entry.agent.order.kind !== "idle") continue;
+      if (at - entry.agent.beatAt <= BEAT_WINDOW_MS) continue;
+      let alive = false;
+      try { alive = ns["isRunning"](entry.agent.pid, entry.hostname); } catch { alive = false; }
+      if (alive) {
+        killPid(entry.hostname, entry.agent.pid);
+        continue;
+      }
       residentsLost++;
       retireVantage(entry.hostname, `${entry.hostname} lost its resident`);
     }
     reconcilePending(at);
-    // Time out an active order whose process was killed.
+    // Ask expired work to stop. Eligible bodies are killed by the later sweep;
+    // pin/walk remain tracked until their atomic/PID-bound work returns.
     for (const entry of hosts.values()) {
       const active = entry.agent;
-      if (active === undefined || active.order.kind === "idle" || active.startedAt === undefined) continue;
-      const expired = active.order.longLived ? at - active.beatAt > LONG_JOB_BEAT_MS : at - active.startedAt > JOB_TIMEOUT_MS;
+      if (active === undefined || active.order.kind === "idle") continue;
+      const expired = jobWatchdogExpired(active, at);
       if (expired) {
-        entry.failed = (entry.failed ?? 0) + 1;
-        active.settle({ id: active.order.id, kind: active.order.kind, host: active.order.host, from: active.order.from, ok: false, died: true, detail: active.order.longLived ? `${active.order.label} stopped beating on ${entry.hostname}` : `${active.order.label} timed out on ${entry.hostname}` });
-        entry.agent = undefined;
+        // Settling alone only drops OUR handle: the process itself may be
+        // perfectly alive, merely slow, and would then hold the host's whole
+        // RAM budget for ever while the map reads the host as unstaffed and
+        // re-plants it. Ask it to stop, then take the pid.
+        cancelActive(entry, `${active.order.label} stopped at a call boundary on ${entry.hostname}`);
       }
     }
     residentsSeenEver = Math.max(residentsSeenEver, liveEntries().length);
@@ -1487,6 +1737,8 @@ export async function main(ns: NS): Promise<void> {
 
   if (realm.dnet_controller === rendezvous) delete realm.dnet_controller;
   for (const entry of hosts.values()) {
+    entry.probeRefresh?.settle(undefined);
+    entry.probeRefresh = undefined;
     const probe = entry.prober;
     if (probe !== undefined && probe.pid > 0 && probe.pid !== ns.pid) ns["kill"](probe.pid);
   }

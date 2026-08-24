@@ -1,8 +1,11 @@
 import type { NS } from "@ns";
+import type { DnetProbeRefresh } from "./launch.ts";
 import type { AttemptOutcome, LogDrainOutcome, ReportHost, VaultEntry } from "../../shared/strategy/dnet/courier.ts";
 import type { DnetHost } from "../../shared/strategy/dnet/host.ts";
 import type { TaskKind } from "../../shared/strategy/dnet/plan.ts";
+import type { DnetTimingProfile } from "../../shared/strategy/dnet/rates.ts";
 import type { DnetDrain, DnetOrders } from "./wire.ts";
+import type { DarknetProfit } from "../../shared/telemetry/topics/dnet.ts";
 
 /** The one object the controller and its agents meet at, and the rules that
  * keep a live reference to a dead host from becoming a bug.
@@ -50,9 +53,8 @@ import type { DnetDrain, DnetOrders } from "./wire.ts";
 /** A version on the global SHAPE. It moves because agents outlive controllers
  * and a build handoff leaves both on disk: an agent from the previous build
  * reading a global whose shape moved under it is a bug with no symptom.
- * Refusing by number makes it exit instead. Bumped from the old
- * `RENDEZVOUS_PROTOCOL = 6` for the controller rewrite. */
-export const DNET_PROTOCOL = 7;
+ * Refusing by number makes it exit instead. */
+export const DNET_PROTOCOL = 9;
 
 /** The script base every allocation starts from. Transcribed rather than read,
  * because a launcher sizes a process it has not started yet.
@@ -89,6 +91,8 @@ export interface Order {
   startedAt?: number;
   /** Current completion estimate, used only to choose the least-cost victim. */
   expectedDoneAt?: number;
+  /** Run without spawn; the controller remotely restores this stasis host. */
+  controllerManaged?: boolean;
 
   // --- kind-specific data ---------------------------------------------------
   targetIdentity?: string;
@@ -99,11 +103,16 @@ export interface Order {
   bootstrapReclaim?: boolean;
   bootstrapThreads?: number;
   omitProber?: boolean;
+  /** The plant target is stasis-linked and must use controller handoff. */
+  targetControllerManaged?: boolean;
   sessionOnly?: boolean;
   edge?: string;
   unpin?: boolean;
   payloads?: string[];
   guess?: string;
+  /** Standalone bleed waits for this exact authentication order. */
+  followAttemptIds?: readonly string[];
+  skipInitialBleed?: boolean;
   symbol?: string;
   filename?: string;
 }
@@ -124,9 +133,10 @@ export interface Report {
   codes?: Record<string, number>;
   charismaNeeded?: number;
   karmaLoss?: number;
+  /** Since-last-report contribution; the controller and home fold it. */
+  profit?: Partial<DarknetProfit>;
   stormFiredAt?: number;
   grammar?: { unrecognised: number; shapes: string[] };
-  dirtied?: boolean;
   detail?: string;
 }
 
@@ -139,17 +149,18 @@ export interface Report {
  * the controller's cooperative reason when set. */
 export interface AgentIo {
   beat: (progress?: Record<string, unknown>) => void;
+  /** Publish the operation currently awaited, and clear it as soon as that
+   * operation settles. Updating this estimate is itself a liveness beat. */
+  setExpectedDoneAt: (at: number | undefined) => void;
   cancelled: () => string | undefined;
   deps: ControllerDeps;
 }
 
 /** One agent process, as the controller and the agent both see it.
  *
- * The externally-resolvable cancel is the whole point: the controller sets
- * `cancelReason` then calls `cancelFire`, and the agent's `Promise.race` falls
- * through even seconds deep in a blocking `authenticate`. `done` settles once,
- * synchronously, the instant the order finishes — so the controller learns of
- * completion on the next microtask, before the successor even spawns. */
+ * The controller sets cancelReason; bodies observe it at safe boundaries. A
+ * blocked Darknet call is stopped by hard-killing an armored agent on the next
+ * derive pass. done settles when the body finishes or atExit handles that kill. */
 export interface AgentHandle {
   pid: number;
   order: Order;
@@ -166,9 +177,9 @@ export interface AgentHandle {
   /** Controller-set; the cooperative cancel flag. Bodies poll it at loop
    *  boundaries and stop there, and it is the licence hard cancel checks. */
   cancelReason?: string;
-  /** Agent-published resolver of its cancel promise — how the controller makes
-   *  a blocked body fall through without a kill. */
-  cancelFire?: () => void;
+  /** Derive pass that requested cancellation; hard cancellation waits until a
+   * later pass so the body gets one cooperative boundary first. */
+  cancelRequestedPass?: number;
   /** Resolves the instant the order finishes or is cancelled. Idempotent. */
   done: Promise<Report>;
   settle: (report: Report) => void;
@@ -183,6 +194,10 @@ export interface HostEntry extends DnetHost {
    *  prober was deliberately killed; `at` is the last report stamp (dead-prober
    *  detection compares it to the mutation clock). */
   prober?: { pid: number; at: number; neighbours: string[]; epoch: number };
+  /** One exact prober launch is expected to publish a first report. Kept on
+   * the host rather than as a launch callback so every caller observes the
+   * same readiness barrier and an old prober cannot satisfy it. */
+  probeRefresh?: DnetProbeRefresh;
   /** THE process on this host. `order.kind === "idle"` is resident mode. */
   agent?: AgentHandle;
   /** A spawn-free local reclaimer — not an agent, and must not be staged to. */
@@ -230,10 +245,18 @@ export interface ControllerHandle {
   wake(cause: string): void;
   /** An agent registers itself the instant it boots. */
   adopt(host: string, handle: AgentHandle): void;
+  /** Resolve after every named order has reported. Used by a prequeued bleed
+   * to follow a whole parallel authentication wave without polling. */
+  afterOrders(ids: readonly string[]): Promise<void>;
+  /** Claim the one outstanding first-probe barrier for this host. `launch`
+   * says whether the caller owns starting it; followers only await it. */
+  beginProbeRefresh(host: string): { refresh: DnetProbeRefresh; launch: boolean };
+  /** Cancel a refused launch and wake every follower with `false`. */
+  cancelProbeRefresh(host: string, refresh: DnetProbeRefresh): void;
   /** A prober files its host's adjacency, its pid, and wakes the controller. */
-  reportProbe(host: string, neighbours: readonly string[], at: number, pid: number): void;
+  reportProbe(host: string, neighbours: readonly string[], at: number, pid: number, refresh?: DnetProbeRefresh): void;
   /** Plant calls this after the first probe and before launching the agent. */
-  preparePlant(host: string): void;
+  preparePlant(host: string): { controllerManaged: boolean; next?: Order; reuseProber: boolean };
   /** A bootstrap reclaimer registers and, on exit, reports itself done. */
   registerBootstrap(host: string, pid: number): void;
   bootstrapDone(host: string): void;
@@ -248,6 +271,8 @@ export interface ControllerHandle {
  * controller, never in the agent's process. */
 export interface ControllerDeps {
   charisma(): number;
+  timing(): DnetTimingProfile | undefined;
+  expectedDelayMs(request: DnetDelayRequest): number | undefined;
   ledgerFor(host: string): DnetHost["attempts"];
   ringFor(host: string): DnetHost["ring"];
   recordAttempt(host: string, outcome: AttemptOutcome): void;
@@ -259,6 +284,27 @@ export interface ControllerDeps {
   recordFileEvidence(host: string, evidence: import("../../shared/strategy/dnet/evidence.ts").PasswordEvidence): void;
   labField(host: string): import("../../shared/strategy/dnet/maze.ts").LabField | undefined;
   publishLabField(host: string, field: import("../../shared/strategy/dnet/maze.ts").LabField): void;
+}
+
+export type DnetDelayedOperation =
+  | "authenticate"
+  | "heartbleed"
+  | "memoryReallocation"
+  | "phishingAttack"
+  | "promoteStock"
+  | "induceServerMigration"
+  | "setStasisLink"
+  | "labradar";
+
+/** Data available at the delayed call boundary. The controller combines this
+ * with its cached host/player state; callers never probe Netscript for timing. */
+export interface DnetDelayRequest {
+  operation: DnetDelayedOperation;
+  host: string;
+  from: string;
+  threads: number;
+  correctChars?: number;
+  shouldLink?: boolean;
 }
 
 // --- the RAM cost table (replaces JOB_METHODS/priceAgent) ---------------------
@@ -279,7 +325,7 @@ export const KIND_CALLS: Readonly<Record<OrderKind, readonly string[]>> = {
   // The dedicated list job: one `ls` of the host it stands on.
   inventory: [...SPAWN, "dnsLookup", "ls", "read", "rm", ...DETAILS],
   bleed: [...SPAWN, "dnet.heartbleed", ...DETAILS],
-  attempt: [...SPAWN, "dnet.authenticate", "dnet.heartbleed", "formulas.dnet.getAuthenticateTime", ...DETAILS],
+  attempt: [...SPAWN, "dnet.authenticate", "dnet.heartbleed", ...DETAILS],
   plant: [...SPAWN, "dnet.connectToSession", "dnet.authenticate", "scp", "exec", "kill", "dnsLookup", ...DETAILS],
   reclaim: [...SPAWN, "dnet.memoryReallocation", ...DETAILS],
   // Spawn-free local recovery: base + one action per thread.
@@ -292,7 +338,9 @@ export const KIND_CALLS: Readonly<Record<OrderKind, readonly string[]>> = {
   pin: ["dnet.probe", "dnet.setStasisLink", ...DETAILS],
   // NO spawn: every byte goes to authenticate threads.
   walk: ["dnet.authenticate", "dnet.labradar"],
-  storm: [...SPAWN, "dnet.unleashStormSeed", "ls", ...DETAILS],
+  // `listingOn` is the seed check, and it reads and deletes the data files it
+  // walks past — the same `ls`/`read`/`rm` surface `inventory` and `cache` pay.
+  storm: [...SPAWN, "dnet.unleashStormSeed", "ls", "read", "rm", ...DETAILS],
   relaunchProbe: [...SPAWN, "exec"],
 };
 
@@ -304,10 +352,10 @@ export const PROBER_CALLS: readonly string[] = ["dnet.probe", "dnet.nextMutation
 export const CONTROLLER_CALLS: readonly string[] = [
   "isRunning",
   "kill",
-  "dnet.probe",
   "dnet.getServerDetails",
   "dnsLookup",
   "getServerMaxRam",
+  "getServerUsedRam",
 ];
 
 /** Price an allocation from the game's OWN table. `ns.getFunctionRamCost` is
@@ -356,16 +404,40 @@ export const THREAD_SCALED_KINDS: ReadonlySet<OrderKind> = new Set([
   "walk",
 ]);
 
-/** Whether the controller may `kill` this agent outright: armored, a live pid,
- * and not an exempt kind. The sweep still vouches the pid with `isRunning`. */
+/** Whether the controller may `kill` this agent outright. Self-spawning agents
+ * are armored; stasis-managed agents are recoverable by remote dispatch. */
 export function hardCancelEligible(handle: AgentHandle): boolean {
-  return handle.armored === true && handle.pid > 0 && !HARD_CANCEL_EXEMPT_KINDS.has(handle.order.kind);
+  return (handle.armored === true || handle.order.controllerManaged === true)
+    && handle.pid > 0
+    && !HARD_CANCEL_EXEMPT_KINDS.has(handle.order.kind);
+}
+
+/** Exact dynamic surface for one recovery mode. */
+export function orderCalls(kind: OrderKind, controllerManaged: boolean): readonly string[] {
+  return controllerManaged ? KIND_CALLS[kind].filter((call) => call !== "spawn") : KIND_CALLS[kind];
+}
+
+/** Eligibility plus the one-pass cooperative grace. Keeping the request pass
+ * on the handle makes it follow the exact process being cancelled. */
+export function hardCancelReady(handle: AgentHandle, derivePass: number): boolean {
+  return handle.cancelReason !== undefined
+    && handle.cancelRequestedPass !== undefined
+    && handle.cancelRequestedPass < derivePass
+    && hardCancelEligible(handle);
 }
 
 // --- timing ------------------------------------------------------------------
 
-export const JOB_TIMEOUT_MS = 60_000;
-export const LONG_JOB_BEAT_MS = 30_000;
+/** Grace after the last known cooperative boundary. This is a stuck-call
+ * recovery margin, not a strategic attempt or batch duration. */
+export const JOB_WATCHDOG_GRACE_MS = 60_000;
+export function jobWatchdogDeadline(handle: AgentHandle): number {
+  return (handle.order.expectedDoneAt ?? handle.beatAt) + JOB_WATCHDOG_GRACE_MS;
+}
+
+export function jobWatchdogExpired(handle: AgentHandle, at: number): boolean {
+  return at > jobWatchdogDeadline(handle);
+}
 export const RESIDENT_BEAT_MS = 5_000;
 export const RESIDENT_BEAT_MISSES = 3;
 /** The beat window a silent resident (or long order) is given before it is

@@ -50,6 +50,16 @@ function compare(memory: DispatchMemory): void {
   // two same-instant ops folds first is observable in the landing prediction.
   const actualTargets = new Map([...memory.byTarget].map(([host, ops]) => [host, [...ops.keys()]]));
   expect(actualTargets).toEqual(expected.byTarget);
+  for (const [host, opIds] of expected.byTarget) {
+    const expectedLandingIds = opIds
+      .filter((opId) => memory.tracked.get(opId)?.landing !== undefined)
+      .sort((a, b) =>
+        memory.tracked.get(a)!.landing! - memory.tracked.get(b)!.landing! || a - b
+      );
+    const actualLandingIds = memory.landingByTarget.get(host)?.chunks
+      .flatMap((chunk) => chunk.map((entry) => entry.op.opId)) ?? [];
+    expect(actualLandingIds).toEqual(expectedLandingIds);
+  }
 
   expect([...memory.weakenPending].sort()).toEqual([...expected.weakenPending].sort());
 

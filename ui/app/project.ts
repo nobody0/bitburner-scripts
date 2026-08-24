@@ -107,6 +107,7 @@ export interface BatchCounters {
   spanMs: number;
   graded: number;
   inOrder: number;
+  noHack: number;
 }
 
 /** One batch kind's curves.
@@ -236,6 +237,9 @@ export interface FarmHealthSeries {
    * order, 0..1. Anchored near 1.0 in a healthy run, which is why its chart
    * needs a y floor. Windowed for the same reason as the span. */
   inOrderShare: [number, number][];
+  /** Share of graded batches that actually launched a hack. Kept separate
+   * from ordering: support-only settlement is waste, not a reorder. */
+  hackLaunchedShare: [number, number][];
 }
 
 export interface ProjectedState {
@@ -355,6 +359,7 @@ function emptyFarmHealth(): FarmHealthSeries {
     engineLatenessMs: [],
     batchSpanMs: [],
     inOrderShare: [],
+    hackLaunchedShare: [],
   };
 }
 
@@ -616,6 +621,7 @@ function foldFarmSeries(state: ProjectedState, t: number, farm: FarmRollup | und
       spanMs: entry.spanMs,
       graded: entry.graded ?? 0,
       inOrder: entry.inOrder,
+      noHack: entry.noHack,
     };
   }
   const sample: FarmSample = {
@@ -691,6 +697,7 @@ function foldFarmSeries(state: ProjectedState, t: number, farm: FarmRollup | und
   let spanDelta = 0;
   let gradedDelta = 0;
   let inOrderDelta = 0;
+  let noHackDelta = 0;
   for (const [kind, now] of Object.entries(sample.byKind)) {
     const series = state.batchSeries[kind] ?? (state.batchSeries[kind] = {
       perSec: [],
@@ -698,7 +705,7 @@ function foldFarmSeries(state: ProjectedState, t: number, farm: FarmRollup | und
     });
     // A kind absent from the baseline is one that settled its first batch
     // inside this window, so zero is its true starting point rather than a gap.
-    const before = base.byKind[kind] ?? { batches: 0, ops: 0, moneyEarned: 0, spanMs: 0, graded: 0, inOrder: 0 };
+    const before = base.byKind[kind] ?? { batches: 0, ops: 0, moneyEarned: 0, spanMs: 0, graded: 0, inOrder: 0, noHack: 0 };
     const settled = now.batches - before.batches;
     push(series.perSec, t, settled / dtSec);
     // 0/0 is not 0. A window that settled nothing has no money-per-batch, and
@@ -708,13 +715,16 @@ function foldFarmSeries(state: ProjectedState, t: number, farm: FarmRollup | und
     spanDelta += now.spanMs - before.spanMs;
     gradedDelta += now.graded - before.graded;
     inOrderDelta += now.inOrder - before.inOrder;
+    noHackDelta += now.noHack - before.noHack;
   }
   // Same "0/0 is not 0" rule: a window that settled nothing has no mean span,
   // and one that graded nothing has no in-order share. A negative graded delta
   // is a rollup that stopped reporting `graded` (it is optional on the wire),
   // which is also not a share.
   if (settledAll > 0) push(state.farmHealth.batchSpanMs, t, spanDelta / settledAll);
-  if (gradedDelta > 0) push(state.farmHealth.inOrderShare, t, inOrderDelta / gradedDelta);
+  const hackBearingDelta = gradedDelta - noHackDelta;
+  if (hackBearingDelta > 0) push(state.farmHealth.inOrderShare, t, inOrderDelta / hackBearingDelta);
+  if (gradedDelta > 0) push(state.farmHealth.hackLaunchedShare, t, hackBearingDelta / gradedDelta);
 }
 
 /** Dispatcher health curves, from fields that were already on the wire.

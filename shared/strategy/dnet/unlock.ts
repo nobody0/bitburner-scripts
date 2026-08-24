@@ -6,17 +6,19 @@ import { DARKSCAPE_COST, TOR_COST } from "./rates.ts";
  * SF15, and there is no way to create it — `Programs.ts` gives it `create: null`,
  * so it is bought or it is absent.
  *
- * What it is worth is NOT priced here, deliberately. Its real payoff is the
- * `.cache` reward table — free programs up to `Formulas.exe`, and free WSE / TIX
- * / 4S access, which `stock` otherwise buys for $200m + $5b + $25b — and none of
- * that is modelled anywhere in this project yet. Inventing an income rate to
- * feed the arbiter would be asserting a number we have not measured. So the
- * decision is affordability: buy it as soon as TOR plus the program are
- * affordable, because it gates the entire darknet progression path. A later
- * increment can price its cache payoff once those rewards are modelled. */
+ * The purchase gate remains pure affordability; the money arbiter prices the
+ * indivisible purchase with the calibrated route marginal below. */
 
-/** Bid as soon as liquid cash covers the complete TOR + program purchase. */
-export const DARKSCAPE_AFFORDABLE_SHARE = 1;
+/** Conservative gross value before BN15, in BN1 route-seconds saved.
+ *
+ * Reproduce with `bun run tools/dnet-value-calibration.ts`. The calibration is
+ * a fresh BN1/SF0 matched pair with only the SF4.3 automation allowance, equal
+ * post-purchase cash, and Darkscape pre-granted only to the treatment. It uses
+ * seeds 1..3, caps a local forecast delta at the 24-hour route horizon, takes
+ * the median, discounts it by 10% for aggregate-Go optimism, and floors it.
+ * Raw 2026-08-24 deltas at the 12-minute early checkpoint were 0, 23,443,167.63
+ * and 190,586.08 seconds; capped samples were 0, 86,400, 86,400. */
+export const DARKSCAPE_EARLY_BN1_ROUTE_SECONDS = 77_760;
 
 export interface DarkscapeView {
   /** True when a simulation profile has switched `dnet` OFF. Buying access to a
@@ -59,6 +61,6 @@ export function stepDarkscape(view: DarkscapeView): boolean {
     // Only once the gate probe has reported the program absent (`undefined`
     // means not probed yet), and only when the complete cost is affordable.
     view.hasProgram === false &&
-    view.money * DARKSCAPE_AFFORDABLE_SHARE >= DARKSCAPE_TOTAL_COST
+    view.money >= DARKSCAPE_TOTAL_COST
   );
 }

@@ -11,7 +11,7 @@ remote-execution model — is [`spec/dnet.md`](../../dnet.md), and the solvers
 > "Traverse the darknet graph by depth, spending stasis links and charisma to keep servers authenticated while instability rises."
 
 **Theme** BN15 The Secrets of the Dark Net (`shared/features/registry.ts`) ·
-**Status** done — overseer/agent pipeline, 24 solvers, sim model (`spec/progress.md`)
+**Status** done — controller/prober/agent pipeline, 24 solvers, sim model (`spec/progress.md`)
 
 **Sourcing.** `src/DarkNet/` cannot be vendored and is absent from the extract
 (`sim/vendor/bitburner/src/StockMarket/MarketAdapter.ts:104-108`), so darknet rules
@@ -24,7 +24,7 @@ There are **two** darknet gates and they are not the same test
 
 | Gate | Test | Grants |
 |---|---|---|
-| plain access | `BN15 \|\| activeSF15 > 0 \|\| DarkscapeNavigator.exe on home` | whether the `ns.dnet` API answers at all — `unlocked.dnet` (`shared/features/unlock.ts:144-150`) |
+| plain access | BN15, active SF15, or DarkscapeNavigator.exe | gated actions and population access; four read-only members remain ungated upstream |
 | full access | `BN15 \|\| activeSF15 > 0` | the labyrinth, and with it the net's depth: without it the net is a flat **5** (`shared/strategy/dnet/rates.ts:152-165`, `sim/features/dnet.ts:199,495`). Also the two deepest-tier models, `KingOfTheHill` and `RateMyPix.Auth` (`sim/features/dnet.ts:269,278-285`). This is `Capabilities.darknetFullAccess` |
 
 `DarkscapeNavigator.exe` on home is a real unlock and is **not** source-file
@@ -36,8 +36,9 @@ labyrinth route off plain access promises one the game does not provide
 (`game/lib/probes/gates.ts:119-123`), standing in for `Player.hasProgram`, which
 has no ns equivalent. Buying it is `singularity.purchaseTor()` then
 `purchaseProgram`, $200 000 (`sim/vendor/bitburner/src/Constants.ts:45`) plus
-$50 000 000 (`shared/strategy/dnet/rates.ts:146`), bid on affordability because the
-`.cache` reward table is unmodelled (`shared/strategy/dnet/unlock.ts`).
+$50 000 000 (`shared/strategy/dnet/rates.ts:146`). The indivisible claim is
+economically priced from the conservative early-BN1 matched-pair calibration in
+`shared/strategy/dnet/unlock.ts`; affordability remains the execution gate.
 
 `BitNodeBooleanOptions` has **no** darknet switch
 (`types/NetscriptDefinitions.d.ts:1899-1904`); `sourceFileOverrides` lowering SF15
@@ -51,7 +52,7 @@ everywhere else.**
 | Call | How charisma enters |
 |---|---|
 | `authenticate` | **duration only.** No charisma requirement is checked; it enters through `skillFactor` and `underleveledFactor` of the auth-time formula (`sim/ns/dnet.ts:81-100`) |
-| `heartbleed` | **hard gate.** Below the host's `requiredCharismaSkill` it returns code 451 after a 100 ms delay (`sim/ns/dnet.ts:314-317`) |
+| heartbleed | hard gate, then charisma_exp * 50 * ((500 + charisma) / 500) after the full delay |
 | labyrinth move | **hard gate**, on the rung's `cha` and not the host's (`sim/features/dnet.ts:1487`, in `labAttempt`) |
 | `memoryReallocation`, `induceServerMigration`, `promoteStock`, `phishingAttack` | wait time and payout scalars only |
 
@@ -66,6 +67,7 @@ The ladder that matters is the labyrinth's, not `getServerRequiredCharismaLevel`
 | Source | Gain |
 |---|---|
 | `authenticate`, success or failure | `(3 + 1.1^difficulty) * threads`, ×10 on a *first* success, ×0.2 once rooted (`sim/features/dnet.ts:184-192`) |
+| heartbleed | charisma_exp * 50 * ((500 + cha) / 500) after the full delay, even if the host then disappears |
 | `phishingAttack` | `charisma_exp * threads * 50`, a quarter on failure — every call pays (`sim/features/dnet.ts:1009-1057,142`) |
 | `promoteStock` | `charisma_exp * threads * 10 * ((200 + cha) / 200)` (`sim/features/dnet.ts:176-177`) |
 | labyrinth exit | a fixed 32-thread equivalent (`sim/features/dnet.ts:1469`) |
@@ -143,18 +145,9 @@ Level 3 also gates the faction-rep charisma bonus
 
 | Concern | File |
 |---|---|
-| strategy | `shared/strategy/dnet/decide.ts` and the modules beside it (`queue`, `spread`, `farm`, `hold`, `listen`, `knowledge`, `oracle`, `rates`, `unlock`, `models`, `solvers/`) |
-| driver, agents | `game/lib/features/dnet.ts`; `game/dnet/overseer.ts`, `agent.ts`, `jobs.ts`, `realm.ts` |
+| strategy | shared/strategy/dnet/host.ts and plan.ts, with supporting solver/rate modules |
+| driver, agents | game/lib/features/dnet.ts; game/dnet/controller.ts, agent.ts, orders.ts, shared.ts |
 | unlock gate | `shared/features/unlock.ts`, `game/lib/probes/gates.ts` |
 | telemetry, tabs | `shared/telemetry/topics/dnet.ts`; `ui/app/tabs/dnet.ts`, `dnet-map.ts` |
 | sim model | `sim/features/dnet.ts`, `sim/ns/dnet.ts` |
-| vendored rules | none for the mechanic — see **Sourcing** above |
-
-## Open
-
-- What is one `openCache` actually worth? The reward table is unmodelled, so the
-  `.exe` purchase carries no priced value.
-- Does `heartbleed` pay charisma experience? Our sim grants none
-  (`sim/ns/dnet.ts:310-328`) and no allowed source settles it.
-- Does full access change which offline darknet servers come back? Nothing in
-  `shared/`, `game/`, `sim/` or the vendored extract models it.
+| vendored rules | coding-contract problems and rewards; the darknet mechanic itself is transcribed — see **Sourcing** above |

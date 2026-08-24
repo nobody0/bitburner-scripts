@@ -13,7 +13,7 @@
  *   long charge — and, in the worst case, the host.
  *
  * Everything here is a pure function of what we believe. The jobs that carry the
- * decisions out live in `game/dnet/jobs.ts`.
+ * decisions out live in `game/dnet/orders.ts`.
  *
  * ## A stasis link is strictly better than a backdoor, and the reason is subtle
  *
@@ -52,7 +52,7 @@
  *   src/DarkNet/controllers/NetworkGenerator.ts:203-231 (addServerToNetwork)
  *   src/DarkNet/utils/darknetNetworkUtils.ts:16-34, 69-78, 90 */
 
-import { fresh, type DarknetHostKnowledge, type ExpiryOpts } from "./knowledge.ts";
+import { fresh, type DnetHost, type ExpiryOpts } from "./host.ts";
 import { isOnAirGap, NET_WIDTH } from "./rates.ts";
 
 /** What every policy here needs to know about one host. All of it is already in
@@ -110,7 +110,7 @@ export interface HoldView {
    *  position is keyed by PID, and the deep labs are hours long — so a run that
    *  spent every link on spare coverage and then found the walk's vantage
    *  unpinnable has traded the critical thing for a nice one. Set by the
-   *  overseer while the labyrinth still needs walking; the reservation stands
+   *  controller while the labyrinth still needs walking; the reservation stands
    *  down on its own the moment an irreplaceable host is linked or is being
    *  pinned this pass, because that IS the walker's slot being spent. */
   reserveForWalker?: boolean;
@@ -136,14 +136,14 @@ export interface HoldRefusal {
 
 /** The shared core of a `HoldHost`, projected from one knowledge record.
  *
- * The overseer and home each build these from the same fold but see different
- * extras — the overseer spreads in `difficulty`/`maxRam`/`freeGb`/
+ * The controller and home each build these from the same fold but see different
+ * extras — the controller spreads in `difficulty`/`maxRam`/`freeGb`/
  * `irreplaceable`, home spreads in `backdoored` — so this covers only what both
  * derive identically: the fresh facts, and the three flags the caller already
  * holds. Fields stay ABSENT rather than `undefined` when unknown; the planners
  * branch on `!== undefined` and the tests pin the difference. */
 export function holdHostFrom(
-  standing: DarknetHostKnowledge,
+  standing: DnetHost,
   opts: {
     at: number;
     expiry: ExpiryOpts;

@@ -7,6 +7,7 @@ import type { GoSystem } from "../features/go-system.ts";
 import type { ShareSystem } from "../features/share.ts";
 import type { StanekSystem } from "../features/stanek.ts";
 import type { StockMarketSystem } from "../features/stock.ts";
+import type { ContractSystem } from "../features/contracts.ts";
 import { getBitNodeMultipliers as vendoredBitNodeMultipliers } from "../vendor/bitburner/src/BitNode/BitNodeMults.ts";
 import { currentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import { StockMarketConstants as STOCK_CONSTANTS } from "../vendor/bitburner/src/StockMarket/data/Constants.ts";
@@ -113,6 +114,7 @@ export interface SimNsHost {
    *  namespace degrades to the gate flags, which is what a run with no market
    *  model should see. */
   stock?: StockMarketSystem;
+  contracts?: ContractSystem;
   /** Called when an augmentation install prestiges the run.
    *
    *  Lives here rather than in `game/` on purpose: a prestige kills every
@@ -371,6 +373,12 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       const seed = host.dnet?.stormSeedOn(target) === true ? ["STORM_SEED.exe"] : [];
       return [...filesOn(host, target), ...caches, ...seed].filter((f) => f.includes(substring)).sort();
     },
+    rm: (filename: string, hostname: unknown = process.host): boolean => {
+      const target = requireServer(host, hostname, process.host).hostname;
+      const removed = filesOn(host, target).delete(filename);
+      host.contents.delete(fileKey(target, filename));
+      return removed;
+    },
     scp: (files: string | string[], rawDestination: unknown, rawSource: unknown = process.host): boolean => {
       const list = Array.isArray(files) ? files : [files];
       const source = requireServer(host, rawSource, process.host).hostname;
@@ -473,7 +481,7 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     },
     kill: (pid: number): boolean => host.processes.kill(pid),
     // The pid form ignores the hostname, as upstream does: the worker map is
-    // global, and this is what lets the darknet overseer vouch (and kill) a
+    // global, and this is what lets the darknet controller vouch (and kill) a
     // job on a host it could never exec onto.
     isRunning: (script: unknown, hostname?: unknown, ...args: (string | number | boolean)[]): boolean => {
       if (typeof script === "number") return host.processes.get(script) !== undefined;
@@ -900,7 +908,25 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     process,
   );
   impl["codingcontract"] = namespace(
-    { getContractTypes: () => Object.values(CodingContractName) },
+    host.contracts ? {
+      getContractTypes: () => Object.values(CodingContractName),
+      getContractType: (filename: string, rawHost: unknown = process.host) => {
+        const target = requireServer(host, rawHost, process.host).hostname;
+        return host.contracts!.type(target, String(filename));
+      },
+      getNumTriesRemaining: (filename: string, rawHost: unknown = process.host) => {
+        const target = requireServer(host, rawHost, process.host).hostname;
+        return host.contracts!.triesRemaining(target, String(filename));
+      },
+      getData: (filename: string, rawHost: unknown = process.host) => {
+        const target = requireServer(host, rawHost, process.host).hostname;
+        return host.contracts!.data(target, String(filename));
+      },
+      attempt: (answer: unknown, filename: string, rawHost: unknown = process.host) => {
+        const target = requireServer(host, rawHost, process.host).hostname;
+        return host.contracts!.attempt(target, String(filename), answer);
+      },
+    } : { getContractTypes: () => Object.values(CodingContractName) },
     "codingcontract",
     host,
     process,

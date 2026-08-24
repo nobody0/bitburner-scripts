@@ -315,7 +315,7 @@ const JIT_PROCESS_PRESSURE_WORLD: NonNullable<SimProfile["world"]> = {
     organizationName: "JIT process-pressure laboratory",
     hackDifficulty: 90,
     moneyAvailable: 1e12,
-    requiredHackingSkill: 900,
+    requiredHackingSkill: 200,
     serverGrowth: 100,
     numOpenPortsRequired: 0,
     maxRam: 0,
@@ -412,11 +412,10 @@ export const PROFILES: readonly SimProfile[] = [
     // the optimiser solve a smaller game and invalidates route timing.
     // Full mechanically playable BN1 surface for this save. `only` does not
     // force any capability on; it merely excludes the currently unmodelled
-    // node-specific systems. Hacknet, the market and side income are universal
-    // systems and must compete with hacking/career in a full-node benchmark.
-    // `side` stays excluded until coding-contract generation is modeled; the
-    // simulator correctly reports that oracle-only subsystem as unmodeled.
-    features: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock"),
+    // node-specific systems. Hacknet, the market and coding contracts are
+    // universal income and must compete with hacking/career in a full-node
+    // benchmark.
+    features: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side"),
     goals: ["bn:1", "installs:2"],
     homeRam: 8,
     world: VANILLA_FULL_WORLD,
@@ -429,7 +428,10 @@ export const PROFILES: readonly SimProfile[] = [
     description:
       "Full BN1 calibration run with the exact free NeuroFlux level and multipliers granted by SF12.30.",
     bitnode: 1,
-    features: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock"),
+    // Identical to `bn1-full` by construction — the only difference this
+    // calibration run may carry is persistent SF12 state, and tests/profile.test.ts
+    // holds the two feature sets equal.
+    features: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side"),
     goals: ["bn:1", "installs:2"],
     homeRam: 8,
     world: BN1_FULL_SF12_30_WORLD,
@@ -484,7 +486,7 @@ export const PROFILES: readonly SimProfile[] = [
       "Synthetic late-game JIT laboratory: game RAM is abundant and a long high-security pipeline stresses live worker count, HGW, and pooling.",
     bitnode: 1,
     features: only("hacking", "progression"),
-    goals: ["earn:1e12"],
+    goals: ["earn:1e18"],
     homeRam: 134_217_728,
     world: JIT_PROCESS_PRESSURE_WORLD,
     horizon: "12m",

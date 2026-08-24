@@ -4,6 +4,8 @@ import type { SimWorld } from "../world.ts";
 import { mockServer } from "../core/mocks.ts";
 import { randomIp } from "../network.ts";
 import type { ProcessTable } from "../ns/process.ts";
+import type { ContractSystem } from "./contracts.ts";
+import type { StockMarketSystem } from "./stock.ts";
 import { MAZE_PATH, directionFromInput, generateMaze, surroundingsVisualized } from "./dnet-maze.ts";
 import {
   isLabyrinth,
@@ -34,17 +36,12 @@ import {
 } from "./dnet-feedback.ts";
 import { PACKET_SNIFF_PHRASES } from "../../shared/strategy/dnet/phrases.ts";
 
-/** The darknet, modelled far enough that buying DarkscapeNavigator.exe is a real
- * event with real consequences.
+/** Controller-facing darknet model for fresh and multi-install worlds.
  *
- * Scope is deliberate. What the controller does with the darknet today is
- * observe it and attempt passwords against it, so this models the population,
- * the getters, the access gate, the mutation clock and every one of the
- * twenty-four password models — their generation in `dnet-generators.ts` and
- * their failure feedback in `dnet-feedback.ts`, both transcribed. Every
- * unmodelled member still reports itself rather than answering with a
- * fabrication — an ns member this does not model is simply absent from the
- * namespace, so the root proxy reports it.
+ * It covers population and mutation, all 23 ns.dnet members, the 24 password
+ * models, sessions, cache/clue/contract rewards, storms and the labyrinth.
+ * Save/offline/UI state stays outside this boundary; unknown ns members remain
+ * absent so the root proxy reports them instead of inventing an answer.
  *
  * The formulas are transcribed, and so is the GRID. A host holds a
  * `(depth, leftOffset)` cell on an 8-wide board with air-gap rows, exactly as
@@ -63,7 +60,7 @@ export const DNET_ASSUMPTIONS: readonly string[] = [
   "dnet.topology: population, the 8-wide grid, air-gap rows and the connection passes are reproduced — a host holds a "
   + "(depth, leftOffset) cell, lateral edges reach only the cells beside it, and vertical edges are rolled against the whole "
   + "adjacent row. What is not transcribed is the ORDER upstream's balancing pass visits candidates in",
-  // Every knowledge expiry in shared/strategy/dnet/knowledge.ts is derived from
+  // Every knowledge expiry in shared/strategy/dnet/host.ts is derived from
   // the move, connect and disconnect rates, and the tick produces ALL of them —
   // every kind upstream rolls, at upstream's probabilities, seated on the real
   // grid — so a sim run does exercise the staleness policy. What is left is the
@@ -76,8 +73,7 @@ export const DNET_ASSUMPTIONS: readonly string[] = [
   + "upstream draws a fresh random() per candidate, which would make the mutation's draw block variable-width and let "
   + "topology perturb the stock stream, so the pairs are decided by hashing one draw instead. Same probabilities, same "
   + "independence, fixed cost",
-  "dnet.probeOrder: upstream shuffles probe() results to hide the network structure; this returns a stable order, because "
-  + "lodash shuffle consumes a variable number of draws and taking them from the shared stream would let topology perturb stock prices",
+  "dnet.probeOrder: probe results use upstream's lodash shuffle law on a dedicated response stream, preserving its distribution without letting probe frequency perturb stock prices",
   "dnet.logNoise: every branch of getLogNoise is now reproduced in upstream's order and at its probabilities — the spam "
   + "phrases, a neighbour's plaintext password, the transaction edge, the exact-characters hint off the last attempt, two "
   + "characters of this host's own password, a stranger's password, and addPacketSnifferNoise's own-or-neighbour leak — as is "
@@ -98,9 +94,7 @@ export const DNET_ASSUMPTIONS: readonly string[] = [
   + "ENTROPY SOURCE: getXorMaskEncryptedPasswordConfig, getPasswordMadeUpOfPrimesProduct and "
   + "generateSimpleArithmeticExpression are unbounded rejection loops, so a host takes exactly ONE draw off the world stream "
   + "and derives a mulberry32 from it (mixed with the hostname) that every generator then runs on. Same distributions, fixed "
-  + "cost per host, and a host's secret is reproducible from (secretDraw, hostname) alone. One substitution inside "
-  + "capturePackets: its generateDarknetServerName() branch emits an existing darknet hostname, because upstream's "
-  + "server-name generator and its offline-name recycling are not modelled",
+  + "cost per host, and a host's secret is reproducible from (secretDraw, hostname) alone. One substitution inside capturePackets emits an existing darknet hostname instead of generating a noise-only name",
   "dnet.playerDraws: three player-initiated darknet rolls take their entropy from the DEDICATED noise stream rather than "
   + "the shared gameplay one — the authentication timeout coin, the placement of an induced migration, and the maze's "
   + "start/endpoint offsets. Upstream draws all three from Math.random(). The probabilities and distributions are "
@@ -130,7 +124,7 @@ export const DNET_ASSUMPTIONS: readonly string[] = [
   + "DELETED rather than left floating. The accumulated charge is engine state no ns member exposes, so a script can only "
   + "infer its progress from the depth changing, exactly as in the game",
   "dnet.labyrinth: the maze is modelled. generateMaze's four stitched sub-mazes with their odd-rounding and their four "
-  + "punched gaps, the endpoint at [cols - 2, rows - 2] less a 0/2/4 offset on the last four labs, labLocations keyed by "
+  + "punched gaps, the endpoint at [cols - 2, rows - 2] less a 0/2/4 offset on the last five labs, labLocations keyed by "
   + "PID with the same offset at the start, getDirectionFromInput's word parsing, the radius-1 render with the player "
   + "overlay and without the exit, and all four response branches — the 451 below the lab's charisma, the deliberate "
   + "refusal of the lab's own password, the wall that leaves the position UNCHANGED, and the exit, which pays charisma at a "
@@ -138,17 +132,17 @@ export const DNET_ASSUMPTIONS: readonly string[] = [
   + "labradar is modelled too, because the deployed walker pays for one whenever a single render decides the exit: its "
   + "radius-3 view WITH the exit overlay, its full authentication delay, its riddle-worded refusals when there is no lab "
   + "or no direct connection, and the fact that it grants NO charisma — upstream delays and renders without ever reaching "
-  + "getAuthResult. labreport is still absent: it answers the same walls the free render already carries. "
+  + "getAuthResult. labreport returns the same PID location as directional booleans after the same authentication delay. "
   + "Opening that cache queues the labyrinth augmentation rather than drawing from the reward table. The net DEEPENS at the "
   + "install that follows rather than at the exit, because getNetDepth reads the current lab and the current lab is chosen "
   + "by installed augmentations — which is upstream's behaviour, not a simplification. What differs: the maze carve takes "
   + "an unbounded number of draws, so it runs on a generator derived from ONE world draw (same treatment as a host's "
   + "password), and the start/endpoint offsets come off the dedicated stream (see dnet.playerDraws)",
-  "dnet.cacheRewards: the draw is narrowed to money and the program/market unlocks, both exact; upstream also draws stock shares, clue files and (from phishing caches) coding contracts, so the MIX is narrower than upstream even though every reward given is faithful",
-  "dnet.cacheSources: three of upstream's four sources are now modelled and exact. A first successful authenticate rolls its 0.1 * 1.05^difficulty cache; memoryReallocation frees getRamBlockRemoved's clamped, roundToTwo'd figure per call, decrements blockedRam AND ramUsed as the two separate writes upstream makes, pays 10 * 1.1^(difficulty+1) charisma xp a call and drops a .cache the moment the block reaches zero on a non-lab host; phishingAttack reproduces the whole handler in upstream's branch order and short-circuit order — the 3-minute NET-WIDE cooldown on DarknetState.lastPhishingCacheTime, both chance formulas, the money term with its depth factor and U(0.9,1.2), and the charisma xp INCLUDING the quarter rate on the failure path. The STORM_SEED.exe side roll is now modelled too (see dnet.webstorm). What is not modelled: handleRamBlockClearedRewards' other side roll, a 30% clue file, which nothing here reads; hasDarknetBonusTime(), which is false by truth since the sim has no offline accrual; and the cooldown window starts OPEN at the beginning of a run rather than closed as upstream's construction-time stamp makes it — an install restamps it exactly as prestigeDarknetState does",
-  "dnet.webstorm: the storm seed and the webstorm are modelled. The seed drops from a cleared RAM block behind upstream's four gates — block at zero, a 15% roll, no seed among the MOVABLE servers (a pinned holder blocks nothing), and 30 minutes since the last storm — lands in the cleared server's own listing (ls appends it, scp cannot move it, a delete takes it, restarts and moves do not), and unleashStormSeed consumes it and stamps lastStormTime BEFORE checking the lock, so firing into a running storm burns it. The burst runs launchWebstorm's phases on the engine's own 200 ms cycles — 5 s warning, movable*0.6 + rand*netDepth - 6 deletes, 60% of survivors moved and every movable restarted, three add waves totalling NET_WIDTH*5, the density balance — under a mutationLock analog that freezes the ordinary clock and resolves nextMutation() on storm phases. Three declared divergences: the burst's draws come off the DEDICATED stream (player-initiated work, see dnet.playerDraws); lastStormTime starts ELIGIBLE rather than stamped at load, the same treatment the phishing stamp gets, with prestige restamping both; and the success/refusal messages are paraphrased",
+  "dnet.cacheRewards: the complete upstream draw is modeled: programs/market unlocks, live stock shares, clue files with fallback, phishing-only coding contracts, and money; generated contracts use the vendored problems and controller-facing reward lifecycle",
+  "dnet.cacheSources: first-root, RAM-clear and phishing caches are modeled in upstream order; first root and RAM clear also run addClue, RAM clear performs the 30% clue and storm-seed rolls, and phishing/storm cooldowns start closed at construction and prestige. hasDarknetBonusTime is false because offline accrual is outside the controller-run boundary",
+  "dnet.webstorm: seed gating, consumption-before-lock, phase timing, delete/move/restart/add waves and density balance are modeled; its variable-width burst draws use the dedicated dnet action stream, the construction/prestige clock starts closed as upstream does, and success/refusal messages are paraphrased",
   "dnet.promoteStock: the charge curve, the 0.4x per-cycle decay, the wait time, the charisma XP and the prestige reset are transcribed exactly; the propaganda has no other modelled effect",
-  "dnet.prestige: an install clears the stock promotions and every stasis link, as upstream does; unlike upstream's prestigeDarknetState it does NOT regenerate the network or the labyrinth, so the map a run maps stays mapped across installs",
+  "dnet.prestige: an install removes every generated host, file, cache, session, link, promotion and maze, then regenerates the current-depth network when access survives; save/offline restoration is outside this coverage boundary",
 ];
 
 /** `getDarknetVolatilityMult` — the propaganda curve `ns.dnet.promoteStock`
@@ -204,6 +198,21 @@ const HORIZONTAL_CONNECTION_CHANCE = 0.5;
 const VERTICAL_CONNECTION_CHANCE = 0.3;
 /** getNetDepth()'s fallback without full darknet access. */
 const NO_SF15_NET_DEPTH = 5;
+
+/** DarknetServerOptions.ts:72-76. `difficulty` is the server's rolled
+ * difficulty, not the row where the network generator managed to seat it. */
+export function requiredCharismaSkill(
+  difficulty: number,
+  labyrinthDepth: number,
+  labyrinthCharisma: number,
+  varianceDraw: number,
+): number {
+  const scaling = difficulty < 2
+    ? difficulty * 10
+    : (difficulty / labyrinthDepth) ** 1.5 * labyrinthCharisma * 0.85;
+  const variance = (varianceDraw * 3 - 1) * difficulty;
+  return Math.max(Math.floor(scaling + variance), 1);
+}
 /** packetSniffing.ts:14. The ring is generous, which is why a wide heartbleed
  * read is free information rather than a cost. */
 const MAX_LOG_LINES = 200;
@@ -449,12 +458,18 @@ export interface DarknetSystemOptions {
   player: SimPlayer;
   /** Files on home, for the programs a cache can hand over. */
   homeFiles: () => Set<string>;
+  filesOn?: (hostname: string) => Set<string>;
+  writeTextFile?: (hostname: string, filename: string, contents: string) => void;
   /** Drop a deleted host's files. The file map belongs to the sim host, not to
    *  this system, so removal is a callback rather than a reach-in. */
   forgetFiles?: (hostname: string) => void;
   /** DarknetMoneyMultiplier for this node — 0 in BN8, which removes the money
    *  reward from the draw entirely rather than scaling it to nothing. */
   darknetMoneyMultiplier: () => number;
+  /** Live reward targets. Cache branches must update the same systems the
+   * corresponding Netscript namespaces read. */
+  contracts?: ContractSystem;
+  stock?: StockMarketSystem;
 }
 
 /** The programs a cache hands over, in the order upstream walks them. The first
@@ -466,6 +481,22 @@ export const CACHE_PROGRAMS = [
   "relaySMTP.exe", "DeepscanV2.exe", "HTTPWorm.exe", "SQLInject.exe", "Formulas.exe",
 ] as const;
 
+const CACHE_PREFIXES = ["wallet", "secrets", "ledger", "stash", "vault", "bankdata", "do_not_open"] as const;
+const PASSWORD_FILE_NAMES = ["secrets", "password", "key", "credentials", "login", "admin", "root", "access"] as const;
+const NOTEBOOK_FILE_NAMES = ["thoughts", "notes", "journal", "search_history", "dreams", "THE_TRUTH"] as const;
+const COMMON_PASSWORDS = [
+  "123456", "password", "12345678", "qwerty", "123456789", "12345", "1234", "111111", "1234567",
+  "dragon", "123123", "baseball", "abc123", "football", "monkey", "letmein", "696969", "shadow", "master",
+  "666666", "qwertyuiop", "123321", "mustang", "1234567890", "michael", "654321", "superman", "1qaz2wsx",
+  "7777777", "121212", "0", "qazwsx", "123qwe", "trustno1", "jordan", "jennifer", "zxcvbnm", "asdfgh",
+  "hunter", "buster", "soccer", "harley", "batman", "andrew", "tigger", "sunshine", "iloveyou", "2000",
+  "charlie", "robert", "thomas", "hockey", "ranger", "daniel", "starwars", "112233", "george", "computer",
+  "michelle", "jessica", "pepper", "1111", "zxcvbn", "555555", "11111111", "131313", "freedom", "777777",
+  "pass", "maggie", "159753", "aaaaaa", "ginger", "princess", "joshua", "cheese", "amanda", "summer",
+  "love", "ashley", "6969", "nicole", "chelsea", "biteme", "matthew", "access", "yankees", "987654321",
+  "dallas", "austin", "thunder", "taylor", "matrix",
+] as const;
+
 export class DarknetSystem {
   readonly hosts = new Map<string, DarknetHost>();
   #populated = false;
@@ -473,6 +504,8 @@ export class DarknetSystem {
   /** Serial for hosts added after populate(), so a re-added name never collides
    *  with one the net still remembers. */
   #added = 0;
+  /** Deleted IPs and hostnames, in insertion order, for the 3% name-reuse path. */
+  readonly #offlineServers = new Set<string>();
   // Declared before the promise that assigns it: a field initialiser running
   // before its own target field exists is a TDZ error on private fields, so the
   // promise is built in the constructor instead.
@@ -485,9 +518,14 @@ export class DarknetSystem {
    *  the real vendored tick rather than a parallel estimate of it. */
   readonly #stockPromotions = new Map<string, number>();
   readonly #opts: DarknetSystemOptions;
+  readonly #standaloneTextFiles = new Map<string, Set<string>>();
+  readonly #createdAtMs: number;
 
   constructor(options: DarknetSystemOptions) {
     this.#opts = options;
+    this.#createdAtMs = options.world.clock.now();
+    this.#lastPhishingCacheMs = this.#createdAtMs;
+    this.#lastStormMs = this.#createdAtMs;
     this.#triggerNextMutation();
   }
 
@@ -556,6 +594,21 @@ export class DarknetSystem {
    *  the per-server state. This does not, and that predates the promotions —
    *  see the `dnet.prestige` entry in `DNET_ASSUMPTIONS`. */
   prestige(nowMs?: number): void {
+    for (const hostname of [...this.hosts.keys()]) {
+      this.#opts.forgetFiles?.(hostname);
+      this.#opts.processes.killall(hostname);
+      this.#opts.servers.delete(hostname);
+      this.#unwire(hostname);
+      this.#opts.network.delete(hostname);
+    }
+    this.hosts.clear();
+    this.caches.clear();
+    this.#standaloneTextFiles.clear();
+    this.#darkweb = undefined;
+    this.#populated = false;
+    this.#added = 0;
+    this.#cyclesSinceMutation = 0;
+    this.#mutations = 0;
     this.#stockPromotions.clear();
     // `prestigeDarknetState` drops `labyrinth`, `labEndpoint` and
     // `labLocations` outright, so a walk that did not finish inside an install
@@ -577,7 +630,10 @@ export class DarknetSystem {
     // thirty minutes. The seeds themselves go with the per-server state.
     if (nowMs !== undefined) this.#lastStormMs = nowMs;
     this.#stormSeeds.clear();
+    this.#offlineServers.clear();
     this.#storm = undefined;
+    this.record("darkweb");
+    if (this.hasAccess()) this.populate();
   }
 
   /** populateDarknet(). Idempotent, as upstream's guard makes it.
@@ -591,27 +647,26 @@ export class DarknetSystem {
     this.#populated = true;
     const { generate } = this.#opts;
     const depth = this.netDepth();
-    const count = Math.max(1, Math.round(depth * NET_WIDTH * SERVER_DENSITY) - 10);
     this.#placeLab();
-    let placed = 0;
-    for (let row = 0; row < depth && placed < count; row++) {
-      // An air-gap row holds nothing at all, which is what makes depth 7 and
-      // depth 9 non-adjacent: the vertical wiring only looks at depth ± 1.
-      if (isOnAirGap(row)) continue;
-      // Rows 0 and 1 are topped up to five upstream; deeper rows take what is
-      // left of the population. Never more than the row has cells.
-      const target = Math.min(NET_WIDTH, row < 2 ? 5 : count - placed);
-      for (let i = 0; i < target; i++) {
-        // One draw per host: it picks the CELL and seeds the wiring.
-        const draw = generate();
-        const free = this.#openPositions(row, row);
-        const cell = free[Math.floor(draw * free.length)];
-        if (!cell) break;
-        this.#buildHost(`dnet-${row}-${i}`, row, row, cell[1]);
-        this.#wire(`dnet-${row}-${i}`, row, cell[1], draw);
-        placed++;
-      }
+    // The loop bound is fractional upstream, so the loop adds ceil(count).
+    // Row top-ups use ordinary random difficulty; only the count comes from
+    // the shallow row's current population.
+    const count = Math.max(0, depth * NET_WIDTH * SERVER_DENSITY - 10);
+    for (let i = 0; i < count; i++) {
+      this.#addHost(Math.floor(generate() * depth), generate(), generate());
     }
+    const rowZeroTopUp = 5 - this.#onRow(0).length;
+    for (let i = 0; i < rowZeroTopUp; i++) {
+      this.#addHost(Math.floor(generate() * depth), generate(), generate());
+    }
+    const rowOneTopUp = 5 - this.#onRow(1).length;
+    for (let i = 0; i < rowOneTopUp; i++) {
+      this.#addHost(Math.floor(generate() * depth), generate(), generate());
+    }
+    const roll: number[] = [];
+    for (let i = 0; i < MUTATION_DRAWS; i++) roll.push(generate());
+    this.#balance(roll);
+    for (let i = 0; i < depth; i++) this.#addConnections(generate(), generate());
   }
 
   /** One darknet host, exactly as `populate` and a later `addRandomDarknetServers`
@@ -630,6 +685,10 @@ export class DarknetSystem {
     // stream would make a host's cost depend on how unlucky its password was.
     const secretDraw = generate();
     const secret = generateSecret(model, difficulty, passwordRng(secretDraw, hostname));
+    const lab = this.currentLab();
+    const labDepth = lab?.depth ?? NO_SF15_NET_DEPTH;
+    const labCharisma = lab?.cha ?? 300;
+    const charisma = requiredCharismaSkill(difficulty, labDepth, labCharisma, generate());
     this.hosts.set(hostname, {
       hostname,
       modelId: model,
@@ -646,8 +705,7 @@ export class DarknetSystem {
       depth,
       // Assigned by #seat below, which is the only writer — see the grid index.
       leftOffset: -1,
-      // depthScaling for depth < 2, per DarknetServerOptions.ts:70.
-      requiredCharismaSkill: Math.max(1, depth * 10),
+      requiredCharismaSkill: charisma,
       isStationary: false,
       stasisLinked: false,
       online: true,
@@ -939,7 +997,8 @@ export class DarknetSystem {
     // labyrinth cache to `getLabReward` by testing that the filename contains
     // `the_great_work` (`cacheFiles.ts:39`), and a lab cache named anything else
     // would silently pay out money instead of an augmentation.
-    const name = `${prefix ?? "cache"}_${Math.floor(this.#opts.generate() * 900 + 100)}${suffix}`;
+    const chosenPrefix = prefix ?? CACHE_PREFIXES[Math.floor(this.#opts.random() * CACHE_PREFIXES.length)]!;
+    const name = `${chosenPrefix}_${this.#opts.random().toString().substring(2, 5)}${suffix}`;
     const held = this.caches.get(hostname) ?? [];
     if (held.includes(name)) return undefined;
     held.push(name);
@@ -951,6 +1010,86 @@ export class DarknetSystem {
     return this.caches.get(hostname) ?? [];
   }
 
+  /** lodash `shuffle` with an isolated response stream: exact ordering law,
+   * without allowing a controller's probe frequency to perturb stock prices. */
+  shuffleProbe(names: readonly string[]): string[] {
+    const out = [...names];
+    const random = this.#opts.logNoise ?? this.#opts.random;
+    for (let index = 0; index < out.length; index++) {
+      const picked = index + Math.floor(random() * (out.length - index));
+      [out[index], out[picked]] = [out[picked]!, out[index]!];
+    }
+    return out;
+  }
+
+  /** `addClue`, including its independent fall-through rolls. A failed branch
+   * keeps going; a written data file returns immediately. */
+  addClue(hostname: string): void {
+    const source = this.record(hostname);
+    if (!source) return;
+    const random = this.#opts.random;
+    const writeText = (filename: string, contents: string): void => {
+      if (this.#opts.writeTextFile) return this.#opts.writeTextFile(hostname, filename, contents);
+      let files = this.#standaloneTextFiles.get(hostname);
+      if (!files) this.#standaloneTextFiles.set(hostname, files = new Set());
+      files.add(filename);
+    };
+    // The literature hint is not controller-visible, but its draws precede
+    // every data-file roll and therefore remain part of the exact sequence.
+    if ((random() < 0.7 && source.difficulty <= 3) || random() < 0.1) random();
+
+    if (random() < 0.1) {
+      const length = 15;
+      const filename = `${PASSWORD_FILE_NAMES[Math.floor(random() * PASSWORD_FILE_NAMES.length)]}.data.txt`;
+      const start = Math.floor(random() * (COMMON_PASSWORDS.length - length));
+      writeText(filename, `Some common passwords include ${COMMON_PASSWORDS.slice(start, start + length).join(", ")}`);
+      return;
+    }
+    if (random() < 0.1) {
+      const neighbour = (this.#opts.network.get(hostname) ?? [])
+        .map((name) => this.record(name))
+        .find((entry) => entry && !this.#opts.servers.get(entry.hostname)?.hasAdminRights && entry.password);
+      // Filename is rolled even if no qualifying neighbour exists upstream.
+      const filename = `${PASSWORD_FILE_NAMES[Math.floor(random() * PASSWORD_FILE_NAMES.length)]}.data.txt`;
+      if (neighbour) {
+        writeText(filename, `Remember this password: ${neighbour.password}`);
+        return;
+      }
+    }
+    const adjacent = (disconnected: boolean): DarknetHost | undefined =>
+      this.#adjacent(source.depth, source.leftOffset).find((entry) =>
+        entry.password
+        && !this.#opts.servers.get(entry.hostname)?.hasAdminRights
+        && (!disconnected || !(this.#opts.network.get(hostname) ?? []).includes(entry.hostname)));
+    if (random() < 0.1) {
+      const filename = `${PASSWORD_FILE_NAMES[Math.floor(random() * PASSWORD_FILE_NAMES.length)]}.data.txt`;
+      const target = adjacent(true);
+      if (target) {
+        writeText(filename, `Server: ${target.hostname} Password: "${target.password}"`);
+        return;
+      }
+    }
+    if (random() < 0.4) {
+      const filename = `${NOTEBOOK_FILE_NAMES[Math.floor(random() * NOTEBOOK_FILE_NAMES.length)]}.data.txt`;
+      const contents = PACKET_SNIFF_PHRASES[Math.floor(random() * PACKET_SNIFF_PHRASES.length)]!;
+      writeText(filename, contents);
+      return;
+    }
+    if (random() < 0.7) {
+      const filename = `${PASSWORD_FILE_NAMES[Math.floor(random() * PASSWORD_FILE_NAMES.length)]}.data.txt`;
+      const target = adjacent(false);
+      if (target) {
+        const firstIndex = Math.floor(random() * target.password.length);
+        let secondIndex = Math.floor(random() * target.password.length);
+        if (secondIndex === firstIndex) secondIndex = (secondIndex + 1) % target.password.length;
+        writeText(
+          filename,
+          `The password for ${target.hostname} contains ${target.password[firstIndex]} and ${target.password[secondIndex]}`,
+        );
+      }
+    }
+  }
+
   // --- the storm ------------------------------------------------------------
 
   /** Hosts holding `STORM_SEED.exe`. Upstream keeps the file in
@@ -959,15 +1098,12 @@ export class DarknetSystem {
    * single slot because the engine's seed-exists gate scans MOVABLES only, so
    * a seed parked on a stasis-pinned host does not stop another spawning. */
   readonly #stormSeeds = new Set<string>();
-  /** `lastStormTime`. Undefined means the eligibility window starts OPEN — a
-   * declared divergence, same treatment as the phishing cooldown stamp: the
-   * upstream clock is module scope stamped at load, and an install restamps
-   * it in `prestige` exactly as `prestigeDarknetState` does. */
+  /** `lastStormTime`, stamped at construction and every prestige. */
   #lastStormMs: number | undefined;
   /** The webstorm in progress — the `mutationLock` analog. While set, the
    * ordinary mutation clock is frozen and `nextMutation()` resolves on storm
    * phases instead. */
-  #storm: { phase: number; cyclesLeft: number } | undefined;
+  #storm: { phase: number; cyclesLeft: number; serversToDelete?: number } | undefined;
 
   /** Whether `STORM_SEED.exe` sits on this host — what `ls` appends. */
   stormSeedOn(hostname: string): boolean {
@@ -1025,14 +1161,14 @@ export class DarknetSystem {
    * `nextMutation()` — upstream's waiters wake on storm phases while the lock
    * is held. */
   #stormProcess(cycles: number): void {
-    let storm: { phase: number; cyclesLeft: number } | undefined = this.#storm;
+    let storm: { phase: number; cyclesLeft: number; serversToDelete?: number } | undefined = this.#storm;
     if (!storm) return;
     storm.cyclesLeft -= cycles;
     while (storm.cyclesLeft <= 0) {
       // Annotated to break TS7022: narrowing the reassigned `let` above makes
       // these two circular through the assignment below without them.
       const leftover: number = storm.cyclesLeft;
-      this.#applyStormPhase(storm.phase);
+      this.#applyStormPhase(storm);
       this.#triggerNextMutation();
       const next: number = storm.phase + 1;
       if (next >= STORM_PHASE_CYCLES.length) {
@@ -1042,34 +1178,35 @@ export class DarknetSystem {
         this.#cyclesSinceMutation = 0;
         return;
       }
-      storm = { phase: next, cyclesLeft: STORM_PHASE_CYCLES[next]! + leftover };
+      storm = { phase: next, cyclesLeft: STORM_PHASE_CYCLES[next]! + leftover, serversToDelete: storm.serversToDelete };
       this.#storm = storm;
     }
   }
 
   /** One phase's action, per `launchWebstorm`'s sequence: warning, then
-   * ~60% of movables deleted (+/- a depth-scaled jitter), 60% of the survivors
-   * moved and EVERY movable restarted, then three add waves totalling
+   * deletion target `0.6 * movables + random(0, netDepth) - 6`, then movement count
+   * `(postDeleteMovables - requestedDeletes) * 0.6`, and every movable restarted;
+   * three add waves then add
    * NET_WIDTH * 5 fresh hosts, then the density balance. Every pool the
    * phases draw from excludes stationary and stasis-linked hosts, which is
    * the entire reason a link is worth a slot. Player-initiated draws, so the
    * dedicated stream (see `dnet.playerDraws`). */
-  #applyStormPhase(phase: number): void {
+  #applyStormPhase(storm: { phase: number; serversToDelete?: number }): void {
     const draw = this.#opts.logNoise ?? this.#opts.generate;
+    const { phase } = storm;
     switch (phase) {
       case 0: {
-        // deleteRandomDarknetServers(movable * 0.6 + rand * netDepth - 6)
         const movable = this.#movable();
-        const count = Math.max(0, Math.floor(movable.length * 0.6 + draw() * this.netDepth() - 6));
+        const count = Math.max(0, movable.length * 0.6 + draw() * this.netDepth() - 6);
+        storm.serversToDelete = count;
         for (let i = 0; i < count; i++) this.#deleteOne(draw());
         break;
       }
       case 1: {
-        // 60% of the survivors moved, then restartAllDarknetServers — which
-        // draws from the movable pool only, so a pinned host keeps its
-        // scripts, sessions and backdoor through the whole burst.
-        for (const name of this.#movable()) {
-          if (draw() < 0.6) this.#moveHost(name, draw(), draw());
+        const count = Math.max(0, (this.#movable().length - (storm.serversToDelete ?? 0)) * 0.6);
+        for (let i = 0; i < count; i++) {
+          const name = this.#pick(this.#movable(), draw());
+          this.#moveHost(name, draw(), draw());
         }
         for (const name of this.#movable()) this.#restartHost(name);
         break;
@@ -1104,7 +1241,7 @@ export class DarknetSystem {
    * figure. Collapsing them would hide the invariant the whole feature leans on:
    * blocked RAM presents AS used RAM, so a script only ever sees the block
    * through `getServerUsedRam`, and a model that moved one without the other
-   * would have `freeRam` disagree with what `exec` would actually accept.
+   * would make reported availability disagree with what `exec` accepts.
    *
    * Clearing the block to zero drops a `.cache` on a non-labyrinth host, with no
    * roll at all. The two side rolls upstream also makes here — a 30% clue file
@@ -1127,9 +1264,7 @@ export class DarknetSystem {
       cleared = true;
       if (!isLabyrinth(hostname, host.modelId)) {
         this.addCache(hostname, false);
-        // `handleRamBlockClearedRewards`' second side roll, now modelled: the
-        // storm seed, behind its own four gates. The 30% clue file remains
-        // declared in DNET_ASSUMPTIONS rather than invented.
+        if (this.#opts.random() < 0.3) this.addClue(hostname);
         this.#maybeDropSeed(hostname, nowMs);
       }
     }
@@ -1233,11 +1368,8 @@ export class DarknetSystem {
   /** `getRewardFromCache`. Karma is spent whatever the reward turns out to be,
    * and the reward is drawn uniformly from the applicable kinds.
    *
-   * Three of upstream's five kinds report rather than resolve — stock shares,
-   * coding contracts and data files each need a subsystem this does not model,
-   * and drawing money in their place would quietly inflate cache income and
-   * make the purchase look better than it is. Nothing opens a cache today, so
-   * this costs nothing now and fails loudly the day something does.
+   * All branches resolve into their live subsystem: stock holdings, host text
+   * files, generated contracts, home programs/market access, or player money.
    * Source: src/DarkNet/effects/cacheFiles.ts:35-74 */
   openCache(hostname: string, filename: string): { success: boolean; message: string; karmaLoss: number } {
     const record = this.record(hostname);
@@ -1249,7 +1381,7 @@ export class DarknetSystem {
       // different failure from a refusal, because a throw kills the calling
       // script: a job that opened a cache off a stale listing would cost its
       // host the resident standing on it. Refusing quietly would have hidden
-      // exactly the bug the guard in `game/dnet/jobs.ts` exists to prevent.
+      // exactly the bug the guard in `game/dnet/orders.ts` exists to prevent.
       throw new Error(`Cache file not found: ${filename} on server ${hostname}`);
     }
     this.caches.set(hostname, held.filter((name) => name !== filename));
@@ -1275,15 +1407,14 @@ export class DarknetSystem {
       };
     }
 
-    // Upstream draws uniformly from five kinds (six on a phishing cache). Three
-    // of them need a subsystem this does not model — stock shares, clue files,
-    // and coding contracts — so the draw is NARROWED to the two that resolve
-    // exactly rather than substituted for or faked. Every reward handed out is
-    // therefore a faithful one; what is unfaithful is the mix, and that is
-    // declared in DNET_ASSUMPTIONS. Throwing on the missing kinds was the other
-    // option and a worse one: a function that fails on a random draw is not a
-    // model anything can use, and the failure would land unpredictably.
-    const kinds: (() => string)[] = [() => this.#programOrMarketReward(record.difficulty)];
+    // Three base kinds, phishing-only contracts, and optional money: the exact
+    // upstream array and therefore the exact uniform branch probabilities.
+    const kinds: (() => string)[] = [
+      () => this.#programOrMarketReward(record.difficulty),
+      () => this.#stockReward(record.difficulty),
+      () => this.#dataFileReward(record.difficulty, hostname),
+    ];
+    if (filename.endsWith(".d.cache")) kinds.push(() => this.#contractReward(record.difficulty, hostname));
     if (this.#opts.darknetMoneyMultiplier() !== 0) {
       kinds.push(() => this.#moneyReward(record.difficulty));
     }
@@ -1324,26 +1455,57 @@ export class DarknetSystem {
    * purchase we deliberately never make. */
   #programOrMarketReward(difficulty: number): string {
     const files = this.#opts.homeFiles();
+    const creating = this.#opts.player.currentWork?.kind === "createProgram"
+      ? this.#opts.player.currentWork.subject
+      : undefined;
     for (const program of CACHE_PROGRAMS) {
-      if (!files.has(program)) {
+      if (!files.has(program) && creating !== program) {
         files.add(program);
         return `You have discovered the program ${program}.`;
       }
     }
     const gates = this.#opts.world.gates;
-    if (!gates.hasWseAccount) {
+    if (!(this.#opts.stock?.hasWseAccount ?? gates.hasWseAccount)) {
+      this.#opts.stock?.grantWseAccount();
       gates.hasWseAccount = true;
       return "You have discovered a stolen WSE Account!";
     }
-    if (!gates.hasTixApiAccess) {
+    if (!(this.#opts.stock?.hasTixApiAccess ?? gates.hasTixApiAccess)) {
+      this.#opts.stock?.grantTixApiAccess();
       gates.hasTixApiAccess = true;
       return "You have discovered a stolen TIX API access point!";
     }
-    if (!gates.has4SData && this.#opts.bitNode !== 8) {
+    if (!(this.#opts.stock?.has4SData ?? gates.has4SData) && this.#opts.bitNode !== 8
+      && (this.#opts.stock?.grant4SData() ?? true)) {
       gates.has4SData = true;
       return "You have discovered a cache of stolen 4S Data!";
     }
     return this.#moneyReward(difficulty);
+  }
+
+  #stockReward(difficulty: number): string {
+    if (!this.#opts.stock) throw new Error("Darknet stock reward requires the stock market model");
+    const reward = this.#opts.stock.grantRandomShares(difficulty, this.#opts.random);
+    if (!reward) return this.#moneyReward(difficulty);
+    return `You have discovered a stock option cache containing ${reward.shares} shares of ${reward.symbol}!`;
+  }
+
+  #dataFileReward(difficulty: number, hostname: string): string {
+    const count = (): number => [...(this.#opts.filesOn?.(hostname) ?? this.#standaloneTextFiles.get(hostname) ?? [])]
+      .filter((name) => name.endsWith(".data.txt")).length;
+    const before = count();
+    this.addClue(hostname);
+    this.addClue(hostname);
+    return count() === before ? this.#moneyReward(difficulty) : "You have discovered a data file cache!";
+  }
+
+  #contractReward(difficulty: number, hostname: string): string {
+    if (this.#opts.world.clock.now() - this.#createdAtMs <= 10 * 60 * 1_000) return this.#moneyReward(difficulty);
+    const count = Math.min(Math.floor(Math.min(20, difficulty) * 0.1 - 1.5 + this.#opts.random() * 3), 3);
+    if (count < 1) return this.#moneyReward(difficulty);
+    if (!this.#opts.contracts) throw new Error("Darknet coding-contract reward requires the contract model");
+    for (let i = 0; i < count; i++) this.#opts.contracts.generate(hostname, 1 / 2);
+    return "New coding contracts are now available on the network!";
   }
 
   // --- sessions -------------------------------------------------------------
@@ -1360,9 +1522,10 @@ export class DarknetSystem {
    * Source: src/DarkNet/effects/authentication.ts:199-205 (the darkweb
    *   short-circuit), src/DarkNet/models/DarknetState.ts:135-147 (the prune). */
   isAuthenticated(hostname: string, pid: number, processHost?: string): boolean {
-    // "We always are authed to ourselves and DarkWeb."
+    // The action gate grants a process its own host before consulting stored
+    // sessions. This method models only hasSession: darkweb plus explicit PIDs.
+    void processHost;
     if (hostname === "darkweb") return true;
-    if (processHost !== undefined && processHost === hostname) return true;
     const host = this.record(hostname);
     if (!host || !host.online) return false;
     if (!host.sessions.has(pid)) return false;
@@ -1384,7 +1547,14 @@ export class DarknetSystem {
     // Upstream sets hasAdminRights on a successful authentication, and it is
     // what the in-game map draws a green border from. It survives a restart;
     // only the session set does not.
+    const firstRoot = server?.hasAdminRights !== true;
     if (server) server.hasAdminRights = true;
+    if (firstRoot) {
+      this.addClue(hostname);
+      if (this.#opts.random() < 0.1 * 1.05 ** host.difficulty && !isLabyrinth(hostname, host.modelId)) {
+        this.addCache(hostname, false);
+      }
+    }
   }
 
   /** Direct connection, which most darknet calls require and `scp` does not. */
@@ -1577,7 +1747,7 @@ export class DarknetSystem {
    *  adopt the first one's progress. */
   readonly #labLocations = new Map<number, [number, number]>();
 
-  /** `getRandomOffset`: 0, 2 or 4 on each axis, and only on the last four labs.
+  /** `getRandomOffset`: 0, 2 or 4 on each axis, and only on the last five labs.
    *
    * It is drawn ONCE per call upstream and used for both the start and the
    * endpoint — the same function, called twice, so the two offsets are
@@ -1740,13 +1910,35 @@ export class DarknetSystem {
     return { success: true, message: surroundingsVisualized(built.maze, x, y, 3, true, true, built.endpoint) };
   }
 
+  labReport(pid: number): {
+    success: true;
+    coords: [number, number];
+    north: boolean;
+    east: boolean;
+    south: boolean;
+    west: boolean;
+  } | { success: false; message: string } {
+    const built = this.labMaze();
+    if (!built) return { success: false, message: "You feel lost..." };
+    const [x, y] = this.labPosition(pid);
+    const open = (dx: number, dy: number): boolean => built.maze[y + dy]?.[x + dx] === MAZE_PATH;
+    return {
+      success: true,
+      coords: [x, y],
+      north: open(0, -1),
+      east: open(1, 0),
+      south: open(0, 1),
+      west: open(-1, 0),
+    };
+  }
+
   /** Check a password, and say what the model says back.
    *
    * All fifteen of upstream's arms, transcribed in `dnet-feedback.ts` — see the
    * `dnet.models` entry in DNET_ASSUMPTIONS for what is left. The labyrinth is
    * intercepted here rather than there, exactly as upstream branches on
-   * `isLabyrinthServer` above the equality test: it is a maze, not a password,
-   * and the sim does not model the maze.
+   * `isLabyrinthServer` above the equality test: it routes into the modeled
+   * maze movement rather than ordinary password equality.
    *
    * `responseTime` is the authenticate delay the caller already waited, which
    * is what the `2G_cellular` arm reports back — upstream passes the same
@@ -1837,11 +2029,8 @@ export class DarknetSystem {
     });
   }
 
-  /** The mutation clock, on the engine's 200 ms cycle.
-   * `getDarknetCyclesPerMutation` is `(rateMultiplier * 150) / depth` cycles,
-   * rateMultiplier being 1 in BN15 and 2 elsewhere. Only deletions and restarts
-   * are applied; moves would need upstream's placement logic, which this does
-   * not reproduce. */
+  /** The mutation clock follows processDarknet: accumulate cycles, perform at most
+   * one mutation per call after the threshold, then reset the accumulator. */
   darknetProcess(cycles: number): void {
     if (!this.hasAccess() || this.hosts.size === 0) return;
     // THE MUTATION LOCK. While a webstorm runs, `mutateDarknet` early-returns
@@ -1853,12 +2042,10 @@ export class DarknetSystem {
     }
     const perMutation = ((this.#opts.bitNode === 15 ? 1 : 2) * 150) / this.netDepth();
     this.#cyclesSinceMutation += cycles;
-    while (this.#cyclesSinceMutation > perMutation) {
-      this.#cyclesSinceMutation -= perMutation;
-      // Resolved for EVERY tick, including one that changes nothing: upstream
-      // triggers it before the throttle roll, so an agent looping on it wakes
-      // on the net's clock rather than on the net's activity.
-      this.#triggerNextMutation();
+    if (this.#cyclesSinceMutation > perMutation) {
+      // Upstream performs at most one mutation per processDarknet call and
+      // resets the accumulator instead of retaining mutation debt.
+      this.#cyclesSinceMutation = 0;
       this.#mutate();
     }
   }
@@ -1884,6 +2071,7 @@ export class DarknetSystem {
 
     const movable = this.#movable();
     if (movable.length === 0) return;
+    this.#triggerNextMutation();
 
     // Deeper nets mutate more often per tick but throttle themselves here, so
     // past depth 16 a growing share of ticks do nothing at all.
@@ -1903,12 +2091,12 @@ export class DarknetSystem {
     if (roll[5]! < 0.3) this.#restockLowLevel(roll);
 
     if (roll[6]! < 0.1) {
-      const count = Math.floor(roll[7]! * 3 + 1);
+      const count = roll[7]! * 3 + 1;
       for (let i = 0; i < count; i++) this.#deleteOne(roll[8]!);
     }
 
     if (roll[9]! < 0.1) {
-      const count = Math.floor(roll[10]! * 3 + 1);
+      const count = roll[10]! * 3 + 1;
       for (let i = 0; i < count; i++) this.#addHost(Math.floor(roll[11]! * this.netDepth()), roll[12]!, roll[13]!);
       return;
     }
@@ -2156,16 +2344,27 @@ export class DarknetSystem {
    * widens its band when the band is full, so a host asked for a saturated row
    * lands near it instead. When the whole net is full nothing is added, which is
    * the behaviour that holds the population at NET_WIDTH per row. */
-  #addHost(difficulty: number, drawA: number, drawB: number): void {
-    const wanted = Math.max(0, Math.min(Math.floor(difficulty), this.netDepth() - 1));
-    const free = this.#openPositions(wanted, wanted);
+  #addHost(difficulty: number, drawA: number, drawB: number, fixedDepth = false): void {
+    const rolledDifficulty = Math.floor(difficulty);
+    const wanted = Math.max(0, Math.min(rolledDifficulty, this.netDepth() - 1));
+    const range = fixedDepth ? 0 : 3;
+    const free = this.#openPositions(wanted - range, wanted + range);
     const cell = free[Math.floor(drawB * free.length)];
     if (!cell) return;
     const [depth, column] = cell;
-    const hostname = `dnet-${depth}-x${this.#added++}`;
-    if (this.hosts.has(hostname)) return;
-    this.#buildHost(hostname, depth, depth, column);
+    let hostname = "dnet-" + depth + "-x" + this.#added++;
+    if (this.#opts.fullAccess() && subDraw(drawA, 1000) < 0.03 && this.#offlineServers.size > 0) {
+      const offline = [...this.#offlineServers];
+      let offset = Math.floor(subDraw(drawA, 1001) * offline.length);
+      while (offset < offline.length && offline[offset]!.includes(".")) offset++;
+      if (offline[offset] !== undefined) hostname = offline[offset]!;
+    }
+    if (this.hosts.get(hostname)?.online === true) return;
+    this.#buildHost(hostname, rolledDifficulty, depth, column);
     this.#wire(hostname, depth, column, drawA);
+    this.#offlineServers.delete(hostname);
+    const server = this.#opts.servers.get(hostname);
+    if (server) this.#offlineServers.delete(server.ip);
   }
 
   /** `addLowLevelServersIfNeeded`: keep the shallow rows populated.
@@ -2175,19 +2374,22 @@ export class DarknetSystem {
    * which is what stops deletion from emptying the approaches to the net. */
   #restockLowLevel(roll: readonly number[]): void {
     const online = [...this.hosts.values()].filter((entry) => entry.online);
-    const atDarkweb = online.filter((entry) => entry.depth === 0).length;
-    if (atDarkweb <= 3) {
-      this.#addHost(0, roll[2]!, roll[3]!);
-      this.#addHost(0, roll[4]!, roll[5]!);
+    if (online.filter((entry) => entry.depth === 0).length <= 3) {
+      const before = this.#movable().length;
+      this.#addHost(0, roll[2]!, roll[3]!, true);
+      this.#addHost(0, roll[4]!, roll[5]!, true);
+      if (this.#movable().length > before) this.#restockLowLevel(roll);
+      return;
     }
-    const shallow = online.filter((entry) => entry.depth <= 3).length;
-    if (shallow / (4 * NET_WIDTH) < LOW_LEVEL_SERVER_DENSITY) {
+    if (online.filter((entry) => entry.depth <= 3).length / (4 * NET_WIDTH) < LOW_LEVEL_SERVER_DENSITY) {
+      const before = this.#movable().length;
       this.#addHost(Math.floor(roll[6]! * 4), roll[7]!, roll[8]!);
       this.#addHost(Math.floor(roll[9]! * 4), roll[10]!, roll[11]!);
+      if (this.#movable().length > before) this.#restockLowLevel(roll);
     }
   }
 
-  /** `moveDarknetServer`: a new depth near the old one, and a full re-wire.
+  /** `moveDarknetServer`: a new cell near immutable difficulty, and a full re-wire.
    *
    * A move invalidates a host's depth AND every edge it had, which is exactly
    * why `position` and `topology` expire on different clocks. */
@@ -2201,18 +2403,16 @@ export class DarknetSystem {
     // darknet host to install a backdoor, and a move landing mid-walk would
     // strand it.
     if (this.#opts.servers.get(hostname)?.isConnectedTo === true) return;
-    const span = 3;
-    const shift = Math.floor(drawA * (span * 2 + 1)) - span;
-    const wanted = Math.max(0, Math.min(host.depth + shift, this.netDepth() - 1));
-    // Vacate FIRST, exactly as upstream does — `moveDarknetServer` clears the
-    // old cell and drops every edge before re-seating. That is why the cell it
-    // came from is a candidate for the cell it goes to, and why a move
-    // invalidates adjacency as thoroughly as it invalidates depth.
-    const from: [number, number] = [host.depth, host.leftOffset];
+    // Position options are computed BEFORE the old cell is vacated and are
+    // centered on immutable difficulty, not the host's current depth.
+    const free = this.#openPositions(host.difficulty - 3, host.difficulty + 3);
+    if (free.length === 0) {
+      this.#removeHost(hostname);
+      return;
+    }
+    const cell = free[Math.floor(drawA * free.length)]!;
     this.#unwire(hostname);
     this.#vacate(host);
-    const free = this.#openPositions(wanted, wanted);
-    const cell = free[Math.floor(drawB * free.length)] ?? from;
     this.#seat(host, cell[0], cell[1]);
     this.#wire(hostname, cell[0], cell[1], drawB);
   }
@@ -2252,7 +2452,7 @@ export class DarknetSystem {
     this.#removeHost(victim);
   }
 
-  /** Take one host off the net for good.
+  /** Take one server identity off the net.
    *
    * Split out of `#deleteOne` because a FAILED migration ends here too:
    * `moveDarknetServer` deletes rather than leaving a host floating when
@@ -2262,7 +2462,7 @@ export class DarknetSystem {
   #removeHost(victim: string): void {
     const host = this.hosts.get(victim);
     if (!host) return;
-    // Gone, permanently, with its files, sessions and logs — and its cell, which
+    // Gone as this identity, with its files, sessions and logs — and its cell, which
     // is what lets the restocking branch put something back there.
     host.online = false;
     this.#vacate(host);
@@ -2270,6 +2470,11 @@ export class DarknetSystem {
     host.logs = [];
     this.#opts.forgetFiles?.(victim);
     this.#opts.processes.killall(victim);
+    const server = this.#opts.servers.get(victim);
+    if (server) {
+      this.#offlineServers.add(server.ip);
+      this.#offlineServers.add(victim);
+    }
     this.#opts.servers.delete(victim);
     this.#unwire(victim);
     this.#opts.network.delete(victim);
@@ -2329,19 +2534,37 @@ export class DarknetSystem {
     const server = this.#opts.servers.get(victim);
     if (server) server.backdoorInstalled = false;
     this.#opts.processes.killall(victim);
+    // Preserve the stabilising darkweb edge, remove every other edge, then add
+    // one guaranteed adjacent connection exactly as restartServer does.
+    for (const neighbour of [...(this.#opts.network.get(victim) ?? [])]) {
+      if (neighbour === "darkweb") continue;
+      this.#opts.network.set(neighbour, (this.#opts.network.get(neighbour) ?? []).filter((name) => name !== victim));
+    }
+    const darkweb = (this.#opts.network.get(victim) ?? []).filter((name) => name === "darkweb");
+    this.#opts.network.set(victim, darkweb);
+    const candidates = this.#adjacent(host.depth, host.leftOffset).filter((entry) => entry.hostname !== victim);
+    if (candidates.length > 0) {
+      const random = this.#opts.logNoise ?? this.#opts.random;
+      const neighbour = candidates[Math.floor(random() * candidates.length)]!.hostname;
+      for (const [a, b] of [[victim, neighbour], [neighbour, victim]] as const) {
+        const links = this.#opts.network.get(a) ?? [];
+        if (!links.includes(b)) this.#opts.network.set(a, [...links, b]);
+      }
+    }
   }
 
   /** `balanceDarknetServers`: hold the population at the generator's density. */
   #balance(roll: readonly number[]): void {
-    const target = Math.round(this.netDepth() * NET_WIDTH * SERVER_DENSITY);
+    const target = this.netDepth() * NET_WIDTH * SERVER_DENSITY;
     const movable = this.#movable();
     if (movable.length > target) {
       for (let i = 0; i < movable.length - target; i++) this.#deleteOne(roll[26]!);
-      return;
+    } else {
+      for (let i = 0; i < target - movable.length; i++) {
+        this.#addHost(Math.floor(roll[11]! * this.netDepth()), roll[23]!, roll[24]!);
+      }
     }
-    for (let i = 0; i < target - movable.length; i++) {
-      this.#addHost(Math.floor(roll[11]! * this.netDepth()), roll[23]!, roll[24]!);
-    }
+    this.#restockLowLevel(roll);
   }
 
 }

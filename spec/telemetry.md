@@ -187,6 +187,21 @@ measuring". The exact combined figure remains
 split; the two are published for the same window on purpose so they can be read
 against each other.
 
+Darknet returns use the same aggregate rule. `dnet.profit` is cumulative for
+the install and changes only when an existing phish, cache, or promotion order
+settles; it adds no Netscript reads and emits no per-attempt events. It carries
+phishing attempts/successes/cache wins and response-precision cash, cache cash,
+shares and compact reward-label counts, plus successful promotion batches,
+threads and symbols. Promotion is intentionally not converted to dollars:
+`promoteStock` changes volatility, and no honest API attribution connects one
+batch to later realized trading P&L.
+
+The dnet Farming refusal table is a current planner-pass explanation, not
+telemetry counters: its number is the count of hosts that skipped each ladder
+step. A host can appear under several steps in the same pass, so those rows must
+not be added together or read as failures. Cumulative outcomes live only in the
+Returns card.
+
 Two records carry the endgame decision loop (`spec/strategy/endgame.md`).
 `endgame.route` fires only when the chosen route CHANGES — decisions, not
 heartbeats — with `{from?, to, etaSec, expectedEndAt, routes[]}`, where

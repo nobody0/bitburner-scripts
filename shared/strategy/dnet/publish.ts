@@ -1,20 +1,20 @@
 import { stripCredentials } from "./courier.ts";
 import { modelEntry } from "./models.ts";
 import {
-  freeRam,
+  fieldGroup,
   fresh,
   isImmune,
-  type DarknetHostKnowledge,
-  type DarknetKnowledge,
+  type DnetHost,
+  type DnetKnowledge,
   type ExpiryOpts,
-} from "./knowledge.ts";
+} from "./host.ts";
 import type {
   DarknetAgentDigest,
   DarknetKnowledgeDigest,
   DarknetKnownHost,
 } from "../../telemetry/topics/dnet.ts";
 
-/** Turning what the overseer KNOWS into something a person can look at.
+/** Turning what the controller KNOWS into something a person can look at.
  *
  * The rule it serves is the one in spec/dnet.md: no darknet fact may be treated
  * as current without checking its age. A digest of bare values would publish a
@@ -29,10 +29,8 @@ import type {
  * each of the sixteen facts below plus six strings per host — on a net that can
  * reach `KNOWLEDGE_MAX_HOSTS`, every tick.
  *
- * What genuinely cannot be derived downstream travels anyway: `freeRam`, whose
- * blocked-vs-used subtraction is subtle enough to belong in exactly one place,
- * and `authState`, which is a decision the map and the table must not be able to
- * disagree about.
+ * Usable script capacity and `authState` are resolved once here so the map and
+ * table cannot disagree about them.
  *
  * One thing deliberately does not travel at all: **credentials**.
  * `credentialKnown` is a boolean, because this digest is mirrored to telemetry
@@ -52,7 +50,6 @@ const PUBLISHED_FACTS = [
   "neighbours",
   "maxRam",
   "blockedRam",
-  "usedRam",
   "requiredCharisma",
   "difficulty",
   "isStationary",
@@ -102,6 +99,7 @@ function solveProgress(state: Record<string, unknown> | undefined): { solve?: { 
 /** A solver's phase name is a label like `bisect` or `probe`. Anything longer is
  * not a label, and a cap costs nothing to enforce. */
 const PHASE_MAX = 32;
+const RUNTIME_RAM_MAX_AGE_MS = 60_000;
 
 export interface PublishOptions {
   netDepth?: number;
@@ -110,10 +108,12 @@ export interface PublishOptions {
   /** Hosts we hold a stasis link on. A stasis-linked host is outside the
    *  mutation clock entirely, so nothing of it ages — see `isImmune`. */
   stasisLinked?: ReadonlySet<string>;
-  /** RAM an agent needs, for the plantable/`freeRam` readouts. */
+  /** RAM an agent needs, for the plantable/usable-RAM readouts. */
   agentRamGb?: number;
   /** Live agents, keyed by the host they are standing on. */
   agents?: Record<string, DarknetAgentDigest>;
+  /** Volatile runtime RAM samples, separate from durable host facts. */
+  ram?: ReadonlyMap<string, NonNullable<DarknetKnownHost["ram"]>>;
   /** Hosts we hold a credential for. Passed in rather than read off the
    *  knowledge record so the vault stays the single source of that truth. */
   vault?: ReadonlySet<string>;
@@ -122,14 +122,14 @@ export interface PublishOptions {
    *  for, which has never had anywhere to live. */
   agentsSeenEver?: number;
   agentsLost?: number;
-  overseer?: DarknetKnowledgeDigest["overseer"];
+  controller?: DarknetKnowledgeDigest["controller"];
   queue?: DarknetKnowledgeDigest["queue"];
 }
 
 /** One host, as the panel needs it: the current best value of every fact, when
  * each was seen, and what we have tried against it. */
 export function publishHost(
-  host: DarknetHostKnowledge,
+  host: DnetHost,
   now: number,
   opts: PublishOptions = {},
   /** The frontier, from `reachableFrom`. Defaulted so a caller publishing a
@@ -137,31 +137,29 @@ export function publishHost(
    *  that the host is reachable, which is the honest result with no graph. */
   reachable: ReadonlySet<string> = new Set(),
 ): DarknetKnownHost {
-  // Resolved once per host: immunity is a property of the host, not of a fact,
-  // so every fact below shares the answer.
-  const expiry: ExpiryOpts = {
-    netDepth: opts.netDepth,
-    bitNode: opts.bitNode,
-    backdoored: opts.backdoored,
-    immune: isImmune(host, opts),
-  };
   const facts: Record<string, number> = {};
   const values: Record<string, unknown> = {};
   for (const key of PUBLISHED_FACTS) {
-    const fact = host.facts[key];
-    if (!fact) continue;
-    facts[key] = fact.at;
+    const value = (host as unknown as Record<string, unknown>)[key];
+    if (value === undefined) continue;
+    const group = fieldGroup(key);
+    const observedAt = group === "identity" ? host.identitySeenAt : group === undefined ? undefined : host.seenAt[group];
+    if (observedAt !== undefined) facts[key] = observedAt;
     // The VALUE is published even when stale, and the age says it is stale.
     // Hiding a stale value would leave the panel blank exactly when the operator
     // most wants to know what we last believed and how long ago.
-    values[key] = fact.value;
+    values[key] = value;
   }
 
   const gone = host.goneAt !== undefined;
   const isDarkweb = host.hostname === "darkweb";
   const depth = values["depth"] as number | undefined;
+  const maxRam = values["maxRam"] as number | undefined;
+  const blockedRam = values["blockedRam"] as number | undefined;
   const entry = modelEntry(values["modelId"] as string | undefined);
   const ledger = host.attempts;
+  const ram = opts.ram?.get(host.hostname);
+  const liveRam = !gone && ram !== undefined && now - ram.at <= RUNTIME_RAM_MAX_AGE_MS ? ram : undefined;
 
   return {
     hostname: host.hostname,
@@ -173,10 +171,9 @@ export function publishHost(
     // "the root" and "we have no idea", or the root ends up in the unplaced row.
     ...(depth !== undefined ? { depth } : {}),
     ...(values["neighbours"] !== undefined ? { neighbours: values["neighbours"] as string[] } : {}),
-    ...(values["maxRam"] !== undefined ? { maxRam: values["maxRam"] as number } : {}),
-    ...(values["blockedRam"] !== undefined ? { blockedRam: values["blockedRam"] as number } : {}),
-    ...(values["usedRam"] !== undefined ? { usedRam: values["usedRam"] as number } : {}),
-    freeRam: freeRam(host, now, expiry),
+    ...(maxRam !== undefined ? { maxRam } : {}),
+    ...(blockedRam !== undefined ? { blockedRam } : {}),
+    ...(maxRam !== undefined ? { usableRam: Math.max(0, maxRam - (blockedRam ?? 0)) } : {}),
     ...(values["requiredCharisma"] !== undefined ? { requiredCharisma: values["requiredCharisma"] as number } : {}),
     ...(values["difficulty"] !== undefined ? { difficulty: values["difficulty"] as number } : {}),
     ...(values["isStationary"] !== undefined ? { isStationary: values["isStationary"] as boolean } : {}),
@@ -190,9 +187,10 @@ export function publishHost(
       : {}),
     ...(values["caches"] !== undefined ? { caches: values["caches"] as string[] } : {}),
     // Not a fact: we are the only thing that links or releases, so the
-    // overseer's set is the truth and an observed copy could only be staler.
+    // controller's set is the truth and an observed copy could only be staler.
     ...(opts.stasisLinked?.has(host.hostname) === true ? { stasisLinked: true } : {}),
     facts,
+    ...(Object.keys(host.dirty).length > 0 ? { dirty: { ...host.dirty } } : {}),
     ...(ledger
       ? {
         attempt: {
@@ -215,6 +213,7 @@ export function publishHost(
       : {}),
     credentialKnown: opts.vault?.has(host.hostname) === true || host.credentialKnown === true,
     ...(opts.agents?.[host.hostname] ? { agent: opts.agents[host.hostname] } : {}),
+    ...(liveRam ? { ram: liveRam } : {}),
     authState: authStateOf(host, gone, isDarkweb, reachable, opts),
   };
 }
@@ -239,7 +238,7 @@ export function publishHost(
  * Source: src/DarkNet/ui/NetworkDisplayWrapper.tsx:89,
  *   src/DarkNet/ui/ServerSummary.tsx:26-31 */
 function authStateOf(
-  host: DarknetHostKnowledge,
+  host: DnetHost,
   gone: boolean,
   isDarkweb: boolean,
   reachable: ReadonlySet<string>,
@@ -268,12 +267,12 @@ function authStateOf(
  * "my neighbour is darkweb" is exactly as good, and often arrives first. This is
  * why the frontier is populated before anything has been cracked at all. */
 function reachableFrom(
-  hosts: readonly DarknetHostKnowledge[],
+  hosts: readonly DnetHost[],
   now: number,
   opts: PublishOptions,
-  expiryFor: (host: DarknetHostKnowledge) => ExpiryOpts,
+  expiryFor: (host: DnetHost) => ExpiryOpts,
 ): Set<string> {
-  const held = (host: DarknetHostKnowledge): boolean =>
+  const held = (host: DnetHost): boolean =>
     host.goneAt === undefined
     && (host.hostname === "darkweb"
       || opts.agents?.[host.hostname]?.alive === true
@@ -283,9 +282,9 @@ function reachableFrom(
   // that WAS beside darkweb a minute ago is a far better guess at the frontier
   // than no guess at all, and the box's own staleness fade already says how much
   // to trust it.
-  const neighboursOf = (host: DarknetHostKnowledge): readonly string[] =>
+  const neighboursOf = (host: DnetHost): readonly string[] =>
     fresh<string[]>(host, "neighbours", now, expiryFor(host))
-      ?? (host.facts["neighbours"]?.value as string[] | undefined)
+      ?? host.neighbours
       ?? [];
 
   const heldNames = new Set(hosts.filter(held).map((host) => host.hostname));
@@ -304,17 +303,17 @@ function reachableFrom(
  * satisfies the telemetry rule with no new getter and a `--perf` build is
  * unchanged. */
 export function publishKnowledge(
-  knowledge: DarknetKnowledge,
+  knowledge: DnetKnowledge,
   now: number,
   opts: PublishOptions = {},
 ): DarknetKnowledgeDigest {
-  const all = Object.values(knowledge.hosts);
+  const all = [...knowledge.hosts.values()];
   // Sorted by depth then name so the panel is stable frame to frame: an
   // insertion-ordered list would reshuffle whenever a host was forgotten, and a
   // map that shimmers is a map nobody reads.
   const sorted = [...all].sort((a, b) => {
-    const da = (a.facts["depth"]?.value as number | undefined) ?? Number.MAX_SAFE_INTEGER;
-    const db = (b.facts["depth"]?.value as number | undefined) ?? Number.MAX_SAFE_INTEGER;
+    const da = a.depth ?? Number.MAX_SAFE_INTEGER;
+    const db = b.depth ?? Number.MAX_SAFE_INTEGER;
     return da - db || (a.hostname < b.hostname ? -1 : a.hostname > b.hostname ? 1 : 0);
   });
   // The frontier is a property of the GRAPH, so it is resolved once over every
@@ -352,7 +351,7 @@ export function publishKnowledge(
       // transport does not drop data, hosts drop agents.
       lostSinceBoot: opts.agentsLost ?? 0,
     },
-    ...(opts.overseer ? { overseer: opts.overseer } : {}),
+    ...(opts.controller ? { controller: opts.controller } : {}),
     ...(opts.queue ? { queue: opts.queue } : {}),
   });
 }

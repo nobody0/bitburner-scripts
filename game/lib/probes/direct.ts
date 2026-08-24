@@ -67,7 +67,7 @@ const dnetFacts: DirectProbe = {
   requires: "dnet",
   // These change on lab-aug installs (the limit) and backdoor churn
   // (instability), not on the mutation clock, so a slow cadence is honest —
-  // but the warm-up burst runs it once immediately on unlock, so the overseer
+  // but the warm-up burst runs it once immediately on unlock, so the controller
   // has its stasis limit and instability from the first order it receives.
   everyMs: 30_000,
   merge: true,

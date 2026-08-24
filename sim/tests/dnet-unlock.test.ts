@@ -4,7 +4,6 @@ import { runGame } from "../game-run.ts";
 import {
   CACHE_PROGRAMS,
   DarknetSystem,
-  DNET_ASSUMPTIONS,
   LAB_STAGES,
   MUTATION_DRAWS,
   currentLab,
@@ -64,7 +63,7 @@ lane({ feature: "dnet", bn: 1 }).describe("buying darknet access", () => {
     expect(Math.max(...mapped, 0)).toBeGreaterThan(1);
   }, 120_000);
 
-  test("the controller plants an overseer on darkweb and the net gets MAPPED", async () => {
+  test("the controller plants a resident on darkweb and the net gets MAPPED", async () => {
     // The end-to-end claim, and the one the whole change exists to make good on.
     // Before this, the Darknet panel showed `darkweb` and nothing else no matter
     // how long a run went, because home's own probe can only ever see one hop
@@ -123,7 +122,7 @@ lane({ feature: "dnet", bn: 1 }).describe("buying darknet access", () => {
   }, 180_000);
 
   test("the storm trigger derives on the live controller, and refuses by name", async () => {
-    // End-to-end wiring proof for the storm: the overseer runs `planStorm`
+    // End-to-end wiring proof for the storm: the controller runs `planStorm`
     // every derivation, the verdict rides the drain to home, and home
     // publishes it as the `storm` telemetry block. A real FIRE needs a
     // 30-minute-converged net (links spent, a seed minted, a fresh
@@ -202,6 +201,7 @@ function darknetWorld(
   const network = new Map<string, string[]>([["home", ["darkweb"]], ["darkweb", ["home"]]]);
   const home = new Set<string>();
   const clock = world.clock;
+  const stock = new StockMarketSystem(world, world.player, mulberry32(3));
   const dnet = new DarknetSystem({
     servers,
     network,
@@ -217,6 +217,7 @@ function darknetWorld(
     player: world.player,
     homeFiles: () => home,
     darknetMoneyMultiplier: () => 1,
+    stock,
   });
   return { world, dnet, network };
 }
@@ -310,7 +311,7 @@ describe("the darknet model", () => {
   });
 
   test("a move invalidates position AND every edge, which is why they expire apart", () => {
-    // The two clocks knowledge.ts derives its expiries from. A model that moved
+    // The two clocks host.ts derives its expiries from. A model that moved
     // a host without rewiring it would make `topology` look as durable as
     // `position`, and the staleness policy would measure as far cheaper than it
     // is in game.
@@ -485,102 +486,10 @@ describe("cache files, which are what the purchase is actually worth", () => {
     // job that opened a cache off a listing that had gone stale under it would
     // cost its host the only resident standing there — and nothing outside the
     // darknet can put one back. Modelling it as a refusal would have made the
-    // guard in `game/dnet/jobs.ts` look like belt-and-braces instead of the
+    // guard in `game/dnet/orders.ts` look like belt-and-braces instead of the
     // thing that keeps a host alive.
     const dnet = system({ hasProgram: true });
     expect(() => dnet.openCache("darkweb", "nope.cache")).toThrow("Cache file not found");
-  });
-});
-
-describe("the darknet model's own claims", () => {
-  test("the assumptions it makes are declared, not implied", () => {
-    // The formulas are transcribed; the topology is a shape. A run's metadata
-    // has to say which is which, or a later measurement cannot invalidate the
-    // right artifacts.
-    const declared = DNET_ASSUMPTIONS.join(" ");
-    expect(DNET_ASSUMPTIONS.length).toBeGreaterThan(0);
-    expect(declared).toContain("topology");
-    expect(declared).toContain("caches");
-    // Each of these is a place the simulator is narrower than the game. Listing
-    // them individually is deliberate: a future edit that quietly drops one
-    // would leave a run claiming a fidelity it does not have.
-    expect(declared).toContain("mutationPlacement");
-    expect(declared).toContain("probeOrder");
-    expect(declared).toContain("logNoise");
-    expect(declared).toContain("models");
-    expect(declared).toContain("backdoors");
-    expect(declared).toContain("stasis");
-  });
-
-  test("the remaining mutation gap is entropy, not placement, and says so", () => {
-    // This assumption has been narrowed twice, and the text is the record of
-    // what a run's measurements may still be invalidated by.
-    //
-    // It first said the tick applied deletes and restarts only, which quietly
-    // invalidated every staleness measurement AND made a long run end with an
-    // empty net. Then it said placement was shape — a moved host was wired to
-    // plausible neighbours one row away instead of taking a grid cell. That one
-    // mattered more than it looked: a same-depth edge can only ever join cells
-    // one column apart, so a sim wiring same-depth pairs freely mints edges the
-    // game cannot produce, and `ui/`'s map infers columns from exactly those
-    // edges. Both are now modelled.
-    //
-    // What is left is the ENTROPY SOURCE, which is a real divergence and a much
-    // smaller one: upstream rolls a fresh random() per candidate pair, and doing
-    // that here would make the mutation's draw block variable-width.
-    const gap = DNET_ASSUMPTIONS.find((line) => line.startsWith("dnet.mutationPlacement"))!;
-    expect(gap).toBeDefined();
-    expect(gap).toContain("ENTROPY SOURCE");
-    expect(gap).toContain("Same probabilities");
-    // The grid is now claimed as reproduced rather than as shape.
-    const topology = DNET_ASSUMPTIONS.find((line) => line.startsWith("dnet.topology"))!;
-    expect(topology).toContain("leftOffset");
-    expect(topology).toContain("air-gap");
-    // And the claims it no longer makes.
-    const all = DNET_ASSUMPTIONS.join(" ");
-    expect(all).not.toContain("deletes and restarts only");
-    expect(all).not.toContain("the exact grid is shape");
-  });
-
-  test("the password models claim full transcription, and name what is left", () => {
-    // The same record, for the half a solver is written against. This entry
-    // used to say nineteen of the twenty-four models had an unguessable
-    // password — a solver could not be tested at all against that, and the
-    // moment it stopped being true the text had to move with it.
-    const models = DNET_ASSUMPTIONS.find((line) => line.startsWith("dnet.models"))!;
-    expect(models).toContain("All fifteen arms");
-    expect(models).toContain("isCloseToCorrectPassword");
-    expect(models).toContain("ENTROPY SOURCE");
-    expect(DNET_ASSUMPTIONS.join(" ")).not.toContain("correctly-formatted-but-unguessable");
-  });
-
-  test("a 408 is reachable now that backdoors are modelled, and the entry says how", () => {
-    // This line USED to be `dnet.authTimeout`, declaring a timeout unreachable
-    // because `getTimeoutChance()` is exactly 0 with no backdoor path. That was
-    // true and is no longer: the chance is `max(min((backdoored - 2) * 0.03,
-    // 0.5), 0)`, so the third backdoor makes 408 a real outcome and the
-    // resume-across-a-timeout path in `attemptJob` is exercised rather than
-    // merely unit-tested. The record moves with the model.
-    expect(DNET_ASSUMPTIONS.some((line) => line.startsWith("dnet.authTimeout"))).toBe(false);
-    const backdoors = DNET_ASSUMPTIONS.find((line) => line.startsWith("dnet.backdoors"))!;
-    expect(backdoors).toBeDefined();
-    expect(backdoors).toContain("408");
-    // The two halves that make a backdoor a decision rather than a freebie: it
-    // taxes every authentication in the net, and it makes its own host churn.
-    expect(backdoors).toContain("1.07 ^ surplus");
-    expect(backdoors).toContain("restart");
-    expect(DNET_ASSUMPTIONS.join(" ")).not.toContain("no backdoor path is modelled");
-  });
-
-  test("the maze is claimed as modelled, with the wall rule stated", () => {
-    // The one branch a walker cannot recover from getting wrong: a refused move
-    // leaves the position unchanged, so a walker that assumed its move landed
-    // desyncs from the engine permanently. If the sim ever stops reproducing
-    // that, this line is what says the measurement is void.
-    const labyrinth = DNET_ASSUMPTIONS.find((line) => line.startsWith("dnet.labyrinth"))!;
-    expect(labyrinth).toContain("UNCHANGED");
-    expect(labyrinth).toContain("PID");
-    expect(DNET_ASSUMPTIONS.join(" ")).not.toContain("a lab is never completed from a script");
   });
 });
 

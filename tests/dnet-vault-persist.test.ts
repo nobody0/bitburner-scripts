@@ -7,7 +7,7 @@ import {
   type PersistedBackdoorEntry,
 } from "../game/lib/features/dnet.ts";
 import type { VaultEntry } from "../shared/strategy/dnet/courier.ts";
-import { emptyKnowledge } from "../shared/strategy/dnet/knowledge.ts";
+import { emptyKnowledge } from "../shared/strategy/dnet/host.ts";
 
 /** Home persists the vault it cracked to its own file so a save RELOAD skips
  * re-cracking. The one thing that must never go wrong is the generation guard:
@@ -82,17 +82,19 @@ describe("backdoor retirement", () => {
   test("gone, replaced, and forgotten hosts release restored slots", () => {
     const held = new Map(backdoors.map((entry) => [entry.hostname, entry.installedAt]));
     const knowledge = emptyKnowledge(GEN);
-    knowledge.hosts["low-ram-a"] = {
+    knowledge.hosts.set("low-ram-a", {
       hostname: "low-ram-a",
       lastSeenAt: 5_000,
       goneAt: 5_000,
-      facts: {},
-    };
-    knowledge.hosts["not-yet-seen"] = {
+      seenAt: {},
+      dirty: {},
+    });
+    knowledge.hosts.set("not-yet-seen", {
       hostname: "not-yet-seen",
       lastSeenAt: 1,
-      facts: {},
-    };
+      seenAt: {},
+      dirty: {},
+    });
     expect(invalidatedPersistedBackdoors(
       held,
       knowledge,

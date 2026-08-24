@@ -1233,10 +1233,37 @@ export interface GoSeedWaitV1 {
 }
 export const GO_PROFILE_SEED_WAIT: Readonly<Partial<Record<GoModelProfile, GoSeedWaitV1>>> = {};
 
+export interface GoPassWhenLostV1 {
+  /** Best predicted win probability at or above which the position is not
+   * treated as lost and the move is kept. Absent on policy-only profiles,
+   * where the rollout guard is the only winnability test. */
+  winAbort: number;
+  /** Confirm the chosen line actually loses with a seeded rollout before
+   * swapping to pass. Protects multi-move kills that bank no immediate score. */
+  rolloutConfirm?: boolean;
+  /** Rollout depth cap in plies; the board is scored where it stops. */
+  rolloutPlies?: number;
+}
+/** Bank a lost game instead of playing it into the ground. Node power pays
+ * blackScore * difficulty * streak win or lose, and the value-first argmax
+ * never selects the exact-0 terminal pass while any move scores above zero —
+ * so a dead position used to spiral: fill our own liberties, get captured,
+ * repeat on the shrinking remainder while White passes, ending near zero.
+ * This rule only ever fires while White's pass is on the table (our pass ends
+ * the game immediately), we are behind, and the chosen move cannot guarantee
+ * banking more than passing does even against White's kindest reply. */
+export const GO_PROFILE_PASS_WHEN_LOST: Readonly<Partial<Record<GoModelProfile, GoPassWhenLostV1>>> = {
+  small5: { winAbort: 0.05, rolloutConfirm: true, rolloutPlies: 40 },
+  daemon19: { winAbort: 0.05, rolloutConfirm: true, rolloutPlies: 40 },
+};
+
 export interface GoFinalizeOptions {
   /** Explicit configuration, or null to disable; absent resolves the
    * per-profile production default. */
   seedWait?: GoSeedWaitV1 | null;
+  /** Explicit configuration, or null to disable; absent resolves the
+   * per-profile production default. */
+  passWhenLost?: GoPassWhenLostV1 | null;
   /** Certified playbook move for the current position. On a cheat-eligible
    * tick it seeds the double-move family's first placement and its plain form
    * is force-retained as a finalist. Per-evaluation state: it never enters
@@ -1321,7 +1348,103 @@ async function rolloutWins(
   return score.X > score.O;
 }
 
+/** Worst-case Black score after playing `move`: the minimum over White
+ * passing and every legal White reply. A one-ply exact-rules bound — a safe
+ * endgame stone guarantees at least one more point than passing, while an
+ * own-eye fill guarantees nothing and a self-endangering fill guarantees
+ * less. Undefined when the move itself is illegal on the held board. */
+function worstCaseBlackScoreAfter(
+  prepared: GoNeuralPrepared,
+  move: { x: number; y: number },
+): number | undefined {
+  const view = prepared.view;
+  const played = playMove(view.board, move.x, move.y, "X", prepared.historyHashes);
+  if (!played) return undefined;
+  const komi = view.komi ?? 0;
+  // White declining to answer is a legal continuation too.
+  let worst = scoreBoard(played.board, komi).X;
+  const replyHashes = new Set(prepared.historyHashes);
+  replyHashes.add(boardHash(view.board));
+  const size = played.board.size;
+  for (const point of legalMoveIndices(played.board, "O", replyHashes)) {
+    const reply = playMove(
+      played.board, Math.floor(point / size), point % size, "O", replyHashes);
+    if (!reply) continue;
+    const banked = scoreBoard(reply.board, komi).X;
+    if (banked < worst) worst = banked;
+  }
+  return worst;
+}
+
+/** The lost-game banking rule (`GO_PROFILE_PASS_WHEN_LOST`): swap the decided
+ * move for a game-ending pass when the position is behind, White's pass is on
+ * the table, and neither the exact one-ply banking bound nor the seeded
+ * rollout can justify playing on. Off-trigger the decision flows through
+ * untouched. */
+async function applyPassWhenLost(
+  prepared: GoNeuralPrepared,
+  decision: GoDecision,
+  engine: GoNeuralEngine,
+  dispatchPlaytime: number,
+  cfg: GoPassWhenLostV1,
+): Promise<GoDecision> {
+  const view = prepared.view;
+  // Cheats have their own success roll and expected value; certified playbook
+  // overrides are applied by the caller and never reach this swap.
+  if (decision.action.type !== "move") return decision;
+  // The safety rail: only act when our pass ends the game immediately, so the
+  // question is "does playing on bank more than passing now", never "should we
+  // concede White a free move".
+  if ((view.consecutivePasses ?? 0) < 1) return decision;
+  const score = scoreBoard(view.board, view.komi ?? 0);
+  // Ahead is already locked in by immediateDecision before the search runs.
+  if (score.X >= score.O) return decision;
+  if (decision.predictedWin !== undefined && decision.predictedWin >= cfg.winAbort) {
+    return decision;
+  }
+  const guaranteed = worstCaseBlackScoreAfter(prepared, decision.action);
+  if (guaranteed !== undefined && guaranteed > score.X) return decision;
+  if (cfg.rolloutConfirm !== false) {
+    const plies = Math.max(1, Math.floor(cfg.rolloutPlies ?? 40));
+    const playtime = dispatchPlaytime + (decision.dispatchOffsetMs ?? 0);
+    if (await rolloutWins(view, decision.action, engine, playtime, plies)) {
+      return decision;
+    }
+  }
+  // A pass is seed-independent, so any seed-wait offset on the abandoned move
+  // is dropped rather than delaying the game's end for nothing. The forecast
+  // and predicted win must describe the returned action, not the abandoned
+  // move: the pass ends the game behind, so no reply follows and the win
+  // probability is exactly zero (kept absent on the policy-only contract).
+  const { dispatchOffsetMs: _waitOffset, ...banked } = decision;
+  return {
+    ...banked,
+    action: { type: "pass" },
+    passReason: "banking-lost-position",
+    forecast: [],
+    ...(decision.predictedWin === undefined ? {} : { predictedWin: 0 }),
+  };
+}
+
 export async function finalizeNeuralGoDecision(
+  prepared: GoNeuralPrepared,
+  seeds: readonly number[],
+  engine: GoNeuralEngine,
+  dispatchPlaytime?: number,
+  options?: GoFinalizeOptions,
+): Promise<GoDecision> {
+  const decision = await finalizeWithSeedWait(
+    prepared, seeds, engine, dispatchPlaytime, options);
+  const profile = goModelProfile(prepared.view.board.size);
+  const passWhenLost = options?.passWhenLost === null ? undefined
+    : options?.passWhenLost ?? GO_PROFILE_PASS_WHEN_LOST[profile];
+  if (!passWhenLost || dispatchPlaytime === undefined || prepared.immediate) {
+    return decision;
+  }
+  return applyPassWhenLost(prepared, decision, engine, dispatchPlaytime, passWhenLost);
+}
+
+async function finalizeWithSeedWait(
   prepared: GoNeuralPrepared,
   seeds: readonly number[],
   engine: GoNeuralEngine,

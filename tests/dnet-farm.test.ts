@@ -1,8 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
-  FARM_BATCH_MS,
   RECLAIM_CLEAR_BUDGET_MS,
-  batchHasRoom,
+  PHISH_CHARISMA_WEIGHT,
   electCacheHunter,
   phishWindowOpen,
   planFarm,
@@ -25,7 +24,7 @@ import {
  * Two things are worth testing here and they are not the same thing. One is that
  * the LADDER is a ladder — strictly ordered, one rung per host, and the order
  * argued rather than tuned. The other is that every rung it declines says so BY
- * NAME, which is the contract `spread.ts` had on paper and did not keep: its
+ * NAME, which is the contract the spread policy had on paper and did not keep: its
  * refusals were computed and thrown away for months, so a planner with nothing
  * left to do was indistinguishable from one that had broken. */
 
@@ -81,6 +80,12 @@ describe("the ladder is strict, and takes the top rung it can", () => {
     const plan = planFarm([host()], inputs());
     expect(kindsOf(plan)).toEqual(["phish"]);
     expect(reasonsOf(plan)).toEqual(["cache-none", "reclaim-no-block"]);
+  });
+
+  test("completed atomic farm work is rederived while the same state remains desirable", () => {
+    const snapshot = [host()];
+    expect(kindsOf(planFarm(snapshot, inputs()))).toEqual(["phish"]);
+    expect(kindsOf(planFarm(snapshot, inputs()))).toEqual(["phish"]);
   });
 
   test("one rung per host, never two", () => {
@@ -347,31 +352,6 @@ describe("exactly one host hunts the cache window", () => {
   });
 });
 
-describe("a farm job is a bounded batch, not an open-ended loop", () => {
-  // Bounded rather than long-lived, so `longLived` — and the beat that has to go
-  // with it — ends up with exactly one user, the maze walker. And bounded well
-  // under JOB_TIMEOUT_MS, so a host is never held away from a plant for longer
-  // than an attempt job would hold it anyway.
-  test("the batch checks BEFORE the call, since the wait is known in advance", () => {
-    const wait = phishWaitMs(200);
-    // Room for the call that would end exactly on the boundary...
-    expect(batchHasRoom("phish", 0, FARM_BATCH_MS - wait, 200)).toBe(true);
-    // ...and none for the one that would overrun it by a millisecond.
-    expect(batchHasRoom("phish", 0, FARM_BATCH_MS - wait + 1, 200)).toBe(false);
-  });
-
-  test("each kind is bounded by its OWN wait, which charisma shortens", () => {
-    expect(reclaimWaitMs(0)).toBe(8000);
-    expect(phishWaitMs(0)).toBe(10000);
-    // Both floor at 200 ms however high charisma goes.
-    expect(reclaimWaitMs(1e9)).toBe(200);
-    expect(phishWaitMs(1e9)).toBe(200);
-    // A high-charisma grind therefore fits many more calls in one batch.
-    expect(batchHasRoom("reclaim", 0, FARM_BATCH_MS - 300, 1e9)).toBe(true);
-    expect(batchHasRoom("reclaim", 0, FARM_BATCH_MS - 300, 0)).toBe(false);
-  });
-});
-
 describe("a cramped block is ground from next door", () => {
   // `memoryReallocation` reaches an authenticated, directly connected
   // neighbour, and the cross-host call is the one that pays the admin-rights
@@ -445,11 +425,15 @@ describe("a cramped block is ground from next door", () => {
 
 describe("phish and promote compete on expected value", () => {
   // The one place the ladder is an exchange rate: phish's $/ms is priced from
-  // the engine's own formulas (weighted 1.25x for the charisma exp every call
+  // the engine's own formulas (weighted 1.5x for the charisma exp every call
   // pays), promote's from home's expectedProfit scaled by PROMOTE_PROFIT_SHARE.
-  // At the fixtures' charisma 200 and depth 3 the break-even sits near a ~$22m
+  // At the fixtures' charisma 200 and depth 3 the break-even sits near a ~$26m
   // position, rising with depth — the money term phish has and promote lacks.
   const rich = [{ symbol: "ECP", expectedProfit: 1e9 }];
+
+  test("phishing values its extra charisma experience at the policy multiplier", () => {
+    expect(PHISH_CHARISMA_WEIGHT).toBe(1.5);
+  });
 
   test("a big enough edge flips a host to promote even with room for both", () => {
     const plan = planFarm([host({ freeGb: 12 })], inputs({
@@ -469,7 +453,7 @@ describe("phish and promote compete on expected value", () => {
   });
 
   test("depth is phish's term: the same edge loses to a deep host and wins on a shallow one", () => {
-    // $50m: above the shallow break-even (~$22m), below the deep one (~$120m).
+    // $50m: above the shallow break-even (~$26m), below the deep one (~$140m).
     const plan = planFarm(
       [host({ host: "dn-shallow", depth: 3, freeGb: 12 }), host({ host: "dn-deep", depth: 25, freeGb: 12 })],
       inputs({

@@ -17,8 +17,8 @@
       "target": "worker/worker.js"
     },
     {
-      "source": "game/dnet/overseer.ts",
-      "target": "dnet/overseer.js"
+      "source": "game/dnet/controller.ts",
+      "target": "dnet/controller.js"
     },
     {
       "source": "game/dnet/agent.ts",

@@ -646,9 +646,16 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
         chainWake = true;
         return;
       }
-      if (result.joined.length > 0) {
+      if (result.joined.length > 0 || result.failed.length > 0) {
         const topic = ctx.state.topics.factions;
         const accepted = new Set(result.joined);
+        // A faction the game REFUSED leaves `invites` too. Nothing else clears
+        // it, and `joinFactions` is the first decision step — so one invitation
+        // the game will not honour (a withdrawn invite, an enemy our metadata
+        // does not predict) would otherwise be re-decided on every single pass,
+        // starving purchase, travel, donate and work until the 30 s probe
+        // happened to refresh the list. The probe republishes it if it was real.
+        const refusedByGame = new Set(result.failed);
         const acceptedStandings = view.factions.filter((standing) => accepted.has(standing.name));
         const invalidated = new Set(
           view.factions
@@ -660,13 +667,15 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
             .map((standing) => standing.name),
         );
         merge(ctx.state, "factions", {
-          joined: [...new Set([...(topic?.joined ?? []), ...result.joined])],
+          ...(result.joined.length > 0
+            ? { joined: [...new Set([...(topic?.joined ?? []), ...result.joined])] }
+            : {}),
           invites: (topic?.invites ?? []).filter(
-            (faction) => !accepted.has(faction) && !invalidated.has(faction),
+            (faction) => !accepted.has(faction) && !invalidated.has(faction) && !refusedByGame.has(faction),
           ),
         });
         // Membership changes the immediately actionable work frontier.
-        chainWake = true;
+        if (result.joined.length > 0) chainWake = true;
       }
       const complete = result.failed.length === 0;
       record(

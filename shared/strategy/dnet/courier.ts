@@ -6,8 +6,8 @@ import { SOLVER_CODES } from "./solvers/types.ts";
  * password out of everything that is written down.
  *
  * Nothing here is serialized: every script the game runs shares one JS realm, so
- * the overseer's own object is reachable from home directly — see
- * `game/dnet/realm.ts` for why that is sound rather than merely convenient, and
+ * the controller's own object is reachable from home directly — see
+ * `game/dnet/shared.ts` for why that is sound rather than merely convenient, and
  * what it costs. What lives here is the shapes, the response codes that make a
  * refusal attributable, and `stripCredentials`, which is the one rule that
  * genuinely needed enforcing in a single place. */
@@ -59,6 +59,9 @@ export function codeName(code: number): string {
     ?? `Unknown(${code})`;
 }
 
+/** Groups that are observed and invalidated together. */
+export type DnetFactGroup = "position" | "topology" | "ram" | "files";
+
 /** One host, as an agent standing next to it saw it. */
 export interface ReportHost {
   hostname: string;
@@ -78,7 +81,9 @@ export interface ReportHost {
   neighbours?: string[];
   blockedRam?: number;
   maxRam?: number;
-  usedRam?: number;
+  /** Groups made stale by the action that produced this report. Invalidations
+   * are folded before another planning pass and travel to home's mirror. */
+  invalidates?: readonly DnetFactGroup[];
   requiredCharisma?: number;
   difficulty?: number;
   isStationary?: boolean;
@@ -175,7 +180,7 @@ export interface LogDrainOutcome {
   drainedAt?: number;
 }
 
-/** A resident saying it is alive. Three missed beats and the overseer retires
+/** A resident saying it is alive. Three missed beats and the controller retires
  * its queue, because a resident dies with its host. */
 export interface AgentBeat {
   agentId: string;
@@ -184,11 +189,11 @@ export interface AgentBeat {
   at: number;
 }
 
-/** A password an agent verified, on its way to the overseer's vault.
+/** A password an agent verified, on its way to the controller's vault.
  *
  * The one structure in the feature that carries a secret. It never crosses a
  * channel that is written down: it lives in the realm between the job that found
- * it and the overseer, and in home's module state after that. */
+ * it and the controller, and in home's module state after that. */
 export interface VaultEntry {
   hostname: string;
   password: string;
@@ -207,7 +212,7 @@ export interface ProvisionalCredential {
   /** When heartbleed exposed the line. The ring carries no creation stamp, so
    * this is the only honest WHEN the script can attach to the observation. */
   at: number;
-  /** Server identity held when the overseer received the observation. */
+  /** Server identity held when the controller received the observation. */
   identity?: string;
 }
 

@@ -56,7 +56,7 @@
       "seed3Hours": 5.01,
       "seed2Reached": false,
       "what": "The cheap regression guard: $1b on the small deterministic early-game fixture.",
-      "note": "ALSO A REGRESSION, and not caused by the route work. spec/progress.md tracked 2.43-2.46h for an older generation; measured on this branch WITHOUT the route changes seed 1 takes 7.44h, and with them 6.23h. The 3x loss against the tracked number predates this pass and is outstanding; the 16% recovery is what the route changes contributed. Runs report `invalid-for-goal` because coding-contract generation is unmodeled -- a known simulator gap, not a run failure.",
+      "note": "ALSO A REGRESSION, and not caused by the route work. spec/progress.md tracked 2.43-2.46h for an older generation; measured on this branch WITHOUT the route changes seed 1 takes 7.44h, and with them 6.23h. The 3x loss against the tracked number predates this pass and is outstanding; the 16% recovery is what the route changes contributed. These archived measurements predate the coding-contract runtime.",
       "history": [
         "2026-08-20: seed 1 7.44h without the cold-start install fixes, 6.23h with them."
       ]

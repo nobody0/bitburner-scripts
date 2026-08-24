@@ -55,12 +55,16 @@ const UNKNOWN_METHOD_GB = 80;
 
 export interface ProbeRunner {
   readonly lastRunAt: Map<string, number>;
+  /** Probe ids the boot burst has ATTEMPTED at least once, whether or not the
+   *  broker could place them. `lastRunAt` cannot serve: a probe too big for a
+   *  cold-start host never earns a stamp, and the burst would never end. */
+  readonly warmedUp: Set<string>;
   /** Probe id -> summed RAM cost of its distinct methods. */
   readonly costs: Map<string, number>;
 }
 
 export function initProbeRunner(): ProbeRunner {
-  return { lastRunAt: new Map(), costs: new Map() };
+  return { lastRunAt: new Map(), warmedUp: new Set(), costs: new Map() };
 }
 
 function methodCost(ns: NS, method: string): number {
@@ -253,7 +257,14 @@ export async function runProbes(
   // becomes applicable, which is the same rule: a probe that has never run is
   // grabbed immediately, not staggered in behind a queue of already-known
   // facts.
-  const warming = DODGED_PROBES.filter(applicable).some((probe) => !runner.lastRunAt.has(probe.id));
+  // ATTEMPTED, not run: `lastRunAt` is stamped only on a successful placement,
+  // and the very probe the throttle below exists to survive — the 4.6 GB one no
+  // cold-start host can hold — never gets one. Keying the burst on `lastRunAt`
+  // alone left `warming` true for ever on exactly that machine, which disabled
+  // the one-per-pass discipline permanently.
+  const warming = DODGED_PROBES.filter(applicable).some(
+    (probe) => !runner.lastRunAt.has(probe.id) && !runner.warmedUp.has(probe.id),
+  );
 
   // A probe that cannot be PLACED must not keep the slot. Earliest-deadline
   // ordering made an unaffordable head permanent: a 4.6 GB probe no cold-start
@@ -269,6 +280,8 @@ export async function runProbes(
     if (ranOne && !warming) break;
     const cost = priceMethods(ns, probe.methods);
     const lease = acquire(cost, `batch:${probe.id}`);
+    // Attempted once: it no longer holds the warm-up burst open (see `warming`).
+    runner.warmedUp.add(probe.id);
     if (lease.status === 'queued') continue;
     ranOne = true;
     runner.lastRunAt.set(probe.id, now);

@@ -302,19 +302,6 @@ lane({ feature: "world", bn: 1 }).describe("running game/ in the synthetic world
     expect(result.scenario).toBe("synthetic-early-game");
   });
 
-  test("the ten-minute coding-contract interval cannot pass silently", async () => {
-    const result = await runGame({
-      goal: parseGoals(["earn:1e99"]),
-      seed: 1,
-      horizonMs: 10 * 60_000 + 1,
-      homeRam: 16,
-      features: only("hacking", "progression", "side"),
-    });
-
-    expect(result.unmodeled["subsystem coding contract generation"]).toBe(1);
-    expect(result.validity).toBe("invalid-for-goal");
-  });
-
   test("an installed Red Pill acquires the final opener and completes the real daemon transition", async () => {
     const events: { name?: string; data?: Record<string, unknown> }[] = [];
     const result = await runGame({

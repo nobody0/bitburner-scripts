@@ -753,6 +753,10 @@ export class SimWorld {
       case "stopShare":
         // The controller simulator exercises these through real worker.ts.
         return this.#fail(action, "share workers require the game driver");
+      case "charge":
+        // Stanek state is owned by the synthetic Netscript controller path;
+        // the standalone planner cannot execute this subsystem.
+        return this.#fail(action, "charge workers require the game driver");
       case "nuke": {
         const target = this.servers.get(action.target);
         if (!target || target.hasAdminRights) return this.#fail(action, "missing or already rooted");

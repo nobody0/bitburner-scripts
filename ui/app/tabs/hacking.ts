@@ -432,36 +432,42 @@ function landingOrderCard(state: ProjectedState): string {
       "only a JIT batch lands on a grid; a shotgun wave has no intra-batch order to verify",
     );
   }
-  const rows = Object.entries(order.observed).sort(([, a], [, b]) => b - a);
-  const inOrder = order.observed[order.planned] ?? 0;
+  const rows = [...order.patterns].sort((a, b) => b.batches - a.batches);
+  const plans = new Set(rows.map((entry) => entry.planned));
   const breakdown = table(
-    ["landed as", "batches", "share", ""],
+    ["planned", "landed as", "batches", "share", ""],
     [
-      ...rows.map(([observed, count]) => [
-        `<span class="${observed === order.planned ? "good" : "bad"}">${esc(observed)}</span>`,
-        fmtNum(count),
-        fmtPct(count / order.batches, 2),
-        observed === order.planned ? "as planned" : esc(describeReorder(observed, order.planned)),
+      ...rows.map((entry) => [
+        esc(entry.planned),
+        `<span class="${entry.observed === entry.planned ? "good" : "bad"}">${esc(entry.observed)}</span>`,
+        fmtNum(entry.batches),
+        fmtPct(entry.batches / order.batches, 2),
+        entry.observed === entry.planned ? "as planned" : esc(describeReorder(entry.observed, entry.planned)),
       ]),
       ...(order.otherBatches
         ? [[
             `<span class="muted">other</span>`,
+            "",
             fmtNum(order.otherBatches),
             fmtPct(order.otherBatches / order.batches, 2),
             "rarer orders, not itemised",
           ]]
         : []),
     ],
-    { left: [0, 3] },
+    { left: [0, 1, 4] },
   );
   const headline = tiles([
     // A tile value is a TEXT slot: it escapes for us, so the signature goes in
     // as prose and the coloured count goes in as deliberate markup.
-    { label: "planned order", value: order.planned, sub: "the order the cycle solve intends" },
+    {
+      label: plans.size === 1 ? "planned order" : "planned orders",
+      value: plans.size === 1 ? [...plans][0]! : fmtNum(plans.size),
+      sub: plans.size === 1 ? "the order the cycle solve intends" : "batch-local shapes observed",
+    },
     {
       label: "landed as planned",
-      value: fmtPct(inOrder / order.batches, 2),
-      sub: `${fmtNum(order.batches)} complete batches verified`,
+      value: fmtPct(order.inOrder / order.batches, 2),
+      sub: `${fmtNum(order.batches)} hack-bearing batches verified`,
     },
     ...(order.incomplete
       ? [{
@@ -1108,28 +1114,23 @@ function batchColumn(state: ProjectedState, kind: string, entry: BatchAggregateR
   // inference, which is right whenever it fires at all.
   const gradedCount = entry.graded;
   const graded = gradedCount !== undefined ? gradedCount > 0 : entry.inOrder + entry.noHack > 0;
-  // The denominator is `graded` where the dispatcher published it, not
-  // `batches`. Two code paths open batches under the SAME kind string — the JIT
-  // planner lands on a grid, the atomic path deliberately emits a whole batch
-  // at once with no roles — so `graded < batches` is normal, and dividing by
-  // every settled batch painted a kind critical-red for batches that had no
-  // order to be right about. It also disagreed with the "landed in order" trend
-  // on this same tab, which is `inOrder / graded`; one run cannot have two
-  // in-order figures. `batches` is not lost: the loss line above prints it.
-  const denom = gradedCount ?? entry.batches;
+  // `graded` excludes batches with no landing grid. Support-only batches are
+  // also removed from the order denominator: they are launch-completeness
+  // failures, reported separately, and have no hack-bearing order to grade.
+  // `batches` is not lost: the loss line above prints it.
+  const denom = gradedCount === undefined ? entry.batches : Math.max(0, gradedCount - entry.noHack);
   const order = !settledAny
     ? `<p class="bad" title="${esc(
         "no batch of this kind has ever settled, so there is no landing order to grade",
       )}">nothing settled</p>`
-    : graded
+    : graded && denom > 0
     ? `<p class="${entry.inOrder >= denom ? "good" : "bad"}" title="${esc(
         gradedCount !== undefined
-          ? "batches whose effects landed in the planned order, out of the batches of this kind that HAD a landing grid. " +
-            "The shortfall is mis-ordered batches plus no-hack ones — a batch that landed its support with nothing stolen " +
-            "is graded and is the costlier of the two failures."
+          ? "hack-bearing batches whose effects landed in their own planned order. Support-only batches are reported " +
+            "separately as no-hack waste, never as reorders."
           : "batches whose effects landed in the order the cycle planned, out of every batch of this kind. This run does " +
             "not publish the graded count, so the denominator includes batches that never had a grid to be right about.",
-      )}">${fmtNum(entry.inOrder)} / ${fmtNum(denom)}${gradedCount !== undefined ? " graded batches in order" : " in order"}</p>`
+      )}">${fmtNum(entry.inOrder)} / ${fmtNum(denom)}${gradedCount !== undefined ? " hack-bearing batches in order" : " in order"}</p>`
     : `<p class="muted" title="${esc(
         "this kind has never produced a landing-order verdict — its batches land as a group with no intended internal sequence",
       )}">no landing grid</p>`;
@@ -1195,11 +1196,22 @@ const HEALTH_TRENDS: {
   {
     id: "inorder",
     label: "landed in order",
-    title: "share of GRADED batches whose effects landed in the planned order. Scaled to its own band: a healthy " +
+    title: "share of HACK-BEARING graded batches whose effects landed in their own planned order. Support-only batches " +
+      "have their own trend and cannot turn this ordering curve into zero. Scaled to its own band: a healthy " +
       "run sits just under 1.0, and against a zero-anchored axis the few percent that matter are invisible.",
     color: "--series-1",
     fit: true,
     series: (health) => health.inOrderShare,
+    fmt: (value) => fmtPct(value, 1),
+  },
+  {
+    id: "hacklaunched",
+    label: "hack launched",
+    title: "share of graded batches that launched a hack. A fall means support landed without a steal to protect — RAM " +
+      "waste and a missed cash-in window, not a landing-order failure.",
+    color: "--series-4",
+    fit: true,
+    series: (health) => health.hackLaunchedShare,
     fmt: (value) => fmtPct(value, 1),
   },
   {
@@ -1332,6 +1344,19 @@ function shareEvidence(farm: FarmRollup): string {
   ]);
 }
 
+function chargeEvidence(farm: FarmRollup): string {
+  const charge = farm.chargeDecision;
+  if (!charge) return "";
+  return definitions([
+    [hint("charge holds", "live one-shot Stanek threads; calls in progress are never cancelled"), `${fmtNum(charge.threads)} threads`],
+    [hint("fragment · allotment", "goal-aware fragment selected and nominal RAM assigned for one large call"), `${fmtNum(charge.fragmentId)} · ${esc(fmtRam(charge.allotmentGb))}`],
+    [
+      hint("value vs hacking", "BitNode seconds saved by the permanent multiplier step versus one second of displaced farm RAM"),
+      `${fmtNum(charge.valueSeconds, 3)} · ${fmtNum(charge.opportunitySeconds, 3)} BN-s`,
+    ],
+  ]);
+}
+
 /** What port openers are owned, and the priced next one.
  *
  * The server table colours `ports req.` red on every blocked host and a filter
@@ -1399,12 +1424,13 @@ function ramSegmentsCard(farm: FarmRollup | undefined): string {
   const pie = bar([
     { label: "farm", value: farm.ramPie.farm, className: "s1" },
     { label: "prep", value: farm.ramPie.prep, className: "s2" },
-    { label: "share", value: farm.ramPie.share, className: "s3" },
-    { label: "free", value: farm.ramPie.free, className: "s4" },
-    { label: "reserve", value: farm.ramPie.reserve, className: "s5" },
+    { label: "charge", value: farm.ramPie.charge ?? 0, className: "s3" },
+    { label: "share", value: farm.ramPie.share, className: "s4" },
+    { label: "free", value: farm.ramPie.free, className: "s5" },
+    { label: "reserve", value: farm.ramPie.reserve, className: "s6" },
   ]);
 
-  const evidence = shareEvidence(farm);
+  const evidence = chargeEvidence(farm) + shareEvidence(farm);
   const cross = farm.ramWork?.nativeGbMsBySegmentKind;
   if (!cross) return pie + evidence;
   // GB·s is cumulative WORK, not the live segment sizes above: the bar says

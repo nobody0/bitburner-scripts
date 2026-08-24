@@ -20,9 +20,9 @@ function cleanupRealm(): void {
   delete g.dispatch_done;
   delete g.dispatch_wake;
   delete g.dispatch_wake_pending;
-  delete g.dispatch_jit_timer;
-  delete g.dispatch_jit_at;
+  delete g.dispatch_jit_timers;
   delete g.dispatch_weaken_timer;
+  delete g.charge_context_pending;
 }
 
 interface MockOp {
@@ -44,6 +44,11 @@ function mockNs(pending: MockOp[]): { ns: unknown; exitCbs: (() => void)[] } {
     grow: op,
     weaken: op,
     share: () => op(""),
+    stanek: {
+      chargeFragment: () => new Promise<void>((resolve) => {
+        pending.push({ resolve: () => resolve() });
+      }),
+    },
   };
   return { ns, exitCbs };
 }
@@ -148,6 +153,27 @@ describe("serve-mode worker", () => {
     expect(returned).toBe(true);
     expect(done).toEqual([{ opId: WORKER_ID, kind: "workerExit", target: "", threads: 7 }]);
     expect(g.worker_info!.has(WORKER_ID)).toBe(false);
+  });
+
+  test("charge is one-shot, reports a targetless completion, and invalidates multiplier context", async () => {
+    cleanupRealm();
+    const g = workerGlobals();
+    g.worker_info!.set(WORKER_ID, { kind: "charge", target: "", threads: 12, x: 2, y: 3 });
+    const done: WorkerDone[] = g.dispatch_done!;
+    const pending: MockOp[] = [];
+    const { ns, exitCbs } = mockNs(pending);
+
+    const { run } = await launchWorker(ns, exitCbs);
+    await drainMicrotasks();
+    expect(pending).toHaveLength(1);
+    pending.shift()!.resolve(0);
+    await drainMicrotasks();
+    await run;
+
+    expect(done).toEqual([
+      expect.objectContaining({ opId: WORKER_ID, kind: "charge", target: "", threads: 12, result: 1 }),
+    ]);
+    expect(g.charge_context_pending).toBe(true);
   });
 
   test("a kill mid-job reports the in-flight op AND the workerExit", async () => {

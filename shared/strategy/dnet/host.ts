@@ -1,5 +1,5 @@
 import { msPerHostEvent, msPerHostEventAny } from "./rates.ts";
-import { conclusiveAttempt, type AttemptOutcome, type LogDrainOutcome, type ReportHost } from "./courier.ts";
+import { conclusiveAttempt, type AttemptOutcome, type DnetFactGroup, type LogDrainOutcome, type ReportHost } from "./courier.ts";
 import type { PasswordEvidence } from "./evidence.ts";
 
 /** One flat record per darknet host, and when its fields stop being believable.
@@ -18,19 +18,13 @@ import type { PasswordEvidence } from "./evidence.ts";
  * password format — which cannot change while the host lives — or trust its
  * neighbour list long after the net rewired it.
  *
- * - identity fields (not a group here — they never age, only die with the
- *   identity): modelId, password shape, difficulty, isStationary, maxRam, …
- * - `position`: depth. Invalidated by a move; refreshed by the details sweep.
- * - `topology`: neighbours. Churned by move, connect and disconnect alike — the
- *   most perishable thing we hold; refreshed only by that host's prober.
- * - `ram`: blockedRam/usedRam. Invalidated by a restart or our own actions;
- *   refreshed by the details sweep.
- * - `files`: caches/contracts/stormSeed. Same invalidators as `ram` but a
- *   DIFFERENT refresh channel — only a resident's `ls` sees them. Splitting the
+ * - ram: blockedRam. Restart preserves it; memory reallocation changes it.
+ * - `files`: caches/contracts/stormSeed. A resident's `ls` is its
+ *   separate refresh channel. Splitting the
  *   old `resource` class in two is deliberate: with a single bit a details
  *   sweep would re-bless a stale cache listing, and acting on one means calling
  *   `openCache` on a filename the host no longer holds, which THROWS. */
-export type DirtyGroup = "position" | "topology" | "ram" | "files";
+export type DirtyGroup = DnetFactGroup;
 
 export const DIRTY_GROUPS: readonly DirtyGroup[] = ["position", "topology", "ram", "files"];
 
@@ -60,7 +54,6 @@ export interface DnetHost {
   neighbours?: string[];
   // ---- ram ----
   blockedRam?: number;
-  usedRam?: number;
   // ---- files (all three read off the one `ls` call). Empty array / explicit
   // false is a real observation — "we looked and there were none" — and must
   // not be conflated with absent, which means "the job did not look". ----
@@ -80,8 +73,7 @@ export interface DnetHost {
   identitySeenAt?: number;
   /** Controller-set invalidation, cleared by the group's refresh channel.
    *  Dirty means "an event may have changed this since we looked": our own
-   *  actions, a report's `dirtied` flag, a storm wipe, or the mutation sweep
-   *  (which marks details-backed groups and refreshes them in the same pass).
+   *  actions, a report's explicit invalidation, or a storm wipe.
    *  The age fallback below covers what dirty marks cannot — mutations nobody
    *  observed. */
   dirty: Partial<Record<DirtyGroup, true>>;
@@ -107,11 +99,22 @@ export interface DnetHost {
 
 export type DnetHosts = Map<string, DnetHost>;
 
+/** Durable home-owned knowledge metadata around the canonical host map. */
+export interface DnetKnowledge {
+  hosts: DnetHosts;
+  generation: string;
+  mutationsSeen: number;
+}
+
+export function emptyKnowledge(generation: string): DnetKnowledge {
+  return { hosts: new Map(), generation, mutationsSeen: 0 };
+}
+
 /** Which group a reportable field belongs to; identity fields are absent. */
 export const GROUP_FIELDS: Readonly<Record<DirtyGroup, readonly string[]>> = {
   position: ["depth"],
   topology: ["neighbours"],
-  ram: ["blockedRam", "usedRam"],
+  ram: ["blockedRam"],
   files: ["caches", "contracts", "stormSeed"],
 };
 
@@ -149,11 +152,10 @@ export interface AttemptLedger {
   solved?: boolean;
   /** A feedback solver's place in its conversation with this host.
    *
-   * It lives here rather than in the job because a solve can outlast the
-   * ADJACENCY it depends on: a vantage lasts about 108 s while the password
-   * itself only changes when the host is deleted, roughly five times longer. So
-   * an expensive solve has to be resumable from a different neighbour, and this
-   * is what it resumes from.
+   * It lives here rather than in the job because the random mutation process
+   * may remove the current adjacency at any call boundary, while the password
+   * changes only when the host is deleted. A solve must therefore be resumable
+   * from a different neighbour, and this is what it resumes from.
    *
    * Typed loosely on purpose. `shared/strategy/dnet/solvers/` owns the shape and
    * validates it with its own fingerprint; the ledger only has to carry it. It
@@ -199,7 +201,14 @@ export function foldAttempts(
       && item.status === attempt.status
       && item.candidateIndex === attempt.candidateIndex
     ));
-    const firstFold = existing === undefined;
+    // Counted on the fold that first makes the outcome CONCLUSIVE, not on the
+    // first fold of the object. `runAttempt` records one authentication twice —
+    // once the instant it returns, so a cancellation at the delayed drain cannot
+    // erase it, and again with the oracle folded in — and the first of those
+    // reads `oracle-unavailable` for every oracle-bearing step. Keying on "first
+    // fold" therefore never counted those at all, and `tried`/`probes` stopped
+    // advancing for exactly the models whose progress they measure.
+    const wasConclusive = existing !== undefined && conclusiveAttempt(existing);
     if (existing) Object.assign(existing, attempt);
     else history.push(attempt);
     if (attempt.modelId !== undefined) ledger.modelId = attempt.modelId;
@@ -207,10 +216,11 @@ export function foldAttempts(
     // does not interpret it, and `solvers/` refuses a state whose fingerprint no
     // longer matches the host.
     if (attempt.solver !== undefined) ledger.solver = attempt.solver;
-    if (firstFold && conclusiveAttempt(attempt)) {
-      if (attempt.status === "implemented") {
-        ledger.tried = Math.max(ledger.tried, (attempt.candidateIndex ?? ledger.tried) + 1);
-      } else if (attempt.oracle !== undefined) {
+    const merged = existing ?? attempt;
+    if (!wasConclusive && conclusiveAttempt(merged)) {
+      if (merged.status === "implemented") {
+        ledger.tried = Math.max(ledger.tried, (merged.candidateIndex ?? ledger.tried) + 1);
+      } else if (merged.oracle !== undefined) {
         ledger.probes += 1;
       }
     }
@@ -337,7 +347,7 @@ export function expiryMs(group: DirtyGroup | "identity", opts: ExpiryOpts = {}):
       return anyOf(["moved", "disconnected", "connected"]) * TRUST_FRACTION;
     case "ram":
     case "files":
-      return anyOf(["restarted"]) * TRUST_FRACTION;
+      return Infinity;
   }
 }
 
@@ -525,11 +535,12 @@ export function foldReports(
       host.seenAt[group] = observedAt;
       delete host.dirty[group];
     }
+    for (const group of seen.invalidates ?? []) host.dirty[group] = true;
   }
 
-  // Darknet servers go offline permanently. Remembering one for ever would be
-  // publishing a map of a world that no longer contains it — unless it is one
-  // the engine cannot delete, which is never gone and so never forgotten.
+  // A deleted identity can disappear from the graph and later be reused.
+  // Forget absent movable hosts so published knowledge describes the live net;
+  // stationary hosts cannot be deleted and therefore remain known.
   const hostsForgotten: string[] = [];
   for (const [name, host] of hosts) {
     const reference = host.goneAt ?? host.lastSeenAt;
@@ -540,6 +551,16 @@ export function foldReports(
   }
 
   return { superseded, hostsForgotten, hostsReplaced };
+}
+
+/** Home-side adapter around the same in-place fold the controller uses. */
+export function foldKnowledgeReports(
+  knowledge: DnetKnowledge,
+  reports: readonly ReportHost[],
+  now: number,
+  opts: ExpiryOpts = {},
+): FoldOutcome & { knowledge: DnetKnowledge } {
+  return { knowledge, ...foldReports(knowledge.hosts, reports, now, opts) };
 }
 
 /** Drop everything that belongs to one server lifetime: identity fields, group
@@ -653,7 +674,7 @@ export function coverage(
     if (fresh<string[]>(host, "neighbours", now, expiry) !== undefined) adjacencyKnown++;
     if (host.credentialKnown === true) {
       cracked++;
-      if (freeRam(host, now, expiry) >= agentRamGb) plantable++;
+      if (usableRam(host, now, expiry) >= agentRamGb) plantable++;
     }
     if (host.identitySeenAt !== undefined) total++;
     for (const group of DIRTY_GROUPS) {
@@ -672,18 +693,19 @@ export function coverage(
   };
 }
 
-/** RAM actually available to a script on a darknet host.
- *
- * The subtraction is not obvious. Owner-blocked RAM presents AS used RAM
- * upstream — `updateRamUsed(server.blockedRam)` runs at construction and again
- * whenever used RAM is recalculated — so a naive `max - blocked - used`
- * double-counts the block and can go negative on a host that is doing nothing
- * wrong. `blockedRam` is therefore only subtracted when `usedRam` has not
- * already absorbed it.
- *
- * Returns 0 rather than a guess when the facts are missing or stale: an unknown
- * capacity must never read as "room for an agent". */
-export function freeRam(
+export function knowledgeCoverage(
+  knowledge: DnetKnowledge,
+  now: number,
+  opts: ExpiryOpts = {},
+  agentRamGb = 2.6,
+): KnowledgeCoverage {
+  return coverage(knowledge.hosts, now, opts, agentRamGb);
+}
+
+/** Script capacity after the owner's durable RAM block. Runtime occupancy is
+ * deliberately excluded: it changes as our known handles start and stop and
+ * therefore is not durable host knowledge. */
+export function usableRam(
   host: DnetHost | undefined,
   now: number,
   opts: ExpiryOpts = {},
@@ -694,7 +716,9 @@ export function freeRam(
   if (maxRam === undefined) return 0;
   if (!groupFresh(host, "ram", now, expiry)) return 0;
   const blocked = host.blockedRam ?? 0;
-  const used = host.usedRam ?? 0;
-  const occupied = used >= blocked ? used : used + blocked;
-  return Math.max(0, maxRam - occupied);
+  return Math.max(0, maxRam - blocked);
+}
+
+export function stormWipeKnowledge(knowledge: DnetKnowledge, opts: ExpiryOpts = {}): DnetKnowledge {
+  return { ...knowledge, hosts: stormWipe(knowledge.hosts, opts) };
 }

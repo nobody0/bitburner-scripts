@@ -1,19 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_SPREAD_LIMITS, candidatesFrom, pickPlantVantage, planSpread, type SpreadCandidate } from "../shared/strategy/dnet/spread.ts";
-import { deriveTasks } from "../shared/strategy/dnet/queue.ts";
-import {
-  emptyKnowledge,
-  foldReports,
-  type DarknetKnowledge,
-} from "../shared/strategy/dnet/knowledge.ts";
+import { DEFAULT_SPREAD_LIMITS, allocateCredentialChecks, candidatesFrom, deriveTasks, pickPlantVantage, planSpread, type SpreadCandidate } from "../shared/strategy/dnet/plan.ts";
+import { foldReports, type DnetHosts } from "../shared/strategy/dnet/host.ts";
 import type { ReportHost } from "../shared/strategy/dnet/courier.ts";
 import { msPerHostEvent } from "../shared/strategy/dnet/rates.ts";
 
-const GEN = "15:0";
 const NOW = 10_000_000;
 
 function candidate(over: Partial<SpreadCandidate> & { host: string }): SpreadCandidate {
-  return { from: "darkweb", hasCredential: true, agentAlive: false, freeRam: 16, depth: 0, ...over };
+  return { from: "darkweb", hasCredential: true, agentAlive: false, usableRam: 16, depth: 0, ...over };
 }
 
 /** The fixtures read better with the facts grouped, so they are flattened into
@@ -29,8 +23,10 @@ function reports(hosts: Seen[], at = NOW): ReportHost[] {
   } as ReportHost));
 }
 
-function fold(hosts: Seen[], at = NOW): DarknetKnowledge {
-  return foldReports(emptyKnowledge(GEN), reports(hosts, at), at).knowledge;
+function fold(hosts: Seen[], at = NOW): DnetHosts {
+  const knowledge: DnetHosts = new Map();
+  foldReports(knowledge, reports(hosts, at), at);
+  return knowledge;
 }
 
 describe("every refusal to spread is named", () => {
@@ -41,7 +37,7 @@ describe("every refusal to spread is named", () => {
   test("a host that is simply gone is not reported as anything else", () => {
     // Order matters: a refusal that sends someone looking at the wrong problem
     // is worse than no refusal at all.
-    const plan = planSpread([candidate({ host: "dead", goneAt: NOW - 1, freeRam: 0, hasCredential: false })], DEFAULT_SPREAD_LIMITS, NOW);
+    const plan = planSpread([candidate({ host: "dead", goneAt: NOW - 1, usableRam: 0, hasCredential: false })], DEFAULT_SPREAD_LIMITS, NOW);
     expect(plan.plant).toEqual([]);
     expect(plan.refused[0]!.why).toBe("gone");
   });
@@ -57,22 +53,22 @@ describe("every refusal to spread is named", () => {
   test("unknown RAM never reads as room for an agent", () => {
     // exec on a full host returns a silent 0, indistinguishable from a missing
     // file. Guessing here would burn a plant and report success.
-    const plan = planSpread([candidate({ host: "unknown", freeRam: undefined })], DEFAULT_SPREAD_LIMITS, NOW);
+    const plan = planSpread([candidate({ host: "unknown", usableRam: undefined })], DEFAULT_SPREAD_LIMITS, NOW);
     expect(plan.refused[0]!.why).toBe("unknown-ram");
   });
 
   test("not enough RAM names the number and the likely cause", () => {
     // A big darknet host can arrive with ALL of its RAM blocked by its owner,
     // which is a different problem from a small host.
-    const plan = planSpread([candidate({ host: "blocked", freeRam: 1 })], DEFAULT_SPREAD_LIMITS, NOW);
+    const plan = planSpread([candidate({ host: "blocked", usableRam: 1 })], DEFAULT_SPREAD_LIMITS, NOW);
     expect(plan.refused[0]!.why).toBe("not-enough-ram");
-    expect(plan.refused[0]!.detail).toContain("1.00GB free");
+    expect(plan.refused[0]!.detail).toContain("1.00GB usable");
     expect(plan.refused[0]!.detail).toContain("memoryReallocation");
   });
 
   test("a cramped blocked host boots the largest local reclaimer that fits", () => {
     const plan = planSpread([
-      candidate({ host: "blocked", freeRam: 5.3, blockedRam: 10 }),
+      candidate({ host: "blocked", usableRam: 5.3, blockedRam: 10 }),
     ], DEFAULT_SPREAD_LIMITS, NOW);
     expect(plan.refused).toEqual([]);
     expect(plan.plant[0]).toEqual(expect.objectContaining({
@@ -84,14 +80,14 @@ describe("every refusal to spread is named", () => {
 
   test("an ordinary host that fits the resident and prober uses the normal plant", () => {
     const plan = planSpread([
-      candidate({ host: "roomy", freeRam: 5.4, blockedRam: 10 }),
+      candidate({ host: "roomy", usableRam: 5.4, blockedRam: 10 }),
     ], DEFAULT_SPREAD_LIMITS, NOW);
     expect(plan.plant[0]?.bootstrapReclaim).toBeUndefined();
   });
 
   test("a pinned lab candidate reclaims without a prober even when a resident would fit", () => {
     const plan = planSpread([
-      candidate({ host: "walker", freeRam: 12, blockedRam: 4, reclaimOnly: true, omitProber: true }),
+      candidate({ host: "walker", usableRam: 12, blockedRam: 4, reclaimOnly: true, omitProber: true }),
     ], DEFAULT_SPREAD_LIMITS, NOW);
     expect(plan.plant[0]).toEqual(expect.objectContaining({
       bootstrapReclaim: true,
@@ -131,8 +127,8 @@ describe("every refusal to spread is named", () => {
       planSpread([candidate({ host: "a", goneAt: NOW - 1 })], DEFAULT_SPREAD_LIMITS, NOW),
       planSpread([candidate({ host: "b", agentAlive: true })], DEFAULT_SPREAD_LIMITS, NOW),
       planSpread([candidate({ host: "c", hasCredential: false })], DEFAULT_SPREAD_LIMITS, NOW),
-      planSpread([candidate({ host: "d", freeRam: undefined })], DEFAULT_SPREAD_LIMITS, NOW),
-      planSpread([candidate({ host: "e", freeRam: 0.5 })], DEFAULT_SPREAD_LIMITS, NOW),
+      planSpread([candidate({ host: "d", usableRam: undefined })], DEFAULT_SPREAD_LIMITS, NOW),
+      planSpread([candidate({ host: "e", usableRam: 0.5 })], DEFAULT_SPREAD_LIMITS, NOW),
       planSpread([candidate({ host: "f", lastPlantAt: NOW })], DEFAULT_SPREAD_LIMITS, NOW),
     ]) {
       for (const refusal of plan.refused) named.add(refusal.why);
@@ -171,8 +167,8 @@ describe("spreading prefers the deep and the roomy, deterministically", () => {
     const plan = planSpread(
       [
         candidate({ host: "shallow", depth: 0, from: "a" }),
-        candidate({ host: "deep-small", depth: 3, freeRam: 4, from: "b" }),
-        candidate({ host: "deep-big", depth: 3, freeRam: 32, from: "c" }),
+        candidate({ host: "deep-small", depth: 3, usableRam: 4, from: "b" }),
+        candidate({ host: "deep-big", depth: 3, usableRam: 32, from: "c" }),
       ],
       DEFAULT_SPREAD_LIMITS,
       NOW,
@@ -212,7 +208,7 @@ describe("remote recovery candidates", () => {
     const knowledge = fold([
       { hostname: "resident-a", present: true, facts: { neighbours: [], depth: 1 } },
       { hostname: "resident-b", present: true, facts: { neighbours: [], depth: 2 } },
-      { hostname: "target", present: true, facts: { depth: 7, maxRam: 32, ramUsed: 0, ownerBlockGb: 0 } },
+      { hostname: "target", present: true, facts: { depth: 7, maxRam: 32, blockedRam: 0 } },
     ]);
     const candidates = candidatesFrom(knowledge, NOW, {
       standing: new Set(["resident-a", "resident-b"]),
@@ -234,7 +230,7 @@ describe("remote recovery candidates", () => {
     // for planting and sits agent-less for ever.
     const knowledge = fold([
       { hostname: "resident", present: true, facts: { depth: 3 } }, // no neighbours fact
-      { hostname: "pinned", present: true, facts: { depth: 7, neighbours: ["resident"], maxRam: 32, usedRam: 0, blockedRam: 0 } },
+      { hostname: "pinned", present: true, facts: { depth: 7, neighbours: ["resident"], maxRam: 32, blockedRam: 0 } },
     ]);
     const candidates = candidatesFrom(knowledge, NOW, {
       standing: new Set(["resident"]),
@@ -250,7 +246,7 @@ describe("remote recovery candidates", () => {
   test("a credential alone never creates a non-adjacent plant", () => {
     const knowledge = fold([
       { hostname: "resident", present: true, facts: { neighbours: [], depth: 1 } },
-      { hostname: "target", present: true, facts: { depth: 7, maxRam: 32, ramUsed: 0, ownerBlockGb: 0 } },
+      { hostname: "target", present: true, facts: { depth: 7, maxRam: 32, blockedRam: 0 } },
     ]);
     expect(candidatesFrom(knowledge, NOW, {
       standing: new Set(["resident"]),
@@ -263,12 +259,12 @@ describe("remote recovery candidates", () => {
     // An immune host is NOT exempt from the cooldown: it can flap from a
     // persistently-failing plant (a stale reverse-edge from symmetric adjacency),
     // and the cooldown is what stops that becoming a spawn-churn loop. The
-    // deliberate-empty case (a pin) is handled by the overseer clearing the stamp
+    // deliberate-empty case (a pin) is handled by the controller clearing the stamp
     // at the source, not by exempting it here.
     const knowledge = fold([
       { hostname: "resident", present: true, facts: { neighbours: ["pinned", "mortal"], depth: 1 } },
-      { hostname: "pinned", present: true, facts: { depth: 7, maxRam: 32, usedRam: 0, blockedRam: 0 } },
-      { hostname: "mortal", present: true, facts: { depth: 7, maxRam: 32, usedRam: 0, blockedRam: 0 } },
+      { hostname: "pinned", present: true, facts: { depth: 7, maxRam: 32, blockedRam: 0 } },
+      { hostname: "mortal", present: true, facts: { depth: 7, maxRam: 32, blockedRam: 0 } },
     ]);
     const cands = candidatesFrom(knowledge, NOW, {
       standing: new Set(["resident"]),
@@ -281,7 +277,7 @@ describe("remote recovery candidates", () => {
       expect(c.lastPlantAt).toBe(NOW - 1_000);
       expect(planSpread([c], DEFAULT_SPREAD_LIMITS, NOW).refused[0]!.why).toBe("cooldown");
     }
-    // With no recent stamp — the overseer having cleared it after a pin — the
+    // With no recent stamp — the controller having cleared it after a pin — the
     // same immune host plants at once.
     const cleared = candidatesFrom(knowledge, NOW, {
       standing: new Set(["resident"]),
@@ -380,7 +376,7 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
       { hostname: "darkweb", present: true, facts: { neighbours: ["dn-1"], depth: -1 } },
       { hostname: "dn-1", present: true, facts: { depth: 0, modelId: "TopPass" } },
     ]);
-    knowledge = foldReports(knowledge, [{ hostname: "dn-1", at: NOW + 1, present: false }], NOW + 1).knowledge;
+    foldReports(knowledge, [{ hostname: "dn-1", at: NOW + 1, present: false }], NOW + 1);
     const tasks = deriveTasks(knowledge, NOW + 1, { agents: new Set(["darkweb"]) });
     expect(tasks.some((t) => t.host === "dn-1")).toBe(false);
   });
@@ -395,7 +391,7 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     expect(first?.reason).toBe("DefaultPassword candidate 1/1");
 
     // Length and format reduce this identity to the sole compatible default.
-    knowledge.hosts["dn-1"]!.attempts = { modelId: "FreshInstall_1.0", tried: 1, probes: 0 };
+    knowledge.get("dn-1")!.attempts = { modelId: "FreshInstall_1.0", tried: 1, probes: 0 };
     expect(deriveTasks(knowledge, NOW, opts).some((t) => t.kind === "attempt")).toBe(false);
   });
 
@@ -418,7 +414,7 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
 
     // And a solve does NOT retire after one deliberate failure the way a probe
     // does: the ledger's probe count is not what bounds it.
-    knowledge.hosts["hard"]!.attempts = { modelId: "DeepGreen", tried: 0, probes: 1 };
+    knowledge.get("hard")!.attempts = { modelId: "DeepGreen", tried: 0, probes: 1 };
     const after = deriveTasks(knowledge, NOW, { agents: new Set(["darkweb"]) });
     expect(after.some((t) => t.kind === "attempt" && t.host === "hard")).toBe(true);
   });
@@ -435,7 +431,7 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     expect(tasks).toHaveLength(1);
     expect(tasks[0]!.reason).toContain("maze");
 
-    knowledge.hosts["maze"]!.attempts = { modelId: "(The Labyrinth)", tried: 0, probes: 1 };
+    knowledge.get("maze")!.attempts = { modelId: "(The Labyrinth)", tried: 0, probes: 1 };
     const after = deriveTasks(knowledge, NOW, { agents: new Set(["darkweb"]) });
     expect(after.some((t) => t.kind === "attempt" && t.host === "maze")).toBe(false);
     expect(after.some((t) => t.kind === "inventory" && t.host === "maze")).toBe(false);
@@ -473,6 +469,60 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     expect(tasks.some((t) => t.kind === "inventory")).toBe(false);
   });
 
+  test("pending records derive one serialized drain and suppress password work", () => {
+    const knowledge = fold([
+      { hostname: "darkweb", present: true, facts: { neighbours: ["dn-1"], depth: -1 } },
+      { hostname: "dn-1", present: true, facts: { depth: 1 } },
+    ]);
+    knowledge.get("dn-1")!.attempts = { tried: 1, probes: 0 };
+    knowledge.get("dn-1")!.ring = { pendingAuthRecords: 2 };
+    const tasks = deriveTasks(knowledge, NOW, {
+      agents: new Set(["darkweb"]),
+      guesses: [{ host: "dn-1", id: "leak", reason: "compatible leaked password" }],
+    });
+    const targetBleeds = tasks.filter((task) => task.kind === "bleed" && task.host === "dn-1");
+    expect(targetBleeds).toHaveLength(1);
+    expect(targetBleeds[0]?.reason).toContain("2 authentication log record");
+    expect(tasks.filter((task) => task.kind === "attempt")).toHaveLength(0);
+  });
+
+  test("an initial ring read happens once; elapsed time cannot invent logs", () => {
+    const knowledge = fold([
+      { hostname: "dn-1", present: true, facts: { neighbours: ["dn-2"], depth: 1, logTrafficInterval: 2 } },
+      { hostname: "dn-2", present: true, facts: { depth: 2 } },
+    ]);
+    knowledge.get("dn-1")!.attempts = { tried: 0, probes: 0 };
+    const opts = { agents: new Set(["dn-1"]), vault: new Set(["dn-1"]) };
+    expect(deriveTasks(knowledge, NOW, opts).find((task) => task.kind === "bleed")?.reason)
+      .toContain("initial log ring");
+    knowledge.get("dn-1")!.ring = {
+      pendingAuthRecords: 0,
+      lastBleedAt: NOW - 40_000,
+      lastBleedAttemptAt: NOW - 40_000,
+    };
+    expect(deriveTasks(knowledge, NOW, opts).some((task) => task.id === "bleed:dn-1")).toBe(false);
+  });
+
+  test("charisma gates oracle work but never a dictionary candidate", () => {
+    const knowledge = fold([
+      { hostname: "dn-0", present: true, facts: { neighbours: ["probe-me", "dict-me", "bleed-me"] } },
+      { hostname: "probe-me", present: true, facts: { depth: 1, modelId: "Mystery_9000", requiredCharisma: 120 } },
+      { hostname: "dict-me", present: true, facts: { depth: 1, modelId: "FreshInstall_1.0", requiredCharisma: 120 } },
+      { hostname: "bleed-me", present: true, facts: { depth: 1, requiredCharisma: 120, logTrafficInterval: 1 } },
+    ]);
+    knowledge.get("bleed-me")!.attempts = { tried: 1, probes: 0 };
+    knowledge.get("bleed-me")!.ring = { pendingAuthRecords: 1 };
+    const attempts = (charisma: number) => deriveTasks(knowledge, NOW, {
+      agents: new Set(["dn-0"]), charisma,
+    }).filter((task) => task.kind === "attempt");
+    expect(attempts(50).map((task) => task.host)).toEqual(["dict-me"]);
+    expect(attempts(200).map((task) => task.host).sort()).toEqual(["dict-me", "probe-me"]);
+    expect(deriveTasks(knowledge, NOW, { agents: new Set(["dn-0"]), charisma: 50 })
+      .some((task) => task.kind === "bleed" && task.host === "bleed-me")).toBe(false);
+    expect(deriveTasks(knowledge, NOW, { agents: new Set(["dn-0"]), charisma: 120 })
+      .some((task) => task.kind === "bleed" && task.host === "bleed-me")).toBe(true);
+  });
+
   test("a plant already in flight is not filed twice", () => {
     // The spread planner has its own cooldown, but it is per HOST and measured
     // from the last plant that FINISHED. A plant in flight is a different fact.
@@ -502,6 +552,109 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     const attempt = tasks.find((t) => t.id === "attempt:target");
     expect(bleed).toBeUndefined();
     expect(attempt).toBeDefined();
+  });
+
+  test("a one-shot candidate prequeues a bleed on the smaller second vantage", () => {
+    const knowledge = fold([
+      { hostname: "a", present: true, facts: { neighbours: ["target"], depth: 0, maxRam: 64, blockedRam: 0 } },
+      { hostname: "b", present: true, facts: { neighbours: ["target"], depth: 0, maxRam: 16, blockedRam: 0 } },
+      { hostname: "target", present: true, facts: { depth: 1, modelId: "FreshInstall_1.0", requiredCharisma: 1 } },
+    ]);
+    const tasks = deriveTasks(knowledge, NOW, {
+      agents: new Set(["a", "b"]),
+      agentFreeGb: new Map([["a", 60], ["b", 12]]),
+      attemptGbPerThread: 4,
+      bleedGbPerThread: 3,
+      charisma: 10,
+    });
+    const attempt = tasks.find((task) => task.id === "attempt:target")!;
+    const bleed = tasks.find((task) => task.followAttemptIds?.includes(attempt.id))!;
+    expect(attempt.from).toBe("a");
+    expect(bleed.from).toBe("b");
+    expect(bleed.threads).toBe(4);
+  });
+
+  test("two narrowed passwords fill two available vantages", () => {
+    const knowledge = fold([
+      { hostname: "a", present: true, facts: { neighbours: ["target"], depth: 0 } },
+      { hostname: "b", present: true, facts: { neighbours: ["target"], depth: 0 } },
+      { hostname: "target", present: true, facts: { depth: 1, modelId: "ZeroLogon" } },
+    ]);
+    const tasks = deriveTasks(knowledge, NOW, {
+      agents: new Set(["a", "b"]),
+      guesses: [
+        { host: "target", id: "one", reason: "candidate one" },
+        { host: "target", id: "two", reason: "candidate two" },
+      ],
+    });
+    const attempts = tasks.filter((task) => task.kind === "attempt" && task.host === "target");
+    expect(attempts.map((task) => task.from).sort()).toEqual(["a", "b"]);
+    expect(attempts.every((task) => task.skipInitialBleed === true)).toBe(true);
+    expect(tasks.some((task) => task.followAttemptIds !== undefined)).toBe(false);
+  });
+
+  test("candidate allocation races tiny sets and spends one slot on information for wider sets", () => {
+    expect(allocateCredentialChecks(10, 1)).toEqual({ authSlots: 1, bleedSlots: 0 });
+    expect(allocateCredentialChecks(2, 2)).toEqual({ authSlots: 2, bleedSlots: 0 });
+    expect(allocateCredentialChecks(3, 3)).toEqual({ authSlots: 3, bleedSlots: 0 });
+    expect(allocateCredentialChecks(3, 2)).toEqual({ authSlots: 1, bleedSlots: 1 });
+    expect(allocateCredentialChecks(10, 3)).toEqual({ authSlots: 2, bleedSlots: 1 });
+    expect(allocateCredentialChecks(10, 10)).toEqual({ authSlots: 3, bleedSlots: 1 });
+    expect(allocateCredentialChecks(10, 10, false)).toEqual({ authSlots: 10, bleedSlots: 0 });
+  });
+
+  test("ten choices on ten vantages use three auth records and one shared follower bleed", () => {
+    const vantageNames = Array.from({ length: 10 }, (_, index) => `a${index}`);
+    const knowledge = fold([
+      ...vantageNames.map((hostname) => ({ hostname, present: true, facts: { neighbours: ["target"], depth: 0 } })),
+      { hostname: "target", present: true, facts: { depth: 1, modelId: "AccountsManager_4.2" } },
+    ]);
+    const tasks = deriveTasks(knowledge, NOW, {
+      agents: new Set(vantageNames),
+      guesses: Array.from({ length: 10 }, (_, index) => ({
+        host: "target",
+        id: String(index),
+        reason: `candidate ${index}`,
+      })),
+    });
+    const attempts = tasks.filter((task) => task.kind === "attempt" && task.host === "target");
+    const follower = tasks.find((task) => task.followAttemptIds !== undefined)!;
+    expect(attempts.map((task) => task.from)).toEqual(["a0", "a1", "a2"]);
+    expect(follower.from).toBe("a3");
+    expect(follower.followAttemptIds).toEqual(attempts.map((task) => task.id));
+  });
+
+  test("duplicate clue paths never authenticate the same password twice", () => {
+    const knowledge = fold([
+      { hostname: "a", present: true, facts: { neighbours: ["target"], depth: 0 } },
+      { hostname: "b", present: true, facts: { neighbours: ["target"], depth: 0 } },
+      { hostname: "target", present: true, facts: { depth: 1, modelId: "ZeroLogon" } },
+    ]);
+    const tasks = deriveTasks(knowledge, NOW, {
+      agents: new Set(["a", "b"]),
+      guesses: [
+        { host: "target", id: "same", reason: "attributed copy" },
+        { host: "target", id: "same", reason: "loose copy" },
+        { host: "target", id: "other", reason: "other candidate" },
+      ],
+    });
+    expect(tasks.filter((task) => task.kind === "attempt").map((task) => task.guessId).sort())
+      .toEqual(["other", "same"]);
+  });
+
+  test("an unreadable oracle spends every available slot on authentication", () => {
+    const vantageNames = Array.from({ length: 5 }, (_, index) => `v${index}`);
+    const knowledge = fold([
+      ...vantageNames.map((hostname) => ({ hostname, present: true, facts: { neighbours: ["target"], depth: 0 } })),
+      { hostname: "target", present: true, facts: { depth: 1, modelId: "AccountsManager_4.2", requiredCharisma: 100 } },
+    ]);
+    const tasks = deriveTasks(knowledge, NOW, {
+      agents: new Set(vantageNames),
+      charisma: 1,
+      guesses: Array.from({ length: 10 }, (_, index) => ({ host: "target", id: String(index), reason: "candidate" })),
+    });
+    expect(tasks.filter((task) => task.kind === "attempt" && task.host === "target")).toHaveLength(5);
+    expect(tasks.some((task) => task.followAttemptIds !== undefined)).toBe(false);
   });
 
   test("a single available vantage is selected directly", () => {
@@ -607,7 +760,7 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     // The WALK now outranks EVERYTHING, the pin included: completing the lab is
     // the point of the darknet, so until it is done the walker is the most
     // important script on its host and nothing may take its slot. A walker's host
-    // is protected by being the walker (the overseer marks it irreplaceable),
+    // is protected by being the walker (the controller marks it irreplaceable),
     // not by a prior pin.
     const walking = deriveTasks(knowledge, NOW, {
       agents: new Set(["darkweb", "dn-1"]),
@@ -653,7 +806,7 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     expect(rederived).toEqual([]);
   });
 
-  test("a plant outranks everything, because it is the only thing that grows the map", () => {
+  test("a plant outranks every other blocking task because it grows the map", () => {
     const knowledge = fold([
       { hostname: "darkweb", present: true, facts: { neighbours: ["dn-1"], depth: -1 } },
       { hostname: "dn-1", present: true, facts: { depth: 0, modelId: "ZeroLogon" } },
@@ -711,7 +864,7 @@ describe("attempts stand on the roomiest vantage, and buy threads with it", () =
       { hostname: "dn-a", present: true, facts: { neighbours: ["target"], depth: 0 } },
       { hostname: "target", present: true, facts: { depth: 1, modelId: "ZeroLogon", requiredCharisma: 1 } },
     ]);
-    knowledge.hosts["target"]!.ring = { pendingAuthRecords: 2 };
+    knowledge.get("target")!.ring = { pendingAuthRecords: 2 };
     const bleed = deriveTasks(knowledge, NOW, {
       agents: new Set(["darkweb", "dn-a"]),
       charisma: 500,

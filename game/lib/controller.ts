@@ -610,7 +610,6 @@ function brokerAcquire(
         priority: brokerRequest.priority,
       },
       reason: execution.plan.reason,
-      threshold: execution.plan.threshold,
       shareGb: roundSigFigs(execution.plan.shareGb, 3),
     });
   }

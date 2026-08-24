@@ -1,4 +1,6 @@
 import type { AttemptOutcome, LogDrainOutcome, ReportHost, VaultEntry } from "../../shared/strategy/dnet/courier.ts";
+import type { DnetTimingProfile } from "../../shared/strategy/dnet/rates.ts";
+import type { DarknetProfit } from "../../shared/telemetry/topics/dnet.ts";
 
 /** The data shapes home and the controller exchange, and the panel reads.
  *
@@ -101,6 +103,8 @@ export interface DnetDrain {
   backdoorInvalidations: { hostname: string; at: number }[];
   charismaNeeded?: number;
   karmaLoss?: number;
+  /** Since-last-drain returns, folded into home's cumulative digest. */
+  profit?: Partial<DarknetProfit>;
   lastPhishCacheAt?: number;
   grammar?: { unrecognised: number; shapes: Record<string, number> };
   residents: {
@@ -113,6 +117,14 @@ export interface DnetDrain {
     failed: number;
     lastError?: string;
   }[];
+  /** Live engine RAM, sampled together by the controller. */
+  ram: {
+    host: string;
+    at: number;
+    total: number;
+    blocked: number;
+    used: number;
+  }[];
   residentsLost: number;
   mutations: number;
   lab?: DnetLabReport;
@@ -120,6 +132,8 @@ export interface DnetDrain {
 
 export interface DnetOrders {
   charisma: number;
+  /** Complete only when home has cached every upstream authentication input. */
+  timing?: DnetTimingProfile;
   vaultSnapshot?: { entries: VaultEntry[]; at: number };
   netDepth?: number;
   bitNode?: number;

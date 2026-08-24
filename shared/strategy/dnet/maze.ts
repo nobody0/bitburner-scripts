@@ -40,9 +40,9 @@
  * below a number anyone can re-check rather than a claim in a comment. It costs
  * the game nothing to keep here — no game file imports it, so esbuild shakes it
  * out of the built artifact entirely, which is checkable by grepping
- * `build/dnet/overseer.*.js` for one of its note strings.
+ * `build/dnet/controller.*.js` for one of its note strings.
  *
- * `decideLab` is what `game/dnet/jobs.ts` actually walks with. It folds every
+ * `decideLab` is what `game/dnet/orders.ts` actually walks with. It folds every
  * render into a wall-slot field, adds everything the generator's arithmetic
  * fixes before the first move (`labPrior`), and replans with A* each step —
  * ~0.65x the DFS's wall-clock over the whole ladder, and it never pays an

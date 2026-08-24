@@ -117,7 +117,7 @@ export interface LabRoute {
   };
 }
 
-/** Adapter for the route deployed by `game/dnet/jobs.ts`.
+/** Adapter for the route deployed by `game/dnet/orders.ts`.
  *
  * The first direction is blind. Every later decision is the production
  * corner-biased DFS, including its handling of a rendered-open move that the
@@ -375,7 +375,7 @@ const hashLabId = (id: string): number => {
  * each PID's `authenticate` delays run in parallel; every failed attempt from
  * ANY pid feeds the one charisma pool; and whichever PID reaches the endpoint
  * roots the lab for everyone. Knowledge sharing stands in for the production
- * realm plumbing (`mergeLabFields` through the overseer): here the members
+ * realm plumbing (`mergeLabFields` through the controller): here the members
  * simply read and write one field, which is the same thing with the copying
  * elided.
  *

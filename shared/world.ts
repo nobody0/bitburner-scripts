@@ -131,6 +131,17 @@ export interface ShareAction {
   opId: number;
 }
 
+/** One-shot Stanek charge. Unlike share this call is never cancelled: its
+ * one-second investment is lost if the process is killed. */
+export interface ChargeAction {
+  type: "charge";
+  source: string;
+  threads: number;
+  opId: number;
+  x: number;
+  y: number;
+}
+
 /** Cancellation of one share worker.
  *
  * The worker parks on a stop promise raced against its current `ns.share()`
@@ -148,19 +159,20 @@ export interface StopShareAction {
 export type Action =
   | HgwAction
   | ShareAction
+  | ChargeAction
   | StopShareAction
   | { type: "nuke"; target: string }
   | { type: "buyServer"; ram: number; name: string }
   | { type: "upgradeServer"; host: string; ram: number }
   | { type: "upgradeHomeRam" }
   | { type: "upgradeHomeCore" }
-  | { type: "sleep"; ms: number };
+  | { type: "sleep"; ms: number; target?: string };
 
 /** Delivered to the driver when a scheduled op settles. `workerExit` reports a
  * pooled serve-worker's process ending (idle timeout, kill, reload): its opId
  * is the WORKER id and its arrival is when the worker's RAM actually frees. */
 export interface CompletionEvent {
-  kind: "hack" | "grow" | "weaken" | "sleep" | "workerExit";
+  kind: "hack" | "grow" | "weaken" | "charge" | "sleep" | "workerExit";
   opId?: number;
   target?: string;
   threads?: number;
@@ -199,4 +211,4 @@ export interface Planner<M> {
  * dies on its first call with "Dynamic RAM usage calculated to be greater
  * than initial RAM usage". `share` is therefore 1.6 + 2.4, not 2.4.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/RamCostGenerator.ts#L10-L20 */
-export const WORKER_RAM = { hack: 1.7, grow: 1.75, weaken: 1.75, share: 4.0 } as const;
+export const WORKER_RAM = { hack: 1.7, grow: 1.75, weaken: 1.75, charge: 2.0, share: 4.0 } as const;

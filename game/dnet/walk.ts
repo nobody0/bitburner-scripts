@@ -15,9 +15,10 @@ import {
   type LabField,
 } from "../../shared/strategy/dnet/maze.ts";
 import type { AgentIo, Order, Report } from "./shared.ts";
+import { awaitDnetOperation } from "./timing.ts";
 
 /** The `walk` order body: the maze walker — extracted mechanically from
- * `jobs.ts`.
+ * `orders.ts`.
  *
  * The body returns the report FIELDS; the agent wrapper stamps `id`, `kind`,
  * `host` and `from` on top.
@@ -91,7 +92,7 @@ export async function runWalk(ns: NS, order: Order, io: AgentIo): Promise<OrderR
   }
   const basePrior = labPrior(stage);
   let prior = basePrior;
-  // Seed from the overseer's shared field: the one piece of walk progress
+  // Seed from the controller's shared field: the one piece of walk progress
   // that outlives a PID. A re-seeded walker starts with its predecessor's
   // map, so a replacement starts with everything its predecessor learned.
   let field: LabField = io.deps.labField(state.host) ?? emptyField();
@@ -150,7 +151,9 @@ export async function runWalk(ns: NS, order: Order, io: AgentIo): Promise<OrderR
         // One authentication for a radius-3 render with the exit overlay ON.
         // `decideLab` has already written this vantage down, so a refused or
         // unreadable radar is skipped rather than retried forever.
-        const seen = await jobNs["dnet"]["labradar"]();
+        const seen = await awaitDnetOperation(io, {
+          operation: "labradar", host: state.host, from: state.from, threads: state.jobThreads ?? state.threads,
+        }, () => jobNs["dnet"]["labradar"]());
         radars++;
         count(seen.success ? "radar" : "radar-refused");
         if (seen.success) {
@@ -167,7 +170,9 @@ export async function runWalk(ns: NS, order: Order, io: AgentIo): Promise<OrderR
     // spaces and takes the first token that parses, so "north" and "go north"
     // are the same move and the shorter one is one less thing to get wrong.
     pending = direction;
-    const answer = await jobNs["dnet"]["authenticate"](state.host, direction);
+    const answer = await awaitDnetOperation(io, {
+      operation: "authenticate", host: state.host, from: state.from, threads: state.jobThreads ?? state.threads,
+    }, () => jobNs["dnet"]["authenticate"](state.host, direction));
     count(answer.code);
     if (answer.success) {
       return {

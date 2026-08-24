@@ -212,6 +212,7 @@ th .sortby.sel { font-weight: 600; }
 .seg.s3 { background: var(--series-3); }
 .seg.s4 { background: var(--series-4); }
 .seg.s5 { background: var(--series-5); }
+.seg.s6 { background: var(--series-6, var(--muted)); }
 
 dl.defs { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; margin: 0; }
 dl.defs dt { color: var(--muted); font-size: var(--fs-sm); }

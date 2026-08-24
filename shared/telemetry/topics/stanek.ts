@@ -29,7 +29,7 @@ export interface StanekState {
   /** Fragment definitions expose rotation-0 grids; the probe normalizes them
    * to occupied cells for the pure packer.
    * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Stanek.ts#L58-L73 */
-  availableTypes?: { id: number; type: string; power: number; limit: number; shape?: { x: number; y: number }[] }[];
+  availableTypes?: { id: number; type: string; power: number; limit: number; shape: { x: number; y: number }[] }[];
   plan?: StanekPlan;
 }
 
@@ -40,6 +40,4 @@ export interface StanekPlan {
    *  optimal, and saying so matters because optimality is this feature's
    *  entire evidence claim. */
   approximated: boolean;
-  chargeOrder: number[];
-  lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

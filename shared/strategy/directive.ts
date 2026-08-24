@@ -1,11 +1,12 @@
 import type { CycleSolution, PrepPlan, TargetStatics } from "./targeting.ts";
 import type { ShareCutover } from "./share.ts";
+import type { ChargeCutover } from "./stanek/charge.ts";
 
 /** Contract between the evaluator (which target, which strategy) and the
  * dispatcher (which ops, where, when). Both halves are pure; the drivers
  * (sim/run.ts, game/lib/dispatch-driver.ts) only move data. */
 
-export type SegmentKind = "farm" | "prep" | "share";
+export type SegmentKind = "farm" | "prep" | "charge" | "share";
 
 export interface Segment {
   kind: SegmentKind;
@@ -20,6 +21,8 @@ export interface TargetDirective {
   segments: Segment[];
   /** Marginal-value evidence behind the share reservation. */
   share?: ShareCutover;
+  /** Marginal-value evidence behind the current one-shot charge budget. */
+  charge?: ChargeCutover;
   /** Context generation the solutions were scored under (never mix). */
   ctxGeneration: number;
   decidedAt: number;

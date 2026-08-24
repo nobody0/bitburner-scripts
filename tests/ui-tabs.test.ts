@@ -64,9 +64,13 @@ describe("tab rendering", () => {
         },
       ],
       landingOrder: {
-        planned: "h-w1-g-w2",
         batches: 1_000,
-        observed: { "h-w1-g-w2": 990, "h-h-g-w2": 10 },
+        inOrder: 990,
+        patterns: [
+          { planned: "h-w1-g-w2", observed: "h-w1-g-w2", batches: 980 },
+          { planned: "h-w1-w1-g-w2", observed: "h-w1-w1-g-w2", batches: 10 },
+          { planned: "h-w1-g-w2", observed: "h-h-g-w2", batches: 10 },
+        ],
         incomplete: 7,
         anomalies: [{ at: 5_000, observed: "h-h-g-w2", planned: "h-w1-g-w2", target: "phantasy" }],
       },
@@ -79,7 +83,7 @@ describe("tab rendering", () => {
         // Loss lives on the abandoned counters.
         hgw: {
           batches: 100, ops: 300, landed: 300, threads: { hack: 1_700, grow: 4_000, weaken: 600 },
-          gb: 100_000, moneyEarned: 5e9, hacks: 99, spanMs: 2_000_000, inOrder: 98, noHack: 1,
+          gb: 100_000, moneyEarned: 5e9, hacks: 99, spanMs: 2_000_000, graded: 100, inOrder: 98, noHack: 1,
           abandoned: 2, abandonedOps: 6, abandonedLanded: 4,
         },
         prep: {
@@ -133,7 +137,7 @@ describe("tab rendering", () => {
     expect(html).toContain("ops adrift");
     // In-order is a FRACTION, so the denominator is visible: it counts every
     // batch of the kind, including ones that never had a grid to be right about.
-    expect(html).toContain("98 / 100 in order");
+    expect(html).toContain("98 / 99 hack-bearing batches in order");
     // And a kind that has never produced a verdict says so instead of showing
     // a red 0%. Which kinds those are is not hardcoded — prep qualifies here
     // because it has graded nothing, not because it is called "prep".
@@ -159,6 +163,7 @@ describe("tab rendering", () => {
     // rather than left as two strings to diff by eye.
     expect(html).toContain("h-w1-g-w2");
     expect(html).toContain("99.00%");
+    expect(html).toContain("h-w1-w1-g-w2");
     expect(html).toContain("h landed where w1 was due");
     // Batches that never launched a hack are counted apart from the reorders.
     expect(html).toContain("no hack launched");
@@ -405,11 +410,13 @@ describe("tab rendering", () => {
         truncated: true,
         totalHosts: 220,
         agents: { live: 1, seenEver: 1, lostSinceBoot: 0 },
-        overseer: { host: "darkweb", pid: 42, lastBeatAt: 900, alive: true, seedAttempts: 2 },
+        controller: { host: "darkweb", pid: 42, lastBeatAt: 900, alive: true, seedAttempts: 2 },
         hosts: [
           {
-            hostname: "dn-1", depth: 1, lastSeenAt: 1_000, blockedRam: 11, requiredCharisma: 50,
-            maxRam: 16, usedRam: 0, freeRam: 5, modelId: "2G_cellular", passwordLength: 6,
+            hostname: "dn-1", depth: 1, lastSeenAt: 1_000, requiredCharisma: 50,
+            maxRam: 16, blockedRam: 4, usableRam: 12,
+            ram: { at: 1_000, total: 16, blocked: 4, used: 5 },
+            modelId: "2G_cellular", passwordLength: 6,
             passwordFormat: "numeric", passwordHint: "the dog, obviously", data: "rex",
             logTrafficInterval: 0.5, difficulty: 3, isStationary: true,
             authState: "auth-required",
@@ -475,6 +482,20 @@ describe("tab rendering", () => {
         // number rather than "open".
         lastPhishCacheAt: 1_000 - 120_000,
       },
+      profit: {
+        phishAttempts: 12,
+        phishSuccesses: 3,
+        phishCash: 125_000,
+        phishCaches: 1,
+        cachesOpened: 4,
+        cacheCash: 2_500_000,
+        cacheShares: 17,
+        cacheRewards: { "program: BruteSSH.exe": 1, "shares: ECP": 1, money: 2 },
+        promotionAttempts: 3,
+        promotionBatches: 2,
+        promotionThreads: 16,
+        promotionSymbols: { ECP: 2 },
+      },
       spread: {
         planted: 2,
         refused: { "not-enough-ram": 3 },
@@ -489,9 +510,10 @@ describe("tab rendering", () => {
     expect(rendered).toContain("2G_cellular");
     expect(rendered).toContain("6 × numeric");
     expect(rendered).toContain("the dog, obviously");
-    // Usable RAM is maxRam minus the owner's block, and it is what decides
-    // whether an agent fits: 16 - 11 - 0.
-    expect(rendered).toContain("5.00GB");
+    expect(rendered).toContain("16GB total");
+    expect(rendered).toContain("4.00GB blocked");
+    expect(rendered).toContain("5.00GB used");
+    expect(rendered).toContain("7.00GB unused");
     // getDepth's -1 sentinel is "unknown", never a depth to render or sort on.
     expect(rendered).not.toContain(">-1<");
     // Why the net is not growing. `planSpread` has named its refusals since it
@@ -513,7 +535,8 @@ describe("tab rendering", () => {
     // say so is a smaller net than the one we are flying.
     expect(rendered).toContain("220");
 
-    // Where the overseer is standing, not merely that it is.
+    // Where the controller is standing, not merely that it is. The fixture
+    // publishes the controller under its current name.
     expect(rendered).toContain("pid 42");
 
     // The labyrinth cache is a DECISION — opening it multiplies every
@@ -552,9 +575,27 @@ describe("tab rendering", () => {
     expect(rendered).toContain("phish window");
     expect(rendered).toContain("shut — 60s left");
 
+    // Farm returns are cumulative state, not a per-call event stream. Cash is
+    // kept separate from promotion activity because volatility has no honest
+    // direct-P&L attribution.
+    expect(rendered).toContain("Returns");
+    expect(rendered).toContain("$2.625e6");
+    expect(rendered).toContain("3 successful / 12 attempts");
+    expect(rendered).toContain("program: BruteSSH.exe");
+    expect(rendered).toContain("2 successful / 3 attempts");
+    expect(rendered).toContain("promoted ECP ×2");
+
+    // Farm refusals are a snapshot of ladder evaluation, not cumulative error
+    // counters. The same host can legitimately miss cache, reclaim and an
+    // already-running job in one derivation, so the table must say what `n`
+    // actually counts instead of presenting several identical mystery totals.
+    expect(rendered).toContain("latest planner pass");
+    expect(rendered).toContain("host counts, not failures or lifetime totals");
+    expect(rendered).toMatch(/ladder step skipped.*hosts.*why/s);
+
     // What grinding the owner's block would actually cost, as a number rather
     // than prose buried in a refusal.
-    expect(rendered).toContain("11GB blocked");
+    expect(rendered).toContain("4.00GB blocked");
 
     // Grammar drift is the same class of event as an unrecognised model id, and
     // it reaches the screen as a SHAPE. The line itself never leaves the game:
@@ -1714,6 +1755,29 @@ describe("the Batches card is per-batch", () => {
     expect(html).toContain(`id="health-inorder"`);
   });
 
+  test("support-only batches reduce hack launch health, never landing order", () => {
+    const sample = (t: number, graded: number, inOrder: number, noHack: number) => farm(t, {
+      launched: { hack: graded - noHack, grow: graded, weaken: graded * 2 },
+      landed: { hack: graded - noHack, grow: graded, weaken: graded * 2 },
+      inFlight: { hack: 0, grow: 0, weaken: 0 },
+      batches: {
+        hwgw: {
+          batches: graded, ops: graded * 4, landed: graded * 4,
+          threads: { hack: 1, grow: 1, weaken: 2 }, gb: graded, moneyEarned: 0, hacks: graded - noHack,
+          spanMs: graded * 1_000, graded, inOrder, noHack,
+          abandoned: 0, abandonedOps: 0, abandonedLanded: 0,
+        },
+      },
+    });
+    const state = appendRecords(emptyState(), [
+      sample(1_000, 10, 10, 0),
+      sample(3_000, 20, 20, 0),
+      sample(5_000, 30, 20, 10),
+    ]);
+    expect(state.farmHealth.inOrderShare.at(-1)?.[1]).toBe(1);
+    expect(state.farmHealth.hackLaunchedShare.at(-1)?.[1]).toBe(0.5);
+  });
+
   test("a compacted run says why the card is empty", () => {
     const state = emptyState();
     state.compacted = true;
@@ -1808,7 +1872,7 @@ describe("the Hacking tab separates an unmeasured reading from a zero one", () =
       batches: { hwgw: kind({ batches: 40, graded: 30, inOrder: 30 }) },
     } as StateMap["farm"];
     const html = TABS.hacking.render(state);
-    expect(html).toMatch(/class="good"[^>]*>30 \/ 30 graded batches in order/);
+    expect(html).toMatch(/class="good"[^>]*>30 \/ 30 hack-bearing batches in order/);
     expect(html).not.toContain("30 / 40 in order");
   });
 

@@ -343,6 +343,36 @@ export class StockMarketSystem {
     return true;
   }
 
+  /** Free darknet-cache grants. They intentionally bypass purchase gates and
+   * money bookkeeping while preserving the market initialization side effect. */
+  grantWseAccount(): void {
+    this.hasWseAccount = true;
+    if (!isStockMarketInitialized()) initStockMarket();
+  }
+
+  grantTixApiAccess(): void {
+    this.hasTixApiAccess = true;
+    if (!isStockMarketInitialized()) initStockMarket();
+  }
+
+  grant4SData(): boolean {
+    if (this.fourSigmaDisabled) return false;
+    this.has4SData = true;
+    return true;
+  }
+
+  grantRandomShares(difficulty: number, random: () => number): { symbol: string; shares: number } | undefined {
+    if (!isStockMarketInitialized()) initStockMarket();
+    const symbols = this.symbols();
+    const symbol = symbols[Math.floor(random() * symbols.length)]!;
+    const stock = this.stock(symbol)!;
+    const capacity = stock.maxShares - stock.playerShares - stock.playerShortShares;
+    if (capacity <= 0) return undefined;
+    const shares = Math.min(Math.floor(1 + difficulty * 5 + random() * 10), capacity);
+    stock.playerShares += shares;
+    return { symbol: stock.symbol, shares };
+  }
+
   // --- manipulation ---------------------------------------------------------
 
   /** `hack(host, {stock: true})`. `moneyDrained` is the PRE-`ScriptHackMoneyGain`

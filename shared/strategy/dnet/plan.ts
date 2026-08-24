@@ -7,7 +7,7 @@ import {
 } from "./host.ts";
 import { modelEntry, planAttempt } from "./models.ts";
 import { conclusiveAttempt } from "./courier.ts";
-import { DNET_PRIORITY, choosePreemptionVantage } from "./priority.ts";
+import { DNET_PRIORITY, choosePreemptionVantage, compareQueuedDnetWork } from "./priority.ts";
 import { STORM_PHISH_OVERLAP_MS, STORM_QUIET_MS } from "./rates.ts";
 
 /** What there is to do out there, and who is doing it.
@@ -114,12 +114,23 @@ export interface Task {
    *  the result over as an opaque id; the id is what the job's `guess` is
    *  resolved from, back where credentials live. */
   guessId?: string;
+  /** Bleeds only: wait for these authentication orders to settle, then drain
+   * the records they wrote. This is staged on a separate direct vantage. */
+  followAttemptIds?: readonly string[];
+  /** Parallel candidate races authenticate immediately; none competes
+   * for the shared ring before writing its result. */
+  skipInitialBleed?: boolean;
 }
 
 export interface DeriveOptions {
   netDepth?: number;
   bitNode?: number;
   backdoored?: number;
+  /** Hosts we hold a stasis link on — the fourth `ExpiryOpts` term, and the one
+   *  that makes a pinned host's position facts immune to expiry. Declared here
+   *  because the controller spreads a whole `ExpiryOpts` in, and a field this
+   *  interface does not name is silently dropped by the rebuild below. */
+  stasisLinked?: ReadonlySet<string>;
   /** Hosts with a live agent, so work gets a valid vantage and spreading does
    *  not plant where someone is already standing. */
   agents?: ReadonlySet<string>;
@@ -191,7 +202,7 @@ const FARM_PRIORITY: Readonly<Record<"cache" | "reclaim" | "phish" | "promote", 
   promote: DNET_PRIORITY["promote"],
 };
 
-/** Where the deliberate kinds sit. The walk goes first, above everything —
+/** Where the deliberate blocking kinds sit. The walk goes first among them —
  * completing the labyrinth is the whole point of the darknet. The pin precedes
  * ordinary work; the storm sits below the pin STRUCTURALLY (a pending pin is a
  * reason not to fire yet); induce is a project of hundreds of calls whose value
@@ -203,9 +214,9 @@ const HOLD_PRIORITY: Readonly<Record<"pin" | "induce" | "walk" | "storm", number
   induce: DNET_PRIORITY["induce"],
 };
 
-/** Placing a process is the scarcest thing we do — it is the only action that
- *  grows the set of places we can act FROM — so it outranks everything, the
- *  deliberate three included. */
+/** Placing a process is the scarcest blocking work we do — it is the only
+ * action that grows the set of places we can act FROM — so it outranks every
+ * other blocking kind. Zero-delay housekeeping is a separate queue lane. */
 export const PLANT_PRIORITY = DNET_PRIORITY["plant"];
 
 /** The per-host offsets, all applied to `rank` (the negated depth). These are
@@ -255,6 +266,43 @@ function vantagesFor(
   return vantages;
 }
 
+export interface CredentialCheckAllocation {
+  authSlots: number;
+  bleedSlots: 0 | 1;
+}
+
+/** Allocate one candidate-check wave across direct vantages.
+ *
+ * One consuming heartbleed drains every authentication record in the ring, so
+ * a second listener has no marginal value. A failed response is conservatively
+ * valued at one bit: k checked candidates plus k response bits can distinguish
+ * roughly `k + 2^k` candidates. Tiny exhaustive sets are raced directly. */
+export function allocateCredentialChecks(
+  candidateCount: number,
+  vantageCount: number,
+  hasInformativeOracle = true,
+): CredentialCheckAllocation {
+  const candidates = Math.max(0, Math.floor(candidateCount));
+  const vantages = Math.max(0, Math.floor(vantageCount));
+  if (candidates === 0 || vantages === 0) return { authSlots: 0, bleedSlots: 0 };
+  if (vantages === 1) return { authSlots: 1, bleedSlots: 0 };
+  if (!hasInformativeOracle) {
+    return { authSlots: Math.min(candidates, vantages), bleedSlots: 0 };
+  }
+
+  const direct = Math.min(candidates, vantages);
+  if (candidates <= 3 && candidates <= vantages) return { authSlots: direct, bleedSlots: 0 };
+
+  let informativeAuth = 1;
+  const authCapacity = Math.min(candidates, vantages - 1);
+  while (informativeAuth < authCapacity
+    && informativeAuth + 2 ** informativeAuth < candidates) informativeAuth++;
+  return {
+    authSlots: Math.max(1, Math.min(candidates, vantages - 1, informativeAuth)),
+    bleedSlots: 1,
+  };
+}
+
 /** Everything worth doing, given what we believe right now.
  *
  * Deterministic and ordered, so two derivations of the same map produce the
@@ -264,7 +312,12 @@ export function deriveTasks(
   now: number,
   opts: DeriveOptions = {},
 ): Task[] {
-  const expiry: ExpiryOpts = { netDepth: opts.netDepth, bitNode: opts.bitNode, backdoored: opts.backdoored };
+  const expiry: ExpiryOpts = {
+    netDepth: opts.netDepth,
+    bitNode: opts.bitNode,
+    backdoored: opts.backdoored,
+    ...(opts.stasisLinked !== undefined ? { stasisLinked: opts.stasisLinked } : {}),
+  };
   const agents = opts.agents ?? new Set<string>();
   const vault = opts.vault ?? new Set<string>();
   const tasks: Task[] = [];
@@ -322,13 +375,32 @@ export function deriveTasks(
     // count are the same decision: the roomiest vantage was picked FOR its
     // room. With no pricing observation, conservatively request one thread;
     // the controller's authoritative fit check still decides whether it can run.
-    const attemptRoom = opts.agentFreeGb?.get(workFrom);
-    const sized = (gbPerThread: number | undefined): number =>
+    const sizedAt = (vantage: string, gbPerThread: number | undefined): number => {
+      const attemptRoom = opts.agentFreeGb?.get(vantage);
+      return (
       gbPerThread !== undefined && gbPerThread > 0 && attemptRoom !== undefined
         ? Math.max(1, Math.floor(attemptRoom / gbPerThread))
-        : 1;
-    const attemptThreads = sized(opts.attemptGbPerThread);
-    const bleedThreads = sized(opts.bleedGbPerThread);
+        : 1
+      );
+    };
+    const attemptThreads = sizedAt(workFrom, opts.attemptGbPerThread);
+    const bleedThreads = sizedAt(workFrom, opts.bleedGbPerThread);
+    const queueFollowerBleed = (attemptIds: readonly string[], used: ReadonlySet<string> = new Set([workFrom])): void => {
+      const bleedFrom = free.find((vantage) => !used.has(vantage));
+      if (bleedFrom === undefined || !bleedable) return;
+      const threads = sizedAt(bleedFrom, opts.bleedGbPerThread);
+      tasks.push({
+        id: `bleed-after:${attemptIds.join("+")}`,
+        kind: "bleed",
+        host: host.hostname,
+        from: bleedFrom,
+        eligibleFrom: [bleedFrom],
+        priority: DNET_PRIORITY["bleed"] + rank + BLEED_BAND,
+        reason: `prequeued behind ${attemptIds.length} authentication${attemptIds.length === 1 ? "" : "s"}`,
+        ...(threads !== 1 ? { threads } : {}),
+        followAttemptIds: [...attemptIds],
+      });
+    };
     // GUESS: an unattributed password whose length and format match this host.
     //
     // It goes FIRST and it suppresses the model attempt below, because the two
@@ -336,26 +408,53 @@ export function deriveTasks(
     // `authenticate` with no penalty for being wrong. A solve that runs while a
     // free candidate is waiting has paid for information the candidate might
     // have made unnecessary.
-    const candidates = (opts.guesses ?? []).filter((guess) => guess.host === host.hostname);
+    // A password can arrive through both the loose and attributed pools. The
+    // opaque id is password-derived, so keep the first (attributed entries are
+    // ordered first by the controller) and never race the same password twice.
+    const candidates: NonNullable<DeriveOptions["guesses"]>[number][] = [];
+    const candidateIds = new Set<string>();
+    for (const guess of opts.guesses ?? []) {
+      if (guess.host !== host.hostname || candidateIds.has(guess.id)) continue;
+      candidateIds.add(guess.id);
+      candidates.push(guess);
+    }
     const guessing = !pendingBleed && !ringBusy
       && candidates.length > 0
       && !vault.has(host.hostname)
       && !busy("attempt", host.hostname);
     if (guessing) {
-      const guess = candidates[0]!;
-      tasks.push({
-        id: `guess:${host.hostname}:${guess.id}`,
-        kind: "attempt",
-        host: host.hostname,
-        from: workFrom,
-        eligibleFrom: free.length > 0 ? free : vantages,
-        // Below every model attempt on the same host:
-        // one call, no oracle, no charisma gate.
-        priority: DNET_PRIORITY["attempt"] + rank + GUESS_BONUS,
-        reason: guess.reason,
-        ...(attemptThreads !== 1 ? { threads: attemptThreads } : {}),
-        guessId: guess.id,
+      const available = free.length > 0 ? free : vantages;
+      const feedback = modelEntry(host.modelId)?.feedback;
+      const hasInformativeOracle = bleedable && feedback !== undefined
+        && feedback !== "none"
+        && feedback !== "dictionary"
+        && feedback !== "echo"
+        && feedback !== "encoded"
+        && feedback !== "opaque";
+      const allocation = allocateCredentialChecks(candidates.length, available.length, hasInformativeOracle);
+      const selected = candidates.slice(0, allocation.authSlots);
+      const attemptIds: string[] = [];
+      const used = new Set<string>();
+      selected.forEach((guess, index) => {
+        const vantage = available[index]!;
+        const threads = sizedAt(vantage, opts.attemptGbPerThread);
+        const id = `guess:${host.hostname}:${guess.id}`;
+        attemptIds.push(id);
+        used.add(vantage);
+        tasks.push({
+          id,
+          kind: "attempt",
+          host: host.hostname,
+          from: vantage,
+          eligibleFrom: [vantage],
+          priority: DNET_PRIORITY["attempt"] + rank + GUESS_BONUS,
+          reason: guess.reason,
+          ...(threads !== 1 ? { threads } : {}),
+          guessId: guess.id,
+          ...(selected.length > 1 ? { skipInitialBleed: true } : {}),
+        });
       });
+      if (allocation.bleedSlots === 1) queueFollowerBleed(attemptIds, used);
     }
 
     let scheduledAttempt = guessing;
@@ -413,6 +512,9 @@ export function deriveTasks(
               : attempt.reason,
           ...(attemptThreads !== 1 ? { threads: attemptThreads } : {}),
         });
+        // Calls that do not need an oracle can finish independently; use a
+        // second, smaller vantage to arrive at the ring immediately afterward.
+        if (!needsRing) queueFollowerBleed([`attempt:${host.hostname}`]);
       }
     }
 
@@ -513,7 +615,7 @@ export function deriveTasks(
     });
   }
 
-  tasks.sort((a, b) => a.priority - b.priority || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  tasks.sort(compareQueuedDnetWork);
   return tasks;
 }
 
@@ -561,7 +663,7 @@ export interface SpreadCandidate {
    * through a still-believable backdoor or stasis link. */
   remote?: boolean;
   depth?: number;
-  freeRam?: number;
+  usableRam?: number;
   /** Fresh owner block. A cramped host with some runnable RAM gets a minimal
    * local reclaimer instead of waiting until a full resident+prober fits. */
   blockedRam?: number;
@@ -658,8 +760,8 @@ export function planSpread(
   const ordered = [...candidates].sort((a, b) => {
     const byDepth = compareDepthDesc(a.depth, b.depth);
     if (byDepth !== 0) return byDepth;
-    const ra = a.freeRam ?? -1;
-    const rb = b.freeRam ?? -1;
+    const ra = a.usableRam ?? -1;
+    const rb = b.usableRam ?? -1;
     if (ra !== rb) return rb - ra;
     return a.host < b.host ? -1 : a.host > b.host ? 1 : 0;
   });
@@ -683,34 +785,37 @@ export function planSpread(
       refuse("no-credential", "no password known; this is an attempt, not a plant");
       continue;
     }
-    if (candidate.freeRam === undefined) {
+    if (candidate.usableRam === undefined) {
       // Unknown capacity must never read as "room for an agent": exec would
       // return a silent 0, indistinguishable from a host that is simply full.
       refuse("unknown-ram", "no believable RAM facts; survey it before planting");
       continue;
     }
-    const needed = candidate.omitProber ? limits.residentRamGb : limits.agentRamGb;
-    if (candidate.blockedRam !== undefined && candidate.blockedRam > 0
-      && (candidate.reclaimOnly === true || candidate.freeRam < needed)
-      && candidate.freeRam >= limits.bootstrapRamGb) {
-      plant.push({
-        ...candidate,
-        bootstrapReclaim: true,
-        bootstrapThreads: Math.floor(candidate.freeRam / limits.bootstrapRamGb),
-      });
-      continue;
-    }
-    if (candidate.freeRam < needed) {
-      refuse(
-        "not-enough-ram",
-        `${candidate.freeRam.toFixed(2)}GB free, needs ${needed.toFixed(2)}GB`
-        + " — usually the owner's block, which memoryReallocation would have to grind down",
-      );
-      continue;
-    }
+    // BEFORE the bootstrap branch below, which plants too: a bootstrap that
+    // skipped the cooldown re-derived on every pass for a host whose plant
+    // keeps dying, which is exactly the spawn-churn loop this guard exists for.
     if (candidate.lastPlantAt !== undefined && now - candidate.lastPlantAt < limits.plantCooldownMs) {
       // A host that keeps restarting must not absorb every worker we have.
       refuse("cooldown", "planted recently; if it is empty again it is restarting");
+      continue;
+    }
+    const needed = candidate.omitProber ? limits.residentRamGb : limits.agentRamGb;
+    if (candidate.blockedRam !== undefined && candidate.blockedRam > 0
+      && (candidate.reclaimOnly === true || candidate.usableRam < needed)
+      && candidate.usableRam >= limits.bootstrapRamGb) {
+      plant.push({
+        ...candidate,
+        bootstrapReclaim: true,
+        bootstrapThreads: Math.floor(candidate.usableRam / limits.bootstrapRamGb),
+      });
+      continue;
+    }
+    if (candidate.usableRam < needed) {
+      refuse(
+        "not-enough-ram",
+        `${candidate.usableRam.toFixed(2)}GB usable, needs ${needed.toFixed(2)}GB`
+        + " — usually the owner's block, which memoryReallocation would have to grind down",
+      );
       continue;
     }
     // No per-source cap and no global cap. The one real thing `fanOut`
@@ -804,7 +909,7 @@ export function candidatesFrom(
       from,
       ...(remote ? { remote: true } : {}),
       ...(host.depth !== undefined ? { depth: host.depth } : {}),
-      freeRam: viewedFreeRam(host),
+      usableRam: viewedUsableRam(host),
       ...(host.blockedRam !== undefined ? { blockedRam: host.blockedRam } : {}),
       hasCredential: opts.vault.has(host.hostname),
       agentAlive: false,
@@ -815,16 +920,12 @@ export function candidatesFrom(
   return out;
 }
 
-/** `freeRam` over an already-viewed record: the freshness question was answered
- * by `planningView`, so what is left is the double-count arithmetic. Returns 0
- * when the capacity or the ram group read as unknown. */
-function viewedFreeRam(view: DnetHost): number {
+/** Usable script capacity over an already-viewed record. Runtime occupancy is
+ * owned by the controller's live handles, not retained as host knowledge. */
+function viewedUsableRam(view: DnetHost): number {
   if (view.maxRam === undefined) return 0;
-  if (view.blockedRam === undefined && view.usedRam === undefined) return 0;
   const blocked = view.blockedRam ?? 0;
-  const used = view.usedRam ?? 0;
-  const occupied = used >= blocked ? used : used + blocked;
-  return Math.max(0, view.maxRam - occupied);
+  return Math.max(0, view.maxRam - blocked);
 }
 
 export interface VantageState {
@@ -873,8 +974,9 @@ export function pickPlantVantage(
  * feature that destroys most of what we know on purpose.
  *
  * `unleashStormSeed` fires `STORM_SEED.exe` from the host holding it and
- * discharges the whole mutation clock in one ~30-second burst: ~60% of movable
- * servers deleted, the survivors moved and restarted, forty fresh ones added.
+ * discharges the whole mutation clock in one ~30-second burst: deletion targets
+ * `0.6 * movable + random(0, netDepth) - 6`, then more hosts move, every
+ * movable survivor restarts, and forty fresh ones are added.
  * Every fresh server is a new first-authentication cache roll AND a new blocked
  * block whose clearing mints a guaranteed `.cache` — which is why a reroll beats
  * phishing's one `.d.cache` per three net-wide minutes. Only stationary hosts
@@ -1008,7 +1110,12 @@ export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormP
     refuse(NET, "no-seed", "no fresh STORM_SEED.exe sighting on any live host");
     return { refused };
   }
-  const holder = holders[0]!;
+  // The sorted preference decides only among holders we can actually fire
+  // from: taking `holders[0]` outright refused `seed-unreachable` whenever the
+  // preferred (pinned) holder happened to be unstaffed — a freshly pinned host
+  // is empty until the spread re-plants it — and never looked at the movable
+  // holder standing right there with a resident on it.
+  const holder = holders.find((candidate) => candidate.agentAlive === true) ?? holders[0]!;
 
   // 3. The fire job runs ON the holder; the file cannot be scp'd off it.
   if (holder.agentAlive !== true) {

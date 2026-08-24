@@ -21,10 +21,9 @@ import {
  *   window completion (landed/launched hacks) : 0.888889
  *   money/sec over the measured window : $1.199933e3
  *
- * $500k deliberately ends before the vanilla ten-minute coding-contract
- * generation boundary. bn1-speedrun leaves all features at their natural
- * capability values, while generated contracts are explicitly unmodelled;
- * choosing this earlier money milestone keeps the fixture faithful and valid.
+ * $500k deliberately isolates the cold opening before the vanilla ten-minute
+ * coding-contract generation boundary; later income sources belong to broader
+ * route scenarios rather than this fleet-bootstrap measurement.
  */
 const RECORDED = {
   timeToMoneyMs: 553_000,

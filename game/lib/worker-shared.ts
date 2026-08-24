@@ -10,8 +10,11 @@ import type { ScriptLaunch } from "./launch-shared.ts";
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/killWorkerScript.ts#L63-L91 */
 
 export interface WorkerInfo {
-  kind: "hack" | "grow" | "weaken" | "share";
+  kind: "hack" | "grow" | "weaken" | "charge" | "share";
   target: string;
+  /** Stanek fragment root for a one-shot charge worker. */
+  x?: number;
+  y?: number;
   /** Live process id, filled by the driver immediately after a successful
    * exec. Broker preemption uses the pid overload so the simulator and game
    * follow the same kill path. */
@@ -43,6 +46,12 @@ export interface WorkerInfo {
   /** Resolve the worker's lifetime gate. Returning from main lets Bitburner
    * cancel an in-flight Netscript call through ordinary script teardown. */
   stop?: () => void;
+  /** A stop arrived before the worker finished booting (`stop` not yet
+   * assigned). exec and module load are asynchronous, so this window is real;
+   * without the flag such a stop is a silent no-op and the worker runs — and
+   * holds its RAM — forever. The worker honors it right after assigning
+   * `stop`. */
+  stopRequested?: boolean;
 }
 
 export interface WorkerLaunch extends ScriptLaunch {
@@ -67,7 +76,7 @@ export interface WorkerJob {
 
 export interface WorkerDone {
   opId: number;
-  kind: "hack" | "grow" | "weaken" | "workerExit";
+  kind: "hack" | "grow" | "weaken" | "charge" | "workerExit";
   target: string;
   /** Thread strength the op actually RAN at, not the process's spawned count.
    * The game awards experience and applies security fortify on the fractional
@@ -99,13 +108,18 @@ export interface WorkerGlobals {
    * Latching it is essential: losing a weaken completion loses the only
    * guaranteed minimum-security observation window. */
   dispatch_wake_pending?: boolean;
-  /** One earliest-deadline timer for pending JIT work. */
-  dispatch_jit_timer?: ReturnType<typeof setTimeout>;
-  dispatch_jit_at?: number;
+  /** Targets with completion/deadline work waiting. The rendezvous promise is
+   * still coalesced, but scheduling ownership is not. */
+  dispatch_wake_targets?: Set<string>;
+  /** Independent deadline ownership. A timer for target A must never be
+   * replaced or cleared while servicing target B. */
+  dispatch_jit_timers?: Map<string, { timer: ReturnType<typeof setTimeout>; at: number }>;
   /** Realm-wide trailing-edge debounce for weaken completions. Spread weakens
    * can finish a few milliseconds apart; the final callback is the one that
    * proves every fragment has restored minimum security. */
   dispatch_weaken_timer?: ReturnType<typeof setTimeout>;
+  /** A completed Stanek charge invalidated the held player multipliers. */
+  charge_context_pending?: boolean;
 }
 
 export type WorkerGlobalThis = typeof globalThis & WorkerGlobals;
@@ -116,5 +130,7 @@ export function workerGlobals(): WorkerGlobalThis {
   g.worker_jobs ??= new Map();
   g.worker_wake ??= new Map();
   g.dispatch_done ??= [];
+  g.dispatch_wake_targets ??= new Set();
+  g.dispatch_jit_timers ??= new Map();
   return g;
 }

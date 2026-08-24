@@ -25,7 +25,7 @@
     "so a baseline can never move as a side effect of a run."
   ],
   "provenance": {
-    "simulatorModelVersion": 8,
+    "simulatorModelVersion": 9,
     "vendorCommit": "3162fd2590e221eadd0c0fbd46151913f7c4c41c",
     "recordedAt": "2026-08-21",
     "recordedFrom": "the six scenario-jit-*.test.ts files these rows were merged from; jit-one-server, jit-share-churn and jit-fragmentation re-measured 2026-08-21 at HEAD, each on its own recorded seed, with a six-seed sweep behind the decision (see their history lines)",

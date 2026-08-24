@@ -30,16 +30,16 @@ import { MINIMUM_WORKER_PRECISION_MS } from "../../shared/strategy/timing.ts";
 
 const IDLE_MS = 5_000;
 
-function wakeDispatcher(kind: "hack" | "grow" | "weaken" | "share"): void {
+function wakeDispatcher(kind: "hack" | "grow" | "weaken" | "charge" | "share", target?: string): void {
   const g = workerGlobals();
   if (kind !== "weaken") {
-    signalWake(g);
+    signalWake(g, target);
     return;
   }
   if (g.dispatch_weaken_timer !== undefined) clearTimeout(g.dispatch_weaken_timer);
   g.dispatch_weaken_timer = setTimeout(() => {
     g.dispatch_weaken_timer = undefined;
-    signalWake(g);
+    signalWake(g, target);
   }, MINIMUM_WORKER_PRECISION_MS);
 }
 
@@ -59,6 +59,10 @@ export async function main(ns: NS): Promise<void> {
   let finishLifetime!: () => void;
   const atExitPromise = new Promise<void>((resolve) => { finishLifetime = resolve; });
   info.stop = finishLifetime;
+  // A stop dispatched while this worker was still booting found `stop`
+  // unassigned; the driver latched it here instead. Honor it now — for a share
+  // worker that means exiting before the first slice ever runs.
+  if (info.stopRequested) finishLifetime();
 
   const options = (job: {
     additionalMsec?: number;
@@ -112,6 +116,29 @@ export async function main(ns: NS): Promise<void> {
     return;
   }
   if (info.kind === "share") return;
+  if (info.kind === "charge") {
+    let succeeded = false;
+    ns.atExit(() => {
+      g.worker_info?.delete(id);
+      info.stop = undefined;
+      g.dispatch_done?.push({
+        opId: id,
+        kind: "charge",
+        target: "",
+        threads: info.threads,
+        at: performance.now(),
+        ...(succeeded ? { result: 1 } : {}),
+      });
+      wakeDispatcher("charge");
+    }, `charge${id}`);
+    const runningTaskPromise = ns.stanek.chargeFragment(info.x ?? 0, info.y ?? 0).then(() => {
+      succeeded = true;
+      g.charge_context_pending = true;
+      finishLifetime();
+    });
+    await Promise.race([runningTaskPromise, atExitPromise]);
+    return;
+  }
   const hgwKind = info.kind;
 
   // The strength an op RAN at, which is what the game awarded experience and
@@ -132,7 +159,7 @@ export async function main(ns: NS): Promise<void> {
         at: performance.now(),
         result,
       });
-      wakeDispatcher(hgwKind);
+      wakeDispatcher(hgwKind, info.target);
     }, `op${id}`);
     const runningTaskPromise = run(info.target, options({ ...info, threads: info.strengthThreads }))
       .then((value) => {
@@ -163,7 +190,7 @@ export async function main(ns: NS): Promise<void> {
     // workerExit deliberately reports the SPAWNED count: it frees the RAM
     // reservation, which was sized on that, never on a job's strength.
     g.dispatch_done?.push({ opId: id, kind: "workerExit", target: "", threads: info.threads });
-    wakeDispatcher(hgwKind);
+    wakeDispatcher(hgwKind, current?.target);
   }, `worker${id}`);
 
   const runningTaskPromise = (async () => {
@@ -202,7 +229,7 @@ export async function main(ns: NS): Promise<void> {
       at: performance.now(),
       result,
     });
-    wakeDispatcher(hgwKind);
+    wakeDispatcher(hgwKind, job.target);
   }
   })();
   await Promise.race([runningTaskPromise, atExitPromise]);

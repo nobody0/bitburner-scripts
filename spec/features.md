@@ -249,7 +249,7 @@ than running every driver every pass.
 
 All fourteen are implemented; there is no `inert()` helper any more. `corp` is
 implemented to the *strategy* level only and refuses to issue its calls; `dnet`
-issues its own on live hosts through the overseer/agent pipeline, while
+issues its own on live hosts through the controller/prober/agent pipeline, while
 `stepDarknet` stays a pure ranking with no action for a driver to carry out
 (`spec/progress.md`, and for dnet's reasons `spec/dnet.md`). Seven have their own
 file (`hacking`, `factions`, `career`, `hacknet`, `stock`, `dnet`, `side`) because

@@ -7,7 +7,7 @@
  *
  * - `authenticate` needs a DIRECT CONNECTION, and home is adjacent to exactly
  *   one thing — `darkweb`. Authentication happens in a job, standing next door
- *   to its target, and `shared/strategy/dnet/queue.ts` is what plans it.
+ *   to its target, and `shared/strategy/dnet/plan.ts` is what plans it.
  * - `setStasisLink` takes no host at all: it pins the CALLING script's own
  *   server, so spending a link means running a 12 GB script on the host being
  *   pinned. Home cannot be that script, and neither can anything home launches
@@ -17,7 +17,7 @@
  * So the actions were a plan expressed in calls the planner could never make,
  * and they were rendered as a "selected" action next to a refusal explaining
  * why it would not happen. They are deleted rather than left refusing, on the
- * same principle as `spread.ts`'s deleted refusal names: a decision nothing can
+ * same principle as `plan.ts`'s deleted refusal names: a decision nothing can
  * carry out teaches the reader that something is about to happen.
  *
  * What survives is two things a reader genuinely wants:

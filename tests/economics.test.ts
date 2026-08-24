@@ -72,6 +72,15 @@ describe("dynamic RAM allocation", () => {
     expect(retainPrepReservation(1.75, 350, false)).toBe(1.75);
   });
 
+  test("charge is funded after farm and before the final share tail", () => {
+    expect(allocateSegments(100, 0, 12, 20)).toEqual([
+      { kind: "farm", gb: 68 },
+      { kind: "prep", gb: 0 },
+      { kind: "charge", gb: 20 },
+      { kind: "share", gb: 12 },
+    ]);
+  });
+
   test("a fleet contraction preserves the farm/share tail proportion", () => {
     expect(adaptSegmentsToFleet([
       { kind: "prep", gb: 20 },

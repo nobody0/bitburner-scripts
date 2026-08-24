@@ -19,7 +19,7 @@ import {
   type Status,
 } from "../lib/dom.ts";
 import { html, raw, type Markup } from "../lib/html.ts";
-import { esc, fmtNum, fmtPct, fmtRam, fmtTime } from "../lib/format.ts";
+import { esc, fmtMoney, fmtNum, fmtPct, fmtRam, fmtTime } from "../lib/format.ts";
 import { view } from "../lib/viewstate.ts";
 import type { ProjectedState } from "../project.ts";
 import { codeName } from "../../../shared/strategy/dnet/courier.ts";
@@ -28,7 +28,7 @@ import { solverFor } from "../../../shared/strategy/dnet/solvers/index.ts";
 import { reclaimForecast } from "../../../shared/strategy/dnet/farm.ts";
 import { PHISH_CACHE_COOLDOWN_MS, STORM_COOLDOWN_MS } from "../../../shared/strategy/dnet/rates.ts";
 import { LAB_LADDER, isLabyrinth } from "../../../shared/strategy/dnet/rates.ts";
-import { FACT_CLASS, type ExpiryOpts } from "../../../shared/strategy/dnet/knowledge.ts";
+import { fieldGroup, type ExpiryOpts } from "../../../shared/strategy/dnet/host.ts";
 import type { DarknetKnownHost, DarknetLabWalker, DarknetState } from "../../../shared/telemetry/topics/dnet.ts";
 import { AUTH_LABEL, factLife, isStale, matches, mapOptions, netLegend, netMap, ramBuckets } from "./dnet-map.ts";
 import { labEtaMs, labExplored, labMaze, labMazeLegend, labPriorFor, walkerEtaMs } from "./dnet-lab.ts";
@@ -91,7 +91,7 @@ const DIGEST_STALE_MS = 6 * DIGEST_PUBLISH_MS;
 /** The RAM a resident needs, for the two places this panel judges room for one.
  *
  * Mirrors `coverage()`'s own `agentRamGb` default (shared/strategy/dnet/
- * knowledge.ts) rather than `DEFAULT_SPREAD_LIMITS.agentRamGb`, and the
+ * host.ts rather than `DEFAULT_SPREAD_LIMITS.agentRamGb`, and the
  * difference is load-bearing: every caller of `coverage()` passes three
  * arguments, so the `plantable` count this panel prints two cards away is
  * counted against that default, while the planner refuses on 5.4 GB (resident
@@ -109,10 +109,10 @@ const AGENT_RAM_GB = 2.6;
  * estimate.
  *
  * The producer's own kill window for a long-lived job is LONG_JOB_BEAT_MS =
- * 30_000 (game/dnet/shared.ts): past it the overseer has already given up on the
+ * 30_000 (game/dnet/shared.ts): past it the controller has already given up on the
  * job, so a digest still carrying the walker means home's copy is stale rather
  * than the walk being slow — `home.lab` is deliberately never blanked, so the
- * last snapshot of a dead overseer's walk can sit on this card indefinitely.
+ * last snapshot of a dead controller's walk can sit on this card indefinitely.
  * `ui/app` imports nothing from `game/`, so the number is restated rather than
  * reached for. Doubled, because a move on a deep rung is a whole
  * authentication and the eta tile would otherwise flap between a figure and a
@@ -149,9 +149,11 @@ function refusals(
   refused: Record<string, number>,
   examples: readonly { why: string; detail: string }[],
   empty: Markup,
+  context: Markup = "",
+  headings: [Markup, Markup, Markup] = ["refused", "n", "why"],
 ): string {
-  return table(
-    ["refused", "n", "why"],
+  return (context ? note(context) : "") + table(
+    headings,
     Object.entries(refused)
       .sort((a, b) => b[1] - a[1])
       .map(([why, n]) => [esc(why), String(n), esc(examples.find((e) => e.why === why)?.detail ?? "")]),
@@ -233,7 +235,7 @@ function factRows(host: DarknetKnownHost, now: number, expiry: ExpiryOpts): [Mar
         ? `<span class="bad">stale</span>`
         : `<span class="good">${fmtTime(age.expiresInMs)} left</span>`;
     rows.push([
-      hint(key, `${FACT_CLASS[key] ?? "topology"} fact`),
+      hint(key, `${fieldGroup(key) ?? "unknown"} fact`),
       `<span class="${age.stale ? "muted" : ""}">${fmtTime(age.ageMs)} ago</span> · ${life}`,
     ]);
   }
@@ -302,13 +304,12 @@ function detailCard(
     { label: "depth", value: depthLabel(host) },
     {
       label: "RAM",
-      value: ram === undefined ? NONE : `${fmtRam(ram.ours)} ours`,
-      // Ours and owner-blocked are separate problems with separate fixes — the
-      // owner's block is what `memoryReallocation` grinds, our own use is not —
-      // so the tile keeps all three buckets separate.
+      value: ram === undefined ? NONE : `${fmtRam(ram.total)} total`,
       sub: ram === undefined
         ? undefined
-        : `${fmtRam(ram.free)} free · ${fmtRam(ram.blocked)} blocked · ${fmtRam(ram.max)} total`,
+        : ram.used === undefined || ram.unused === undefined
+          ? `${fmtRam(ram.blocked)} blocked`
+          : `${fmtRam(ram.blocked)} blocked · ${fmtRam(ram.used)} used · ${fmtRam(ram.unused)} unused`,
     },
     {
       label: "charisma",
@@ -419,7 +420,7 @@ function detailCard(
   );
 }
 
-/** The beachhead and its crew: whether the overseer is standing, where every
+/** The beachhead and its crew: whether the controller is standing, where every
  * resident is, what each is doing, and where they die. This is the card that
  * answers "is the thing running at all" — which out there is a real question,
  * because the coordinator lives on a host that reboots. */
@@ -437,7 +438,7 @@ function crewCard(
   selected: string,
 ): string {
   const knowledge = d.knowledge;
-  const overseer = knowledge?.overseer;
+  const controller = knowledge?.controller;
   const queue = knowledge?.queue;
   const residents = hosts
     .filter((host) => host.agent !== undefined)
@@ -445,14 +446,14 @@ function crewCard(
 
   const summary = tiles([
     {
-      label: "overseer",
-      value: overseer ? (overseer.alive ? "alive" : "silent") : NONE,
+      label: "controller",
+      value: controller ? (controller.alive ? "alive" : "silent") : NONE,
       // WHERE it is standing, not only whether it is: the controller lives on a
       // host that reboots, and "silent" plus a hostname is a place to look.
-      sub: overseer
-        ? `${overseer.host}${overseer.pid !== undefined ? ` pid ${overseer.pid}` : ""}`
-          + ` · beat ${overseer.lastBeatAt > 0 ? `${fmtTime(now - overseer.lastBeatAt)} ago` : NONE}`
-          + ` · ${overseer.seedAttempts} seeds`
+      sub: controller
+        ? `${controller.host}${controller.pid !== undefined ? ` pid ${controller.pid}` : ""}`
+          + ` · beat ${controller.lastBeatAt > 0 ? `${fmtTime(now - controller.lastBeatAt)} ago` : NONE}`
+          + ` · ${controller.seedAttempts} seeds`
         : undefined,
     },
     {
@@ -511,7 +512,7 @@ function crewCard(
       { id: "queued", label: "queued", cell: (r) => String(r.agent.pending ?? 0), sort: (r) => r.agent.pending ?? 0 },
       {
         id: "free",
-        label: "free RAM",
+        label: "job capacity",
         cell: (r) => (r.agent.freeGb === undefined ? NONE : fmtRam(r.agent.freeGb)),
         sort: (r) => r.agent.freeGb ?? -1,
       },
@@ -727,12 +728,18 @@ export const dnetTab: Tab = {
       switch (showFilter) {
         case "cracked": return host.credentialKnown === true;
         case "locked": return host.authState === "auth-required";
-        case "roomy": return (host.freeRam ?? 0) >= AGENT_RAM_GB;
+        case "roomy": return (host.usableRam ?? 0) >= AGENT_RAM_GB;
         case "stale": return isStale(host, now, expiry);
         case "gone": return host.goneAt !== undefined;
         default: return true;
       }
     });
+    const ramValue = (host: DarknetKnownHost, key: "total" | "blocked" | "used" | "unused"): number | undefined =>
+      ramBuckets(host)?.[key];
+    const ramCell = (host: DarknetKnownHost, key: "total" | "blocked" | "used" | "unused"): string => {
+      const value = ramValue(host, key);
+      return value === undefined ? NONE : fmtRam(value);
+    };
 
     const servers = dataTable(
       "dnet.servers",
@@ -764,30 +771,10 @@ export const dnetTab: Tab = {
           },
         },
         { id: "model", label: "model", left: true, cell: (h) => (h.modelId ? esc(h.modelId) : NONE), sort: (h) => h.modelId ?? "" },
-        {
-          id: "ours",
-          label: "ours",
-          cell: (h) => {
-            const ram = ramBuckets(h);
-            return ram === undefined ? NONE : fmtRam(ram.ours);
-          },
-          sort: (h) => ramBuckets(h)?.ours ?? -1,
-        },
-        {
-          id: "free",
-          label: "free",
-          cell: (h) => {
-            if (h.maxRam === undefined) return NONE;
-            const free = h.freeRam ?? 0;
-            // The threshold explains itself here rather than in the column
-            // label: `Column.label` is typed `string` and `dataTable` escapes
-            // it, so a `hint()` there would print its own markup at the reader.
-            return html`<span class="${free >= AGENT_RAM_GB ? "good" : "bad"}" title="green = a resident fits: ${fmtRam(AGENT_RAM_GB)}">${fmtRam(free)}</span>`;
-          },
-          sort: (h) => h.freeRam ?? -1,
-        },
-        { id: "blocked", label: "blocked", cell: (h) => (h.blockedRam === undefined ? NONE : fmtRam(h.blockedRam)), sort: (h) => h.blockedRam ?? -1 },
-        { id: "max", label: "max RAM", cell: (h) => (h.maxRam === undefined ? NONE : fmtRam(h.maxRam)), sort: (h) => h.maxRam ?? -1 },
+        { id: "total", label: "total RAM", cell: (h) => ramCell(h, "total"), sort: (h) => ramValue(h, "total") ?? -1 },
+        { id: "blocked", label: "blocked", cell: (h) => ramCell(h, "blocked"), sort: (h) => ramValue(h, "blocked") ?? -1 },
+        { id: "used", label: "used", cell: (h) => ramCell(h, "used"), sort: (h) => ramValue(h, "used") ?? -1 },
+        { id: "unused", label: "unused", cell: (h) => ramCell(h, "unused"), sort: (h) => ramValue(h, "unused") ?? -1 },
         {
           id: "charisma",
           label: "charisma",
@@ -1118,7 +1105,58 @@ export const dnetTab: Tab = {
             ] as [Markup, Markup]]
             : []),
         ])
-        + refusals(farming.refused, farming.examples, "every resident took the top rung of the ladder"),
+        + refusals(
+          farming.refused,
+          farming.examples,
+          "every resident took the top rung of the ladder",
+          "latest planner pass; these are host counts, not failures or lifetime totals. One host can skip several ladder steps.",
+          ["ladder step skipped", "hosts", "why"],
+        ),
+      )
+      : "";
+
+    // Since-install counters, updated only when a farm call settles. No probe
+    // exists for this card: it is folded from results the agents already hold.
+    // Promotion is deliberately not converted to dollars—the call changes
+    // volatility and neither the game nor the strategy can attribute realized
+    // stock P&L to one batch.
+    const profit = d.profit;
+    const profitCard = profit
+      ? card(
+        "Returns",
+        definitions([
+          [
+            hint("observed cash", "phishing + cache cash at the display precision returned by the API; collected without an extra getPlayer call"),
+            fmtMoney(profit.phishCash + profit.cacheCash),
+          ],
+          [
+            "phishing",
+            `${profit.phishSuccesses} successful / ${profit.phishAttempts} attempts · ${fmtMoney(profit.phishCash)} · ${profit.phishCaches} caches`,
+          ],
+          [
+            "caches",
+            `${profit.cachesOpened} opened · ${fmtMoney(profit.cacheCash)} · ${fmtNum(profit.cacheShares, 0)} shares`,
+          ],
+          [
+            hint("stock promotion", "successful propaganda batches and their threads; raises volatility but has no honest direct-cash attribution"),
+            `${profit.promotionBatches} successful / ${profit.promotionAttempts} attempts · ${fmtNum(profit.promotionThreads, 0)} threads`,
+          ],
+        ])
+        + (Object.keys(profit.cacheRewards).length > 0
+          ? table(
+            ["cache reward", "n"],
+            Object.entries(profit.cacheRewards)
+              .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+              .map(([reward, count]) => [esc(reward), String(count)]),
+            { left: [0] },
+          )
+          : "")
+        + (Object.keys(profit.promotionSymbols).length > 0
+          ? note(`promoted ${Object.entries(profit.promotionSymbols)
+            .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+            .map(([symbol, count]) => `${esc(symbol)} ×${count}`)
+            .join(" · ")}`)
+          : ""),
       )
       : "";
 
@@ -1162,7 +1200,7 @@ export const dnetTab: Tab = {
     const labRefusals = (d.hold?.examples ?? []).filter((entry) => entry.host === labHost);
     const walkers = lab?.walkers ?? [];
     // Empty for a grid that does not match its own dimensions — a shape change
-    // between a running overseer and a rebuilt panel. The legend follows the
+    // between a running controller and a rebuilt panel. The legend follows the
     // maze rather than the digest, so a card that could not draw one does not
     // caption it either.
     const maze = lab === undefined ? "" : labMaze(lab, labPriorFor(lab));
@@ -1176,7 +1214,7 @@ export const dnetTab: Tab = {
     const etaMs = lab ? labEtaMs(lab) : undefined;
     // Whether the picture has stopped moving. `home.lab` is intentionally never
     // blanked — the card would flicker between a map and an empty state — so
-    // once the overseer dies with its host the digest keeps shipping the last
+    // once the controller dies with its host the digest keeps shipping the last
     // walker snapshot, and the beat is the only thing that can say so.
     const walkStalled = walkers.length > 0 && walkers.every((walker) => now - walker.beatAt > WALK_STALE_MS);
 
@@ -1209,7 +1247,7 @@ export const dnetTab: Tab = {
         // would silently render muted. And the line says STALLED rather than
         // dropping the estimate, so the card explains why the number went away.
         + (stalled
-          ? `<span class="bad" title="the overseer gives up on a long-lived job after 30s of silence, so a walker still on this card is a frozen snapshot rather than a slow walk">`
+          ? `<span class="bad" title="the controller gives up on a long-lived job after 30s of silence, so a walker still on this card is a frozen snapshot rather than a slow walk">`
             + `beat ${fmtTime(beatAge)} ago — stalled</span>`
           : `<span class="num">beat ${fmtTime(beatAge)} ago</span>`
             + (eta !== undefined ? `<span class="num">~${fmtTime(eta)} left</span>` : ""))
@@ -1278,7 +1316,7 @@ export const dnetTab: Tab = {
             ? `<div class="labwalkers">${walkers.map(walkerLine).join("")}</div>`
             : lab !== undefined
               // A map with nobody on it: the walk died with its host and the
-              // overseer has not re-filed one yet. Worth saying out loud, because
+              // controller has not re-filed one yet. Worth saying out loud, because
               // the map still being there is exactly what makes it recoverable.
               ? note("no walker is in the maze right now — the map below outlives them, so the next one resumes from it")
               : "")
@@ -1553,6 +1591,7 @@ export const dnetTab: Tab = {
       ))
       + holdCard
       + spreadCard
+      + profitCard
       + farmCard
       + stormCard
       + unknownCard

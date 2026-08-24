@@ -1,4 +1,4 @@
-import { staleness, type ExpiryOpts, type Staleness } from "../../../shared/strategy/dnet/knowledge.ts";
+import { expiryMs, fieldGroup, type ExpiryOpts, type Staleness } from "../../../shared/strategy/dnet/host.ts";
 import { modelEntry } from "../../../shared/strategy/dnet/models.ts";
 import {
   isLabyrinth,
@@ -718,7 +718,15 @@ export function factLife(
   const at = host.facts[key];
   if (at === undefined) return undefined;
   const immune = host.isStationary === true || host.stasisLinked === true;
-  return staleness({ value: undefined, at }, key, now, { ...expiry, immune });
+  const group = fieldGroup(key);
+  if (group === undefined) return undefined;
+  const limit = expiryMs(group, { ...expiry, immune });
+  const ageMs = Math.max(0, now - at);
+  return {
+    ageMs,
+    expiresInMs: limit === Infinity ? Infinity : Math.max(0, limit - ageMs),
+    stale: (group !== "identity" && host.dirty?.[group] === true) || ageMs > limit,
+  };
 }
 
 /** True when nothing PERISHABLE we hold about this host is still believable.
@@ -762,7 +770,11 @@ function titleOf(host: DarknetKnownHost, options: MapOptions): string {
   if (entry?.blocked !== undefined) parts.push(entry.blocked);
   const ram = ramBuckets(host);
   if (ram) {
-    parts.push(`RAM ${fmtRam(ram.ours)} ours, ${fmtRam(ram.free)} free, ${fmtRam(ram.blocked)} blocked of ${fmtRam(ram.max)}`);
+    parts.push(
+      ram.used === undefined || ram.unused === undefined
+        ? `RAM ${fmtRam(ram.total)} total, ${fmtRam(ram.blocked)} blocked`
+        : `RAM ${fmtRam(ram.total)} total, ${fmtRam(ram.blocked)} blocked, ${fmtRam(ram.used)} used, ${fmtRam(ram.unused)} unused`,
+    );
   }
   if (host.requiredCharisma !== undefined) parts.push(`charisma ${fmtNum(host.requiredCharisma, 0)}`);
   if (host.agent) {
@@ -776,27 +788,30 @@ function titleOf(host: DarknetKnownHost, options: MapOptions): string {
   }
   if (host.goneAt !== undefined) parts.push("gone");
   if (isStale(host, options.now, options.expiry)) {
-    parts.push("stale — position and topology believed, not confirmed");
+    parts.push("stale — one or more observations are no longer confirmed");
   }
   return parts.filter(Boolean).join(" · ");
 }
 
 export interface RamBuckets {
-  max: number;
-  ours: number;
-  free: number;
+  total: number;
   blocked: number;
+  used?: number;
+  unused?: number;
 }
 
-/** Split capacity into the three buckets the player can act on. The game's
- * raw usedRam includes owner-blocked RAM, so deriving ours from the centrally
- * normalised freeRam is the only representation that does not double-count. */
+/** Keep durable capacity distinct from a volatile runtime-occupancy sample. */
 export function ramBuckets(host: DarknetKnownHost): RamBuckets | undefined {
+  if (host.ram !== undefined) {
+    const total = Math.max(0, host.ram.total);
+    const blocked = Math.max(0, Math.min(host.ram.blocked, total));
+    const used = Math.max(0, Math.min(host.ram.used, total - blocked));
+    return { total, blocked, used, unused: Math.max(0, total - blocked - used) };
+  }
   if (host.maxRam === undefined) return undefined;
-  const max = Math.max(0, host.maxRam);
-  const blocked = Math.max(0, Math.min(host.blockedRam ?? 0, max));
-  const free = Math.max(0, Math.min(host.freeRam ?? 0, max - blocked));
-  return { max, ours: Math.max(0, max - blocked - free), free, blocked };
+  const total = Math.max(0, host.maxRam);
+  const blocked = Math.max(0, Math.min(host.blockedRam ?? 0, total));
+  return { total, blocked };
 }
 
 function compactRam(gb: number): string {
@@ -807,16 +822,23 @@ function compactRam(gb: number): string {
 
 function ramBar(host: DarknetKnownHost, x: number, y: number): string {
   const ram = ramBuckets(host);
-  if (!ram || ram.max <= 0) return "";
+  if (!ram || ram.total <= 0) return "";
   const width = BOX_W - 16;
-  const w = (value: number) => Math.max(0, (value / ram.max) * width);
-  const oursW = w(ram.ours);
-  const freeW = w(ram.free);
+  const w = (value: number) => Math.max(0, (value / ram.total) * width);
+  if (ram.used === undefined || ram.unused === undefined) {
+    const availableW = w(Math.max(0, ram.total - ram.blocked));
+    return (
+      `<rect class="ram unknown ram-unknown" x="${x}" y="${y}" width="${availableW.toFixed(1)}" height="4"></rect>`
+      + `<rect class="ram blocked ram-blocked" x="${(x + availableW).toFixed(1)}" y="${y}" width="${w(ram.blocked).toFixed(1)}" height="4"></rect>`
+    );
+  }
+  const usedW = w(ram.used ?? 0);
+  const unusedW = w(ram.unused ?? Math.max(0, ram.total - ram.blocked));
   const blockedW = w(ram.blocked);
   return (
-    `<rect class="ram ours ram-ours" x="${x}" y="${y}" width="${oursW.toFixed(1)}" height="4"></rect>`
-    + `<rect class="ram free ram-free" x="${(x + oursW).toFixed(1)}" y="${y}" width="${freeW.toFixed(1)}" height="4"></rect>`
-    + `<rect class="ram blocked ram-blocked" x="${(x + oursW + freeW).toFixed(1)}" y="${y}" width="${blockedW.toFixed(1)}" height="4"></rect>`
+    `<rect class="ram used ram-used" x="${x}" y="${y}" width="${usedW.toFixed(1)}" height="4"></rect>`
+    + `<rect class="ram unused ram-unused" x="${(x + usedW).toFixed(1)}" y="${y}" width="${unusedW.toFixed(1)}" height="4"></rect>`
+    + `<rect class="ram blocked ram-blocked" x="${(x + usedW + unusedW).toFixed(1)}" y="${y}" width="${blockedW.toFixed(1)}" height="4"></rect>`
   );
 }
 
@@ -835,7 +857,9 @@ function nodeMarkup(entry: Placed, options: MapOptions): string {
   const buckets = ramBuckets(host);
   const ram = buckets === undefined
     ? ""
-    : `O/F/B ${compactRam(buckets.ours)}/${compactRam(buckets.free)}/${compactRam(buckets.blocked)}`;
+    : buckets.used === undefined || buckets.unused === undefined
+      ? `T/B ${compactRam(buckets.total)}/${compactRam(buckets.blocked)}`
+      : `T/B/U/- ${compactRam(buckets.total)}/${compactRam(buckets.blocked)}/${compactRam(buckets.used)}/${compactRam(buckets.unused)}`;
 
   return (
     // data-view-key is the whole selection mechanism: main.ts's delegated
@@ -980,9 +1004,10 @@ export function netLegend(): string {
     + swatch("stale", "faded = stale: perishable facts expired")
     + `</div>`
     + `<div class="netlegend">`
-    + swatch("ram-ours", "RAM: ours")
-    + swatch("ram-free", "RAM: free")
+    + swatch("ram-used", "RAM: used by our scripts")
+    + swatch("ram-unused", "RAM: unused")
     + swatch("ram-blocked", "RAM: owner-blocked")
+    + swatch("ram-unknown", "RAM: occupancy not sampled")
     + `</div>`
     // The edge vocabulary, which had no key at all — including the one edge that
     // means our own knowledge is wrong.

@@ -6,10 +6,12 @@ import { ProcessTable } from "../sim/ns/process.ts";
 import { makeSimNs, type SimNsHost } from "../sim/ns/api.ts";
 import { darkwebServerSpec } from "../sim/network.ts";
 import { main as agentMain } from "../game/dnet/agent.ts";
+import { handoffLaunch } from "../game/lib/launch-shared.ts";
 import {
   DNET_PROTOCOL,
   dnetRealm,
   hardCancelEligible,
+  hardCancelReady,
   HARD_CANCEL_EXEMPT_KINDS,
   signalWake,
   type AgentHandle,
@@ -58,6 +60,8 @@ const BLOCKED_TARGET = "dn-block";
 
 const noopDeps: ControllerDeps = {
   charisma: () => 1_000,
+  timing: () => ({ charisma: 1_000, intelligence: 0, hasBoots: false, sf15Level: 0, authenticationDurationMultiplier: 1 }),
+  expectedDelayMs: () => 10_000,
   ledgerFor: () => undefined,
   ringFor: () => undefined,
   recordAttempt: () => {},
@@ -80,13 +84,14 @@ interface Rig {
   /** Every report any adopted handle settled, in settle order. */
   reports: Report[];
   /** Every adoption the fake controller saw, in order. */
-  adopted: { kind: OrderKind; pid: number }[];
+  adopted: { kind: OrderKind; pid: number; startedAt: number; orderStartedAt?: number }[];
   /** Every `wake(cause)` the agent sent the controller. */
   wakes: string[];
   /** Make the stubbed `setStasisLink` park in a killable sleep. */
   pinBlocks: { value: boolean };
   /** Launch the real agent in resident mode on darkweb. */
   plantResident: () => number;
+  plantManaged: () => Promise<number>;
   entry: () => HostEntry | undefined;
 }
 
@@ -157,7 +162,7 @@ function rig(): Rig {
 
   const hosts: DnetHostEntries = new Map();
   const reports: Report[] = [];
-  const adopted: { kind: OrderKind; pid: number }[] = [];
+  const adopted: { kind: OrderKind; pid: number; startedAt: number; orderStartedAt?: number }[] = [];
   const wakes: string[] = [];
   const ensure = (hostname: string): HostEntry => {
     const existing = hosts.get(hostname);
@@ -182,11 +187,14 @@ function rig(): Rig {
       // process on that host's entry, and its settle is observed.
       const entry = ensure(hostname);
       entry.agent = handle;
-      adopted.push({ kind: handle.order.kind, pid: handle.pid });
+      adopted.push({ kind: handle.order.kind, pid: handle.pid, startedAt: handle.startedAt, orderStartedAt: handle.order.startedAt });
       void handle.done.then((report) => void reports.push(report));
     },
+    afterOrders: () => Promise.resolve(),
+    beginProbeRefresh: () => { throw new Error("not used"); },
+    cancelProbeRefresh: () => {},
     reportProbe: () => {},
-    preparePlant: () => {},
+    preparePlant: () => ({ controllerManaged: false, reuseProber: false }),
     registerBootstrap: () => {},
     bootstrapDone: () => {},
     deps: noopDeps,
@@ -204,6 +212,15 @@ function rig(): Rig {
       { threads: 1, ramOverride: 4.45, temporary: true },
       "darkweb",
     );
+  const plantManaged = (): Promise<number> => handoffLaunch(
+    { kind: "dnet-agent", host: "darkweb", controllerManaged: true },
+    (launchId) => controllerNs.exec(
+      "agent.js",
+      "darkweb",
+      { threads: 1, ramOverride: 2.45, temporary: true },
+      launchId,
+    ),
+  );
 
   return {
     host,
@@ -216,6 +233,7 @@ function rig(): Rig {
     wakes,
     pinBlocks,
     plantResident,
+    plantManaged,
     entry: () => hosts.get("darkweb"),
   };
 }
@@ -289,6 +307,9 @@ describe("hardCancelEligible: the pure licence to kill", () => {
     expect(hardCancelEligible(handleOf("pin", { armored: true, pid: 42 }))).toBe(false);
     // A pre-armor process is never killed without its net.
     expect(hardCancelEligible(handleOf("attempt", { pid: 42 }))).toBe(false);
+    const managed = handleOf("attempt", { pid: 42 });
+    managed.order.controllerManaged = true;
+    expect(hardCancelEligible(managed)).toBe(true);
     // The one killable shape: armored, live pid, non-exempt kind.
     expect(hardCancelEligible(handleOf("attempt", { armored: true, pid: 42 }))).toBe(true);
     // The sweep also refuses a handle with no pid to vouch.
@@ -296,9 +317,69 @@ describe("hardCancelEligible: the pure licence to kill", () => {
     // The exemption list is exactly the two spawn-less kinds.
     expect([...HARD_CANCEL_EXEMPT_KINDS].sort()).toEqual(["pin", "walk"]);
   });
+
+  test("a cancellation follows its handle and receives one cooperative pass", () => {
+    const handle = handleOf("attempt", { armored: true, pid: 42 });
+    handle.cancelReason = "superseded";
+    handle.cancelRequestedPass = 7;
+    expect(hardCancelReady(handle, 7)).toBe(false);
+    expect(hardCancelReady(handle, 8)).toBe(true);
+
+    const replacement = handleOf("attempt", { armored: true, pid: 43 });
+    expect(hardCancelReady(replacement, 8)).toBe(false);
+  });
 });
 
 describe("the controller's kill, and the agent's survival of it", () => {
+  test("a stasis-managed agent exits to the controller without losing its successor", async () => {
+    const r = rig();
+    await r.plantManaged();
+    await residentJoined(r);
+
+    const first = makeOrder("bleed", { id: "managed-first", host: "dn-quick", controllerManaged: true });
+    const second = makeOrder("bleed", { id: "managed-second", host: "dn-quick", controllerManaged: true });
+    const entry = r.entry()!;
+    (entry.staged ??= []).push(first, second);
+    signalWake(entry);
+
+    await r.world.clock.runAsync(() => r.processes.ps("darkweb").length === 0, 60_000);
+    expect(entry.agent).toBeUndefined();
+    expect(entry.staged?.map((order) => order.id)).toEqual(["managed-first", "managed-second"]);
+    expect(r.wakes).toContain("stasis-dispatch-requested");
+
+    entry.pendingOrder = entry.staged!.shift();
+    await r.plantManaged();
+    await r.world.clock.runAsync(() => r.reports.some((report) => report.id === first.id), 60_000);
+    expect(r.processes.ps("darkweb")).toHaveLength(0);
+    expect(entry.staged?.map((order) => order.id)).toEqual(["managed-second"]);
+    expect(r.wakes).toContain("controller-managed-order-finished");
+    expect(r.host.crashes).toEqual([]);
+  });
+
+  test("the adopted handle exposes the current delayed boundary and clears an early completion", async () => {
+    const r = rig();
+    r.plantResident();
+    await residentJoined(r);
+
+    const blocked = makeOrder("bleed", { host: BLOCKED_TARGET });
+    stage(r, blocked);
+    const handle = await inFlight(r, "bleed");
+    expect(handle.order).toBe(blocked);
+    expect(handle.startedAt).toBe(blocked.startedAt!);
+    expect(blocked.expectedDoneAt!).toBeGreaterThan(handle.startedAt);
+    handle.cancelReason = "test cleanup";
+    expect(r.controllerNs.kill(handle.pid)).toBe(true);
+    await handle.done;
+    expect(blocked.expectedDoneAt).toBeUndefined();
+
+    await residentJoined(r);
+    const quick = makeOrder("bleed", { id: "bleed-quick", host: "dn-quick" });
+    stage(r, quick);
+    await r.world.clock.runAsync(() => r.reports.some((report) => report.id === quick.id), 60_000);
+    expect(quick.startedAt).toBeDefined();
+    expect(quick.expectedDoneAt).toBeUndefined();
+  });
+
   test("a pointless in-flight order is killed, settles cancelled, and the resident is back before kill returns", async () => {
     const r = rig();
     r.plantResident();
@@ -312,10 +393,9 @@ describe("the controller's kill, and the agent's survival of it", () => {
     expect(hardCancelEligible(handle)).toBe(true);
     const orderPid = handle.pid;
 
-    // The controller's hard cancel: reason, fire, kill — the reason marks the
-    // death a cancellation, and the atExit hook runs synchronously inside kill.
+    // The controller marks the reason, then hard-kills on the following pass.
+    // atExit runs synchronously inside kill and reports cancellation.
     handle.cancelReason = "credential already verified";
-    handle.cancelFire?.();
     expect(r.controllerNs.kill(orderPid)).toBe(true);
 
     // Everything below was already true when kill returned: the murdered order
@@ -341,7 +421,7 @@ describe("the controller's kill, and the agent's survival of it", () => {
     expect(r.host.crashes).toEqual([]);
   });
 
-  test("a pin is never armored and never eligible, even flagged and forged; cooperative cancel leaves the host empty", async () => {
+  test("a pin is never armored and never eligible, even flagged and forged; completing the atomic call leaves the host empty", async () => {
     const r = rig();
     r.pinBlocks.value = true;
     r.plantResident();
@@ -357,14 +437,11 @@ describe("the controller's kill, and the agent's survival of it", () => {
     handle.armored = true;
     expect(hardCancelEligible(handle)).toBe(false);
     handle.armored = false;
-
-    // The cooperative path is all a pin gets: the race falls through, the
-    // order settles cancelled, and the process exits WITHOUT a successor —
-    // a pin leaves its host empty for the spread planner to re-plant.
+    // A pin is not killable. If its atomic call completes after cancellation was
+    // requested, the completed result wins; the link cannot be rolled back.
     handle.cancelReason = "belief changed";
-    handle.cancelFire?.();
-    await r.world.clock.runAsync(() => r.reports.some((report) => report.kind === "pin"), 60_000);
-    expect(r.reports.find((report) => report.kind === "pin")).toMatchObject({ ok: false, targetState: "cancelled" });
+    await r.world.clock.runAsync(() => r.reports.some((report) => report.kind === "pin"), 700_000);
+    expect(r.reports.find((report) => report.kind === "pin")).toMatchObject({ ok: true });
     expect(r.processes.ps("darkweb")).toHaveLength(0);
     expect(r.host.crashes).toEqual([]);
   });
@@ -377,10 +454,11 @@ describe("the controller's kill, and the agent's survival of it", () => {
     // Two orders staged together: the finishing first order's atExit spawn must
     // take the second DIRECTLY, not via a resident bounce.
     const entry = r.entry()!;
-    (entry.staged ??= []).push(
-      makeOrder("bleed", { id: "bleed-first", host: "dn-quick" }),
-      makeOrder("bleed", { id: "bleed-second", host: "dn-quick" }),
-    );
+    const firstOrder = makeOrder("bleed", { id: "bleed-first", host: "dn-quick" });
+    const secondOrder = makeOrder("bleed", { id: "bleed-second", host: "dn-quick" });
+    (entry.staged ??= []).push(firstOrder, secondOrder);
+    expect(firstOrder.startedAt).toBeUndefined();
+    expect(secondOrder.startedAt).toBeUndefined();
     signalWake(entry);
     await r.world.clock.runAsync(() => r.reports.some((report) => report.id === "bleed-second"), 60_000);
 
@@ -388,6 +466,11 @@ describe("the controller's kill, and the agent's survival of it", () => {
     const first = r.adopted.find((a) => a.kind === "bleed")!;
     const chain = r.adopted.filter((a) => a.kind === "bleed");
     expect(chain).toHaveLength(2);
+    expect(chain[0]!.startedAt).toBe(firstOrder.startedAt!);
+    expect(chain[0]!.orderStartedAt).toBe(firstOrder.startedAt!);
+    expect(chain[1]!.startedAt).toBe(secondOrder.startedAt!);
+    expect(chain[1]!.orderStartedAt).toBe(secondOrder.startedAt!);
+    expect(secondOrder.startedAt).toBeGreaterThanOrEqual(firstOrder.startedAt!);
     // Consecutive PIDs prove atExit launched the successor itself. An
     // intermediate resident would consume one PID before the second order.
     expect(chain[1]!.pid).toBe(first.pid + 1);

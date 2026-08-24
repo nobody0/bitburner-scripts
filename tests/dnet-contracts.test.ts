@@ -9,7 +9,7 @@ import {
 } from "../game/lib/contracts.ts";
 import { syncDarknetContracts } from "../game/lib/features/dnet.ts";
 import type { GameState } from "../game/lib/state.ts";
-import { emptyKnowledge, foldReports } from "../shared/strategy/dnet/knowledge.ts";
+import { emptyKnowledge, foldKnowledgeReports } from "../shared/strategy/dnet/host.ts";
 
 const observed: ContractQueueEntry = {
   host: "dn-1",
@@ -75,7 +75,7 @@ describe("darknet contract queue", () => {
       topics: {}, dirty: new Set(), mirrors: {}, mirrorDirty: new Set(),
       probeFailures: {}, featureLastRun: {},
     } as GameState;
-    let knowledge = foldReports(emptyKnowledge("run"), [{
+    let knowledge = foldKnowledgeReports(emptyKnowledge("run"), [{
       hostname: "dn-1",
       identity: "10.0.0.1",
       at: 1_000,
@@ -89,7 +89,7 @@ describe("darknet contract queue", () => {
     syncDarknetContracts(state, knowledge, 1_001, { bitNode: 15, netDepth: 5 });
     expect(state.contractQueue).toEqual([]);
 
-    knowledge = foldReports(knowledge, [{
+    knowledge = foldKnowledgeReports(knowledge, [{
       hostname: "dn-1",
       identity: "10.0.0.1",
       at: 1_100,

@@ -24,6 +24,7 @@ import { AggregateGoNeuralRuntime } from "./features/go-aggregate-runtime.ts";
 import { ShareSystem } from "./features/share.ts";
 import { StanekSystem } from "./features/stanek.ts";
 import { StockMarketSystem } from "./features/stock.ts";
+import { ContractSystem } from "./features/contracts.ts";
 import { satisfiesAll, type SatisfyContext } from "./features/requirements.ts";
 import {
   DEFAULT_NETWORK,
@@ -250,9 +251,10 @@ const REALM_SLOTS = [
   "dispatch_done",
   "dispatch_wake",
   "dispatch_wake_pending",
+  "dispatch_wake_targets",
   "dispatch_weaken_timer",
-  "dispatch_jit_timer",
-  "dispatch_jit_at",
+  "dispatch_jit_timers",
+  "charge_context_pending",
   "dodge_tail",
 ] as const;
 
@@ -496,9 +498,26 @@ async function runGameInstalled(
   const hashMode = (bitnode === 9 || (save?.sourceFiles["9"] ?? 0) > 0) && save?.bitNodeOptions.disableHacknetServer !== true;
   const hacknet = new HacknetSystem(world, world.player, hashMode, save?.hacknet);
   const education = new EducationSystem(world, world.player, (name) => hacknet.hashLevels[name] ?? 0);
+  const fileStore = new Map<string, Set<string>>(
+    save
+      ? save.servers.map((server) => [
+          server.hostname,
+          new Set(server.hostname === "home" ? initialHomeFiles : server.contractFiles),
+        ] as const)
+      : [["home", initialHomeFiles]],
+  );
   // Declared before the engine so its 200 ms hook can close over it, assigned
   // after the host exists because it needs the process table and file map.
   let dnet: DarknetSystem | undefined;
+  const contracts = new ContractSystem({
+    world,
+    player: world.player,
+    servers: world.servers,
+    files: fileStore,
+    random: mulberry32(DARKNET_NETWORK_SEED ^ 0x434354),
+    factions,
+    companies,
+  });
 
   const engine: Engine = new Engine(clock, {
     addPlaytime: (milliseconds) => world.addPlaytime(milliseconds),
@@ -524,18 +543,8 @@ async function runGameInstalled(
     processHacknetEarnings: (cycles) => hacknet.processEarnings(cycles),
     darknetProcess: (cycles) => dnet?.darknetProcess(cycles),
     // The real engine makes three coding-contract generation attempts every
-    // ten minutes. Until the generated contract/reward lifecycle is modelled,
-    // reaching that boundary with side automation enabled must be visible in
-    // validity instead of silently deleting a progression source.
-    generateContracts: () => {
-      if (options.features?.side !== "off") {
-        noteUnmodeled(
-          "subsystem",
-          "coding contract generation",
-          "the v3.0.1 generation interval fired, but generated contracts and rewards are not modelled",
-        );
-      }
-    },
+    // ten minutes. ContractSystem owns placement, solving, rewards and prestige.
+    generateContracts: () => contracts.generateAttempts(3),
     // SECOND in updateGame's real order, right after processWork. The 6 s tick,
     // the 4 s floor and the 75-tick cycle all live inside the vendored function.
     processStockPrices: (cycles) => {
@@ -588,14 +597,7 @@ async function runGameInstalled(
     goState: save ? null : undefined,
     ...(go ? { go } : {}),
     processes: new ProcessTable(world.servers, clock),
-    files: new Map(
-      save
-        ? save.servers.map((server) => [
-            server.hostname,
-            new Set(server.hostname === "home" ? initialHomeFiles : server.contractFiles),
-          ] as const)
-        : [["home", initialHomeFiles]],
-    ),
+    files: fileStore,
     // Empty build id: the controller's self-update branch compares against its
     // own __BUILD_ID__ and skips when the pushed value is blank.
     contents: new Map([["home\0build-id.txt", ""]]),
@@ -620,6 +622,7 @@ async function runGameInstalled(
     share,
     ...(stanek ? { stanek } : {}),
     stock,
+    contracts,
     singularity: makeSingularity({
       world,
       player: world.player,
@@ -688,6 +691,17 @@ async function runGameInstalled(
     world,
     player: world.player,
     homeFiles: () => host.files.get("home")!,
+    filesOn: (hostname) => {
+      let files = host.files.get(hostname);
+      if (!files) host.files.set(hostname, files = new Set());
+      return files;
+    },
+    writeTextFile: (hostname, filename, contents) => {
+      let files = host.files.get(hostname);
+      if (!files) host.files.set(hostname, files = new Set());
+      files.add(filename);
+      host.contents.set(`${hostname}\0${filename}`, contents);
+    },
     darknetMoneyMultiplier: () => currentNodeMults.DarknetMoneyMultiplier ?? 1,
     // A THIRD stream. Log-noise draws vary in number with how long a script
     // waited before bleeding, so taking them from the gameplay stream would let
@@ -698,6 +712,7 @@ async function runGameInstalled(
     // keeps them, and an agent that scps itself onto a host would leave its
     // payload "present" on a server that no longer exists.
     forgetFiles: (hostname: string) => {
+      contracts.forgetHost(hostname);
       host.files.delete(hostname);
       // The content map is keyed with a NUL separator, not a colon; the wrong
       // one would match nothing and leak every file on the deleted host.
@@ -706,6 +721,8 @@ async function runGameInstalled(
         if (key.startsWith(prefix)) host.contents.delete(key);
       }
     },
+    contracts,
+    stock,
   });
   const darknet = dnet;
   host.dnet = darknet;
@@ -807,10 +824,10 @@ async function runGameInstalled(
         : undefined,
     }, regenerated?.network);
     hacknet.prestige();
+    contracts.prestige();
     stock.prestige();
     // Before the market re-rolls, not after: propaganda and the portfolio are
     // cleared on the same boundary upstream (DarknetState.ts:97).
-    dnet?.prestige(virtualTime.nowMs());
     grafting.prestige();
     programs.prestige();
     hasTor.value = permanentDarknetAccess();
@@ -858,6 +875,7 @@ async function runGameInstalled(
       }
     }
     if (permanentDarknetAccess()) connectTor();
+    dnet?.prestige(virtualTime.nowMs());
     host.reset = {
       ...host.reset,
       lastAugReset: virtualTime.nowMs(),

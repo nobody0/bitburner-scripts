@@ -396,7 +396,10 @@ describe("layout puts the net on the game's grid", () => {
 
 describe("the rendered SVG", () => {
   const hosts = [
-    host({ hostname: "darkweb", isDarkweb: true, depth: -1, authState: "session", maxRam: 16, freeRam: 16 }),
+    host({
+      hostname: "darkweb", isDarkweb: true, depth: -1, authState: "session", maxRam: 16, usableRam: 16,
+      ram: { at: NOW, total: 16, blocked: 0, used: 3.6 },
+    }),
     host({
       hostname: "dn-1",
       depth: 0,
@@ -405,20 +408,28 @@ describe("the rendered SVG", () => {
       modelId: "2G_cellular",
       maxRam: 16,
       blockedRam: 4,
-      freeRam: 12,
+      usableRam: 12,
+      ram: { at: NOW, total: 16, blocked: 4, used: 5 },
       authState: "auth-required",
     }),
   ];
 
-  test("shows ours, free and owner-blocked RAM without double-counting", () => {
-    const split = ramBuckets(host({ hostname: "dn-ram", maxRam: 16, usedRam: 7, freeRam: 9, blockedRam: 4 }));
-    expect(split).toEqual({ max: 16, ours: 3, free: 9, blocked: 4 });
+  test("shows total, blocked, used, and unused RAM", () => {
+    const ram = { at: NOW, total: 16, blocked: 4, used: 5 };
+    const split = ramBuckets(host({ hostname: "dn-ram", maxRam: 16, blockedRam: 4, ram }));
+    expect(split).toEqual({ total: 16, blocked: 4, used: 5, unused: 7 });
 
     const html = netMap([
-      host({ hostname: "dn-ram", depth: 0, maxRam: 16, usedRam: 7, freeRam: 9, blockedRam: 4 }),
+      host({ hostname: "dn-ram", depth: 0, maxRam: 16, blockedRam: 4, ram }),
     ], OPTIONS);
-    expect(html).toContain("O/F/B 3/9/4");
-    expect(html).toContain("RAM 3.00GB ours, 9.00GB free, 4.00GB blocked of 16GB");
+    expect(html).toContain("T/B/U/- 16/4/5/7");
+    expect(html).toContain("RAM 16GB total, 4.00GB blocked, 5.00GB used, 7.00GB unused");
+  });
+
+  test("does not call unsampled capacity unused", () => {
+    const hostWithoutRuntime = host({ hostname: "dn-old", depth: 0, maxRam: 16, blockedRam: 4 });
+    expect(ramBuckets(hostWithoutRuntime)).toEqual({ total: 16, blocked: 4 });
+    expect(netMap([hostWithoutRuntime], OPTIONS)).toContain('class="ram unknown ram-unknown"');
   });
 
   test("every host is drawn exactly once, with a stable key", () => {
@@ -464,10 +475,10 @@ describe("the rendered SVG", () => {
     expect(html).toContain("[ auth required ]");
     // The in-game box only hints at blocked RAM with a lock icon; we show the
     // split, because it is what decides whether an agent fits at all.
-    expect(html).toContain('class="ram free ram-free"');
+    expect(html).toContain('class="ram used ram-used"');
+    expect(html).toContain('class="ram unused ram-unused"');
     expect(html).toContain('class="ram blocked ram-blocked"');
-    expect(html).toContain('class="ram ours ram-ours"');
-    expect(html).toContain("O/F/B 0/12/4");
+    expect(html).toContain("T/B/U/- 16/4/5/7");
   });
 
   test("zoom changes the width attribute and never the viewBox", () => {
@@ -533,7 +544,7 @@ describe("the panel at the scale the game actually reaches", () => {
           depth,
           neighbours: depth === 0 ? ["darkweb"] : [`dn-${depth - 1}-${i}`],
           maxRam: 16,
-          freeRam: 8,
+          usableRam: 8,
         }));
       }
     }
@@ -571,7 +582,7 @@ describe("the panel at the scale the game actually reaches", () => {
             modelId: "DeepGreen",
             maxRam: 32,
             blockedRam: 16,
-            freeRam: 16,
+            usableRam: 16,
             authState: "auth-required",
             // One timestamp per fact. The panel works out the rest.
             facts: { depth: 900, modelId: 900 },
@@ -606,7 +617,10 @@ describe("the key describes the map, and not something near it", () => {
   /** Every host state the map can draw, one host each, so the markup below
    *  contains every class the map is capable of emitting. */
   const EVERY_STATE: DarknetKnownHost[] = [
-    host({ hostname: "dn-session", depth: 0, authState: "session", maxRam: 16, freeRam: 8, blockedRam: 4 }),
+    host({
+      hostname: "dn-session", depth: 0, authState: "session", maxRam: 16, usableRam: 12, blockedRam: 4,
+      ram: { at: NOW, total: 16, blocked: 4, used: 5 },
+    }),
     host({ hostname: "dn-auth", depth: 0, authState: "authenticated" }),
     host({ hostname: "dn-locked", depth: 0, authState: "auth-required" }),
     host({ hostname: "dn-unreached", depth: 1, authState: "no-connection" }),
@@ -622,7 +636,7 @@ describe("the key describes the map, and not something near it", () => {
       depth: 2,
       modelId: "(Dictionary)",
       maxRam: 8,
-      facts: { modelId: 1, maxRam: 1, requiredCharisma: 1, depth: 1, neighbours: 1, usedRam: 1 },
+      facts: { modelId: 1, maxRam: 1, requiredCharisma: 1, depth: 1, neighbours: 1 },
     }),
   ];
 

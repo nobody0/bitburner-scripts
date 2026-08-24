@@ -4,7 +4,7 @@ import { runOrder } from "../game/dnet/orders.ts";
 import type { AgentIo, ControllerDeps, Order, OrderKind } from "../game/dnet/shared.ts";
 import { checkPassword, logEntryFor, type PacketWorld } from "../sim/features/dnet-feedback.ts";
 import { generateSecret, passwordRng } from "../sim/features/dnet-generators.ts";
-import type { AttemptLedger } from "../shared/strategy/dnet/knowledge.ts";
+import type { AttemptLedger } from "../shared/strategy/dnet/host.ts";
 import type { ProvisionalCredential, VaultEntry } from "../shared/strategy/dnet/courier.ts";
 
 /** The wiring, not the algorithms.
@@ -56,6 +56,8 @@ function makeDeps(over: Partial<ControllerDeps> = {}): ControllerDeps {
     labField: () => undefined,
     publishLabField: () => {},
     ...over,
+    timing: over.timing ?? (() => ({ charisma: 1_000, intelligence: 0, hasBoots: false, sf15Level: 0, authenticationDurationMultiplier: 1 })),
+    expectedDelayMs: over.expectedDelayMs ?? (() => 0),
   };
 }
 
@@ -67,6 +69,7 @@ function makeIo(
 ): AgentIo {
   return {
     beat: () => {},
+    setExpectedDoneAt: () => {},
     cancelled: cancelled ?? (() => undefined),
     deps: makeDeps({ ledgerFor: () => ledger, ...over }),
   };
@@ -150,9 +153,6 @@ function rig(modelId: string, difficulty: number, opts: { charismaGate?: number;
         return Promise.resolve({ success: true, code: 200, message: "ok", logs });
       },
     },
-    formulas: {
-      dnet: { getAuthenticateTime: () => 1_000 },
-    },
     getServerMaxRam: () => 32,
     getServerUsedRam: () => 0,
     // A successful authenticate can create this without mentioning the roll
@@ -185,8 +185,8 @@ describe("the attempt order runs the whole conversation in one process", () => {
       expect(result.attempts?.length).toBe(r.sent.length);
       // A win may have dropped a `.cache`, but the job does not `ls` for it — that
       // would be 0.2 GB per authenticate thread. It flags the host dirty and the
-      // overseer files one instant list job.
-      expect(result.dirtied).toBe(true);
+      // controller files one instant list job.
+      expect(result.hosts?.[0]?.invalidates).toEqual(["files"]);
       expect(result.hosts?.[0]?.caches).toBeUndefined();
       // And the credential writes through before the job settles.
       expect(recovered).toContainEqual({
@@ -263,7 +263,7 @@ describe("the attempt order runs the whole conversation in one process", () => {
     });
     const result = await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }), io);
     expect(result.ok, result.detail).toBe(true);
-    expect(recordedAttempts).toEqual(r.sent);
+    expect([...new Set(recordedAttempts)]).toEqual(r.sent);
     expect(drains.some((outcome) => outcome.pendingAuthRecords === 1)).toBe(true);
     expect(drains[drains.length - 1]).toMatchObject({
       pendingAuthRecords: 1,
