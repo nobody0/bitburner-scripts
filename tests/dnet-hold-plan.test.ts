@@ -98,6 +98,87 @@ describe("planWalk's preparation checklist", () => {
   });
 });
 
+describe("the mortal scout", () => {
+  const scoutHost = (over: Partial<HoldHost> = {}): HoldHost => vantage({
+    hostname: "dnet-6-x2",
+    maxRam: 32,
+    freeGb: 28,
+    stasisLinked: false,
+    ...over,
+  });
+
+  test("a finisher in flight plus a second staffed vantage admits one scout", () => {
+    const { refuse } = refusals();
+    const plan = planWalk({
+      hosts: [labHost(), vantage(), scoutHost()],
+      charisma: LAB.cha,
+      walkGb: WALK_GB,
+      walkerAt: "dnet-6-x1",
+      scoutWalker: true,
+    }, refuse);
+    expect(plan.tasks).toEqual([{
+      kind: "walk",
+      host: LAB.hostname,
+      from: "dnet-6-x2",
+      threads: Math.floor(28 / WALK_GB),
+      route: "southern",
+      scout: true,
+      reason: "mortal scout from dnet-6-x2",
+    }]);
+  });
+
+  test("no second scout while one already walks, and none without the flag", () => {
+    const { refuse } = refusals();
+    const withScout = planWalk({
+      hosts: [labHost(), vantage(), scoutHost()],
+      charisma: LAB.cha,
+      walkGb: WALK_GB,
+      walkerAt: "dnet-6-x1",
+      scoutAt: "dnet-6-x2",
+      scoutWalker: true,
+    }, refuse);
+    expect(withScout.tasks).toEqual([]);
+    const withoutFlag = planWalk({
+      hosts: [labHost(), vantage(), scoutHost()],
+      charisma: LAB.cha,
+      walkGb: WALK_GB,
+      walkerAt: "dnet-6-x1",
+    }, refuse);
+    expect(withoutFlag.tasks).toEqual([]);
+  });
+
+  test("the scout's absence refuses nothing — it is opportunistic", () => {
+    const { list, refuse } = refusals();
+    const plan = planWalk({
+      hosts: [labHost(), vantage()],
+      charisma: LAB.cha,
+      walkGb: WALK_GB,
+      walkerAt: "dnet-6-x1",
+      scoutWalker: true,
+    }, refuse);
+    expect(plan.tasks).toEqual([]);
+    expect(list).toEqual([]);
+  });
+
+  test("planHold never stamps the scout irreplaceable", () => {
+    const hosts = [labHost(), vantage(), scoutHost()];
+    const plan = planHold({
+      hosts,
+      netDepth: LAB.depth,
+      stasisLimit: 1,
+      stasisLinkedCount: 1,
+      labExpected: true,
+      charisma: LAB.cha,
+      walkerAt: "dnet-6-x1",
+      scoutWalker: true,
+      walkGb: WALK_GB,
+      pinGb: PIN_GB,
+    });
+    expect(plan.tasks.some((t) => t.kind === "walk" && t.scout === true)).toBe(true);
+    expect(hosts.find((h) => h.hostname === "dnet-6-x2")!.irreplaceable).toBeUndefined();
+  });
+});
+
 describe("admitPins", () => {
   test("a staffed host without room for the 12 GB link refuses no-room", () => {
     const { list, refuse } = refusals();

@@ -8,7 +8,9 @@ import { getFunctionRamCost } from "./ns/ram-costs.ts";
 import { SimWorld } from "./world.ts";
 import { expForSkill, skillFromExp } from "../shared/formulas.ts";
 import type { ReportHost } from "../shared/strategy/dnet/courier.ts";
-import { foldReports, type DnetHosts, type ExpiryOpts } from "../shared/strategy/dnet/host.ts";
+import { foldReports, planningView, type DnetHosts, type ExpiryOpts } from "../shared/strategy/dnet/host.ts";
+import { chooseLabVantage, holdHostFrom, planHold, type HoldHost } from "../shared/strategy/dnet/hold.ts";
+import { planFarm, type FarmHost } from "../shared/strategy/dnet/farm.ts";
 import { modelEntry, type PasswordFacts } from "../shared/strategy/dnet/models.ts";
 import {
   candidatesFrom,
@@ -68,6 +70,9 @@ export const BOOTSTRAP_GB = price(KIND_CALLS.bootstrapReclaim);
 export const PIN_GB = price(KIND_CALLS.pin);
 export const WALK_GB = price(KIND_CALLS.walk);
 export const RESIDENT_GB = price(KIND_CALLS.idle);
+export const CACHE_GB = price(KIND_CALLS.cache);
+export const PHISH_GB = price(KIND_CALLS.phish);
+export const PROMOTE_GB = price(KIND_CALLS.promote);
 
 // --- the world fixture --------------------------------------------------------
 
@@ -78,8 +83,8 @@ export interface SpreadNet {
 }
 
 /** The same minimal recipe the sim's own dnet tests use: BN15, full access, no
- * augmentations, darkweb pinned beside home. The farm lane opens caches, whose
- * reward table can draw a stock grant, so it asks for the market too. */
+ * augmentations, darkweb pinned beside home. Both lanes open caches, whose
+ * reward table can draw a stock grant, so the market rides along by default. */
 export function generateNet(seed: number, opts: { stock?: boolean } = {}): SpreadNet {
   const world = new SimWorld({ seed, bitnode: 15, network: [] });
   const servers = world.servers;
@@ -87,7 +92,7 @@ export function generateNet(seed: number, opts: { stock?: boolean } = {}): Sprea
   darkweb.simKind = "DarknetServer";
   servers.set("darkweb", darkweb);
   const network = new Map<string, string[]>([["home", ["darkweb"]], ["darkweb", ["home"]]]);
-  const stock = opts.stock === true
+  const stock = opts.stock !== false
     ? new StockMarketSystem(world, world.player, mulberry32(seed + 2), {
       hasWseAccount: true,
       hasTixApiAccess: true,
@@ -125,9 +130,14 @@ export interface SpreadPolicy {
   /** Plant the minimal spawn-free reclaimer on cramped hosts (shipped) or wait
    *  for full agent room. */
   bootstrapReclaim: boolean;
-  /** Grind every host's owner block down, not just the cramped ones (shipped:
-   *  true — a cleared block is threads, and threads are crack speed). */
-  eagerReclaim?: boolean;
+  /** Gang-grind the lab candidate's block from every able vantage at once
+   *  (`FarmInputs.gangReclaim`), instead of the single elected grinder. */
+  gangReclaim?: boolean;
+  /** How `chooseLabVantage` ranks candidates — raw RAM (shipped) or the
+   *  estimated grind+walk total time. */
+  vantageScoring?: "maxRam" | "totalTime";
+  /** `DeriveOptions.labAdjacentBonus` — crack the future vantage first. */
+  labAdjacentBonus?: number;
   limits?: Partial<SpreadLimits>;
   /** Player charisma at case start. */
   charisma?: number;
@@ -137,7 +147,12 @@ export const SHIPPED_SPREAD: SpreadPolicy = {
   name: "shipped",
   threadScaledAttempts: true,
   bootstrapReclaim: true,
-  eagerReclaim: true,
+  // Promoted by the paired sweep: gang-grinding the lab candidate and scoring
+  // its vantage by grind+walk total time was 0.76x on walker-start, CI
+  // excluding zero. The old single-grinder / raw-RAM shapes stay in the
+  // benchmark as the standing losers.
+  gangReclaim: true,
+  vantageScoring: "totalTime",
 };
 
 // --- run ----------------------------------------------------------------------
@@ -163,11 +178,14 @@ export interface SpreadRun {
 }
 
 interface Job {
-  kind: "attempt" | "reclaim" | "pin" | "unpin";
+  kind: "attempt" | "reclaim" | "cache" | "pin" | "unpin";
   target: string;
   threads: number;
   doneAt: number;
+  filename?: string;
 }
+
+const CACHE_OPEN_MS = 200;
 
 interface Agent {
   job?: Job;
@@ -224,8 +242,13 @@ export function runSpreadCase(
   const mutationCycles = 150 / netDepth + 1;
 
   // One charisma pool, exactly as `labPlayer` keeps one for the lab arenas.
+  // The default starts AT the current lab's charisma gate: below it the real
+  // `planWalk` refuses `charisma` without even naming a candidate, and the
+  // road to the gate is charisma farming — a different mode with its own
+  // economics, not this lane's question.
   const skillMult = 1;
-  let charismaExp = expForSkill(policy.charisma ?? 60, skillMult);
+  const labGate = system.currentLab()?.cha ?? 60;
+  let charismaExp = expForSkill(policy.charisma ?? labGate, skillMult);
   let charisma = skillFromExp(charismaExp, skillMult);
   const gainCharisma = (exp: number): void => {
     charismaExp += exp;
@@ -253,6 +276,8 @@ export function runSpreadCase(
   let nextMutationAt = mutationEveryMs;
   let nextPid = 1;
   let plantedPeak = 0;
+  const debug = typeof process !== "undefined" && process.env["DNET_SPREAD_DEBUG"] === "1";
+  let nextDebugAt = 0;
   const run: SpreadRun = {
     caseId: `spread:${netDepth}`,
     policy: policy.name,
@@ -355,22 +380,35 @@ export function runSpreadCase(
     }
   };
 
-  /** The lab candidate: a cracked host we can see standing next to the lab —
-   * an already-linked one first (commitment, `chooseLabVantage`'s own rule),
-   * then biggest RAM. */
+  /** The same projection the controller hands `planHold`: the shared core
+   * from `holdHostFrom` plus the extras only the runtime knows. */
+  const projectHoldHosts = (): HoldHost[] =>
+    [...knowledge.values()].map((host) => {
+      const view = planningView(host, clock, expiry());
+      return {
+        ...holdHostFrom(host, {
+          at: clock,
+          expiry: expiry(),
+          agentAlive: agents.has(host.hostname) && agents.get(host.hostname)!.bootstrap !== true,
+          hasCredential: vault.has(host.hostname),
+          stasisLinked: stasisLinked.has(host.hostname),
+        }),
+        ...(view.blockedRam !== undefined ? { blockedRam: view.blockedRam } : {}),
+        ...(view.difficulty !== undefined ? { difficulty: view.difficulty } : {}),
+        ...(view.maxRam !== undefined ? { maxRam: view.maxRam } : {}),
+        freeGb: jobFreeGb(host.hostname),
+      };
+    });
+
+  /** The believed lab candidate, by the REAL `chooseLabVantage` — used only
+   * for the crack milestone; the pin/walk decisions are `planHold`'s. */
   const labVantage = (): string | undefined => {
     if (labHost === undefined) return undefined;
-    const adjacent = [...knowledge.values()]
-      .filter((host) => host.goneAt === undefined
-        && host.neighbours?.includes(labHost) === true
-        && vault.has(host.hostname)
-        && truth(host.hostname) !== undefined);
-    if (adjacent.length === 0) return undefined;
-    const linkBias = (name: string): number => (stasisLinked.has(name) ? 1 : 0);
-    return [...adjacent].sort((a, b) =>
-      linkBias(b.hostname) - linkBias(a.hostname)
-      || maxRamOf(b.hostname) - maxRamOf(a.hostname)
-      || (a.hostname < b.hostname ? -1 : 1))[0]!.hostname;
+    return chooseLabVantage(projectHoldHosts().filter((h) =>
+      (h.agentAlive || h.stasisLinked === true)
+      && h.neighbours?.includes(labHost) === true
+      && h.hasCredential
+      && truth(h.hostname) !== undefined))?.hostname;
   };
 
   // --- one derive pass: plant, then file and assign -------------------------
@@ -409,54 +447,85 @@ export function runSpreadCase(
     }
     if (labHost !== undefined && knowledge.has(labHost)) milestone("msToLabSighted");
 
-    // The arena's hold policy is a deliberate stand-in for `hold.ts`'s
-    // `planWalk`/`admitPins` (this lane predates their extraction and does not
-    // model their full refusal checklist): pin the lab vantage, grind its
-    // block, start the walker when both are done.
-    const vantage = labVantage();
-    const hold: Array<NonNullable<DeriveOptions["hold"]>[number]> = [];
-    // Release a link whose lab edge is gone: with one slot, a mispin held
-    // forever is a permanent stall. The deployed planner's release rule —
-    // "the walker evicts anything" — needs an agent standing on the host,
-    // which the remote re-plant above provides.
-    for (const linked of stasisLinked) {
-      if (linked === vantage) continue;
-      if (agents.get(linked) === undefined || agents.get(linked)!.job !== undefined) continue;
-      hold.push({ kind: "pin", host: linked, from: linked, unpin: true, reason: "release a mispinned link" });
-    }
-    if (vantage !== undefined) {
-      const record = truth(vantage);
-      if (record !== undefined && !stasisLinked.has(vantage)
-        && maxRamOf(vantage) - record.blockedRam >= PIN_GB) {
-        hold.push({ kind: "pin", host: vantage, from: vantage, edge: labHost!, reason: "pin the lab vantage" });
-      }
-      if (stasisLinked.has(vantage) && record !== undefined && record.blockedRam <= 0
-        && agents.has(vantage)) {
-        hold.push({
-          kind: "walk",
-          host: labHost!,
-          from: vantage,
-          threads: Math.max(1, Math.floor(maxRamOf(vantage) / WALK_GB)),
-          reason: "walk the labyrinth",
-        });
-      }
+    // The REAL hold planner decides the pin, the release, and the walk — the
+    // exact refusal checklist the controller runs. `induce` tasks it files are
+    // skipped at assignment (migration is out of this lane's scope).
+    const holdPlan = planHold({
+      hosts: projectHoldHosts(),
+      netDepth,
+      stasisLimit: system.stasisLinkLimit(),
+      stasisLinkedCount: stasisLinked.size,
+      labExpected: true,
+      charisma,
+      walkGb: WALK_GB,
+      pinGb: PIN_GB,
+      reclaimGb: RECLAIM_GB,
+      ...(policy.vantageScoring !== undefined ? { vantageScoring: policy.vantageScoring } : {}),
+    });
+    const hold = holdPlan.tasks;
+    if (debug && clock >= nextDebugAt) {
+      nextDebugAt += 60_000;
+      const kinds = hold.map((t) => `${t.kind}:${t.host}`).join(",");
+      const refused = holdPlan.refused.map((r) => `${r.why}@${r.hostname}`).join(",");
+      console.error(`[spread] t=${(clock / 60_000).toFixed(1)}m agents=${agents.size} vault=${vault.size} hold=[${kinds}] refused=[${refused}]`);
     }
 
+    // The REAL farm ladder decides the grind (and the cache openings that
+    // unblock it — planFarm's rungs are exclusive per host, so a cache task
+    // must actually run or its host never reaches the reclaim rung). Phish
+    // and promote are skipped at assignment: money is out of scope here.
     const farm: Array<NonNullable<DeriveOptions["farm"]>[number]> = [];
+    const farmHosts: FarmHost[] = [];
     for (const [name, agent] of agents) {
-      const record = truth(name);
-      if (!record || record.blockedRam <= 0) continue;
-      const wantsGrind = agent.bootstrap === true
-        || name === vantage
-        || policy.eagerReclaim === true
-        || jobFreeGb(name) < ATTEMPT_GB;
-      if (!wantsGrind) continue;
-      const perThread = agent.bootstrap === true ? BOOTSTRAP_GB : RECLAIM_GB;
-      const room = agent.bootstrap === true
-        ? Math.max(0, maxRamOf(name) - record.blockedRam)
-        : jobFreeGb(name);
-      const threads = Math.max(1, Math.floor(room / perThread));
-      farm.push({ kind: "reclaim", host: name, threads, reason: "grind the owner block" });
+      if (agent.bootstrap === true) {
+        // The spawn-free reclaimer is not a resident and never reaches the
+        // ladder: it grinds its own block outright, exactly as deployed.
+        const record = truth(name);
+        if (!record || record.blockedRam <= 0) continue;
+        const room = Math.max(0, maxRamOf(name) - record.blockedRam);
+        farm.push({
+          kind: "reclaim",
+          host: name,
+          threads: Math.max(1, Math.floor(room / BOOTSTRAP_GB)),
+          reason: "bootstrap: grind the owner block",
+        });
+        continue;
+      }
+      const view = planningView(knowledge.get(name) ?? { hostname: name, lastSeenAt: 0, seenAt: {}, dirty: {} }, clock, expiry());
+      farmHosts.push({
+        host: name,
+        depth: view.depth,
+        difficulty: view.difficulty,
+        blockedRam: view.blockedRam,
+        freeGb: jobFreeGb(name),
+        caches: view.caches,
+        isLab: false,
+        busy: new Set(),
+        neighbours: view.neighbours,
+        hasCredential: vault.has(name),
+      });
+    }
+    const farmPlan = planFarm(farmHosts, {
+      now: clock,
+      charisma,
+      gbPerThread: { cache: CACHE_GB, reclaim: RECLAIM_GB, phish: PHISH_GB, promote: PROMOTE_GB },
+      wantedGb: ATTEMPT_GB,
+      openLabCache: false,
+      ...(policy.gangReclaim === true && holdPlan.labCandidate !== undefined
+        ? { gangReclaim: holdPlan.labCandidate }
+        : {}),
+    });
+    for (const task of farmPlan.tasks) {
+      if (task.kind !== "reclaim" && task.kind !== "cache") continue;
+      farm.push({
+        kind: task.kind,
+        host: task.host,
+        ...(task.from !== undefined ? { from: task.from } : {}),
+        threads: task.threads,
+        ...(task.filename !== undefined ? { filename: task.filename } : {}),
+        reason: task.reason,
+        ...(task.gang === true ? { perVantage: true } : {}),
+      });
     }
 
     const inFlight = new Map<string, { from: string; kind: Task["kind"] }[]>();
@@ -481,6 +550,7 @@ export function runSpreadCase(
       hold,
       farm,
       inFlight,
+      ...(policy.labAdjacentBonus !== undefined ? { labAdjacentBonus: policy.labAdjacentBonus } : {}),
     });
 
     for (const task of [...tasks].sort((a, b) => a.priority - b.priority)) {
@@ -511,6 +581,15 @@ export function runSpreadCase(
           target: task.host,
           threads: task.threads ?? 1,
           doneAt: clock + reclaimWaitMs(charisma),
+        };
+      } else if (task.kind === "cache") {
+        if (task.filename === undefined) continue;
+        agent.job = {
+          kind: "cache",
+          target: task.host,
+          threads: 1,
+          doneAt: clock + CACHE_OPEN_MS,
+          filename: task.filename,
         };
       } else if (task.kind === "pin") {
         agent.job = {
@@ -565,6 +644,12 @@ export function runSpreadCase(
           agents.delete(name);
         }
       }
+    } else if (job.kind === "cache") {
+      if (!record || job.filename === undefined) return;
+      if (system.cachesOn(job.target).includes(job.filename)) {
+        system.openCache(job.target, job.filename);
+      }
+      fold([observeHost(job.target)]);
     } else if (job.kind === "pin") {
       // The deployed pin job probes before it links (`KIND_CALLS.pin` carries
       // `dnet.probe`): a stale believed edge refuses rather than spending the

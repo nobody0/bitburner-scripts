@@ -260,7 +260,9 @@ async function plantOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
     hosts: [{ ...describeHost(jobNs, order.host, deps), ...(filesDirty ? { invalidates: ["files" as const] } : {}) }],
     detail: order.omitProber === true
       ? `resident pid ${pid}, prober reserved for lab walk`
-      : `resident pid ${pid}, prober pid ${proberPid}`,
+      : prepared.reuseProber
+        ? `resident pid ${pid}, surviving prober reused`
+        : `resident pid ${pid}, prober pid ${proberPid}`,
   };
 }
 

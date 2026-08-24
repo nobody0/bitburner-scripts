@@ -102,8 +102,11 @@ describe("a hacking_speed step under a fixed landing grid", () => {
     const weakenError = weakenMs(AFTER) - weakenMs(BEFORE);
     expect(weakenError).toBe(4 * hackError);
     expect(weakenError - hackError).toBe(-9_000);
-    // Which is the number that matters: the grid it has to survive is 5 ms.
-    expect((weakenError - hackError) / MINIMUM_LANDING_GAP_MS).toBe(-1_800);
+    // Which is the number that matters: the shear measured in landing-grid
+    // units — three orders of magnitude beyond what ordering can survive,
+    // whatever the gap constant is set to.
+    expect((weakenError - hackError) / MINIMUM_LANDING_GAP_MS).toBe(-9_000 / MINIMUM_LANDING_GAP_MS);
+    expect(Math.abs((weakenError - hackError) / MINIMUM_LANDING_GAP_MS)).toBeGreaterThan(100);
   });
 
   test("weaken drifts exactly 4x the hack however small the step", () => {

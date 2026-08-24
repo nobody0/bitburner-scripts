@@ -82,6 +82,8 @@ import {
   hardCancelReady,
   jobWatchdogExpired,
   orderCalls,
+  PENDING_ORDER_GRACE_MS,
+  PROBE_REFRESH_DEADLINE_MS,
   priceCalls,
   proberReserveGb,
   signalWake,
@@ -752,22 +754,27 @@ export async function main(ns: NS): Promise<void> {
   };
 
   // --- projections (HoldHost / FarmHost from the flat entries) --------------
-  /** Every host with a walk running or staged, in map order. Written once:
-   * three sweeps used to carry private copies of this loop. */
-  const walkVantages = (): Set<string> => {
-    const walking = new Set<string>();
+  /** Every host with a walk running or staged, in map order, mapped to whether
+   * EVERY walk it carries is a mortal scout. `false` therefore means "carries
+   * the finisher", which is the flag the whole feature branches on: only the
+   * finisher is irreplaceable, and only the finisher holds the storm. Written
+   * once: three sweeps used to carry private copies of this loop. */
+  const walkVantageRoles = (): Map<string, boolean> => {
+    const roles = new Map<string, boolean>();
+    const note = (host: string, scout: boolean): void => {
+      roles.set(host, (roles.get(host) ?? true) && scout);
+    };
     for (const entry of hosts.values()) {
-      if (entry.agent?.order.kind === "walk") walking.add(entry.hostname);
-      for (const o of entry.staged ?? []) if (o.kind === "walk") walking.add(entry.hostname);
+      if (entry.agent?.order.kind === "walk") note(entry.hostname, entry.agent.order.scout === true);
+      for (const o of entry.staged ?? []) if (o.kind === "walk") note(entry.hostname, o.scout === true);
     }
-    return walking;
+    return roles;
   };
-  /** The walker's host, when one exists — the LAST in map order, exactly the
-   * value the private loops used to leave behind. */
-  const currentWalker = (): string | undefined => [...walkVantages()].pop();
+  /** Every host with a walk running or staged, in map order. */
+  const walkVantages = (): Set<string> => new Set(walkVantageRoles().keys());
 
   const projectHoldHosts = (at: number, expiry: ExpiryOpts): HoldHost[] => {
-    const walking = walkVantages();
+    const walking = walkVantageRoles();
     return [...hosts.values()].map((entry) => {
       const view = planningView(entry, at, expiry);
       return {
@@ -787,7 +794,10 @@ export async function main(ns: NS): Promise<void> {
         ...(view.difficulty !== undefined ? { difficulty: view.difficulty } : {}),
         ...(view.maxRam !== undefined ? { maxRam: view.maxRam } : {}),
         freeGb: usableGb(entry.hostname, at, expiry),
-        ...(walking.has(entry.hostname) ? { irreplaceable: true } : {}),
+        // Only the FINISHER is irreplaceable. A mortal scout stamped here
+        // would claim the reserved walker stasis slot in `admitPins` and
+        // evict a held link for a walker whose death is already priced in.
+        ...(walking.get(entry.hostname) === false ? { irreplaceable: true } : {}),
       };
     });
   };
@@ -874,10 +884,27 @@ export async function main(ns: NS): Promise<void> {
       stasisLinkedCount: stasisLinked.size,
       labExpected,
       charisma,
-      walkerAt: currentWalker(),
+      // The finisher and the scout are told apart by the ORDER's own flag, not
+      // by a proxy: a scout mistaken for the finisher would suppress the
+      // finisher's re-plan and hold the storm. The last-in-map-order pick
+      // among finishers is exactly the pre-scout single-walk shape.
+      ...(() => {
+        const roles = [...walkVantageRoles()];
+        const finisherAt = roles.filter(([, scout]) => !scout).map(([host]) => host).pop();
+        const scoutAt = roles.find(([, scout]) => scout)?.[0];
+        return {
+          ...(finisherAt !== undefined ? { walkerAt: finisherAt } : {}),
+          ...(scoutAt !== undefined ? { scoutAt } : {}),
+        };
+      })(),
+      scoutWalker: true,
       walkGb: budgets["walk"],
       pinGb: budgets["pin"]!,
       induceGbPerThread: budgets["induce"],
+      reclaimGb: budgets["reclaim"],
+      // Promoted from the reach-the-lab benchmark: with the gang grind, the
+      // least grind+walk TOTAL beats raw RAM (0.76x paired, CI excluding 0).
+      vantageScoring: "totalTime",
     });
     labCandidateHost = plan.labCandidate;
     if (plan.charismaNeeded !== undefined) charismaNeeded = Math.max(charismaNeeded ?? 0, plan.charismaNeeded);
@@ -899,18 +926,21 @@ export async function main(ns: NS): Promise<void> {
     const runner = hosts.get(task.from);
     if (!runner || runner.agent === undefined) return false;
     const isWalk = task.kind === "walk";
+    // A mortal scout keeps its prober and its ordinary recovery: only the
+    // finisher's host is consumed whole.
+    const isScout = isWalk && task.scout === true;
     // A stasis edge is a remote recovery guarantee. Spend that host's RAM on
     // work, not spawn; unpin is the exception because success removes it.
-    const controllerManaged = isWalk
+    const controllerManaged = (isWalk && !isScout)
       || (stasisLinked.has(task.from) && !(task.kind === "pin" && task.unpin === true));
     const budget = priceCalls(ns, orderCalls(task.kind, controllerManaged));
-    const room = usableGb(task.from, Date.now(), expiryOpts(), !isWalk);
+    const room = usableGb(task.from, Date.now(), expiryOpts(), !isWalk || isScout);
     const threads = threadsFor(room, budget, THREAD_SCALED_KINDS.has(task.kind), task.threads ?? 1);
     if (threads < 1 || budget * threads > room) return false;
     // Only once the order is certain to be staged: a refused walk that had
     // already killed the prober would leave the lab candidate — the one host
     // `reviveProbers` deliberately skips — blind for good.
-    if (isWalk && strategicQueueDepth(runner.staged ?? []) < MAX_STAGED_PER_HOST) killWalkHostProber(task.from);
+    if (isWalk && !isScout && strategicQueueDepth(runner.staged ?? []) < MAX_STAGED_PER_HOST) killWalkHostProber(task.from);
     const order: Order = {
       id: task.id,
       kind: task.kind,
@@ -934,6 +964,8 @@ export async function main(ns: NS): Promise<void> {
       ...(task.symbol !== undefined ? { symbol: task.symbol } : {}),
       ...(task.edge !== undefined ? { edge: task.edge } : {}),
       ...(task.unpin === true ? { unpin: true } : {}),
+      ...(task.route !== undefined ? { route: task.route } : {}),
+      ...(isScout ? { scout: true } : {}),
       ...(task.guessId !== undefined && guessFor.has(task.guessId) ? { guess: guessFor.get(task.guessId)! } : {}),
       ...(task.followAttemptIds !== undefined ? { followAttemptIds: [...task.followAttemptIds] } : {}),
       ...(task.skipInitialBleed === true ? { skipInitialBleed: true } : {}),
@@ -1146,19 +1178,23 @@ export async function main(ns: NS): Promise<void> {
     const seedHolder = stormHosts.find((h) => h.goneAt === undefined && h.stormSeed === true);
     const labWalkedNow = [...hosts.values()].some((entry) => isLabyrinth(entry.hostname, fresh<string>(entry, "modelId", at, stormExpiry)) && vault.has(entry.hostname));
     const seedHunt = seedHolder === undefined && (labWalkedNow || stasisLinked.size >= stasisLimit) && (lastStormFiredAt === undefined || at - lastStormFiredAt > STORM_COOLDOWN_MS);
+    // Hold BEFORE farm: the farm's gang grind is aimed at the hold plan's lab
+    // candidate, whose block is the last gate before the walker starts.
+    const holdPlan = planHold(at);
+    hold = holdPlan.report;
     const farmPlan = planFarm(projectFarmHosts(at, expiryOpts()), {
       now: at, charisma, gbPerThread: farmGbPerThread, wantedGb: heaviestJobGb,
       ...(lastPhishCacheAt !== undefined ? { lastPhishCacheAt } : {}),
       ...(promoteSymbols.length > 0 ? { promoteSymbols } : {}),
       crimeSuccessMult, openLabCache,
       ...(seedHunt ? { seedHunt: true } : {}),
+      ...(holdPlan.labCandidate !== undefined && !labWalkedNow
+        ? { gangReclaim: holdPlan.labCandidate }
+        : {}),
     });
     const farmAdmitted: Record<string, number> = {};
     for (const task of farmPlan.tasks) farmAdmitted[task.kind] = (farmAdmitted[task.kind] ?? 0) + 1;
     farm = { admitted: farmAdmitted, ...foldRefusals(farmPlan.refused), ...(farmPlan.cacheHunter !== undefined ? { cacheHunter: farmPlan.cacheHunter } : {}) };
-
-    const holdPlan = planHold(at);
-    hold = holdPlan.report;
 
     for (const candidate of spreadCandidates) {
       if (candidate.host === holdPlan.labCandidate && stasisLinked.has(candidate.host)) { candidate.omitProber = true; candidate.reclaimOnly = true; }
@@ -1167,8 +1203,13 @@ export async function main(ns: NS): Promise<void> {
     spread = { planted: plan.plant.length, ...foldRefusals(plan.refused) };
 
     const pinsPending = holdPlan.tasks.some((t) => t.kind === "pin" && t.unpin !== true) || [...projectInFlight().values()].some((held) => held.some((job) => job.kind === "pin"));
-    let walkFrom = currentWalker();
-    for (const task of holdPlan.tasks) if (task.kind === "walk") walkFrom = task.from;
+    // The storm's walker gate protects the FINISHER only. The mortal scout is
+    // explicitly sacrificial, so neither a running nor a planned scout may
+    // hold the fire.
+    const walking = new Set(
+      [...walkVantageRoles()].filter(([, scout]) => !scout).map(([host]) => host));
+    for (const task of holdPlan.tasks) if (task.kind === "walk" && task.scout !== true) walking.add(task.from);
+    const walkFrom = [...walking].pop();
     const stormCtx: StormContext = {
       now: at,
       vault: new Set(vault.keys()),
@@ -1181,6 +1222,11 @@ export async function main(ns: NS): Promise<void> {
       labWalked: holdPlan.labWalked,
       ...(lastPhishCacheAt !== undefined ? { lastPhishCacheAt } : {}),
       ...(lastStormFiredAt !== undefined ? { lastStormFiredAt } : {}),
+      // The blocks the farm just refused ON BUDGET do not hold the fire —
+      // built from the same plan's refusals so the two rules cannot disagree.
+      budgetRefusedBlocks: new Set(
+        farmPlan.refused.filter((r) => r.why === "reclaim-not-needed").map((r) => r.host),
+      ),
     };
     const stormPlan = planStorm(stormHosts, stormCtx);
     const seedSeenAt = seedHolder !== undefined ? hosts.get(seedHolder.hostname)?.seenAt.files : undefined;
@@ -1225,7 +1271,7 @@ export async function main(ns: NS): Promise<void> {
       ...(budgets["bleed"] !== undefined ? { bleedGbPerThread: budgets["bleed"] } : {}),
       vault: new Set(vault.keys()),
       plantable: plan.plant.map((entry) => ({ host: entry.host, from: entry.from, ...(entry.remote ? { remote: true } : {}), ...(entry.bootstrapReclaim ? { bootstrapReclaim: true } : {}), ...(entry.bootstrapThreads !== undefined ? { bootstrapThreads: entry.bootstrapThreads } : {}), ...(entry.omitProber ? { omitProber: true } : {}) })),
-      farm: farmPlan.tasks,
+      farm: farmPlan.tasks.map((task) => ({ ...task, ...(task.gang === true ? { perVantage: true } : {}) })),
       hold: [...holdPlan.tasks, ...(stormPlan.fire !== undefined ? [{ kind: "storm" as const, host: stormPlan.fire.host, from: stormPlan.fire.from, reason: stormPlan.fire.reason }] : [])],
       ...(guesses.length > 0 ? { guesses } : {}),
     });
@@ -1291,20 +1337,42 @@ export async function main(ns: NS): Promise<void> {
 
   const reconcilePending = (at: number): void => {
     const expiry = expiryOpts();
+    const staleReason = (order: Order): string | undefined => {
+      const host = hosts.get(order.host);
+      if (!host || host.goneAt !== undefined) return "target is gone";
+      if (order.targetIdentity !== undefined && host.identity !== undefined && order.targetIdentity !== host.identity) return "target identity changed";
+      if (order.kind === "attempt" && vault.has(order.host)) return "credential already verified";
+      if (order.kind === "plant" && hosts.get(order.host)?.agent !== undefined) return "resident already present";
+      if (order.kind === "cache" && order.filename !== undefined && !(fresh<string[]>(host, "caches", at, expiry) ?? []).includes(order.filename)) return "cache listing changed";
+      return undefined;
+    };
     for (const entry of hosts.values()) {
       const keep: Order[] = [];
       for (const order of entry.staged ?? []) {
-        const host = hosts.get(order.host);
-        let reason: string | undefined;
-        if (!host || host.goneAt !== undefined) reason = "target is gone";
-        else if (order.targetIdentity !== undefined && host.identity !== undefined && order.targetIdentity !== host.identity) reason = "target identity changed";
-        else if (order.kind === "attempt" && vault.has(order.host)) reason = "credential already verified";
-        else if (order.kind === "plant" && hosts.get(order.host)?.agent !== undefined) reason = "resident already present";
-        else if (order.kind === "cache" && order.filename !== undefined && !(fresh<string[]>(host, "caches", at, expiry) ?? []).includes(order.filename)) reason = "cache listing changed";
+        const reason = staleReason(order);
         if (reason === undefined) keep.push(order);
         else retireStaged(order, "cancelled", reason);
       }
       entry.staged = keep;
+      // The handoff slot goes stale by the same rules. A `pendingOrder` whose
+      // spawn died (or whose plant claim keeps failing) is otherwise never
+      // inspected again, and `projectInFlight` reads it as busy FOREVER — a
+      // plant target silently barred from the plant pool.
+      const pending = entry.pendingOrder;
+      if (pending !== undefined) {
+        const reason = staleReason(pending);
+        if (reason !== undefined) {
+          entry.pendingOrder = undefined;
+          retireStaged(pending, "cancelled", reason);
+        } else if (entry.agent === undefined && entry.bootstrap === undefined
+          && at - (entry.pendingOrderAt ?? 0) > PENDING_ORDER_GRACE_MS) {
+          // Still a valid order, but its spawn died with it in hand: nobody is
+          // coming to adopt it. Hand it back to the queue — the next resident
+          // (or a re-plant) picks it up and runs it at its own price.
+          entry.pendingOrder = undefined;
+          (entry.staged ??= []).unshift(pending);
+        }
+      }
     }
   };
 
@@ -1391,7 +1459,17 @@ export async function main(ns: NS): Promise<void> {
     },
     beginProbeRefresh(host) {
       const entry = ensureEntry(host);
-      if (entry.probeRefresh !== undefined) return { refresh: entry.probeRefresh, launch: false };
+      if (entry.probeRefresh !== undefined) {
+        if (Date.now() - (entry.probeRefreshAt ?? 0) <= PROBE_REFRESH_DEADLINE_MS) {
+          return { refresh: entry.probeRefresh, launch: false };
+        }
+        // The barrier outlived any live prober's first report: its launcher
+        // died between exec and settle. Left standing, every later plant on
+        // this host would await it forever — the prober-only orphan loop.
+        const stale = entry.probeRefresh;
+        entry.probeRefresh = undefined;
+        stale.settle(undefined);
+      }
       let settled = false;
       let resolve!: (report: DnetProbeReport | undefined) => void;
       const refresh: DnetProbeRefresh = {
@@ -1403,6 +1481,7 @@ export async function main(ns: NS): Promise<void> {
         },
       };
       entry.probeRefresh = refresh;
+      entry.probeRefreshAt = Date.now();
       return { refresh, launch: true };
     },
     cancelProbeRefresh(host, refresh) {
@@ -1435,9 +1514,16 @@ export async function main(ns: NS): Promise<void> {
       if (next !== undefined) {
         next.controllerManaged = true;
         entry.pendingOrder = next;
+        entry.pendingOrderAt = Date.now();
       }
+      // A live, tracked prober is reusable on ANY host, not only a
+      // stasis-managed one. Launching a second prober beside a survivor both
+      // wastes its 1.8 GB and — in the band where usableRam admits one prober
+      // but not two — makes the resident exec fail with `launch-refused` every
+      // 60 s forever, which is exactly the prober-only orphan state observed
+      // in play.
       const proberPid = entry.prober?.pid;
-      const reuseProber = controllerManaged && proberPid !== undefined
+      const reuseProber = proberPid !== undefined
         && proberPid > 0 && ns["isRunning"](proberPid, host);
       return { controllerManaged, ...(next !== undefined ? { next } : {}), reuseProber };
     },

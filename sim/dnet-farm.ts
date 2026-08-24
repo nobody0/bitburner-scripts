@@ -31,7 +31,7 @@ import {
   type StormContext,
   type Task,
 } from "../shared/strategy/dnet/plan.ts";
-import { planFarm, type FarmHost } from "../shared/strategy/dnet/farm.ts";
+import { planFarm, type FarmHost, type HunterElection } from "../shared/strategy/dnet/farm.ts";
 import {
   authenticateWaitMs,
   isLabyrinth,
@@ -70,6 +70,12 @@ export interface FarmPolicy {
    *  lab is unfinished). False models the post-lab net. */
   labPresent?: boolean;
   charisma?: number;
+  /** `FarmInputs.hunterElection` — which sort elects the cache hunter. */
+  hunterElection?: HunterElection;
+  /** `FarmInputs.clearBudgetMs` — the grind-for-the-cache wall-clock budget. */
+  clearBudgetMs?: number;
+  /** `StormContext.phishOverlapMs` — gate 7's fire window. */
+  phishOverlapMs?: number;
 }
 
 export const SHIPPED_FARM: FarmPolicy = { name: "shipped", stormEnabled: true, labPresent: true };
@@ -287,6 +293,22 @@ export function runFarmCase(
         nextWalkerAttemptAt = walkerAuthMs();
       }
     }
+    if (!labPresent) {
+      // The post-lab shape has already spent its links — that is `planStorm`'s
+      // gate 5 (`links-unspent`), and a lab-less arm with no links could never
+      // fire a storm and would measure nothing. Deepest and biggest first,
+      // the same order the spare planner claims its targets.
+      const limit = system.stasisLinkLimit();
+      const linkable = [...system.hosts.values()]
+        .filter((host) => host.online && !host.isStationary && vault.has(host.hostname))
+        .sort((a, b) => b.depth - a.depth
+          || maxRamOf(b.hostname) - maxRamOf(a.hostname)
+          || (a.hostname < b.hostname ? -1 : 1));
+      for (const host of linkable) {
+        if (stasisLinked.size >= limit) break;
+        if (system.setStasisLink(host.hostname, true) === 200) stasisLinked.add(host.hostname);
+      }
+    }
 
     for (const name of vault) {
       // Spread's endgame already rooted these; the first-auth caches that
@@ -394,6 +416,8 @@ export function runFarmCase(
       lastPhishCacheAt,
       openLabCache: false,
       seedHunt,
+      ...(policy.hunterElection !== undefined ? { hunterElection: policy.hunterElection } : {}),
+      ...(policy.clearBudgetMs !== undefined ? { clearBudgetMs: policy.clearBudgetMs } : {}),
     });
 
     // The storm, through its own gates.
@@ -418,6 +442,12 @@ export function runFarmCase(
         labWalked: !labPresent,
         ...(lastPhishCacheAt !== undefined ? { lastPhishCacheAt } : {}),
         ...(lastStormFiredAt !== undefined ? { lastStormFiredAt } : {}),
+        // Same-plan agreement, as the controller wires it: blocks the farm
+        // refused on budget do not hold the fire.
+        budgetRefusedBlocks: new Set(
+          farmPlan.refused.filter((r) => r.why === "reclaim-not-needed").map((r) => r.host),
+        ),
+        ...(policy.phishOverlapMs !== undefined ? { phishOverlapMs: policy.phishOverlapMs } : {}),
       };
       const storm = planStorm(views, ctx);
       if (storm.fire) {

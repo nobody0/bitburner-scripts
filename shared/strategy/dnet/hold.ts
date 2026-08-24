@@ -52,7 +52,9 @@
  *   src/DarkNet/controllers/NetworkGenerator.ts:203-231 (addServerToNetwork)
  *   src/DarkNet/utils/darknetNetworkUtils.ts:16-34, 69-78, 90 */
 
+import { reclaimForecast } from "./farm.ts";
 import { fresh, type DnetHost, type ExpiryOpts } from "./host.ts";
+import type { LabRouteBias } from "./maze.ts";
 import { isLabyrinth, isOnAirGap, labStage, NET_WIDTH } from "./rates.ts";
 
 /** What every policy here needs to know about one host. All of it is already in
@@ -170,15 +172,54 @@ export function holdHostFrom(
   };
 }
 
+/** Inputs for the total-time vantage score — see `chooseLabVantage`. */
+export interface LabVantageScoring {
+  charisma: number;
+  /** One walker thread's allocation, for the thread count RAM buys. */
+  walkGb: number;
+  /** One reclaim thread's allocation, for the grind-time estimate. */
+  reclaimGb: number;
+  /** Expected walk length in attempts; the lab lane's planner mean. */
+  walkAttempts?: number;
+  /** One attempt's cost at ONE thread, before the thread factor. */
+  attemptMsAt1Thread?: number;
+}
+
+const DEFAULT_WALK_ATTEMPTS = 120;
+const DEFAULT_ATTEMPT_MS = 4_000;
+
+/** Estimated time from HERE to a walked lab through this candidate: grind its
+ * block clear, then walk at the threads its RAM buys. The two terms pull in
+ * opposite directions — a big host walks faster but may block longer — and
+ * raw `maxRam` sees only one of them. */
+export function labVantageTotalMs(host: HoldHost, scoring: LabVantageScoring): number {
+  const grindThreads = Math.max(1, Math.floor((host.freeGb ?? 0) / scoring.reclaimGb));
+  const forecast = reclaimForecast(host, scoring.charisma, grindThreads);
+  const grindMs = (host.blockedRam ?? 0) <= 0 ? 0 : forecast?.clearMs ?? Infinity;
+  const walkThreads = Math.max(1, Math.floor((host.maxRam ?? 0) / scoring.walkGb));
+  const walkMs = (scoring.walkAttempts ?? DEFAULT_WALK_ATTEMPTS)
+    * (scoring.attemptMsAt1Thread ?? DEFAULT_ATTEMPT_MS)
+    / (1 + 0.2 * (walkThreads - 1));
+  return grindMs + walkMs;
+}
+
 /** Choose the one host that will become the lab walker.
  *
  * Once a candidate has been stasis-linked it is a commitment: switching to a
  * larger unlinked neighbour would strand the first link and restart the whole
- * preparation sequence. Among equally committed candidates RAM wins because
- * every remaining gigabyte becomes an authenticate thread. */
-export function chooseLabVantage(candidates: readonly HoldHost[]): HoldHost | undefined {
+ * preparation sequence. Among equally committed candidates: with `scoring`,
+ * the least TOTAL time to a walked lab wins (grind + walk — a big host with a
+ * huge owner block can lose to a clean smaller one); without it, raw RAM wins
+ * because every remaining gigabyte becomes an authenticate thread. */
+export function chooseLabVantage(
+  candidates: readonly HoldHost[],
+  scoring?: LabVantageScoring,
+): HoldHost | undefined {
   return [...candidates].sort((a, b) =>
     Number(b.stasisLinked === true) - Number(a.stasisLinked === true)
+    || (scoring !== undefined
+      ? labVantageTotalMs(a, scoring) - labVantageTotalMs(b, scoring)
+      : (b.maxRam ?? 0) - (a.maxRam ?? 0))
     || (b.maxRam ?? 0) - (a.maxRam ?? 0)
     || (a.hostname < b.hostname ? -1 : a.hostname > b.hostname ? 1 : 0))[0];
 }
@@ -201,6 +242,14 @@ export interface HoldTask {
   edge?: string;
   /** Pins only: release the link instead. */
   unpin?: boolean;
+  /** Walks only: the macro-route this walker's prior commits to. The finisher
+   *  stays unbiased; a scout is worth most on the route the finisher is not
+   *  on. */
+  route?: LabRouteBias;
+  /** Walks only: a MORTAL scout — a second, unpinned walker. Never stamped
+   *  irreplaceable, never reserves a stasis slot, keeps its prober, and its
+   *  death costs a re-plant rather than the walk (the shared field survives). */
+  scout?: true;
 }
 
 export interface HoldPlanInputs {
@@ -214,13 +263,24 @@ export interface HoldPlanInputs {
   /** Whether this world still expects a labyrinth to walk. */
   labExpected: boolean;
   charisma: number;
-  /** The vantage a walk is already running or staged from, if any. */
+  /** The vantage the FINISHER walk is already running or staged from, if any. */
   walkerAt?: string;
+  /** The vantage a mortal scout already walks from, if any. */
+  scoutAt?: string;
+  /** Field ONE mortal scout beside the finisher when a second lab-adjacent
+   *  staffed vantage exists. The party benchmark's finding: a second PID in
+   *  the same maze shares the field and the charisma pool, either finishing
+   *  roots the lab, and even a short-lived scout beats solo. */
+  scoutWalker?: boolean;
   /** One walker thread's allocation; undefined refuses the walk on room. */
   walkGb?: number;
   /** One pin job's allocation. */
   pinGb: number;
   induceGbPerThread?: number;
+  /** One reclaim thread's allocation. With `vantageScoring: "totalTime"` the
+   *  lab vantage is chosen by estimated grind+walk time instead of raw RAM. */
+  reclaimGb?: number;
+  vantageScoring?: "maxRam" | "totalTime";
 }
 
 export interface HoldPlan {
@@ -246,7 +306,7 @@ interface WalkPlan {
  * pin, fresh blocked RAM, a zero block, a resident, and room for one legal
  * walker thread. Each stops the walk and names the one thing to fix next. */
 export function planWalk(
-  inputs: Pick<HoldPlanInputs, "hosts" | "charisma" | "walkerAt" | "walkGb">,
+  inputs: Pick<HoldPlanInputs, "hosts" | "charisma" | "walkerAt" | "scoutAt" | "scoutWalker" | "walkGb" | "reclaimGb" | "vantageScoring">,
   refuse: (host: string, why: string, detail: string) => void,
 ): WalkPlan {
   const lab = inputs.hosts.find((h) => isLabyrinth(h.hostname, h.modelId) && h.gone !== true);
@@ -265,10 +325,14 @@ export function planWalk(
   if (walkerAt === undefined) {
     // Only worth choosing when no walk is in flight: for the whole multi-minute
     // walk this filter-and-sort would otherwise run every tick for nothing.
+    const scoring = inputs.vantageScoring === "totalTime"
+      && inputs.walkGb !== undefined && inputs.reclaimGb !== undefined
+      ? { charisma: inputs.charisma, walkGb: inputs.walkGb, reclaimGb: inputs.reclaimGb }
+      : undefined;
     const vantageHost = chooseLabVantage(inputs.hosts.filter((h) =>
       (h.agentAlive || h.stasisLinked === true)
       && h.neighbours?.includes(lab.hostname) === true
-      && h.hasCredential));
+      && h.hasCredential), scoring);
     const vantage = vantageHost?.hostname;
     if (vantage === undefined) {
       refuse(lab.hostname, "no-vantage", "nothing of ours is standing next to the labyrinth with room for a walker");
@@ -298,6 +362,36 @@ export function planWalk(
     }
     tasks.push({ kind: "walk", host: lab.hostname, from: vantage, threads: Math.floor(maxRam / inputs.walkGb), reason: `walk the maze from ${vantage}` });
     walkerAt = vantage;
+  }
+  // THE MORTAL SCOUT: once a finisher walks, one more lab-adjacent staffed
+  // vantage may join it — unpinned, opportunistic (its absence refuses
+  // nothing), biased to the route the unbiased finisher tends away from. It
+  // keeps its prober, so its threads come from FREE room, not the whole host.
+  if (inputs.scoutWalker === true && walkerAt !== undefined && inputs.scoutAt === undefined
+    && inputs.walkGb !== undefined) {
+    const scout = chooseLabVantage(inputs.hosts.filter((h) =>
+      h.hostname !== walkerAt
+      && h.agentAlive
+      && h.gone !== true
+      // A pinned host is never the scout's seat: `chooseLabVantage` ranks
+      // stasis-linked candidates FIRST, so without this the sacrificial
+      // walker would preferentially settle on the one link this world can
+      // least afford to spend on something whose death is priced in.
+      && h.stasisLinked !== true
+      && h.neighbours?.includes(lab.hostname) === true
+      && h.hasCredential
+      && (h.freeGb ?? 0) >= inputs.walkGb!));
+    if (scout !== undefined) {
+      tasks.push({
+        kind: "walk",
+        host: lab.hostname,
+        from: scout.hostname,
+        threads: Math.max(1, Math.floor((scout.freeGb ?? 0) / inputs.walkGb)),
+        route: "southern",
+        scout: true,
+        reason: `mortal scout from ${scout.hostname}`,
+      });
+    }
   }
   return { lab, ...(walkerAt !== undefined ? { candidate: walkerAt } : {}), tasks };
 }
@@ -364,6 +458,9 @@ export function planHold(inputs: HoldPlanInputs): HoldPlan {
   if (labCandidate) labCandidate.irreplaceable = true;
   for (const task of walk.tasks) {
     tasks.push(task);
+    // The scout is deliberately NOT irreplaceable: it never reserves a stasis
+    // slot and its death is priced in — the shared field survives it.
+    if (task.scout === true) continue;
     const standing = inputs.hosts.find((h) => h.hostname === task.from);
     if (standing) standing.irreplaceable = true;
   }

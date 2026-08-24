@@ -54,7 +54,7 @@ import type { DarknetProfit } from "../../shared/telemetry/topics/dnet.ts";
  * and a build handoff leaves both on disk: an agent from the previous build
  * reading a global whose shape moved under it is a bug with no symptom.
  * Refusing by number makes it exit instead. */
-export const DNET_PROTOCOL = 9;
+export const DNET_PROTOCOL = 10;
 
 /** The script base every allocation starts from. Transcribed rather than read,
  * because a launcher sizes a process it has not started yet.
@@ -115,6 +115,14 @@ export interface Order {
   skipInitialBleed?: boolean;
   symbol?: string;
   filename?: string;
+  /** Walks only: the macro-route bias the walk body hands `routePrior` — set
+   *  for a mortal scout, absent (unbiased) for the finisher. */
+  route?: string;
+  /** Walks only: a MORTAL scout rather than the pinned finisher. The
+   *  controller cannot tell the two apart from a live handle otherwise, and
+   *  the difference decides who is stamped irreplaceable, who holds the storm
+   *  and whose absence re-plans a walk. */
+  scout?: true;
 }
 
 /** What an order hands back. Data, never live objects: the controller folds it
@@ -198,6 +206,11 @@ export interface HostEntry extends DnetHost {
    * the host rather than as a launch callback so every caller observes the
    * same readiness barrier and an old prober cannot satisfy it. */
   probeRefresh?: DnetProbeRefresh;
+  /** When the outstanding barrier was opened, for the stale-barrier reclaim:
+   * a launcher that died between exec and settle would otherwise pin the
+   * barrier forever, and every later plant on the host would await a report
+   * nobody will ever file. */
+  probeRefreshAt?: number;
   /** THE process on this host. `order.kind === "idle"` is resident mode. */
   agent?: AgentHandle;
   /** A spawn-free local reclaimer — not an agent, and must not be staged to. */
@@ -209,6 +222,11 @@ export interface HostEntry extends DnetHost {
    *  booting process reads and clears it. Absent means the successor runs as a
    *  resident. This is the whole order handoff — no closures, just data. */
   pendingOrder?: Order;
+  /** When the handoff slot was filled. A slot far older than any spawn
+   * handoff means the spawn died with the order in hand; the reconcile sweep
+   * hands it back to `staged` so the work is not silently lost while
+   * `projectInFlight` reads the target as busy forever. */
+  pendingOrderAt?: number;
   /** Resolves an idle agent's wait the instant work is staged. */
   wake?: () => void;
   wakePending?: boolean;
@@ -427,6 +445,16 @@ export function hardCancelReady(handle: AgentHandle, derivePass: number): boolea
 }
 
 // --- timing ------------------------------------------------------------------
+
+/** How long an unsettled first-probe barrier stays believable. A launched
+ * prober files its report within one engine turn of booting, so a barrier
+ * this old means its launcher died between exec and settle — reclaim it and
+ * launch fresh rather than awaiting a report nobody will file. */
+export const PROBE_REFRESH_DEADLINE_MS = 30_000;
+
+/** How long a filled `pendingOrder` handoff slot stays believable. A zero-delay
+ * spawn adopts it within an engine turn; a slot this old has lost its spawn. */
+export const PENDING_ORDER_GRACE_MS = 15_000;
 
 /** Grace after the last known cooperative boundary. This is a stuck-call
  * recovery margin, not a strategic attempt or batch duration. */

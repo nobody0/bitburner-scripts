@@ -9,7 +9,7 @@ import { modelEntry, planAttempt } from "./models.ts";
 import { conclusiveAttempt } from "./courier.ts";
 import type { HoldTask } from "./hold.ts";
 import { DNET_PRIORITY, compareQueuedDnetWork } from "./priority.ts";
-import { STORM_PHISH_OVERLAP_MS, STORM_QUIET_MS } from "./rates.ts";
+import { isLabyrinth, STORM_PHISH_OVERLAP_MS, STORM_QUIET_MS } from "./rates.ts";
 
 /** What there is to do out there, and who is doing it.
  *
@@ -108,6 +108,11 @@ export interface Task {
   edge?: string;
   /** Pins only: release the link instead of applying one. */
   unpin?: boolean;
+  /** Walks only: the scout's route bias, carried verbatim to the walk body. */
+  route?: string;
+  /** Walks only: a mortal scout — keeps its prober, so the RAM sizing must
+   *  reserve it where the finisher's host is consumed whole. */
+  scout?: true;
   /** Which unattributed password an `attempt` task is spending, BY REFERENCE.
    *
    *  The password itself never enters this module. The controller matches a
@@ -167,6 +172,9 @@ export interface DeriveOptions {
     filename?: string;
     symbol?: string;
     reason: string;
+    /** A gang grinder: dedup per (kind, target, vantage) like an induce push,
+     *  because several vantages grind the same block at once. */
+    perVantage?: boolean;
   }[];
   /** The deliberate work `hold.ts`/`planStorm` admitted. Unlike the farm these
    *  are not self-host — an `induceServerMigration` REFUSES its own host — so
@@ -184,6 +192,9 @@ export interface DeriveOptions {
   /** Work a live process is already doing, keyed by TARGET. A `(kind, target)`
    *  pair in here emits no task. Data only, never a password. */
   inFlight?: ReadonlyMap<string, readonly { from: string; kind: TaskKind }[]>;
+  /** Depth-rows of head start a lab-ADJACENT host's cracking work gets — it is
+   *  the future walker's vantage. 0 (the default) is today's pure-depth rank. */
+  labAdjacentBonus?: number;
 }
 
 const FARM_PRIORITY: Readonly<Record<"cache" | "reclaim" | "phish" | "promote", number>> = {
@@ -318,6 +329,11 @@ export function deriveTasks(
   /** Freshness applied once per host; sub-reads are plain field reads. */
   const views = new Map<string, DnetHost>();
   for (const host of hosts.values()) views.set(host.hostname, planningView(host, now, expiry));
+  /** The labyrinth(s) among the views, for the adjacency bonus. */
+  const labNames = new Set<string>();
+  for (const view of views.values()) {
+    if (isLabyrinth(view.hostname, view.modelId)) labNames.add(view.hostname);
+  }
   const netHasUncrackedMovable = [...views.values()].some((candidate) =>
     candidate.goneAt === undefined
     && candidate.isStationary !== true
@@ -342,7 +358,14 @@ export function deriveTasks(
     // made the host we know least about the most urgent thing in the net.
     // `darkweb` at -1 lands there too, and belongs there — it is a shop, not a
     // vantage worth racing to.
-    const rank = host.depth === undefined ? 1 : -host.depth;
+    //
+    // The lab-adjacency bonus (0 by default) pulls a host whose believed
+    // neighbours include the labyrinth ahead of its depth peers: it is the
+    // future walker's vantage, and cracking it first is what starts the walk.
+    const labAdjacent = (opts.labAdjacentBonus ?? 0) !== 0
+      && (host.neighbours ?? []).some((name) => labNames.has(name));
+    const rank = (host.depth === undefined ? 1 : -host.depth)
+      - (labAdjacent ? opts.labAdjacentBonus! : 0);
     // The heartbleed gate. An UNKNOWN requirement passes: the refused call's own
     // describeHost report is what teaches us the number, so the first try is
     // the action's own report.
@@ -564,12 +587,19 @@ export function deriveTasks(
   // and the priorities say so — but the queue files in priority order, so a
   // plant derived while a phish is queued still goes in front of it.
   for (const entry of opts.farm ?? []) {
-    if (busy(entry.kind, entry.host)) continue;
+    const from = entry.from ?? entry.host;
+    // A gang grinder dedups per (kind, target, VANTAGE) — the same treatment
+    // an induce push gets, and for the same reason: several vantages work the
+    // same target at once, so a per-target check would file only the first.
+    const claimed = entry.perVantage === true
+      ? (opts.inFlight?.get(entry.host) ?? []).some((claim) => claim.kind === entry.kind && claim.from === from)
+      : busy(entry.kind, entry.host);
+    if (claimed) continue;
     tasks.push({
-      id: `${entry.kind}:${entry.host}`,
+      id: entry.perVantage === true ? `${entry.kind}:${entry.host}:${from}` : `${entry.kind}:${entry.host}`,
       kind: entry.kind,
       host: entry.host,
-      from: entry.from ?? entry.host,
+      from,
       priority: FARM_PRIORITY[entry.kind],
       reason: entry.reason,
       ...(entry.threads !== 1 ? { threads: entry.threads } : {}),
@@ -583,11 +613,12 @@ export function deriveTasks(
   // each carries its own vantage, because `induceServerMigration` is the one
   // call in the feature that refuses the host it is running on.
   for (const entry of opts.hold ?? []) {
-    // Pushes dedup on (kind, target, VANTAGE), while the single walk dedups by
-    // target. An induce target may be charged by SEVERAL vantages — the migration
-    // charge accumulates on the TARGET, so N pushers move it ~N× faster.
-    // Every other hold kind keeps the plain per-target check.
-    const perVantage = entry.kind === "induce";
+    // Pushes AND walks dedup on (kind, target, VANTAGE). An induce target may
+    // be charged by SEVERAL vantages — the migration charge accumulates on the
+    // TARGET, so N pushers move it ~N× faster. A walk target likewise carries
+    // the finisher and, when one is admitted, a mortal scout, each from its
+    // own vantage. Every other hold kind keeps the plain per-target check.
+    const perVantage = entry.kind === "induce" || entry.kind === "walk";
     const alreadyPlanned = !perVantage && tasks.some((task) => task.kind === entry.kind && task.host === entry.host);
     const inFlight = perVantage
       ? (opts.inFlight?.get(entry.host) ?? []).some((claim) => claim.kind === entry.kind && claim.from === entry.from)
@@ -603,6 +634,8 @@ export function deriveTasks(
       ...(entry.threads !== undefined && entry.threads !== 1 ? { threads: entry.threads } : {}),
       ...(entry.edge !== undefined ? { edge: entry.edge } : {}),
       ...(entry.unpin === true ? { unpin: true } : {}),
+      ...(entry.route !== undefined ? { route: entry.route } : {}),
+      ...(entry.scout === true ? { scout: true } : {}),
     });
   }
 
@@ -996,6 +1029,17 @@ export interface StormContext {
   lastPhishCacheAt?: number;
   /** Our own stamp of the last fire, taken pessimistically at claim time. */
   lastStormFiredAt?: number;
+  /** Hosts whose residual block `planFarm` refused to grind ON BUDGET this
+   *  pass (`reclaim-not-needed`). Gate 4 exempts their `blockedRam` — the farm
+   *  has already decided that block is not worth the wall clock, and a storm
+   *  gate that still demands it produces a standing deadlock: the grind never
+   *  happens AND the fire never fires. Built from the same `FarmPlan`'s
+   *  refusals, so the two rules cannot disagree. */
+  budgetRefusedBlocks?: ReadonlySet<string>;
+  /** Override of `STORM_PHISH_OVERLAP_MS`, gate 7's fire window. A benchmark
+   *  dial: 30 s of a 180 s cooldown is a 17% duty cycle that must coincide
+   *  with every other gate being green. */
+  phishOverlapMs?: number;
 }
 
 export type StormRefusalReason =
@@ -1077,7 +1121,9 @@ export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormP
   const incomplete = hosts.find((host) => host.goneAt === undefined && host.isStationary !== true && (
     !ctx.vault.has(host.hostname)
     || host.blockedRam === undefined
-    || host.blockedRam > 0
+    // A block the farm refused ON BUDGET does not hold the fire: it was never
+    // going to be ground, and demanding it here would deadlock the storm.
+    || (host.blockedRam > 0 && ctx.budgetRefusedBlocks?.has(host.hostname) !== true)
     || host.caches === undefined
     || host.caches.length > 0
     || [...(host.busy ?? [])].some((kind) => HARVEST_KINDS.has(kind))
@@ -1121,13 +1167,14 @@ export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormP
   // 7. Fire into the dead phish window, not across an open one. Never having
   // seen a `.d.cache` reads as open — the conservative side, and it corrects
   // itself within one cache.
-  if (ctx.lastPhishCacheAt === undefined || ctx.now - ctx.lastPhishCacheAt > STORM_PHISH_OVERLAP_MS) {
+  const overlapMs = ctx.phishOverlapMs ?? STORM_PHISH_OVERLAP_MS;
+  if (ctx.lastPhishCacheAt === undefined || ctx.now - ctx.lastPhishCacheAt > overlapMs) {
     refuse(
       holder.hostname,
       "phish-window-open",
       ctx.lastPhishCacheAt === undefined
         ? "no .d.cache ever sighted; waiting to fire just after one lands"
-        : `last .d.cache landed ${Math.round((ctx.now - ctx.lastPhishCacheAt) / 1000)}s ago; firing only within ${Math.round(STORM_PHISH_OVERLAP_MS / 1000)}s of one`,
+        : `last .d.cache landed ${Math.round((ctx.now - ctx.lastPhishCacheAt) / 1000)}s ago; firing only within ${Math.round(overlapMs / 1000)}s of one`,
     );
     return { refused };
   }

@@ -780,10 +780,11 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     expect(tasks.indexOf(pin)).toBeLessThan(tasks.indexOf(push));
   });
 
-  test("only one walker may own a lab across all vantages", () => {
-    // The maze is global while positions are per PID, so a second walk would
-    // duplicate the shared map while competing for the one protected vantage.
-    // Walk dedup is therefore per target, across every vantage.
+  test("walks file per vantage: the finisher and its scout coexist, neither re-derives", () => {
+    // The maze is global while positions are per PID. How MANY walks exist is
+    // `planWalk`'s decision alone (one pinned finisher, at most one mortal
+    // scout); the queue's job is to file exactly what it admitted, so walk
+    // dedup is per (target, VANTAGE) — the same treatment an induce push gets.
     const knowledge = fold([
       { hostname: "darkweb", present: true, facts: { neighbours: ["dn-1"], depth: -1 } },
       { hostname: "dn-1", present: true, facts: { neighbours: ["darkweb", "dn-2"], depth: 0 } },
@@ -791,20 +792,20 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     ]);
     const hold = [
       { kind: "walk" as const, host: "dn-2", from: "dn-1", reason: "walk the maze" },
-      { kind: "walk" as const, host: "dn-2", from: "darkweb", reason: "duplicate walk" },
+      { kind: "walk" as const, host: "dn-2", from: "darkweb", scout: true as const, reason: "mortal scout" },
     ];
     const base = { agents: new Set(["darkweb", "dn-1"]), vault: new Set(["darkweb", "dn-1", "dn-2"]) };
     const both = deriveTasks(knowledge, NOW, { ...base, hold }).filter((t) => t.kind === "walk");
-    expect(both.map((t) => t.id)).toEqual(["walk:dn-2"]);
-    expect(both[0]!.from).toBe("dn-1");
+    // Equal priority; the id tie-break orders them.
+    expect(both.map((t) => t.id)).toEqual(["walk:dn-2:darkweb", "walk:dn-2:dn-1"]);
 
-    // With the walker already in flight, no other vantage re-derives it.
+    // A walk already in flight suppresses only ITS vantage; the other files.
     const rederived = deriveTasks(knowledge, NOW, {
       ...base,
       hold,
       inFlight: new Map([["dn-2", [{ from: "dn-1", kind: "walk" as const }]]]),
     }).filter((t) => t.kind === "walk");
-    expect(rederived).toEqual([]);
+    expect(rederived.map((t) => t.id)).toEqual(["walk:dn-2:darkweb"]);
   });
 
   test("a plant outranks every other blocking task because it grows the map", () => {

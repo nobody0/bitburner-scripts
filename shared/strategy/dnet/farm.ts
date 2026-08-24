@@ -177,6 +177,19 @@ export interface FarmInputs {
    *  actually mint one (30+ minutes since the last storm) — otherwise the lift
    *  buys rolls that cannot pay. */
   seedHunt?: boolean;
+  /** Which sort elects the cache hunter — see `electCacheHunter`. Absent means
+   *  the shipped default. */
+  hunterElection?: HunterElection;
+  /** ONE host whose block is ground by EVERY able grinder at once — self plus
+   *  each adjacent credentialed neighbour with room, one task per vantage.
+   *  `getRamBlockRemoved` is linear in threads and the charge is per call, so
+   *  N grinders clear it ~N× faster; the same per-vantage treatment `induce`
+   *  has always had. Meant for the lab candidate, whose block is the last gate
+   *  before the walker starts — the budget refusal does not apply to it. */
+  gangReclaim?: string;
+  /** Override of `RECLAIM_CLEAR_BUDGET_MS`, the wall clock we will spend
+   *  clearing a block purely for the `.cache` at its end. A benchmark dial. */
+  clearBudgetMs?: number;
 }
 
 export interface FarmTask {
@@ -186,6 +199,9 @@ export interface FarmTask {
   /** The vantage, when it is not the target: the neighbour elected to grind a
    *  cramped host's block remotely. Absent means self-host. */
   from?: string;
+  /** A gang grinder: one of SEVERAL concurrent reclaims on the same target.
+   *  The queue must dedup these per (target, vantage), not per target. */
+  gang?: true;
   threads: number;
   /** The `.cache` file to open, for a `cache` task and nothing else. */
   filename?: string;
@@ -282,18 +298,28 @@ export function phishWindowOpen(inputs: Pick<FarmInputs, "now" | "lastPhishCache
  *
  * `eligible` is how a caller says which hosts can actually SPEND the window: a
  * hunter with no room for a `phishingAttack` is a host pinned to a roll it
- * cannot make, leaving nobody guaranteed to chase the cache. */
+ * cannot make, leaving nobody guaranteed to chase the cache.
+ *
+ * `election` picks the sort: `"capacity"` elects the ROOMIEST host, because
+ * `phishCacheChance` is linear in threads while depth only scales the money
+ * term — the hunter exists for the cache, so its seat should maximise cache
+ * rate. `"depth"` is the previous rule, kept for the standing benchmark
+ * comparison. */
+export type HunterElection = "capacity" | "depth";
+
 export function electCacheHunter(
   hosts: readonly FarmHost[],
   eligible?: (host: FarmHost) => boolean,
+  election: HunterElection = "depth",
 ): string | undefined {
   const pool = hosts.filter((host) =>
     host.goneAt === undefined && host.isLab !== true && (eligible?.(host) ?? true));
   if (pool.length === 0) return undefined;
   const best = [...pool].sort((a, b) => {
-    const byDepth = compareDepthDesc(a.depth, b.depth);
-    if (byDepth !== 0) return byDepth;
-    if (a.freeGb !== b.freeGb) return b.freeGb - a.freeGb;
+    const primary = election === "capacity"
+      ? b.freeGb - a.freeGb || compareDepthDesc(a.depth, b.depth)
+      : compareDepthDesc(a.depth, b.depth) || b.freeGb - a.freeGb;
+    if (primary !== 0) return primary;
     return a.host < b.host ? -1 : a.host > b.host ? 1 : 0;
   })[0]!;
   return best.host;
@@ -327,7 +353,7 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
   const refused: FarmRefusal[] = [];
   // Only among hosts that could actually spend the window: a hunter with no room
   // for a `phishingAttack` is a window nobody rolls for.
-  const hunter = electCacheHunter(hosts, (host) => host.freeGb >= inputs.gbPerThread.phish);
+  const hunter = electCacheHunter(hosts, (host) => host.freeGb >= inputs.gbPerThread.phish, inputs.hunterElection);
   const windowOpen = phishWindowOpen(inputs);
   const maxPhishThreads = inputs.maxPhishThreads ?? DEFAULT_MAX_PHISH_THREADS;
   /** How many hosts have been given propaganda this pass, which is what spreads
@@ -399,6 +425,53 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
     const grindable = Math.floor(host.freeGb / inputs.gbPerThread.reclaim);
     const maxReclaim = inputs.maxReclaimThreads ?? DEFAULT_MAX_RECLAIM_THREADS;
     const selfThreads = Math.min(grindable, maxReclaim);
+    // THE GANG. The named host's block is the last gate before the walker
+    // starts, so EVERY able grinder takes it at once — one task per vantage,
+    // deduped per vantage by the queue, budget refusal not consulted. The
+    // in-flight set still suppresses re-filing per vantage downstream.
+    if (host.host === inputs.gangReclaim && blocked > 0 && host.difficulty !== undefined) {
+      const grinders: { from?: string; threads: number }[] = [];
+      if (selfThreads >= 1) grinders.push({ threads: selfThreads });
+      if (host.hasCredential === true) {
+        for (const other of hosts) {
+          if (other.host === host.host || other.goneAt !== undefined || other.isLab === true) continue;
+          if (!(other.neighbours?.includes(host.host) ?? false)) continue;
+          const threads = Math.min(Math.floor(other.freeGb / inputs.gbPerThread.reclaim), maxReclaim);
+          if (threads >= 1) grinders.push({ from: other.host, threads });
+        }
+      }
+      // Each grinder's call is priced at ITS OWN threads, and a call whose
+      // freed RAM rounds to zero frees nothing while still paying the wait.
+      // Without this the gang re-files a full-thread grind from every
+      // credentialed neighbour every pass, for ever, against a block that
+      // never moves.
+      const able = grinders.filter((grinder) =>
+        (reclaimForecast(host, inputs.charisma, grinder.threads)?.rawPerCallGb ?? 0) >= RECLAIM_MIN_PER_CALL_GB);
+      if (grinders.length === 0) {
+        refuse("reclaim-no-room", "the gang target has no able grinder: no room on it and no roomy authenticated neighbour");
+      } else if (able.length === 0) {
+        const most = Math.max(...grinders.map((grinder) => grinder.threads));
+        refuse(
+          "reclaim-grind-stalled",
+          `one gang call at ${most} thread${most === 1 ? "" : "s"} would free `
+          + `${(reclaimForecast(host, inputs.charisma, most)?.rawPerCallGb ?? 0).toFixed(4)}GB, `
+          + "which rounds to zero; charisma has to catch up first",
+        );
+      } else {
+        for (const grinder of able) {
+          tasks.push({
+            kind: "reclaim",
+            host: host.host,
+            ...(grinder.from !== undefined ? { from: grinder.from } : {}),
+            threads: grinder.threads,
+            gang: true,
+            reason: `gang grind: ${blocked.toFixed(2)}GB blocks the walker`
+              + (grinder.from !== undefined ? `, ground from ${grinder.from}` : ""),
+          });
+        }
+      }
+      continue;
+    }
     // THE HELPER. `memoryReallocation` reaches an authenticated, directly
     // connected neighbour, so a block the host cannot afford to grind itself —
     // or can only grind at fewer threads than a roomy neighbour would — is
@@ -453,7 +526,7 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
       );
     } else if (
       host.freeGb >= inputs.wantedGb
-      && forecast.clearMs > RECLAIM_CLEAR_BUDGET_MS
+      && forecast.clearMs > (inputs.clearBudgetMs ?? RECLAIM_CLEAR_BUDGET_MS)
       && inputs.seedHunt !== true
     ) {
       // Two ways a grind earns its wall clock, and this is the refusal when

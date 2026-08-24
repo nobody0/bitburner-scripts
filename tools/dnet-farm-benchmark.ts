@@ -18,11 +18,25 @@ if (!Number.isFinite(hours) || hours <= 0) {
 }
 
 // The shipped policy first, then the storm withheld — the axis this lane
-// exists to price — then the post-lab shape where the walker gate has retired.
+// exists to price — then the post-lab shape where the walker gate has retired,
+// then the tuning dials wiggled one at a time. Sweep history (12 seeds x 2h):
+// - "no storm" 0.973x (-6.7 caches/h): the storm EARNS its keep once the
+//   budget-refused-blocks gate stopped deadlocking it.
+// - "hunter by capacity" tied 12/12 exactly — but this arena passes no promote
+//   symbols, so the election never has to divert anyone; the tie is an arena
+//   limitation, not proof. The depth default stands until a promote-bearing
+//   sweep says otherwise.
+// - "fire window 90s" +5.0 caches/h with a CI crossing zero: promising,
+//   unproven. Left at 30s.
+// - "clear budget 20m" -2.5 caches/h and fewer storms (the longer grind holds
+//   gate 4 longer): rejected.
 const policies: FarmPolicy[] = [
   SHIPPED_FARM,
   { ...SHIPPED_FARM, name: "no storm", stormEnabled: false },
   { ...SHIPPED_FARM, name: "post-lab (no walker)", labPresent: false },
+  { ...SHIPPED_FARM, name: "hunter by capacity", hunterElection: "capacity" },
+  { ...SHIPPED_FARM, name: "fire window 90s", phishOverlapMs: 90_000 },
+  { ...SHIPPED_FARM, name: "clear budget 20m", clearBudgetMs: 20 * 60_000 },
 ];
 
 const seeds = Array.from({ length: seedCount }, (_, index) => index + 1);

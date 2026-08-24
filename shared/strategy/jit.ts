@@ -30,11 +30,14 @@ export { MINIMUM_WORKER_PRECISION_MS };
  * Reference: JOB_LATE_FINISH vs POSSIBLE_LAGS, imports/batchPlanner.ts:7-14. */
 
 /** Landing separation: how far apart effects inside a batch land, and the floor
- * on the batch interval. Survivable this tight only because weaken is
- * oversized — see THREAD_WEAKEN_UPSCALE. Two milliseconds wider than the
- * reference's 3 ms because our workers also report telemetry and completions
- * per invocation. */
-export const MINIMUM_LANDING_GAP_MS = MINIMUM_WORKER_PRECISION_MS;
+ * on the batch interval. Two precision quanta (10 ms): live engine lateness
+ * oscillates 5-10 ms under load, and at one quantum (5 ms) that lag flipped
+ * adjacent landings — measured live as "landed in order" sinking to 72% as the
+ * pipeline deepened, entirely "w1 landed where h was due" rows. The wider gap
+ * halves the cadence CEILING (50 → 25 batches/sec), which nothing currently
+ * reaches; ordering insurance (THREAD_WEAKEN_UPSCALE) still covers the
+ * residue beyond 10 ms. */
+export const MINIMUM_LANDING_GAP_MS = 2 * MINIMUM_WORKER_PRECISION_MS;
 /** How late the JavaScript side may be without moving a landing. Absorbed by
  * additionalMsec, so it buys safety at no cost to pipeline depth. */
 export const LAUNCH_SLACK_MS = 200;

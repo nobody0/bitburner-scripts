@@ -20,7 +20,11 @@ const policies: SpreadPolicy[] = [
   SHIPPED_SPREAD,
   { ...SHIPPED_SPREAD, name: "single-thread attempts", threadScaledAttempts: false },
   { ...SHIPPED_SPREAD, name: "no bootstrap reclaim", bootstrapReclaim: false },
-  { ...SHIPPED_SPREAD, name: "lazy reclaim", eagerReclaim: false },
+  { ...SHIPPED_SPREAD, name: "single grinder", gangReclaim: false },
+  { ...SHIPPED_SPREAD, name: "vantage by raw RAM", vantageScoring: "maxRam" },
+  // A confirmed no-op at this world size (60/60 exact ties): the future
+  // vantage cracks quickly on pure depth order anyway. Kept as documentation.
+  { ...SHIPPED_SPREAD, name: "lab-adjacent bonus 8", labAdjacentBonus: 8 },
 ];
 
 const seeds = Array.from({ length: seedCount }, (_, index) => index + 1);
@@ -31,8 +35,8 @@ const runs = new Map<string, SpreadRun[]>(policies.map((policy) => [
 
 console.log(
   `Reach-the-lab paired benchmark: ${seedCount} seeded worlds, cold start on darkweb.\n`
-  + "Real planners (candidatesFrom/planSpread/deriveTasks) against the real DarknetSystem\n"
-  + "mutation clock; execution abstracted to the transcribed rates.ts waits. Solver models\n"
+  + "Real planners (candidatesFrom/planSpread/deriveTasks/planHold/planFarm) against the real\n"
+  + "DarknetSystem mutation clock; execution abstracted to the transcribed rates.ts waits. Solver models\n"
   + "are charged their declared budget, dictionary models the true password's position.",
 );
 

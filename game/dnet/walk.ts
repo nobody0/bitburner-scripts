@@ -11,9 +11,11 @@ import {
   observeLab,
   readCoords,
   refuseEdge,
+  routePrior,
   type Cell,
   type Direction,
   type LabField,
+  type LabRouteBias,
 } from "../../shared/strategy/dnet/maze.ts";
 import type { AgentIo, Order, Report } from "./shared.ts";
 import { awaitDnetOperation } from "./timing.ts";
@@ -86,7 +88,11 @@ export async function runWalk(ns: NS, order: Order, io: AgentIo): Promise<OrderR
     };
   }
   const basePrior = labPrior(stage);
-  let prior = basePrior;
+  // A scout order carries a route bias: it commits to the macro-route the
+  // unbiased finisher tends away from, and the lost-fallback below hands it
+  // back the unbiased prior if its route closes. The finisher stays at "any",
+  // for which routePrior returns basePrior unchanged.
+  let prior = routePrior(basePrior, (state.route as LabRouteBias | undefined) ?? "any");
   // Seed from the controller's shared field: the one piece of walk progress
   // that outlives a PID. A re-seeded walker starts with its predecessor's
   // map, so a replacement starts with everything its predecessor learned.

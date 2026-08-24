@@ -81,8 +81,17 @@ export async function main(ns: NS): Promise<void> {
   if (g !== undefined && pending !== undefined) {
     const entry = g.hosts.get(host)!;
     entry.pendingOrder = undefined;
-    await runAsOrder(ns, g, entry, pending, residentGb);
-    return;
+    // Adopt only an order this process was SIZED for: a spawn-chained
+    // successor (no launch descriptor) always was, and a plant exec was only
+    // when the plant claimed the order (controller-managed). A bare-resident
+    // exec adopting a stale order would run it at the 3.6 GB idle budget and
+    // die at its first uncovered call — leaving the host prober-only again.
+    // Handing it back to the queue lets THIS resident spawn into it priced.
+    if (launch === undefined || controllerManaged) {
+      await runAsOrder(ns, g, entry, pending, residentGb);
+      return;
+    }
+    (entry.staged ??= []).unshift(pending);
   }
 
   await runAsResident(ns, host, residentGb, controllerManaged);
@@ -198,6 +207,7 @@ async function runAsResident(ns: NS, host: string, residentGb: number, controlle
       }
       staged.shift();
       entry.pendingOrder = next;
+      entry.pendingOrderAt = Date.now();
       state.deliberate = true;
       respawnFromEntry(ns, host, residentGb);
       return;
@@ -319,6 +329,7 @@ async function runAsOrder(ns: NS, g: ControllerHandle, entry: HostEntry, order: 
 function stageSuccessor(entry: HostEntry): void {
   const next = (entry.staged ??= []).shift();
   entry.pendingOrder = next;
+  if (next !== undefined) entry.pendingOrderAt = Date.now();
   entry.agent = undefined; // the successor process adopts its own handle
 }
 

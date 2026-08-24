@@ -883,12 +883,24 @@ door candidates at once. `sim/tests/dnet-lab-benchmark.test.ts` and
 whole ladder in ~0.65x the DFS's wall-clock (attempts land ~1.4x the omniscient
 shortest path, against the DFS's ~2.2x).
 
-### One walker, one pinned host
+### One pinned finisher, one mortal scout
 
 The maze is global (`DarknetState.labyrinth`) while position is per PID. Dnet
-therefore runs exactly one finisher. The shared `labFields` map remains useful
-across observations and failed restarts, but it is not a reason to spend a
-second host on a concurrent scout.
+runs exactly one FINISHER — the pinned, protected, full-host walker — and,
+when a second lab-adjacent staffed vantage exists, one MORTAL SCOUT beside it.
+The scout is everything the finisher is not: unpinned, opportunistic (its
+absence refuses nothing), prober kept, sized from free RAM rather than the
+whole host, and its walk is biased to the southern macro-route the unbiased
+finisher tends away from (`Order.route` → `routePrior`). The two share one
+`labFields` map and one charisma pool, and either PID reaching the endpoint
+roots the lab for both — the party benchmark's paired evidence is 0.905×
+wall-clock for an immortal scout and still under 1.0 for a scout that dies
+every five minutes, because a dead scout costs a re-plant while its map
+survives in the shared field. The scout never holds the storm: the
+`walker-unpinned` gate protects the finisher only.
+
+An earlier revision of this section concluded a second walker was not worth a
+host; the paired party benchmark overturned that.
 
 Preparation is deliberately ordered:
 

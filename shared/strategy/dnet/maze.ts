@@ -781,6 +781,11 @@ function planStep(
       return unknownCost;
     }
     return unknownCost;
+    // NOTE, so the next tuner does not re-dig this hole: a "degree inference"
+    // (three provable walls around a cell force its fourth slot open, priced 1)
+    // was implemented and swept — byte-identical results over 480 paired cases.
+    // A radius-1 render reveals all four slots of every visited cell at once,
+    // so the three-known-one-unknown situation never decides a real route.
   };
 
   const goals = targets.map(parse);
