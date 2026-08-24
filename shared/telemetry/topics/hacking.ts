@@ -118,6 +118,11 @@ export interface SettledBatchReport {
   landed: number;
   threads: FarmByKind;
   gb: number;
+  /** RAM-time the batch actually occupied, in GB·ms: Σ per landed op of
+   * gb × (landing − launch). The honest $/GB·s denominator — `gb × spanMs`
+   * charges every op for the whole span. Absent on runs recorded before it
+   * existed. */
+  gbMs?: number;
   moneyEarned: number;
   order?: string;
   planned?: string;

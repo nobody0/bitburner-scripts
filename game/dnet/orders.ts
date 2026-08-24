@@ -1,8 +1,8 @@
 import type { NS } from "@ns";
 import { LOCAL_CODE, type ReportHost } from "../../shared/strategy/dnet/courier.ts";
 import { isDarknetDataFile, parseDarknetFileClue } from "../../shared/strategy/dnet/file-clues.ts";
-import { harvestLogs, logShape } from "../../shared/strategy/dnet/oracle.ts";
-import { SOLVER_CODES } from "../../shared/strategy/dnet/solvers/types.ts";
+import { harvestLogs } from "../../shared/strategy/dnet/oracle.ts";
+import { grammarDrift, LOG_LINES, targetStateFor } from "./report-shared.ts";
 import { handoffLaunch, temporaryRunOptions } from "../lib/launch-shared.ts";
 import type { DnetAgentLaunch, DnetProberLaunch } from "./launch.ts";
 import {
@@ -34,26 +34,7 @@ import { cacheProfit, phishProfit, promotionProfit } from "./profit.ts";
 
 type OrderResult = Omit<Report, "id" | "kind" | "host" | "from">;
 
-const LOG_LINES = 200;
-const SHAPES_PER_JOB = 2;
 const STORM_SEED_FILE = "STORM_SEED.exe";
-
-function grammarDrift(unrecognised: readonly string[]): { unrecognised: number; shapes: string[] } | undefined {
-  if (unrecognised.length === 0) return undefined;
-  const shapes: string[] = [];
-  for (const line of unrecognised) {
-    const shape = logShape(line);
-    if (shape.length > 0 && !shapes.includes(shape)) shapes.push(shape);
-    if (shapes.length >= SHAPES_PER_JOB) break;
-  }
-  return { unrecognised: unrecognised.length, shapes };
-}
-
-function targetStateFor(code: number): Pick<Report, "targetState"> {
-  if (code === 351) return { targetState: "edge-lost" };
-  if (code === 503) return { targetState: "gone" };
-  return {};
-}
 
 /** Everything one `ls` teaches about a darknet host, in one call. */
 function listingOn(jobNs: NS, host: string, deps: ControllerDeps): { caches: string[]; contracts: string[]; stormSeed: boolean } {
@@ -524,5 +505,3 @@ export function runOrder(ns: NS, order: Order, io: AgentIo): Promise<OrderResult
       return Promise.resolve({ ok: false, detail: `${order.kind} is not run through the order switch` });
   }
 }
-
-void SOLVER_CODES;

@@ -1722,6 +1722,84 @@ describe("the Batches card is per-batch", () => {
     setView("hacking.batch", "");
   });
 
+  test("$/GB·s divides by the dispatcher's RAM-time integral when it is present", () => {
+    const state = appendRecords(emptyState(), [
+      farm(1_000, {
+        launched: { hack: 10, grow: 10, weaken: 10 },
+        landed: { hack: 10, grow: 10, weaken: 10 },
+        inFlight: { hack: 0, grow: 0, weaken: 0 },
+        // gbMs says the ops occupied half of what gb × span charges.
+        recentBatches: [batch(1, 1_000, { gbMs: 500_000 }), batch(2, 1_100)],
+      }),
+    ]);
+    const measured = state.batchHistory.find((entry) => entry.id === 1)!;
+    const legacy = state.batchHistory.find((entry) => entry.id === 2)!;
+    expect(measured.moneyPerGbSec).toBe(1_000 / 500);
+    // A run recorded before gbMs existed falls back to charging every op for
+    // the whole span: 1000 over 500 GB × 2 s.
+    expect(legacy.moneyPerGbSec).toBe(1_000 / (500 * 2));
+  });
+
+  test("prep waves are their own series, not $0 noise in the farm scatter", () => {
+    const prep = (id: number, at: number) =>
+      batch(id, at, { kind: "prep", moneyEarned: 0, order: undefined, planned: undefined });
+    const state = appendRecords(emptyState(), [
+      farm(1_000, {
+        launched: { hack: 10, grow: 10, weaken: 10 },
+        landed: { hack: 10, grow: 10, weaken: 10 },
+        inFlight: { hack: 0, grow: 0, weaken: 0 },
+        // Two of each: a series shorter than two points is dropped from the
+        // chart, and its legend entry with it.
+        recentBatches: [batch(1, 1_000), batch(2, 1_100), prep(3, 1_200), prep(4, 1_300)],
+      }),
+    ]);
+    const html = TABS.hacking.render(state);
+    expect(html).toContain(">prep<");
+    expect(html).toContain("spends RAM to make a target farmable");
+    expect(html).toContain(">in order<");
+  });
+
+  test("batch timestamps are based on the dispatcher clock, never wall-clock t0", () => {
+    // Batch times are performance.now() values; record.t is epoch ms. Before
+    // the split origin, the table subtracted t0 across clock domains and
+    // labelled every batch with a huge bogus offset ("2.00h" here; negative
+    // epoch seconds live).
+    const state = appendRecords(emptyState(), [
+      farm(1_000, {
+        launched: { hack: 10, grow: 10, weaken: 10 },
+        landed: { hack: 10, grow: 10, weaken: 10 },
+        inFlight: { hack: 0, grow: 0, weaken: 0 },
+        recentBatches: [batch(1, 7_200_000), batch(2, 7_200_100)],
+      }),
+    ]);
+    // The origin is the earliest batch START (at − span), in the batch clock.
+    expect(state.batchT0).toBe(7_198_000);
+    const html = TABS.hacking.render(state);
+    expect(html).not.toContain("2.00h");
+  });
+
+  test("an install clears the dispatcher-clock origin along with the history", () => {
+    const state = populated();
+    expect(state.batchT0).not.toBeNull();
+    appendRecords(state, [
+      farm(9_000, {
+        launched: { hack: 1, grow: 1, weaken: 1 },
+        landed: { hack: 1, grow: 1, weaken: 1 },
+        inFlight: { hack: 0, grow: 0, weaken: 0 },
+        // Counters moved backwards: an install wiped the topic, and the old
+        // performance.now() origin is garbage in the new run.
+        batches: {
+          hgw: {
+            batches: 1, ops: 4, landed: 4, threads: { hack: 10, grow: 20, weaken: 5 },
+            gb: 500, moneyEarned: 1_000, hacks: 1, spanMs: 2_000, graded: 1, inOrder: 1,
+            noHack: 0, abandoned: 0, abandonedOps: 0, abandonedLanded: 0,
+          },
+        },
+      }),
+    ]);
+    expect(state.batchT0).toBeNull();
+  });
+
   test("health gauges are drawn as trends, not as a row of latest values", () => {
     // A THIRD rollup, because the in-order share is now differenced over a
     // window rather than read off the rollup as a lifetime mean: the first

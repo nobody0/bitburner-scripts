@@ -266,6 +266,9 @@ export interface Tracked {
   kind: "hack" | "grow" | "weaken";
   segment: SegmentKind;
   gb: number;
+  /** When the op's exec was emitted (ms, view.time clock). Feeds the batch's
+   * `gbMs` RAM-time integral; absent on ops tracked outside a launch pass. */
+  launchedAt?: number;
   /** True only for ops launched by a prep wave: the prepInFlight counter is
    * incremented at launch and decremented on release for exactly these ops,
    * so farm-batch completions on the same target can never unlock an
@@ -611,6 +614,10 @@ interface OpenBatch {
   landed: number;
   threads: ByKind;
   gb: number;
+  /** RAM-time actually occupied: Σ per landed op of gb × (landing − launch),
+   * in GB·ms. Unlike `gb × span`, this does not charge every op for the whole
+   * batch span. */
+  gbMs: number;
   moneyEarned: number;
   hacks: number;
 }
@@ -665,6 +672,8 @@ export interface SettledBatch {
   landed: number;
   threads: ByKind;
   gb: number;
+  /** RAM-time actually occupied (GB·ms) — see `OpenBatch.gbMs`. */
+  gbMs: number;
   moneyEarned: number;
   order?: string;
   planned?: string;
@@ -1590,6 +1599,8 @@ export function dispatch(
           tracked.jitRole,
           completion.kind === "hack" && completion.result?.success ? completion.result.moneyGained ?? 0 : 0,
           completion.kind === "hack" && Boolean(completion.result?.success),
+          tracked.gb,
+          tracked.launchedAt,
         );
       }
       if (tracked?.workerId !== undefined) noteJobDone(memory.pool, tracked.workerId, view.time);
@@ -2469,6 +2480,7 @@ function openBatch(
     landed: 0,
     threads: emptyByKind(),
     gb: 0,
+    gbMs: 0,
     moneyEarned: 0,
     hacks: 0,
   });
@@ -2523,10 +2535,13 @@ function noteBatchLanding(
   role: JitRole["role"] | undefined,
   earned: number,
   hacked: boolean,
+  gb: number,
+  launchedAt?: number,
 ): void {
   const batch = memory.batches.get(batchId);
   if (!batch) return;
   batch.landed++;
+  batch.gbMs += gb * Math.max(0, at - (launchedAt ?? batch.startedAt));
   batch.moneyEarned += earned;
   if (hacked) batch.hacks++;
   if (role !== undefined) batch.observed.push(role);
@@ -2593,6 +2608,7 @@ function settleBatch(memory: DispatchMemory, batch: OpenBatch, at: number): void
     landed: batch.landed,
     threads: { ...batch.threads },
     gb: batch.gb,
+    gbMs: batch.gbMs,
     moneyEarned: batch.moneyEarned,
     ...(observed !== undefined ? { order: observed } : {}),
     ...(planned !== undefined ? { planned } : {}),
@@ -3453,6 +3469,7 @@ function launchDuePrep(
       kind: "grow",
       segment: op.segment,
       gb,
+      launchedAt: now,
       wave: true,
       landing: op.landing,
       effectThreads,
@@ -4106,6 +4123,7 @@ function launchDueJit(
           kind: op.kind,
           segment: "farm",
           gb,
+          launchedAt: now,
           wave: false,
           landing: op.landing,
           effectThreads: usedEffect,
@@ -4888,6 +4906,7 @@ function launchBatches(
         kind: op.kind,
         segment: "farm",
         gb,
+        launchedAt: now,
         wave: false,
         landing: op.landing,
         effectThreads: usedEffect,
@@ -5091,6 +5110,7 @@ function launchPrepWave(
         kind,
         segment,
         gb: block.threads * WORKER_RAM[kind],
+        launchedAt: view.time,
         wave: true,
         landing,
         effectThreads: block.threads * coreEffect(memory.heap.host(block.hostname)?.cores ?? 1),

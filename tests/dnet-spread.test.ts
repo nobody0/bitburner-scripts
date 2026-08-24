@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_SPREAD_LIMITS, allocateCredentialChecks, candidatesFrom, deriveTasks, pickPlantVantage, planSpread, type SpreadCandidate } from "../shared/strategy/dnet/plan.ts";
+import { DEFAULT_SPREAD_LIMITS, allocateCredentialChecks, candidatesFrom, deriveTasks, planSpread, type SpreadCandidate } from "../shared/strategy/dnet/plan.ts";
+import { choosePreemptionVantage } from "../shared/strategy/dnet/priority.ts";
 import { foldReports, type DnetHosts } from "../shared/strategy/dnet/host.ts";
 import type { ReportHost } from "../shared/strategy/dnet/courier.ts";
 import { msPerHostEvent } from "../shared/strategy/dnet/rates.ts";
@@ -290,7 +291,7 @@ describe("remote recovery candidates", () => {
 
 describe("spreading preempts to take a vantage", () => {
   test("a free vantage wins outright, and nothing is cancelled", () => {
-    const choice = pickPlantVantage([
+    const choice = choosePreemptionVantage("plant", [
       { host: "busy", activeKind: "attempt", activeStartedAt: NOW - 5_000 },
       { host: "free" },
     ], NOW);
@@ -298,7 +299,7 @@ describe("spreading preempts to take a vantage", () => {
   });
 
   test("with none free, the lowest-priority active job is the one we cancel", () => {
-    const choice = pickPlantVantage([
+    const choice = choosePreemptionVantage("plant", [
       { host: "old", activeKind: "attempt", activeStartedAt: NOW - 9_000 },
       { host: "fresh", activeKind: "induce", activeStartedAt: NOW - 500 },
       { host: "mid", activeKind: "bleed", activeStartedAt: NOW - 4_000 },
@@ -309,21 +310,21 @@ describe("spreading preempts to take a vantage", () => {
   test("the lab and its pin are never sacrificed for a plant", () => {
     // Every vantage is busy with something a plant may not touch → no choice,
     // the plant waits rather than cancelling the walk, its pin or a storm.
-    expect(pickPlantVantage([
+    expect(choosePreemptionVantage("plant", [
       { host: "walker", activeKind: "walk", activeStartedAt: NOW - 1_000 },
       { host: "pinner", activeKind: "pin", activeStartedAt: NOW - 1_000 },
     ], NOW)).toBeUndefined();
   });
 
   test("a free vantage beats a just-started preemptible one", () => {
-    expect(pickPlantVantage([
+    expect(choosePreemptionVantage("plant", [
       { host: "z-free" },
       { host: "a-fresh", activeKind: "attempt", activeStartedAt: NOW },
     ], NOW)).toEqual({ vantage: "z-free", preempt: false });
   });
 
   test("ties break by name, so the derivation is reproducible", () => {
-    expect(pickPlantVantage([
+    expect(choosePreemptionVantage("plant", [
       { host: "b", activeKind: "attempt", activeStartedAt: NOW - 1_000 },
       { host: "a", activeKind: "attempt", activeStartedAt: NOW - 1_000 },
     ], NOW)).toEqual({ vantage: "a", preempt: true });

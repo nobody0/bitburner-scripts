@@ -1,7 +1,8 @@
 import type { NS } from "@ns";
 import { attemptDisposition, conclusiveAttempt, LOCAL_CODE, type AttemptOutcome, type ReportHost } from "../../shared/strategy/dnet/courier.ts";
 import { modelEntry, planAttempt, type ModelId, type PasswordFacts } from "../../shared/strategy/dnet/models.ts";
-import { harvestLogs, logShape, oracleFor } from "../../shared/strategy/dnet/oracle.ts";
+import { harvestLogs, oracleFor } from "../../shared/strategy/dnet/oracle.ts";
+import { grammarDrift, LOG_LINES } from "./report-shared.ts";
 import { solverFor } from "../../shared/strategy/dnet/solvers/index.ts";
 import { authenticateWaitMs } from "../../shared/strategy/dnet/rates.ts";
 import {
@@ -43,33 +44,6 @@ import { awaitDnetOperation } from "./timing.ts";
 
 type OrderResult = Omit<Report, "id" | "kind" | "host" | "from">;
 
-/** Every read drains the complete upstream ring. A target-owned pending count
- * preserves any records that cannot be read yet because charisma is too low. */
-const LOG_LINES = 200;
-
-/** At most this many distinct shapes per job. Drift shows up in the first one or
- * two; a whole bleed's worth would be a list of the same shape. */
-const SHAPES_PER_JOB = 2;
-
-/** What a bleed learned about our own parser, in a form that is safe to carry.
- *
- * The COUNT says the grammar has drifted; the shapes say which line drifted, and
- * `logShape` is what makes reporting them safe — see its comment. Undefined when
- * nothing was unrecognised, so the common case adds no field. */
-function grammarDrift(
-  unrecognised: readonly string[],
-): { unrecognised: number; shapes: string[] } | undefined {
-  if (unrecognised.length === 0) return undefined;
-  const shapes: string[] = [];
-  for (const line of unrecognised) {
-    const shape = logShape(line);
-    if (shape.length > 0 && !shapes.includes(shape)) shapes.push(shape);
-    if (shapes.length >= SHAPES_PER_JOB) break;
-  }
-  return { unrecognised: unrecognised.length, shapes };
-}
-
-/** The storm seed's filename, exactly as upstream's program enum spells it. */
 
 /** Everything one `ls` teaches about a darknet host, in one call.
  *

@@ -1,6 +1,7 @@
 import type { NS } from "@ns";
 import { SOLVER_CODES } from "../../shared/strategy/dnet/solvers/types.ts";
 import { labStage } from "../../shared/strategy/dnet/rates.ts";
+import { targetStateFor } from "./report-shared.ts";
 import {
   decideLab,
   emptyField,
@@ -34,12 +35,6 @@ import { awaitDnetOperation } from "./timing.ts";
  * artifact against esbuild rewriting it. */
 
 type OrderResult = Omit<Report, "id" | "kind" | "host" | "from">;
-
-function targetStateFor(code: number): Pick<Report, 'targetState'> {
-  if (code === 351) return { targetState: 'edge-lost' };
-  if (code === 503) return { targetState: 'gone' };
-  return {};
-}
 
 /** The maze walker: `authenticate(lab, <direction>)`, over and over, with the
  * occasional paid `labradar` when one render decides more than one move can.

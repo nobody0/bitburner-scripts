@@ -53,12 +53,14 @@
  *   src/DarkNet/utils/darknetNetworkUtils.ts:16-34, 69-78, 90 */
 
 import { fresh, type DnetHost, type ExpiryOpts } from "./host.ts";
-import { isOnAirGap, NET_WIDTH } from "./rates.ts";
+import { isLabyrinth, isOnAirGap, labStage, NET_WIDTH } from "./rates.ts";
 
 /** What every policy here needs to know about one host. All of it is already in
  * the knowledge fold; none of it is a credential. */
 export interface HoldHost {
   hostname: string;
+  /** Identity model, for spotting the labyrinth among the projected hosts. */
+  modelId?: string;
   /** Current row. */
   depth?: number;
   /** Original row, and the thing migration is anchored on. Also what decides
@@ -154,8 +156,10 @@ export function holdHostFrom(
 ): HoldHost {
   const depth = fresh<number>(standing, "depth", opts.at, opts.expiry);
   const neighbours = fresh<string[]>(standing, "neighbours", opts.at, opts.expiry);
+  const modelId = fresh<string>(standing, "modelId", opts.at, opts.expiry);
   return {
     hostname: standing.hostname,
+    ...(modelId !== undefined ? { modelId } : {}),
     ...(depth !== undefined ? { depth } : {}),
     agentAlive: opts.agentAlive,
     hasCredential: opts.hasCredential,
@@ -177,6 +181,220 @@ export function chooseLabVantage(candidates: readonly HoldHost[]): HoldHost | un
     Number(b.stasisLinked === true) - Number(a.stasisLinked === true)
     || (b.maxRam ?? 0) - (a.maxRam ?? 0)
     || (a.hostname < b.hostname ? -1 : a.hostname > b.hostname ? 1 : 0))[0];
+}
+
+// --- the walk / pins / hold orchestration ------------------------------------
+//
+// Extracted from the controller's closure so the maze-vantage and pin
+// decisions are a pure function of a projected view, testable without a game.
+// The controller projects `HoldHost[]` (live handles, RAM, credentials), hands
+// over the few scalars it alone knows, and applies the returned tasks.
+
+/** One admitted hold action, in the exact shape `DeriveOptions.hold` accepts. */
+export interface HoldTask {
+  kind: "pin" | "induce" | "walk" | "storm";
+  host: string;
+  from: string;
+  threads?: number;
+  reason: string;
+  /** Pins only: the neighbour this pin exists to keep — the lab. */
+  edge?: string;
+  /** Pins only: release the link instead. */
+  unpin?: boolean;
+}
+
+export interface HoldPlanInputs {
+  /** Projected hosts. MUTATED: the walk's vantage is stamped `irreplaceable`
+   *  in place so `planStasis` sees the same commitment the controller does. */
+  hosts: HoldHost[];
+  netDepth: number;
+  stasisLimit: number;
+  /** Links actually held right now — the controller's own count. */
+  stasisLinkedCount: number;
+  /** Whether this world still expects a labyrinth to walk. */
+  labExpected: boolean;
+  charisma: number;
+  /** The vantage a walk is already running or staged from, if any. */
+  walkerAt?: string;
+  /** One walker thread's allocation; undefined refuses the walk on room. */
+  walkGb?: number;
+  /** One pin job's allocation. */
+  pinGb: number;
+  induceGbPerThread?: number;
+}
+
+export interface HoldPlan {
+  tasks: HoldTask[];
+  refused: HoldRefusal[];
+  /** The labyrinth's password is held: the walk is over. */
+  labWalked: boolean;
+  labCandidate?: string;
+  /** The maze's charisma gate when it refused the walk. */
+  charismaNeeded?: number;
+}
+
+interface WalkPlan {
+  lab?: HoldHost;
+  candidate?: string;
+  tasks: HoldTask[];
+  charismaNeeded?: number;
+}
+
+/** Whether and where the maze walk can run, and every named reason it cannot.
+ *
+ * The refusal sequence is the preparation checklist in order: a vantage, its
+ * pin, fresh blocked RAM, a zero block, a resident, and room for one legal
+ * walker thread. Each stops the walk and names the one thing to fix next. */
+export function planWalk(
+  inputs: Pick<HoldPlanInputs, "hosts" | "charisma" | "walkerAt" | "walkGb">,
+  refuse: (host: string, why: string, detail: string) => void,
+): WalkPlan {
+  const lab = inputs.hosts.find((h) => isLabyrinth(h.hostname, h.modelId) && h.gone !== true);
+  if (lab === undefined) return { tasks: [] };
+  if (lab.hasCredential) {
+    refuse(lab.hostname, "lab-walked", "we already hold this lab's password, so its maze has been finished");
+    return { lab, tasks: [] };
+  }
+  const needed = labStage(lab.hostname)?.cha;
+  if (needed !== undefined && inputs.charisma < needed) {
+    refuse(lab.hostname, "charisma", `the maze needs charisma ${needed}, and every move below it answers 451`);
+    return { lab, tasks: [], charismaNeeded: needed };
+  }
+  let walkerAt = inputs.walkerAt;
+  const tasks: HoldTask[] = [];
+  if (walkerAt === undefined) {
+    // Only worth choosing when no walk is in flight: for the whole multi-minute
+    // walk this filter-and-sort would otherwise run every tick for nothing.
+    const vantageHost = chooseLabVantage(inputs.hosts.filter((h) =>
+      (h.agentAlive || h.stasisLinked === true)
+      && h.neighbours?.includes(lab.hostname) === true
+      && h.hasCredential));
+    const vantage = vantageHost?.hostname;
+    if (vantage === undefined) {
+      refuse(lab.hostname, "no-vantage", "nothing of ours is standing next to the labyrinth with room for a walker");
+      return { lab, tasks };
+    }
+    const standing = inputs.hosts.find((h) => h.hostname === vantage);
+    if (standing?.stasisLinked !== true) {
+      refuse(vantage, "walker-unpinned", "the lab candidate must be in position and stasis-linked before preparation finishes");
+      return { lab, candidate: vantage, tasks };
+    }
+    if (standing.blockedRam === undefined) {
+      refuse(vantage, "ram-unknown", "the lab candidate's blocked RAM is not fresh");
+      return { lab, candidate: vantage, tasks };
+    }
+    if (standing.blockedRam > 0) {
+      refuse(vantage, "ram-blocked", `${standing.blockedRam.toFixed(2)}GB remains before the lab walker can start`);
+      return { lab, candidate: vantage, tasks };
+    }
+    if (!standing.agentAlive) {
+      refuse(vantage, "walker-unstaffed", "the pinned lab candidate is being reclaimed or awaiting its resident");
+      return { lab, candidate: vantage, tasks };
+    }
+    const maxRam = standing.maxRam ?? 0;
+    if (inputs.walkGb === undefined || maxRam < inputs.walkGb) {
+      refuse(vantage, "no-room", "the lab candidate cannot fit one legal walker thread");
+      return { lab, candidate: vantage, tasks };
+    }
+    tasks.push({ kind: "walk", host: lab.hostname, from: vantage, threads: Math.floor(maxRam / inputs.walkGb), reason: `walk the maze from ${vantage}` });
+    walkerAt = vantage;
+  }
+  return { lab, ...(walkerAt !== undefined ? { candidate: walkerAt } : {}), tasks };
+}
+
+/** Turn a stasis planner's pin/release name list into admitted pin tasks.
+ *
+ * Two gates: room for the 12 GB `setStasisLink` beside whatever the host is
+ * doing, and a way BACK — a credential for the post-pin remote plant (a pin
+ * job ends with the host empty), or for a release, a neighbour able to
+ * re-plant it once the link's backdoor is gone. */
+export function admitPins(
+  hosts: readonly HoldHost[],
+  pin: readonly string[],
+  pinGb: number,
+  refuse: (host: string, why: string, detail: string) => void,
+  labHost?: string,
+  remoteAfter = true,
+): HoldTask[] {
+  const tasks: HoldTask[] = [];
+  for (const hostname of pin) {
+    const standing = hosts.find((h) => h.hostname === hostname);
+    const free = standing?.freeGb ?? 0;
+    if (standing?.agentAlive === true && pinGb > free) {
+      refuse(hostname, "no-room", `a 12 GB setStasisLink needs ${pinGb.toFixed(2)}GB and ${free.toFixed(2)}GB is free`);
+      continue;
+    }
+    const replanter = hosts.some((other) =>
+      other.hostname !== hostname && other.agentAlive && other.neighbours?.includes(hostname) === true);
+    if ((!remoteAfter && !replanter) || standing?.hasCredential !== true) {
+      refuse(hostname, "no-replanter", remoteAfter
+        ? "the host has no credential for its post-pin remote plant"
+        : "releasing the link would leave no neighbour able to re-plant this host");
+      continue;
+    }
+    tasks.push({ kind: "pin", host: hostname, from: hostname, reason: "pin the host nothing can replace", ...(labHost !== undefined ? { edge: labHost } : {}) });
+  }
+  return tasks;
+}
+
+/** The whole hold decision: walk, then stasis pins and releases, then the
+ * migration pushes — every task and every named refusal, from one projected
+ * view. The controller's only jobs are projecting the view and filing the
+ * tasks. */
+export function planHold(inputs: HoldPlanInputs): HoldPlan {
+  const refused: HoldRefusal[] = [];
+  const refuse = (hostname: string, why: string, detail: string): void => {
+    refused.push({ hostname, why, detail });
+  };
+  const tasks: HoldTask[] = [];
+  const view: HoldView = {
+    hosts: inputs.hosts,
+    netDepth: inputs.netDepth,
+    stasisLimit: inputs.stasisLimit,
+    spareTargets: stasisTargetDepths(
+      inputs.netDepth,
+      inputs.labExpected ? inputs.stasisLimit - 1 : inputs.stasisLimit,
+      inputs.labExpected,
+    ),
+    charisma: inputs.charisma,
+    authDurationMultiplier: 1,
+  };
+  const walk = planWalk(inputs, refuse);
+  const labCandidate = inputs.hosts.find((h) => h.hostname === walk.candidate);
+  if (labCandidate) labCandidate.irreplaceable = true;
+  for (const task of walk.tasks) {
+    tasks.push(task);
+    const standing = inputs.hosts.find((h) => h.hostname === task.from);
+    if (standing) standing.irreplaceable = true;
+  }
+  const labWalked = walk.lab !== undefined && walk.lab.hasCredential;
+  const stasis = planStasis({ ...view, reserveForWalker: !labWalked && inputs.labExpected });
+  for (const refusal of stasis.refused) refuse(refusal.hostname, refusal.why, refusal.detail);
+  for (const task of admitPins(inputs.hosts, stasis.release, inputs.pinGb, refuse, undefined, false)) {
+    tasks.push({ ...task, unpin: true, reason: "release a link its host no longer earns" });
+  }
+  const walkerPin = (name: string): boolean =>
+    inputs.hosts.find((e) => e.hostname === name)?.irreplaceable === true;
+  tasks.push(...admitPins(inputs.hosts, stasis.pin.filter(walkerPin), inputs.pinGb, refuse, walk.lab?.hostname));
+  tasks.push(...admitPins(inputs.hosts, stasis.pin.filter((name) => !walkerPin(name)), inputs.pinGb, refuse));
+  const lab = walk.lab;
+  const spareLinks = Math.max(0, inputs.stasisLimit - inputs.stasisLinkedCount);
+  const labNeed = lab !== undefined && !lab.hasCredential && walk.candidate === undefined;
+  const ferryWanted = unconqueredBands(view).length > 0;
+  if (!labNeed && spareLinks === 0 && !ferryWanted) {
+    if (lab !== undefined) refuse(lab.hostname, "push-not-needed", "the labyrinth is reachable, every stasis link is spent, and every band holds a resident");
+  } else {
+    const induce = planInduce({ ...view, induceGbPerThread: inputs.induceGbPerThread, needLabVantage: labNeed });
+    for (const refusal of induce.refused) refuse(refusal.hostname, refusal.why, refusal.detail);
+    for (const push of induce.pushes) tasks.push({ kind: "induce", host: push.host, from: push.from, threads: push.threads, reason: push.reason });
+  }
+  return {
+    tasks,
+    refused,
+    labWalked,
+    ...(walk.candidate !== undefined ? { labCandidate: walk.candidate } : {}),
+    ...(walk.charismaNeeded !== undefined ? { charismaNeeded: walk.charismaNeeded } : {}),
+  };
 }
 
 // --- backdoors ---------------------------------------------------------------
@@ -595,7 +813,7 @@ function refuse(into: HoldRefusal[], host: HoldHost, why: string, detail: string
 /** The charge one call adds, from `chargeServerMigration` (`effects.ts:245-251`):
  * `((charisma + 500) / (difficulty * 200 + 1000)) * 0.01 * threads`. The host
  * moves when the accumulated charge reaches 1. */
-export function migrationChargePerCall(difficulty: number, charisma: number, threads = 1): number {
+function migrationChargePerCall(difficulty: number, charisma: number, threads = 1): number {
   return ((charisma + 500) / (difficulty * 200 + 1000)) * 0.01 * threads;
 }
 

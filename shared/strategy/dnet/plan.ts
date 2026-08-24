@@ -7,7 +7,8 @@ import {
 } from "./host.ts";
 import { modelEntry, planAttempt } from "./models.ts";
 import { conclusiveAttempt } from "./courier.ts";
-import { DNET_PRIORITY, choosePreemptionVantage, compareQueuedDnetWork } from "./priority.ts";
+import type { HoldTask } from "./hold.ts";
+import { DNET_PRIORITY, compareQueuedDnetWork } from "./priority.ts";
 import { STORM_PHISH_OVERLAP_MS, STORM_QUIET_MS } from "./rates.ts";
 
 /** What there is to do out there, and who is doing it.
@@ -170,17 +171,7 @@ export interface DeriveOptions {
   /** The deliberate work `hold.ts`/`planStorm` admitted. Unlike the farm these
    *  are not self-host — an `induceServerMigration` REFUSES its own host — so
    *  each carries its own vantage. */
-  hold?: readonly {
-    kind: "pin" | "induce" | "walk" | "storm";
-    host: string;
-    from: string;
-    threads?: number;
-    reason: string;
-    /** Pins only: the neighbour this pin exists to keep — the lab. */
-    edge?: string;
-    /** Pins only: release the link instead. */
-    unpin?: boolean;
-  }[];
+  hold?: readonly HoldTask[];
   /** Unattributed passwords matched to hosts they could open, by reference. */
   guesses?: readonly { host: string; id: string; reason: string }[];
   /** How many deliberate probes an unsolved model may cost, per host. */
@@ -926,46 +917,6 @@ function viewedUsableRam(view: DnetHost): number {
   if (view.maxRam === undefined) return 0;
   const blocked = view.blockedRam ?? 0;
   return Math.max(0, view.maxRam - blocked);
-}
-
-export interface VantageState {
-  /** A host we could exec the plant from — adjacent to the target, or a
-   *  stamped remote-exec vantage. */
-  host: string;
-  /** The kind of job its resident is running, or undefined if it is idle. */
-  activeKind?: string;
-  /** When that job started, so the least-loss choice can prefer the one that
-   *  has run the shortest. */
-  activeStartedAt?: number;
-  /** Canonical queue priority of the active job. */
-  activePriority?: number;
-  /** Best current completion estimate for remaining-time tie-breaking. */
-  activeExpectedDoneAt?: number;
-  /** Usable job RAM on this worker. */
-  usableGb?: number;
-  /** Already selected for cancellation or work in this scheduling pass. */
-  cancelling?: boolean;
-  assigned?: number;
-}
-
-/** Which vantage should run a plant, and whether doing so preempts a job.
- *
- * Spreading is critical, so this looks past "is a vantage free" to "which
- * vantage costs the least to free". The order is:
- *
- *   1. A FREE vantage — nothing is lost, so it wins outright.
- *   2. Otherwise the PREEMPTIBLE job we lose the least time on: the one that has
- *      run the shortest, because cancelling it throws away the least work.
- *   3. Otherwise nothing — every vantage is busy with the lab, a pin, another
- *      plant or a storm, none of which a plant may interrupt. The plant waits in
- *      its filed queue rather than sacrificing something more important.
- *
- * Deterministic: ties break by host name so a derivation is reproducible. */
-export function pickPlantVantage(
-  vantages: readonly VantageState[],
-  now: number,
-): { vantage: string; preempt: boolean } | undefined {
-  return choosePreemptionVantage("plant", vantages, now);
 }
 
 // --- storm -------------------------------------------------------------------

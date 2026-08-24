@@ -90,6 +90,16 @@ money, in-order and abandoned counts) plus a bounded ring of recently settled
 batches as examples, because a record per batch is no more sendable than a
 record per op.
 
+Each ring entry carries `gbMs` — the RAM-time the batch actually occupied, in
+GB·ms, summed per landed op as `gb × (landing − launch)`. It exists because the
+naive denominator `gb × spanMs` charges every op for the whole batch span, and
+for a HWGW cycle whose weaken outlives its hack ~4x that overstatement is both
+large and shape-dependent: as skill rises between re-solves the span shrinks
+under a frozen thread plan, and $/GB·s drawn against `gb × spanMs` ramps into a
+sawtooth that reflects the metric, not the farm. `gbMs` is the honest
+denominator; the viewer falls back to `gb × spanMs` only for runs recorded
+before the field existed.
+
 Where op LOSS is observable is worth stating precisely, because the obvious
 answer is wrong and cost a display. A batch settles only when its last op
 lands, so a settled batch has `landed === ops` by construction and the per-kind

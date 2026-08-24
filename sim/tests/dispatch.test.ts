@@ -1539,6 +1539,16 @@ describe("shotgun mode", () => {
       expect(aggregate.abandonedOps).toBeGreaterThanOrEqual(aggregate.abandonedLanded);
     }
 
+    // Every settled batch carries its RAM-time integral: each landed op billed
+    // from its own launch to its own landing. That is bounded above by the
+    // naive `gb × span`, which charges every op for the whole batch span —
+    // the gap between the two is exactly what made the naive $/GB·s sawtooth.
+    expect(h.memory.dispatch.stats.recentBatches.length).toBeGreaterThan(0);
+    for (const settled of h.memory.dispatch.stats.recentBatches) {
+      expect(settled.gbMs).toBeGreaterThan(0);
+      expect(settled.gbMs).toBeLessThanOrEqual(settled.gb * settled.spanMs + 1e-6);
+    }
+
     // The target stays inside its bands throughout, which is the whole reason
     // same-tick FIFO is an acceptable substitute for ordered deadlines.
     const farmed = h.samples.filter((sample) => sample.maxMoney > 0);

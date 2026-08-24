@@ -645,24 +645,41 @@ function verdictOf(batch: SettledBatchView): BatchVerdict {
   return batch.misordered ? "misordered" : "ordered";
 }
 
-const VERDICTS: { verdict: BatchVerdict; color: string; label: string; title: string }[] = [
+/** What the timeline splits by: prep waves apart — they earn nothing by
+ * design, so mixed into the farm scatter their $0 reads as farm failure — and
+ * the landing verdict for everything that farms. */
+type BatchClass = "prep" | BatchVerdict;
+
+function classOf(batch: SettledBatchView): BatchClass {
+  return batch.kind === "prep" ? "prep" : verdictOf(batch);
+}
+
+const BATCH_SERIES: { class: BatchClass; color: string; label: string; title: string }[] = [
   {
-    verdict: "ordered",
+    class: "ordered",
     color: "--series-1",
     label: "in order",
     title: "landed in the order the cycle planned",
   },
   {
-    verdict: "misordered",
+    class: "misordered",
     color: "--series-4",
     label: "mis-ordered",
     title: "had a landing grid and landed out of order — the effects fought each other",
   },
   {
-    verdict: "ungraded",
+    class: "ungraded",
     color: "--series-2",
     label: "no grid",
-    title: "no landing grid to be right about — a prep wave, a shotgun cycle, or a batch that never launched a hack",
+    title: "no landing grid to be right about — a shotgun cycle, or a batch that never launched a hack",
+  },
+  // LAST: the crosshair anchors on the first drawn series, which should stay
+  // the farm scatter, not the prep floor.
+  {
+    class: "prep",
+    color: "--series-5",
+    label: "prep",
+    title: "a prep wave — spends RAM to make a target farmable and earns nothing, so its $0 is by design, not failure",
   },
 ];
 
@@ -686,18 +703,18 @@ function seriesKey(color: string): string {
  * the chart. */
 function batchTimelineSeries(state: ProjectedState): ChartSeries[] {
   const metric = batchMetric();
-  const byVerdict = new Map<BatchVerdict, [number, number][]>();
+  const byClass = new Map<BatchClass, [number, number][]>();
   for (const batch of state.batchHistory) {
     const value = metric.value(batch);
     if (!Number.isFinite(value)) continue;
-    const verdict = verdictOf(batch);
-    let pts = byVerdict.get(verdict);
-    if (!pts) byVerdict.set(verdict, (pts = []));
+    const cls = classOf(batch);
+    let pts = byClass.get(cls);
+    if (!pts) byClass.set(cls, (pts = []));
     pts.push([batch.at, value]);
   }
-  return VERDICTS
+  return BATCH_SERIES
     .map((entry) => ({
-      pts: byVerdict.get(entry.verdict) ?? [],
+      pts: byClass.get(entry.class) ?? [],
       color: entry.color,
       label: entry.label,
       kind: "points" as const,
@@ -872,7 +889,7 @@ function batchTimeline(state: ProjectedState): string {
 
   const legend =
     `<div class="barkey">` +
-    VERDICTS.filter((entry) => shown.some((series) => series.label === entry.label))
+    BATCH_SERIES.filter((entry) => shown.some((series) => series.label === entry.label))
       .map((entry) =>
         `<span class="${seriesKey(entry.color)}" title="${esc(entry.title)}">●</span>` +
         `<span class="muted">${esc(entry.label)}</span>`
@@ -943,7 +960,7 @@ function batchInspector(state: ProjectedState): string {
   const head = tiles([
     { label: "batch", value: `#${fmtNum(batch.id)}`, sub: batch.kind },
     { label: "target", value: batch.target },
-    { label: "settled", value: fmtTime(batch.at - (state.t0 ?? 0)), sub: `span ${fmtMs(batch.spanMs)}` },
+    { label: "settled", value: fmtTime(batch.at - (state.batchT0 ?? 0)), sub: `span ${fmtMs(batch.spanMs)}` },
     { label: "earned", value: fmtMoney(batch.moneyEarned), sub: `${fmtRam(batch.gb)} committed` },
     { label: metric.label, value: metric.fmt(value), ...(versus ? { sub: versus } : {}) },
   ]);
@@ -984,7 +1001,7 @@ function batchHistoryDetail(state: ProjectedState): string {
       cell: (batch) =>
         `<button class="server-link" data-view-key="hacking.batch" data-view-value="${batch.id}" ` +
         `title="Inspect batch ${batch.id}">#${fmtNum(batch.id)}</button>` +
-        ` <span class="muted">${fmtTime(batch.at - (state.t0 ?? 0))}</span>`,
+        ` <span class="muted">${fmtTime(batch.at - (state.batchT0 ?? 0))}</span>`,
     },
     { id: "kind", label: "kind", left: true, sort: (batch) => batch.kind, cell: (batch) => esc(batch.kind) },
     { id: "target", label: "target", left: true, sort: (batch) => batch.target, cell: (batch) => esc(batch.target) },
@@ -1982,7 +1999,9 @@ export const hackingTab: Tab = {
       el,
       "batch-timeline",
       batchTimelineSeries(state),
-      state.t0,
+      // Batch timestamps live on the dispatcher's performance.now() clock, not
+      // the wall-clock `t0` every other series here uses.
+      state.batchT0,
       (value) => metric.fmt(value),
       { fitY: metric.fit },
     );

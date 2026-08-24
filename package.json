@@ -17,6 +17,8 @@
     "bench:sim:bn8-full": "bun run sim/run.ts --profile bn8-full --compact --perf",
     "bench:sim:bn1-full": "bun run sim/run.ts --profile bn1-full --compact --perf",
     "bench:sim:dnet-lab": "bun run tools/dnet-lab-benchmark.ts",
+    "bench:sim:dnet-spread": "bun run tools/dnet-spread-benchmark.ts",
+    "bench:sim:dnet-farm": "bun run tools/dnet-farm-benchmark.ts",
     "bench:cct": "bun run sim/contract-benchmark.ts",
     "sync": "bun run tools/rfa-server.ts --sync",
     "types": "bun run tools/rfa-server.ts --types-only",

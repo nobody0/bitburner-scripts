@@ -342,6 +342,11 @@ export interface ProjectedState {
    * watermark dropped exactly those batches, and when one landed last in the
    * ring it read as a counter restart and discarded the entire history. */
   batchSeen: Set<number>;
+  /** Session origin for batch timestamps, in the DISPATCHER's clock domain
+   * (`performance.now()`), derived as the earliest batch start seen. Batch
+   * charts and prose subtract this, never `t0` — `t0` is wall-clock epoch ms
+   * and the two domains must NEVER be compared or mixed. */
+  batchT0: number | null;
   /** Dispatcher health, as curves. */
   farmHealth: FarmHealthSeries;
   /** Recent cumulative samples, so a rate can be taken over a WINDOW rather
@@ -434,6 +439,7 @@ export function emptyState(): ProjectedState {
     batchSeries: {},
     batchHistory: [],
     batchSeen: new Set(),
+    batchT0: null,
     farmHealth: emptyFarmHealth(),
     farmSamples: [],
     farmWindowMs: DEFAULT_RATE_WINDOW_MS,
@@ -831,6 +837,8 @@ function foldFarmSeries(state: ProjectedState, t: number, farm: FarmRollup | und
     state.batchSeries = {};
     state.batchHistory = [];
     state.batchSeen.clear();
+    // performance.now() restarts with the game, so the old origin is garbage.
+    state.batchT0 = null;
     state.farmHealth = emptyFarmHealth();
     // Including the measured span: a span left over from the previous run would
     // caption this one's first points with the old one's window.
@@ -968,6 +976,9 @@ function foldBatchHistory(state: ProjectedState, batches: readonly SettledBatchR
   for (const batch of batches) {
     if (state.batchSeen.has(batch.id)) continue;
     state.batchSeen.add(batch.id);
+    // `at - spanMs` is the batch's START; the ratcheting min stays stable
+    // under the ring's legitimately out-of-order settle times.
+    state.batchT0 = Math.min(state.batchT0 ?? Infinity, batch.at - batch.spanMs);
     state.batchHistory.push(view(batch));
   }
   if (state.batchHistory.length > SERIES_LIMIT) {
@@ -982,7 +993,9 @@ function foldBatchHistory(state: ProjectedState, batches: readonly SettledBatchR
 /** Derive the size-normalised figures once, when the batch is first seen. */
 function view(batch: SettledBatchReport): SettledBatchView {
   const totalThreads = batch.threads.hack + batch.threads.grow + batch.threads.weaken;
-  const gbSec = batch.gb * (batch.spanMs / 1_000);
+  // RAM-time actually occupied when the dispatcher reported it; runs recorded
+  // before `gbMs` existed fall back to charging every op for the whole span.
+  const gbSec = (batch.gbMs ?? batch.gb * batch.spanMs) / 1_000;
   return {
     ...batch,
     totalThreads,

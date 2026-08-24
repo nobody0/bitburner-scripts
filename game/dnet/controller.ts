@@ -39,7 +39,7 @@ import {
 } from "../../shared/strategy/dnet/plan.ts";
 import { DNET_PRIORITY, strategicQueueDepth, choosePreemptionVantage, compareQueuedDnetWork, isSameTurn, type PreemptionCandidate } from "../../shared/strategy/dnet/priority.ts";
 import { planFarm, type FarmHost, type FarmKind, type PromoteSymbol } from "../../shared/strategy/dnet/farm.ts";
-import { chooseLabVantage, planInduce, planStasis, stasisTargetDepths, unconqueredBands, type HoldHost, type HoldView } from "../../shared/strategy/dnet/hold.ts";
+import { holdHostFrom, planHold as planHoldFromView, type HoldHost, type HoldTask } from "../../shared/strategy/dnet/hold.ts";
 import { looseCandidates, type LooseTarget } from "../../shared/strategy/dnet/oracle.ts";
 import type { PasswordEvidence } from "../../shared/strategy/dnet/evidence.ts";
 import { exactNeighbourClueEpoch } from "../../shared/strategy/dnet/file-clues.ts";
@@ -139,7 +139,6 @@ function looseId(password: string): string {
   return h.toString(36);
 }
 
-type HoldTask = NonNullable<DeriveOptions["hold"]>[number];
 
 export async function main(ns: NS): Promise<void> {
   ns.disableLog("ALL");
@@ -753,39 +752,44 @@ export async function main(ns: NS): Promise<void> {
   };
 
   // --- projections (HoldHost / FarmHost from the flat entries) --------------
-  const projectHoldHosts = (at: number, expiry: ExpiryOpts): HoldHost[] => {
+  /** Every host with a walk running or staged, in map order. Written once:
+   * three sweeps used to carry private copies of this loop. */
+  const walkVantages = (): Set<string> => {
     const walking = new Set<string>();
     for (const entry of hosts.values()) {
       if (entry.agent?.order.kind === "walk") walking.add(entry.hostname);
       for (const o of entry.staged ?? []) if (o.kind === "walk") walking.add(entry.hostname);
     }
+    return walking;
+  };
+  /** The walker's host, when one exists — the LAST in map order, exactly the
+   * value the private loops used to leave behind. */
+  const currentWalker = (): string | undefined => [...walkVantages()].pop();
+
+  const projectHoldHosts = (at: number, expiry: ExpiryOpts): HoldHost[] => {
+    const walking = walkVantages();
     return [...hosts.values()].map((entry) => {
       const view = planningView(entry, at, expiry);
       return {
-        ...holdHostFromView(view, entry, at),
+        // The shared core projection home also uses — one definition, so the
+        // two sides can never derive the same record differently.
+        ...holdHostFrom(entry, {
+          at,
+          expiry,
+          agentAlive: entry.agent !== undefined,
+          hasCredential: vault.has(entry.hostname),
+          stasisLinked: stasisLinked.has(entry.hostname),
+        }),
+        // `planWalk` REFUSES a lab candidate whose blocked RAM is not fresh,
+        // and refuses again while any of it remains. Leaving it off the
+        // projection parks the whole labyrinth walk on `ram-unknown` for ever.
+        ...(view.blockedRam !== undefined ? { blockedRam: view.blockedRam } : {}),
         ...(view.difficulty !== undefined ? { difficulty: view.difficulty } : {}),
         ...(view.maxRam !== undefined ? { maxRam: view.maxRam } : {}),
         freeGb: usableGb(entry.hostname, at, expiry),
         ...(walking.has(entry.hostname) ? { irreplaceable: true } : {}),
       };
     });
-  };
-  const holdHostFromView = (view: DnetHost, entry: HostEntry, at: number): HoldHost => {
-    void at;
-    return {
-      hostname: entry.hostname,
-      ...(view.depth !== undefined ? { depth: view.depth } : {}),
-      // `planWalk` REFUSES a lab candidate whose blocked RAM is not fresh, and
-      // refuses again while any of it remains. Leaving it off the projection
-      // parks the whole labyrinth walk on `ram-unknown` for ever.
-      ...(view.blockedRam !== undefined ? { blockedRam: view.blockedRam } : {}),
-      agentAlive: entry.agent !== undefined,
-      hasCredential: vault.has(entry.hostname),
-      ...(view.neighbours !== undefined ? { neighbours: view.neighbours } : {}),
-      ...(view.isStationary === true ? { isStationary: true } : {}),
-      ...(stasisLinked.has(entry.hostname) ? { stasisLinked: true } : {}),
-      ...(entry.goneAt !== undefined ? { gone: true } : {}),
-    };
   };
 
   const projectInFlight = (): Map<string, { from: string; kind: TaskKind }[]> => {
@@ -858,108 +862,34 @@ export async function main(ns: NS): Promise<void> {
     [...hosts.keys()].map((hostname) => projectLooseTarget(hostname, at, expiry));
 
   // --- the walk / pins / hold plan ------------------------------------------
-  const planWalk = (
-    at: number, expiry: ExpiryOpts, holdHosts: readonly HoldHost[],
-    refuse: (host: string, why: string, detail: string) => void,
-  ): { lab?: HoldHost; candidate?: string; tasks: HoldTask[]; walking: boolean } => {
-    const lab = holdHosts.find((h) => isLabyrinth(h.hostname, fresh<string>(hosts.get(h.hostname), "modelId", at, expiry)) && !h.gone);
-    if (lab === undefined) return { tasks: [], walking: false };
-    if (vault.has(lab.hostname)) { refuse(lab.hostname, "lab-walked", "we already hold this lab's password, so its maze has been finished"); return { lab, tasks: [], walking: false }; }
-    const needed = labStage(lab.hostname)?.cha;
-    if (needed !== undefined && charisma < needed) {
-      charismaNeeded = Math.max(charismaNeeded ?? 0, needed);
-      refuse(lab.hostname, "charisma", `the maze needs charisma ${needed}, and every move below it answers 451`);
-      return { lab, tasks: [], walking: false };
-    }
-    let walkerAt: string | undefined;
-    for (const entry of hosts.values()) {
-      if (entry.agent?.order.kind === "walk") walkerAt = entry.hostname;
-      for (const o of entry.staged ?? []) if (o.kind === "walk") walkerAt = entry.hostname;
-    }
-    const vantageHost = chooseLabVantage(holdHosts.filter((h) => (h.agentAlive || h.stasisLinked === true) && h.neighbours?.includes(lab.hostname) === true && vault.has(h.hostname)));
-    const tasks: HoldTask[] = [];
-    if (walkerAt === undefined) {
-      const vantage = vantageHost?.hostname;
-      if (vantage === undefined) { refuse(lab.hostname, "no-vantage", "nothing of ours is standing next to the labyrinth with room for a walker"); return { lab, tasks, walking: false }; }
-      const standing = holdHosts.find((h) => h.hostname === vantage);
-      if (standing?.stasisLinked !== true) { refuse(vantage, "walker-unpinned", "the lab candidate must be in position and stasis-linked before preparation finishes"); return { lab, candidate: vantage, tasks, walking: false }; }
-      if (standing.blockedRam === undefined) { refuse(vantage, "ram-unknown", "the lab candidate's blocked RAM is not fresh"); return { lab, candidate: vantage, tasks, walking: false }; }
-      if (standing.blockedRam > 0) { refuse(vantage, "ram-blocked", `${standing.blockedRam.toFixed(2)}GB remains before the lab walker can start`); return { lab, candidate: vantage, tasks, walking: false }; }
-      if (hosts.get(vantage)?.agent === undefined) { refuse(vantage, "walker-unstaffed", "the pinned lab candidate is being reclaimed or awaiting its resident"); return { lab, candidate: vantage, tasks, walking: false }; }
-      const maxRam = fresh<number>(hosts.get(vantage), "maxRam", at, expiry) ?? 0;
-      if (budgets["walk"] === undefined || maxRam < budgets["walk"]) { refuse(vantage, "no-room", "the lab candidate cannot fit one legal walker thread"); return { lab, candidate: vantage, tasks, walking: false }; }
-      tasks.push({ kind: "walk", host: lab.hostname, from: vantage, threads: Math.floor(maxRam / budgets["walk"]), reason: `walk the maze from ${vantage}` });
-      walkerAt = vantage;
-    }
-    return { lab, candidate: walkerAt, tasks, walking: walkerAt !== undefined };
-  };
-
-  const admitPins = (
-    at: number, expiry: ExpiryOpts, pin: readonly string[],
-    refuse: (host: string, why: string, detail: string) => void, labHost?: string, remoteAfter = true,
-  ): HoldTask[] => {
-    const tasks: HoldTask[] = [];
-    for (const hostname of pin) {
-      const entry = hosts.get(hostname);
-      const free = usableGb(hostname, at, expiry);
-      if (entry?.agent !== undefined && budgets["pin"]! > free) { refuse(hostname, "no-room", `a 12 GB setStasisLink needs ${budgets["pin"]!.toFixed(2)}GB and ${free.toFixed(2)}GB is free`); continue; }
-      const replanter = [...hosts.values()].some((other) => {
-        if (other.hostname === hostname || other.agent === undefined) return false;
-        return (fresh<string[]>(other, "neighbours", at, expiry) ?? []).includes(hostname);
-      });
-      if ((!remoteAfter && !replanter) || !vault.has(hostname)) {
-        refuse(hostname, "no-replanter", remoteAfter ? "the host has no credential for its post-pin remote plant" : "releasing the link would leave no neighbour able to re-plant this host");
-        continue;
-      }
-      tasks.push({ kind: "pin", host: hostname, from: hostname, reason: "pin the host nothing can replace", ...(labHost !== undefined ? { edge: labHost } : {}) });
-    }
-    return tasks;
-  };
-
+  // The decisions live in `hold.ts` (`planHold`/`planWalk`/`admitPins`) as
+  // pure functions of the projected view; this wrapper only projects, hands
+  // over the scalars the controller alone knows, and folds the report.
   const planHold = (at: number): { tasks: HoldTask[]; report: DnetHoldReport; labWalked: boolean; labCandidate?: string } => {
     const expiry = expiryOpts();
-    const refused: DnetHoldReport["examples"] = [];
-    const refuse = (host: string, why: string, detail: string): void => { refused.push({ host, why, detail }); };
-    const tasks: HoldTask[] = [];
-    const holdHosts = projectHoldHosts(at, expiry);
-    const view: HoldView = {
-      hosts: holdHosts,
+    const plan = planHoldFromView({
+      hosts: projectHoldHosts(at, expiry),
       netDepth: netDepth ?? DEFAULT_NET_DEPTH,
       stasisLimit,
-      spareTargets: stasisTargetDepths(netDepth ?? DEFAULT_NET_DEPTH, labExpected ? stasisLimit - 1 : stasisLimit, labExpected),
+      stasisLinkedCount: stasisLinked.size,
+      labExpected,
       charisma,
-      authDurationMultiplier: 1,
-    };
-    const walk = planWalk(at, expiry, holdHosts, refuse);
-    labCandidateHost = walk.candidate;
-    const labCandidate = holdHosts.find((h) => h.hostname === walk.candidate);
-    if (labCandidate) labCandidate.irreplaceable = true;
-    for (const task of walk.tasks) {
-      tasks.push(task);
-      const standing = holdHosts.find((h) => h.hostname === task.from);
-      if (standing) standing.irreplaceable = true;
-    }
-    const labWalked = walk.lab !== undefined && vault.has(walk.lab.hostname);
-    const stasis = planStasis({ ...view, reserveForWalker: !labWalked && labExpected });
-    for (const refusal of stasis.refused) refuse(refusal.hostname, refusal.why, refusal.detail);
-    for (const task of admitPins(at, expiry, stasis.release, refuse, undefined, false)) tasks.push({ ...task, unpin: true, reason: "release a link its host no longer earns" });
-    const walkerPin = (name: string): boolean => holdHosts.find((e) => e.hostname === name)?.irreplaceable === true;
-    tasks.push(...admitPins(at, expiry, stasis.pin.filter(walkerPin), refuse, walk.lab?.hostname));
-    tasks.push(...admitPins(at, expiry, stasis.pin.filter((name) => !walkerPin(name)), refuse));
-    const lab = walk.lab;
-    const spareLinks = Math.max(0, stasisLimit - stasisLinked.size);
-    const labNeed = lab !== undefined && !vault.has(lab.hostname) && walk.candidate === undefined;
-    const ferryWanted = unconqueredBands(view).length > 0;
-    if (!labNeed && spareLinks === 0 && !ferryWanted) {
-      if (lab !== undefined) refuse(lab.hostname, "push-not-needed", "the labyrinth is reachable, every stasis link is spent, and every band holds a resident");
-    } else {
-      const induce = planInduce({ ...view, induceGbPerThread: budgets["induce"], needLabVantage: labNeed });
-      for (const refusal of induce.refused) refuse(refusal.hostname, refusal.why, refusal.detail);
-      for (const push of induce.pushes) tasks.push({ kind: "induce", host: push.host, from: push.from, threads: push.threads, reason: push.reason });
-    }
+      walkerAt: currentWalker(),
+      walkGb: budgets["walk"],
+      pinGb: budgets["pin"]!,
+      induceGbPerThread: budgets["induce"],
+    });
+    labCandidateHost = plan.labCandidate;
+    if (plan.charismaNeeded !== undefined) charismaNeeded = Math.max(charismaNeeded ?? 0, plan.charismaNeeded);
     const admitted: Record<string, number> = {};
-    for (const task of tasks) admitted[task.kind] = (admitted[task.kind] ?? 0) + 1;
-    return { tasks, report: { admitted, ...foldRefusals(refused) }, labWalked, ...(walk.candidate !== undefined ? { labCandidate: walk.candidate } : {}) };
+    for (const task of plan.tasks) admitted[task.kind] = (admitted[task.kind] ?? 0) + 1;
+    const refused = plan.refused.map((r) => ({ host: r.hostname, why: r.why, detail: r.detail }));
+    return {
+      tasks: plan.tasks,
+      report: { admitted, ...foldRefusals(refused) },
+      labWalked: plan.labWalked,
+      ...(plan.labCandidate !== undefined ? { labCandidate: plan.labCandidate } : {}),
+    };
   };
 
   // --- filing tasks as orders -----------------------------------------------
@@ -1237,11 +1167,7 @@ export async function main(ns: NS): Promise<void> {
     spread = { planted: plan.plant.length, ...foldRefusals(plan.refused) };
 
     const pinsPending = holdPlan.tasks.some((t) => t.kind === "pin" && t.unpin !== true) || [...projectInFlight().values()].some((held) => held.some((job) => job.kind === "pin"));
-    let walkFrom: string | undefined;
-    for (const entry of hosts.values()) {
-      if (entry.agent?.order.kind === "walk") walkFrom = entry.hostname;
-      for (const o of entry.staged ?? []) if (o.kind === "walk") walkFrom = entry.hostname;
-    }
+    let walkFrom = currentWalker();
     for (const task of holdPlan.tasks) if (task.kind === "walk") walkFrom = task.from;
     const stormCtx: StormContext = {
       now: at,
@@ -1658,27 +1584,33 @@ export async function main(ns: NS): Promise<void> {
       lastMutationAt = Math.max(lastMutationAt ?? 0, (lastStormFiredAt ?? at) + STORM_BURST_MS);
     }
 
-    if (mutationSweepDue) {
-      mutationSweepDue = false;
-      for (const entry of [...hosts.values()]) {
-        const pid = entry.agent?.pid ?? entry.prober?.pid;
-        if (pid === undefined || pid <= 0) continue;
-        if (entry.agent === undefined && entry.prober === undefined) continue;
-        let alive = false;
-        try { alive = ns["isRunning"](pid, entry.hostname); } catch { alive = false; }
-        if (alive) continue;
-        // `retireVantage` settles an ACTIVE order with `died`, and `onReport`
-        // counts that loss itself — only a bare resident goes uncounted.
-        if (entry.agent === undefined || entry.agent.order.kind === "idle") residentsLost++;
-        retireVantage(entry.hostname, `${entry.hostname} process died during a mutation`);
-        invalidateBackdoor(entry.hostname);
-      }
-    }
-
-    // Sweep entries whose resident stopped beating. A live process is still
-    // authoritative: request cancellation, but never detach it while it can
-    // perform another side effect.
+    // ONE dead-process pass, two predicates in their original order: the
+    // mutation sweep (any tracked pid no longer running) first, then the
+    // beat-timeout sweep for idle residents. The predicates never interact
+    // across entries, so folding the two back-to-back map walks into one
+    // changes the iteration count and nothing else. The watchdog sweep below
+    // stays separate: its place AFTER `reconcilePending` is load-bearing.
+    const sweepMutations = mutationSweepDue;
+    mutationSweepDue = false;
     for (const entry of [...hosts.values()]) {
+      if (sweepMutations) {
+        const pid = entry.agent?.pid ?? entry.prober?.pid;
+        if (pid !== undefined && pid > 0 && (entry.agent !== undefined || entry.prober !== undefined)) {
+          let alive = false;
+          try { alive = ns["isRunning"](pid, entry.hostname); } catch { alive = false; }
+          if (!alive) {
+            // `retireVantage` settles an ACTIVE order with `died`, and `onReport`
+            // counts that loss itself — only a bare resident goes uncounted.
+            if (entry.agent === undefined || entry.agent.order.kind === "idle") residentsLost++;
+            retireVantage(entry.hostname, `${entry.hostname} process died during a mutation`);
+            invalidateBackdoor(entry.hostname);
+            continue;
+          }
+        }
+      }
+      // A resident that stopped beating. A live process is still
+      // authoritative: request cancellation, but never detach it while it can
+      // perform another side effect.
       if (entry.agent === undefined || entry.agent.order.kind !== "idle") continue;
       if (at - entry.agent.beatAt <= BEAT_WINDOW_MS) continue;
       let alive = false;
