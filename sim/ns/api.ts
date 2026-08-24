@@ -1,5 +1,6 @@
 import type { NS, Player, ResetInfo, Server } from "@ns";
 import type { Clock } from "../clock.ts";
+import { countCall } from "../cost.ts";
 import type { SimServer } from "../core/effects.ts";
 import type { Engine } from "../engine.ts";
 import type { HacknetSystem } from "../features/hacknet.ts";
@@ -189,6 +190,8 @@ function namespace(impl: Record<string, unknown>, path: string, host: SimNsHost,
       if (typeof prop !== "string" || typeof value !== "function") return value;
       const functionPath = path === "" ? prop : `${path}.${prop}`;
       return (...args: unknown[]): unknown => {
+        // Only counts when --cost armed the meter; otherwise a null check.
+        countCall(functionPath);
         concurrentCall(host, process, functionPath);
         const result = (value as (...inner: unknown[]) => unknown)(...args);
         if (functionPath === "asleep" || !(result instanceof Promise) || process.runningFn) return result;

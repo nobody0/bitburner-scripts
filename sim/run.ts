@@ -21,6 +21,7 @@ import {
 } from "./fidelity.ts";
 import { scenarioFingerprint } from "./scenario.ts";
 import { SimArtifactSession } from "./artifacts.ts";
+import { formatReport } from "./cost.ts";
 import {
   assertValidExperiment,
   type EntranceIdentity,
@@ -316,6 +317,9 @@ if (import.meta.main) {
   let freshEntrance = false;
   let routeId: string | undefined;
   let child = false;
+  let wallBudgetMs: number | undefined;
+  let cost = false;
+  let costSampleEveryMs: number | undefined;
   let featureOnly: FeatureId[] | undefined;
   let featureAdd: FeatureId[] | undefined;
 
@@ -334,6 +338,15 @@ if (import.meta.main) {
     else if (arg === "--verbose") verbose = true;
     else if (arg === "--compact") compact = true;
     else if (arg === "--perf") perf = true;
+    // --horizon bounds virtual time; --wall-budget bounds the wait. Its reason
+    // for existing is profiling: Bun writes a CPU profile on process exit, so a
+    // run that stops cleanly after N real seconds is what makes a window of an
+    // hours-long simulation profilable at all.
+    else if (arg === "--wall-budget") wallBudgetMs = parseDuration(next());
+    else if (arg === "--cost") cost = true;
+    // Sampling finer than the default matters on short budgets: the drift
+    // number needs several intervals before its direction means anything.
+    else if (arg === "--cost-every") costSampleEveryMs = parseDuration(next());
     else if (arg === "--farm") farm = true;
     else if (arg === "--baseline") farm = false;
     else if (arg === "--profile") profileId = next();
@@ -504,6 +517,9 @@ if (import.meta.main) {
         ...(homeRam !== undefined ? { homeRam } : profile?.homeRam !== undefined ? { homeRam: profile.homeRam } : {}),
         ...(runMoney !== undefined ? { startingMoney: runMoney } : {}),
         ...(perf ? { telemetry: false } : {}),
+        ...(wallBudgetMs !== undefined ? { wallBudgetMs } : {}),
+        ...(cost ? { cost: true } : {}),
+        ...(costSampleEveryMs !== undefined ? { costSampleEveryMs } : {}),
         ...(compact ? {
           // Preserve identity, validity, milestones and terminal result while
           // dropping enormous periodic state payloads. Goal evaluation still
@@ -517,6 +533,7 @@ if (import.meta.main) {
         onRecord: (line) => artifacts.write(line),
       });
       result = outcome;
+      if (outcome.cost) console.log(formatReport(outcome.cost));
       const gaps = Object.entries(outcome.unmodeled);
       if (gaps.length > 0) {
         console.log(`  not modelled: ${gaps.map(([name, count]) => `${name} x${count}`).join(", ")}`);

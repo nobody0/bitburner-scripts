@@ -219,6 +219,53 @@ benchmarks, and the normal telemetry path when inspecting detailed decisions.
   requirement of every generated server, while saves retain live open ports.
 - Intelligence is 0 in the default fixture, matching a fresh character.
 
+## Measuring host cost
+
+Everything else the harness reports is virtual. `timeToGoalMs`, `engineCycles`
+and `noteTickLateness` all answer "how fast did the player get there", never
+"how long did I sit here waiting". Two flags answer the second question:
+
+- `--wall-budget <duration>` stops the pump after that much REAL time and
+  reports `stoppedBecause: "budget"`. `--horizon` bounds virtual time; this
+  bounds the wait. It exists because a sampling profiler only writes its output
+  when the process exits normally, so bounding a run is what makes a window of
+  an hours-long simulation profilable at all. A budgeted run never reaches its
+  goal, so `assertPromotableSession` refuses it and no truncated run can enter
+  route lineage.
+- `--cost` reports throughput in **virtual hours per wall minute** — the number a
+  performance change has to move — plus per-event cost, queue shape, and
+  Netscript calls bucketed by name. It samples every 10s of real time, because
+  the whole-run average hides the shape.
+
+Both are in `sim/cost.ts`. The one rule: `sim/realm/timers.ts` has replaced
+`performance.now` and `Date.now` with virtual time by the time a run is pumping,
+so every wall-clock measurement goes through `realNowMs()` (`sim/clock.ts`),
+captured at module load like the pump's own timers. A bare `performance.now()`
+inside a run silently reports the game's clock as the host's.
+
+The driver is `bun run sim:profile` (`tools/sim-profile.ts`):
+
+```
+bun run sim:profile --cpu-prof --wall-budget 2m   # one bounded run under Bun's sampler
+bun run sim:profile --matrix                      # throughput across configurations
+```
+
+`--cpu-prof` writes a `.cpuprofile` and a markdown digest under `runs/profiles/`.
+`--matrix` bounds every case to the same budget and varies one thing at a time —
+`--perf`, `--compact`, and the `--only` feature ladder. It is a screen, not an
+attribution: turning a feature off runs a *different* simulation, not the same
+one minus a cost, so a build that cannot buy servers has fewer hosts to dispatch
+to and looks fast for unrelated reasons. The ladder is not monotonic and is not
+supposed to be. Use it to rule a suspect out and to spot an order-of-magnitude
+outlier; take real attribution from `--cpu-prof`. Both run a single seed on
+purpose: `sim/run.ts` fans multi-seed runs out to child processes, and a
+profiler attached to the parent would watch it wait.
+
+Read `--cost`'s throughput curve before the profile's hot list. A flat CPU
+profile cannot distinguish "this function is expensive" from "this function is
+called more often the longer the run goes", and as the next section records,
+this simulator's worst performance bugs have all been the second kind.
+
 ## Run-length pathologies (found and FIXED by profiling factions-join)
 
 The 2-hour factions-join profile was unfinishable — 40+ minutes real per seed,

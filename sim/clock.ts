@@ -25,6 +25,18 @@ const realSetImmediate: (fn: () => void) => unknown =
     ? globalThis.setImmediate.bind(globalThis)
     : (fn: () => void) => realSetTimeout(fn, 0);
 
+/** Real wall-clock milliseconds, for the same reason and by the same trick as
+ * the timers above: sim/realm/timers.ts replaces `performance.now` with
+ * `() => clock.now()`, so anything measuring the HOST cost of a run has to hold
+ * a reference captured before the patch. Every wall-clock measurement inside a
+ * running simulation must come through here — a bare `performance.now()` or
+ * `Date.now()` silently reports virtual game time instead. */
+const realPerformanceNow = globalThis.performance.now.bind(globalThis.performance);
+
+export function realNowMs(): number {
+  return realPerformanceNow();
+}
+
 /** One real macrotask: every pending microtask and already-resolved promise
  * chain settles before it returns. */
 export function drainMicrotasks(): Promise<void> {
@@ -39,6 +51,10 @@ export class Clock {
   #nextId = 1;
   /** Cancelled-but-still-heaped ids (lazy deletion). */
   #cancelled = new Set<number>();
+  /** Events actually popped and run. The denominator for every throughput
+   * number: virtual ms per event says how much time a run buys per unit of
+   * host work. */
+  #events = 0;
 
   now(): number {
     return this.#now;
@@ -47,6 +63,14 @@ export class Clock {
   /** Live (uncancelled) scheduled events. */
   pending(): number {
     return this.#heap.length - this.#cancelled.size;
+  }
+
+  /** Queue shape, for cost reporting. `cancelled` is the lazy-deletion backlog:
+   * a cancelled id is only dropped when it surfaces at the heap top, so a run
+   * that kills a lot of in-flight ops carries the handles until then. Watching
+   * it grow is how you tell a leak from a merely busy queue. */
+  stats(): { events: number; heap: number; cancelled: number } {
+    return { events: this.#events, heap: this.#heap.length, cancelled: this.#cancelled.size };
   }
 
   /** Returns a cancellation handle. Ids start at 1: the game's
@@ -111,6 +135,7 @@ export class Clock {
       }
       this.#pop();
       this.#now = next.time;
+      this.#events++;
       return next;
     }
   }

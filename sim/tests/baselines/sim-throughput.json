@@ -1,0 +1,61 @@
+{
+  "note": [
+    "HOST COST of the simulator, as opposed to the in-game results in bn1.json.",
+    "",
+    "The unit is `vhPerWallMinute` -- virtual hours of game bought per real",
+    "minute of waiting. It improves UPWARD. Everything else the harness reports",
+    "is virtual time and says nothing about how long a run takes to sit through.",
+    "",
+    "RULES.",
+    "  1. Only move a number from a run you actually observed, and record the",
+    "     machine: these are wall-clock measurements, so they are comparable",
+    "     only against other measurements on the same hardware. A 5% gap is",
+    "     noise; a 2x gap is a finding.",
+    "  2. `decayPct` is the whole point of the entry. It compares the mean",
+    "     per-interval throughput of the FIRST HALF of a bounded window's samples",
+    "     against the SECOND HALF -- not the first sample against the last, which",
+    "     is the two least reliable readings (JIT warm-up, and a partial tail).",
+    "     Strongly negative means cost grows with run length, which is a different",
+    "     bug from `vhPerWallMinute` simply being low, and the one this simulator",
+    "     has historically actually had (see spec/simulator.md, 'Run-length",
+    "     pathologies').",
+    "  3. A budgeted run never reaches its goal. These entries are diagnostics",
+    "     and are never route evidence.",
+    "",
+    "HOW TO RE-MEASURE.",
+    "  bun run sim -- --profile bn1-full --seed 1 --compact --perf \\",
+    "      --wall-budget 2m --cost",
+    "  bun run sim:profile --cpu-prof --wall-budget 2m   # where the time goes",
+    "  bun run sim:profile --matrix                      # which subsystem owns it",
+    "Same seed, same budget, an otherwise idle machine."
+  ],
+  "provenance": {
+    "recordedAt": "2026-08-24",
+    "gitRev": "e618e085",
+    "bun": "1.3.14",
+    "machine": "darwin arm64",
+    "recordedFrom": "first measurement, taken when --wall-budget and --cost were added"
+  },
+  "profiles": {
+    "bn1-full": {
+      "command": "--profile bn1-full --seed 1 --compact --perf --wall-budget 2m --cost",
+      "vhPerWallMinute": 2.89,
+      "decayPct": -30,
+      "firstHalfVhPerMin": 3.37,
+      "lastHalfVhPerMin": 2.36,
+      "virtualHoursIn2Min": 5.79,
+      "events": 481280,
+      "usPerEvent": 249.8,
+      "nsCalls": 2157526,
+      "what": "Cold BN1 start under the settings bench:sim:bn1-full uses.",
+      "note": "THE PROBLEM, not a target. At a flat 2.89 vh/min the 24h horizon would take ~8 minutes a seed. It is not flat: throughput halves across the window and the last interval measured 1.02 vh/min and was still falling, so the run does not finish in any reasonable time. Fix the decay before the absolute number. Reproduced twice at this revision within 0.4%.",
+      "whereTheTimeGoes": {
+        "note": "Self+total time from a 2-minute `sim:profile --cpu-prof` at the same revision. The two chains are roughly equal and independent.",
+        "hackingDispatch": "31.5% -- runPump -> pump -> planFarm -> dispatch. Inside it ramInvestment (game/lib/features/hacking.ts:968) is 15.0%, almost all of it marginalCostPerGb (shared/strategy/ram-supply.ts:143, 9.7%) sorting a supply list with compareSupply (4.6% self, entirely under native sort).",
+        "targeting": "20.4% -- solveCycle (shared/strategy/targeting.ts:429) via stepEvaluator and solveEntry, spending it in evalThreads -> packsAt -> place. packsAt alone is 7.0% self.",
+        "factionsPortfolio": "20.7% -- a 30-second-cadence feature taking a fifth of the CPU. factions tick -> stepFactions -> decideFactions -> selectFactionPortfolio -> chooseBudget -> evaluate (15.3%), of which evaluateUncached is 10.8%, so the memo misses most of the time. estimatedCost/greedyOrder (shared/strategy/factions/augs.ts:823) 8.8%.",
+        "clockOverhead": "#siftDown 1.4% self. The discrete-event pump itself is not the problem."
+      }
+    }
+  }
+}

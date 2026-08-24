@@ -5,6 +5,7 @@ import { describeOverrides, type FeatureOverrides } from "../shared/features/pro
 import type { SaveSeed } from "../shared/save/to-sim.ts";
 import type { LogRecord, WireMessage } from "../shared/telemetry/schema.ts";
 import { Clock } from "./clock.ts";
+import { CostMeter, pumpGuard, type CostReport } from "./cost.ts";
 import type { SimPlayerOptions } from "./core/player.ts";
 import type { ServerSpec } from "./core/effects.ts";
 import { mulberry32 } from "./core/rng.ts";
@@ -138,6 +139,18 @@ export interface GameRunOptions {
   /** Optional artifact filter. Every record still reaches the goal reducer;
    * this only controls which already-observed records are serialized. */
   recordFilter?: (record: LogRecord) => boolean;
+  /** Stop the pump after this many REAL milliseconds and report
+   * `stoppedBecause: "budget"`. The horizon bounds virtual time; this bounds
+   * the wait. It exists so a run can be profiled: a sampling profiler only
+   * writes its output when the process exits normally, so a bounded run is the
+   * only way to profile a window of a simulation that would otherwise run for
+   * hours. A budgeted run never reaches its goal, so it cannot be promoted. */
+  wallBudgetMs?: number;
+  /** Measure host cost (sim/cost.ts) and attach the report to the result. */
+  cost?: boolean;
+  /** Real milliseconds between cost samples. */
+  costSampleEveryMs?: number;
+  onCostSample?: (line: string) => void;
 }
 
 /** Singularity RAM is governed only by active SF4 (or BN4 inside getRamCost),
@@ -164,9 +177,11 @@ export interface GameRunResult {
   reached: boolean;
   timeToGoalMs: number;
   records: number;
-  stoppedBecause: "goal" | "empty" | "horizon";
+  stoppedBecause: "goal" | "empty" | "horizon" | "budget";
   /** 200ms game cycles processed — the second timebase's progress. */
   engineCycles: number;
+  /** Host cost of the run, present only when `cost` was requested. */
+  cost?: CostReport;
   /** Everything the simulator was asked for and does not model, with counts. */
   unmodeled: Record<string, number>;
   crashes: { pid: number; filename: string; error: string }[];
@@ -1047,10 +1062,33 @@ async function runGameInstalled(
 
   let stoppedBecause: GameRunResult["stoppedBecause"];
   const originalWebSocket = globalThis.WebSocket;
+  // Constructed here rather than at run setup so its start time is the pump's,
+  // not the world builder's: world construction is real work but it is not the
+  // per-event cost this measures, and folding it in would flatter every
+  // throughput number by whatever the fixture cost to build.
+  const emitCostSample = options.onCostSample ?? ((line: string) => console.log(line));
+  const meter = options.cost
+    ? new CostMeter({
+        clock,
+        ...(options.costSampleEveryMs !== undefined ? { sampleEveryMs: options.costSampleEveryMs } : {}),
+        engineCycles: () => engine.cyclesProcessed,
+        records: () => recordCount,
+        onSample: (_sample, line) => emitCostSample(line),
+      })
+    : undefined;
+  const guard = pumpGuard({
+    goalDone: () => goal.done(ctx),
+    ...(options.wallBudgetMs !== undefined ? { wallBudgetMs: options.wallBudgetMs } : {}),
+    ...(meter ? { meter } : {}),
+  });
   try {
     globalThis.WebSocket = SimTelemetrySocket as unknown as typeof WebSocket;
     launch(host, controller);
-    stoppedBecause = await clock.runAsync(() => goal.done(ctx), horizonMs);
+    const outcome = await clock.runAsync(guard.until, horizonMs);
+    // runAsync cannot distinguish the two reasons `until` returns true, so the
+    // guard reports which one tripped. Without this a budget-truncated run
+    // would claim it reached the goal.
+    stoppedBecause = outcome === "goal" ? guard.stoppedBy() : outcome;
   } finally {
     // Terminal harness teardown is not an in-world kill: no continuation is
     // observable after the virtual realm is dismantled. Do not reject pending
@@ -1061,6 +1099,7 @@ async function runGameInstalled(
     globalThis.WebSocket = originalWebSocket;
   }
 
+  const costReport = meter?.finish();
   const reached = stoppedBecause === "goal";
   const gaps = unmodeledCounts();
   const validity: RunValidity = Object.keys(gaps).length > 0 || host.crashes.length > 0 ? "invalid-for-goal" : "valid";
@@ -1079,6 +1118,7 @@ async function runGameInstalled(
     records: recordCount,
     stoppedBecause,
     engineCycles: engine.cyclesProcessed,
+    ...(costReport ? { cost: costReport } : {}),
     unmodeled: gaps,
     crashes: host.crashes,
     output: host.output,

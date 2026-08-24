@@ -163,6 +163,20 @@ bun run sim -- --profile bn1-full --fresh                             # explicit
 bun run sim:compare runs/<baseline>.session.json runs/<candidate>.session.json
 ```
 
+Why is a run slow? `--horizon` bounds virtual time; `--wall-budget` bounds the
+wait, and `--cost` reports throughput in virtual hours per wall minute:
+
+```
+bun run sim -- --profile bn1-full --seed 1 --compact --perf --wall-budget 2m --cost
+bun run sim:profile --cpu-prof --wall-budget 2m   # the same run under Bun's sampler
+bun run sim:profile --matrix                      # throughput per configuration
+```
+
+A budgeted run stops cleanly and reports `stoppedBecause: budget`, which is what
+lets a sampling profiler write its output for a simulation that would otherwise
+run for hours. It never reaches its goal, so it can never be promoted. See
+`spec/simulator.md`.
+
 Profiles are explicitly either `bitnode-route` or `feature-scenario`. Route
 sessions carry their entrance identity in the manifest: fresh BN1, or a
 registered save id plus the SHA-256 of its exact bytes. Replacing bytes behind
