@@ -1,16 +1,15 @@
 import {
   NEUROFLUX,
   closePurchaseSet,
-  estimatedCost,
+  estimatedAugSetCost,
   type AugInfo,
-  type PurchaseCandidate,
 } from "./augs.ts";
 import type { FactionIntent, FactionPortfolio, HorizonSample } from "./plan.ts";
 import {
   buildFrontiers,
   countValue,
   cycleCompatible,
-  favorValue,
+  favorValueFromFuture,
   qualityValue,
   routeAwareScore,
   type FactionPackage,
@@ -104,6 +103,26 @@ function unownedFrom(faction: string, view: FactionsView): AugInfo[] {
   return offered;
 }
 
+/** Name set of {@link unownedFrom}, for overlap counting from the acquired
+ * side: the union a portfolio evaluation holds is usually far smaller than a
+ * big faction's catalogue, so `favorValue`'s future-work count is cheaper as
+ * `|offered| - |acquired ∩ offered|` iterating the union. Same per-view
+ * lifetime as the list it mirrors. */
+const OFFERED_SET_CACHE = new WeakMap<FactionsView, Map<string, ReadonlySet<string>>>();
+
+function unownedSetFrom(faction: string, view: FactionsView): ReadonlySet<string> {
+  let cache = OFFERED_SET_CACHE.get(view);
+  if (!cache) {
+    cache = new Map();
+    OFFERED_SET_CACHE.set(view, cache);
+  }
+  const cached = cache.get(faction);
+  if (cached) return cached;
+  const names = new Set(unownedFrom(faction, view).map((aug) => aug.name));
+  cache.set(faction, names);
+  return names;
+}
+
 /** What a selection pass returns. `intent` and `runnerUp` are the head and the
  * next member of the portfolio, kept under their old names because every
  * existing consumer — the arbiter's claims, the `until` readout, progression's
@@ -151,19 +170,56 @@ export interface PortfolioSolution {
 function unionAugs(choices: readonly Choice[], view: FactionsView): string[] {
   const names: string[] = [];
   const seen = new Set<string>();
+  // `plain` tracks, in the same walk that builds the list, whether the closure
+  // could change it at all: it deduplicates (repeated NeuroFlux), drops owned
+  // names, and inserts prerequisites — so a unique, unowned, prerequisite-free
+  // list IS its own closure and skips the whole `closePurchaseSet` apparatus.
+  // This is the portfolio search's inner loop; see the COST note above.
+  let plain = true;
+  let nfgSeen = false;
   for (const choice of choices) {
     for (const name of choice.pkg.augmentations) {
       // NeuroFlux is the one repeatable name: two factions each offering the
       // next level is two levels, not one shared purchase.
-      if (name !== NEUROFLUX && seen.has(name)) continue;
-      seen.add(name);
+      if (name === NEUROFLUX) {
+        if (nfgSeen || view.owned.has(name)) plain = false;
+        nfgSeen = true;
+      } else if (seen.has(name)) {
+        continue;
+      } else {
+        seen.add(name);
+        if (view.owned.has(name)) plain = false;
+      }
+      if (plain) {
+        const aug = view.catalog.get(name);
+        if (aug !== undefined && aug.prereqs.length > 0) plain = false;
+      }
       names.push(name);
     }
   }
+  if (plain) return names;
   return closePurchaseSet(names, view.catalog, view.owned);
 }
 
 const STANDING_CACHE = new WeakMap<FactionsView, Map<string, FactionStanding>>();
+
+/** `bestWorkType(standing.offers, view.person, standing.favor, ...)` reads
+ * only per-view-stable inputs, and both the critical-path pricing and the
+ * forfeit term ask it per chosen faction per evaluation — thousands of times
+ * per budget sweep for a handful of distinct answers. */
+const WORK_CACHE = new WeakMap<FactionsView, Map<string, ReturnType<typeof bestWorkType>>>();
+
+function bestWorkFor(standing: FactionStanding, view: FactionsView): ReturnType<typeof bestWorkType> {
+  let cache = WORK_CACHE.get(view);
+  if (!cache) {
+    cache = new Map();
+    WORK_CACHE.set(view, cache);
+  }
+  if (cache.has(standing.name)) return cache.get(standing.name)!;
+  const work = bestWorkType(standing.offers, view.person, standing.favor, view.repContext, true);
+  cache.set(standing.name, work);
+  return work;
+}
 
 function standingOf(faction: string, view: FactionsView): FactionStanding | undefined {
   let cache = STANDING_CACHE.get(view);
@@ -182,20 +238,18 @@ function standingOf(faction: string, view: FactionsView): FactionStanding | unde
  * local search, and the exact ordering DP is exponential — `orderPurchases` is
  * for the transaction boundary, where money actually changes hands. */
 function unionCost(augNames: readonly string[], choices: readonly Choice[], view: FactionsView): number {
-  const candidates: PurchaseCandidate[] = [];
+  // No seller attribution and no PurchaseCandidate wrappers: an augmentation
+  // costs the same wherever it is bought, the estimate reads only the name,
+  // the prerequisites and the queue depth, and nothing built here leaves this
+  // function — both the per-augmentation `choices.find` and the wrapper
+  // objects sat measurably inside the search's innermost loop. The
+  // transaction boundary (`orderPurchases`) still names real sellers.
+  const augs: AugInfo[] = [];
   for (const name of augNames) {
     const aug = view.catalog.get(name);
-    if (!aug) continue;
-    // The seller is carried for the transaction, not for the price: an
-    // augmentation costs the same wherever it is bought, and `estimatedCost`
-    // reads only the name, the prerequisites and the queue depth. Naming the
-    // member of the set that actually sells it keeps the record honest.
-    const seller = choices.find((choice) => aug.factions.includes(choice.faction))?.faction
-      ?? choices[0]?.faction
-      ?? "";
-    candidates.push({ name, aug, faction: seller });
+    if (aug) augs.push(aug);
   }
-  return estimatedCost(candidates, view.priceContext);
+  return estimatedAugSetCost(augs, view.priceContext);
 }
 
 /** Value of the union, recomposed from the same terms `packageValues` uses.
@@ -208,10 +262,11 @@ function portfolioValue(
   augNames: readonly string[],
   view: FactionsView,
 ): { total: number; activation: number } {
-  const acquired = new Set(augNames);
-  const augs = augNames
-    .map((name) => view.catalog.get(name))
-    .filter((aug): aug is AugInfo => Boolean(aug));
+  const augs: AugInfo[] = [];
+  for (const name of augNames) {
+    const aug = view.catalog.get(name);
+    if (aug) augs.push(aug);
+  }
 
   // Same terms `packageValues` uses, over the UNION rather than one package.
   const count = countValue(augs, view);
@@ -221,7 +276,13 @@ function portfolioValue(
   for (const choice of choices) {
     const standing = standingOf(choice.faction, view);
     if (!standing) continue;
-    favor += favorValue(standing, choice.pkg.favorAfterInstall, unownedFrom(choice.faction, view), acquired, view);
+    // future = offered minus what this set acquires, counted from the
+    // acquired side — see unownedSetFrom. Identical to handing favorValue the
+    // offered list; the acquired union is just the smaller thing to iterate.
+    const offered = unownedSetFrom(choice.faction, view);
+    let overlap = 0;
+    for (let i = 0; i < augNames.length; i++) if (offered.has(augNames[i]!)) overlap++;
+    favor += favorValueFromFuture(standing, choice.pkg.favorAfterInstall, offered.size - overlap, view);
   }
   // Same split `packageValues` makes, and for the same reason: count is ROUTE
   // progress toward a gate, not a rate. It is kept once acquired and an install
@@ -256,7 +317,7 @@ function portfolioTime(
     if (pkg.donationCost <= 0 && pkg.repSec > 0) {
       const standing = standingOf(choice.faction, view);
       const work = standing
-        ? bestWorkType(standing.offers, view.person, standing.favor, view.repContext, true)
+        ? bestWorkFor(standing, view)
         : undefined;
       if (!pace || !work) {
         sec += pkg.repSec;
@@ -281,20 +342,38 @@ function portfolioTime(
 /** Evaluations are the search's inner loop and the search revisits the same
  * sets constantly — local search proposes a move, rejects it, and the next
  * budget proposes it again. Keyed on the ORDERED selection, because the work
- * term is order-dependent. Per view, so it dies with the strategy pass. */
-const EVAL_CACHE = new WeakMap<FactionsView, Map<string, PortfolioSolution>>();
+ * term is order-dependent. Per view, so it dies with the strategy pass.
+ *
+ * The key is a trie over the packages' object identities rather than a
+ * `faction:index` string: each frontier entry is a fresh literal identifying
+ * exactly one (faction, index) pair, and building + hashing the string key
+ * cost more than many of the cache hits it served. A frontier REBUILT for the
+ * same view starts cold here where the string key would have carried entries
+ * over — which only re-runs a pure function on equal inputs. */
+interface EvalNode {
+  solution?: PortfolioSolution;
+  next?: Map<FactionPackage, EvalNode>;
+}
+const EVAL_CACHE = new WeakMap<FactionsView, EvalNode>();
 
 function evaluate(choices: readonly Choice[], view: FactionsView): PortfolioSolution {
-  let cache = EVAL_CACHE.get(view);
-  if (!cache) {
-    cache = new Map();
-    EVAL_CACHE.set(view, cache);
+  let node = EVAL_CACHE.get(view);
+  if (!node) {
+    node = {};
+    EVAL_CACHE.set(view, node);
   }
-  const key = choices.map((choice) => `${choice.faction}:${choice.index}`).join("|");
-  const hit = cache.get(key);
-  if (hit) return hit;
+  for (const choice of choices) {
+    if (!node.next) node.next = new Map();
+    let child = node.next.get(choice.pkg);
+    if (!child) {
+      child = {};
+      node.next.set(choice.pkg, child);
+    }
+    node = child;
+  }
+  if (node.solution) return node.solution;
   const solution = evaluateUncached(choices, view);
-  cache.set(key, solution);
+  node.solution = solution;
   return solution;
 }
 
@@ -585,7 +664,7 @@ function resetForfeitSec(solution: PortfolioSolution, view: FactionsView): numbe
 
     const favorRelief = (1 + standing.favor / 100)
       / Math.max(1e-9, 1 + choice.pkg.favorAfterInstall / 100);
-    const work = bestWorkType(standing.offers, view.person, standing.favor, view.repContext, true);
+    const work = bestWorkFor(standing, view);
     const bankedSec = work && work.repPerSec > 0 ? standing.rep / work.repPerSec : 0;
     forfeit += (choice.pkg.unlockSec + bankedSec)
       * leftShare

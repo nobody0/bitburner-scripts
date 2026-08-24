@@ -44,41 +44,43 @@
   ],
   "provenance": {
     "recordedAt": "2026-08-24",
-    "gitRev": "fed225bc plus the joint-packing inline pass",
+    "gitRev": "a76d187b plus the factions-portfolio hot-path pass",
     "bun": "1.3.14",
     "machine": "darwin arm64",
-    "recordedFrom": "the joint-packing inline pass measured against fed225bc"
+    "recordedFrom": "the factions-portfolio hot-path pass measured against a76d187b"
   },
   "profiles": {
     "bn1-full-1h": {
       "command": "--profile bn1-full --seed 1 --horizon 1h --compact --perf --cost",
       "horizonHours": 1,
-      "vhPerWallMinute": 5.46,
-      "wallSeconds": 11.0,
+      "vhPerWallMinute": 7.1,
+      "wallSeconds": 8.5,
       "what": "THE A/B METRIC. One virtual hour of cold BN1, so both sides do identical work.",
-      "note": "Median of three, spread under 1%. Against fed225bc on the same machine: 11.6s / 5.16 vh/min before, 11.0s / 5.46 after (1.06x throughput). Full telemetry is byte-identical for bn1-full seed 1 at 1h, bn1-full seed 2 at 45m, bn1-speedrun seed 1 at 1h, and bn1-progression seed 1 at 30m.",
+      "note": "Median of the six confirming runs (a faster 8.1s / 7.42 triple was observed once but did not reproduce; the conservative figure is recorded). Against a76d187b on the same machine: 10.8s / 5.57 vh/min before, 8.5s / 7.10 after (1.27x throughput). Full telemetry is byte-identical for bn1-full seed 1 at 1h, bn1-full seed 2 at 45m, bn1-speedrun seed 1 at 1h, and bn1-progression seed 1 at 30m.",
       "history": [
         "49e75edb: 3.47 vh/min, 17.3s. The first hot-path pass took it to 5.04 vh/min, 11.9s -- 1.45x.",
-        "fed225bc remeasured immediately before this pass: 5.16 vh/min, 11.6s. Inlining the joint-packing placements took it to 5.46 vh/min, 11.0s -- 1.06x."
+        "fed225bc remeasured immediately before the packing pass: 5.16 vh/min, 11.6s. Inlining the joint-packing placements took it to 5.46 vh/min, 11.0s -- 1.06x.",
+        "a76d187b remeasured immediately before the factions pass: 5.57 vh/min, 10.8s. The factions-portfolio hot-path pass took it to 7.10 vh/min, 8.5s -- 1.27x."
       ]
     },
     "bn1-full": {
       "command": "--profile bn1-full --seed 1 --compact --perf --wall-budget 2m --cost",
       "wallBudget": "2m",
-      "vhPerWallMinute": 2.97,
-      "decayPct": -82,
-      "firstHalfVhPerMin": 5.03,
-      "lastHalfVhPerMin": 0.91,
-      "virtualHoursReached": 5.95,
-      "events": 985088,
-      "usPerEvent": 121.8,
-      "nsCalls": 2840537,
+      "vhPerWallMinute": 3.0,
+      "decayPct": -86,
+      "firstHalfVhPerMin": 5.29,
+      "lastHalfVhPerMin": 0.72,
+      "virtualHoursReached": 6.03,
+      "events": 1058816,
+      "usPerEvent": 113.8,
+      "nsCalls": 3053217,
       "what": "Cold BN1 start under the settings bench:sim:bn1-full uses. A diagnostic, not an A/B -- see the header.",
-      "note": "THE PROBLEM REMAINS. The packing pass improves identical early work and buys 5.95 virtual hours in this diagnostic window, but the first half still collapses from 5.03 to 0.91 vh/min in the second (-82%). A faster simulator reaches the expensive late state sooner; this endpoint is not the A/B metric.",
-      "lead": "Cancelled-timer compaction was tested and reverted: it bounded the dead backlog but produced the same 2.84 vh/min / -78% diagnostic as the uncompacted tree, and no fixed-horizon improvement at 1h or 2h. The post-change CPU profile is flat again: latestJitStart 3.7%, Map 3.6%, filter 2.6%, packsScan 2.5%, buildView 2.2%; no single remaining lead clears 4% self time.",
+      "note": "THE PROBLEM REMAINS. The factions pass improves identical early work and buys 6.03 virtual hours in this diagnostic window, but the first half still collapses from 5.29 to 0.72 vh/min in the second (-86%). A faster simulator reaches the expensive late state sooner; this endpoint is not the A/B metric.",
+      "lead": "After the factions pass the portfolio evaluator's stepFactions fell from 34.6% total to ~27% and no longer holds a dominant self-time block; the largest remaining self-time entries are spread across dispatch view/topology work, the publish-digest JSON signatures, and needs/coordination containers. The run-length decay is untouched and remains the open lead.",
       "history": [
         "49e75edb: 2.89 vh/min, 5.79 virtual hours, -30% decay, 249.8us/event. Hot paths were marginalCostPerGb sorting a supply list (9.7%), targeting's solveCycle (20.4%) and the factions portfolio evaluator (20.7%).",
-        "The first hot-path pass: 2.84 vh/min, 5.68 virtual hours, -78% decay, 150.9us/event."
+        "The first hot-path pass: 2.84 vh/min, 5.68 virtual hours, -78% decay, 150.9us/event.",
+        "The joint-packing inline pass: 2.97 vh/min, 5.95 virtual hours, -82% decay, 121.8us/event."
       ]
     }
   }

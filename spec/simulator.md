@@ -321,6 +321,63 @@ The measurement that matters is a FIXED HORIZON, not a wall budget. Under
 this 1.45x moved the two-minute window's virtual hours by -2%. See
 `sim/tests/baselines/sim-throughput.json`, which records both and says why.
 
+## Hot paths the third profile found: the factions portfolio (FIXED)
+
+A 1.27x on identical work — one virtual hour of `bn1-full` seed 1 went from
+10.8s to 8.5s — with the full-telemetry record streams byte-identical to
+`a76d187b` for all four runs in the performance protocol. Nothing here changed
+a decision; each is the same computation arranged differently.
+
+The "flat" profile the packing pass left behind was flat only in SELF time. By
+total time one block still owned a third of the run: `stepFactions` 34.6%,
+almost all of it the portfolio budget sweep (`chooseBudget` 29.9%), whose
+inner loop `evaluateUncached` runs ~335k times per virtual hour (measured by
+instrumentation, mean union size ~12, max 40). At that call volume the cost
+was not any algorithm but per-call constants — closures, spreads, one-use
+containers — and the first fix attempted here proves it: rewriting the
+`greedyOrder` rescan as a heap-based priority Kahn moved the bench by nothing,
+because its per-call apparatus cost as much as the rescans it replaced. What
+worked:
+
+- **A fast path for the shape the search actually sends.** Most union sets are
+  unique-named with no in-set prerequisite, where most-expensive-ready-first
+  is exactly one static sort (`estimatedCost`); most unions need no
+  prerequisite closure at all, and `unionAugs` now detects that in the same
+  walk that builds the list. Sets that do carry chains (the Cranial Signal
+  Processor generations) go through a rewind-scan placement that keeps the
+  sort but drops the dedupe/heap bookkeeping.
+- **No allocation per priced item.** `totalCost` spread a fresh `PriceContext`
+  and an `augCost` result object per item; `augMoneyCost` is the same money
+  formula as a bare number with the NeuroFlux level as a parameter (shared by
+  `augCost`, so the formulas cannot drift). `unionCost` also built a
+  `PurchaseCandidate` wrapper per augmentation and ran a `choices.find` per
+  augmentation for a seller field the estimate never reads; it now prices bare
+  `AugInfo`s (`estimatedAugSetCost`).
+- **Cache keys without string building.** The evaluation cache keyed ordered
+  selections as a joined `faction:index` string — native `join` alone was
+  1.3% of the run; it is now a trie over package object identities. Per-view
+  invariants (`bestWorkType`, per-faction offered-name sets) are cached beside
+  the existing standing/offered caches, and `favorValue`'s future-work count
+  iterates the (small) acquired union against those sets instead of
+  materialising a filtered copy of each faction's catalogue.
+- **Outside factions**: `cloudQuotes` regenerated ~500 quote objects at least
+  twice per hacking tick from inputs that change only when a purchase lands —
+  now a single-slot fingerprint memo; `solveCycle` hoisted the per-candidate-
+  constant `hackExpGain` out of its thread-evaluation closure.
+
+Two of these were measured slower first and fixed: the heap Kahn (above), and
+an acquired-Set iteration in `portfolioValue` whose per-choice iterator
+allocation cost more than the array filter it replaced. At 335k calls/hour,
+intuition about constant factors loses to the profiler — re-measure every
+step.
+
+After the pass `stepFactions` is ~27% total and no single self-time entry in
+it clears 3%; the largest remaining blocks are dispatch view/topology
+construction, the publish-digest JSON signatures, and needs/coordination
+containers. The two-minute diagnostic still decays 5.29 -> 0.72 vh/min (-86%)
+while reaching 6.03 virtual hours: the run-length pathology remains the open
+lead, and it is not a factions problem.
+
 ## Run-length pathologies (found and FIXED by profiling factions-join)
 
 The 2-hour factions-join profile was unfinishable — 40+ minutes real per seed,

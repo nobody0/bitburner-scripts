@@ -178,9 +178,9 @@ export function countValue(
   // Repeatable NFG levels are multiplier value, not one fresh permanent
   // augmentation apiece. The first level can fill one Daedalus count slot;
   // later levels cannot because the game stores installed NFG as one entry.
-  const countable = augs.filter(
-    (aug) => aug.name !== NEUROFLUX || (Number.isFinite(view.targetAugCount) && !view.owned.has(NEUROFLUX)),
-  ).length;
+  const nfgCountable = Number.isFinite(view.targetAugCount) && !view.owned.has(NEUROFLUX);
+  let countable = 0;
+  for (const aug of augs) if (aug.name !== NEUROFLUX || nfgCountable) countable++;
   const countWeight = countSlotWeight(view.rates?.worth ?? new Map(), countGoal);
   return Number.isFinite(countGoal) && countGoal > 0
     ? Math.min(countable, countGoal) * countWeight
@@ -207,7 +207,23 @@ export function favorValue(
   acquired: ReadonlySet<string>,
   view: FactionsView,
 ): number {
-  const future = allOffered.filter((aug) => !acquired.has(aug.name)).length;
+  // A count, not a list: this runs once per chosen faction per portfolio
+  // evaluation, and materialising the survivors just to read `.length` was a
+  // measurable slice of the budget sweep. The portfolio path counts the same
+  // overlap from the other side (its acquired union is usually the smaller
+  // set) and calls `favorValueFromFuture` directly.
+  let future = 0;
+  for (const aug of allOffered) if (!acquired.has(aug.name)) future++;
+  return favorValueFromFuture(standing, favorAfterInstall, future, view);
+}
+
+/** {@link favorValue} with the future-work count already resolved. */
+export function favorValueFromFuture(
+  standing: FactionStanding,
+  favorAfterInstall: number,
+  future: number,
+  view: FactionsView,
+): number {
   const beforeRate = 1 + standing.favor / 100;
   const afterRate = 1 + favorAfterInstall / 100;
   const favorUseful = favorCanActivateBeforeGoal(view);

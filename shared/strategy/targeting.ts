@@ -280,6 +280,9 @@ export function solveCycle(
   const hackTimeS = hackTimeSeconds(ctx, minDifficulty, requiredHackingSkill);
   const weakenPerThread = weakenEffect(ctx, 1, cores);
   const intervalS = kind === "hgw" ? HGW_INTERVAL_S : BATCH_INTERVAL_S;
+  // Constant across every thread count this call evaluates; hoisted out of
+  // the per-candidate closure below, which the searches run hundreds of times.
+  const experiencePerThread = hackExpGain(ctx, baseDifficulty);
 
   const stealBound = Math.max(1, Math.floor(MAX_STEAL / percent));
   const hackBlockBound = Number.isFinite(caps.hackBlockGb)
@@ -321,7 +324,6 @@ export function solveCycle(
     // grow moves a zero fraction (no long influence either). Fixes the
     // long-side overvaluation spec/targeting.md used to acknowledge.
     const stockIncome = manipulation ? chance * steal * manipulation.valuePerOp : 0;
-    const experiencePerThread = hackExpGain(ctx, baseDifficulty);
     const expectedHackThreads = hackThreads * (0.25 + 0.75 * chance);
     const experience = experiencePerThread *
       (expectedHackThreads + growThreadCount + weaken1 + weaken2);

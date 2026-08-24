@@ -94,7 +94,22 @@ function cheapestQuote(quotes: readonly RamSupplyQuote[]): RamSupplyQuote | unde
   return best;
 }
 
+/** Single-slot memo for {@link cloudQuotes}. The quote list depends only on
+ * the cloud fleet's shape — rung ceiling, slots, multipliers, and each
+ * server's current RAM — which changes when a purchase lands, not per tick;
+ * yet the hacking tick regenerates it at least twice (the rounded purchase
+ * and its marginal fallback). The fingerprint includes server order because
+ * ties resolve to the FIRST minimum in generation order. Callers treat the
+ * list as read-only (they copy before editing), which is what makes sharing
+ * one array safe. One slot, module-level: bounded RAM, and this module also
+ * runs in-game where retained memory is paid for. */
+let CLOUD_QUOTES_KEY = "";
+let CLOUD_QUOTES: RamSupplyQuote[] = [];
+
 function cloudQuotes(state: NonNullable<RamSupplyState["cloud"]>): RamSupplyQuote[] {
+  let key = `${state.maxRam}|${state.slotsAvailable}|${state.costMultiplier}|${state.softcap}`;
+  for (const server of state.servers) key += `|${server.host}:${server.ram}`;
+  if (key === CLOUD_QUOTES_KEY) return CLOUD_QUOTES;
   const rungs = powerOfTwoRungs(state.maxRam);
   const out: RamSupplyQuote[] = [];
   if (state.slotsAvailable > 0) {
@@ -129,6 +144,8 @@ function cloudQuotes(state: NonNullable<RamSupplyState["cloud"]>): RamSupplyQuot
       });
     }
   }
+  CLOUD_QUOTES_KEY = key;
+  CLOUD_QUOTES = out;
   return out;
 }
 

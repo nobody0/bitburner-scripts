@@ -160,28 +160,38 @@ export function augCost(
   ctx: PriceContext,
   queuedOffset = 0,
 ): { moneyCost: number; repCost: number } {
+  const moneyCost = augMoneyCost(aug, ctx, queuedOffset, ctx.neurofluxLevel);
+  if (aug.name === NEUROFLUX) {
+    return {
+      repCost: aug.baseRepRequirement * Math.pow(NEUROFLUX_LEVEL_MULT, ctx.neurofluxLevel) * ctx.augRepCost,
+      moneyCost,
+    };
+  }
+  if (isSoA(aug.name)) {
+    return { moneyCost, repCost: aug.baseRepRequirement * Math.pow(SOA_REP_MULT, ctx.ownedSoA) };
+  }
+  return { moneyCost, repCost: aug.baseRepRequirement * ctx.augRepCost };
+}
+
+/** The money half of {@link augCost} as a bare number, with the NeuroFlux
+ * level as a parameter instead of a context field. The batch-cost walks below
+ * advance the level per item, and building a `{...ctx}` (or an `augCost`
+ * result object) per item made those walks — 300k+ estimate calls per virtual
+ * hour, each over a dozen items — a top allocation site of a BN1 run. Shared
+ * by `augCost` so the two formulas cannot drift. */
+export function augMoneyCost(
+  aug: AugInfo,
+  ctx: PriceContext,
+  queuedOffset = 0,
+  neurofluxLevel = ctx.neurofluxLevel,
+): number {
   const queued = ctx.queuedNonSoA + queuedOffset;
   const generic = Math.pow(basePriceMultiplier(ctx.sf11Level), queued);
-
   if (aug.name === NEUROFLUX) {
-    const multiplier = Math.pow(NEUROFLUX_LEVEL_MULT, ctx.neurofluxLevel);
-    return {
-      repCost: aug.baseRepRequirement * multiplier * ctx.augRepCost,
-      moneyCost: aug.baseCost * multiplier * ctx.augMoneyCost * generic,
-    };
+    return aug.baseCost * Math.pow(NEUROFLUX_LEVEL_MULT, neurofluxLevel) * ctx.augMoneyCost * generic;
   }
-
-  if (isSoA(aug.name)) {
-    return {
-      moneyCost: aug.baseCost * Math.pow(SOA_COST_MULT, ctx.ownedSoA),
-      repCost: aug.baseRepRequirement * Math.pow(SOA_REP_MULT, ctx.ownedSoA),
-    };
-  }
-
-  return {
-    moneyCost: aug.baseCost * generic * ctx.augMoneyCost,
-    repCost: aug.baseRepRequirement * ctx.augRepCost,
-  };
+  if (isSoA(aug.name)) return aug.baseCost * Math.pow(SOA_COST_MULT, ctx.ownedSoA);
+  return aug.baseCost * generic * ctx.augMoneyCost;
 }
 
 // --- valuation -------------------------------------------------------------
@@ -402,8 +412,12 @@ export function closePurchaseSet(
   catalog: ReadonlyMap<string, AugInfo>,
   owned: ReadonlySet<string>,
 ): string[] {
+  // The copy exists only to hide an owned NeuroFlux from the closure; without
+  // NeuroFlux in the set, copying `owned` per call (this sits under every
+  // portfolio evaluation) buys nothing.
+  if (!wanted.includes(NEUROFLUX)) return closePrereqs(wanted, catalog, owned);
   const closureOwned = new Set(owned);
-  if (wanted.includes(NEUROFLUX)) closureOwned.delete(NEUROFLUX);
+  closureOwned.delete(NEUROFLUX);
   return closePrereqs(wanted, catalog, closureOwned);
 }
 
@@ -412,8 +426,28 @@ export function closePrereqs(
   catalog: ReadonlyMap<string, AugInfo>,
   owned: ReadonlySet<string>,
 ): string[] {
+  // Fast path: while no wanted name has prerequisites, the closure is a plain
+  // dedupe-and-drop-owned pass — which is what almost every set the portfolio
+  // search closes (300k+ a virtual hour) looks like. The first name that does
+  // carry prerequisites falls through to the recursive closure ON THE WHOLE
+  // INPUT, which re-derives the same prefix this pass produced.
   const out: string[] = [];
   const seen = new Set<string>();
+  let flat = true;
+  for (const name of wanted) {
+    if (seen.has(name) || owned.has(name)) continue;
+    const aug = catalog.get(name);
+    if (aug !== undefined && aug.prereqs.length > 0) {
+      flat = false;
+      break;
+    }
+    seen.add(name);
+    out.push(name);
+  }
+  if (flat) return out;
+
+  out.length = 0;
+  seen.clear();
   const visiting = new Set<string>();
 
   const visit = (name: string): void => {
@@ -455,8 +489,7 @@ export function totalCost(order: readonly PurchaseCandidate[], ctx: PriceContext
   let nonSoA = 0;
   let neuroflux = ctx.neurofluxLevel;
   for (const candidate of order) {
-    const local: PriceContext = { ...ctx, neurofluxLevel: neuroflux };
-    total += augCost(candidate.aug, local, nonSoA).moneyCost;
+    total += augMoneyCost(candidate.aug, ctx, nonSoA, neuroflux);
     if (candidate.name === NEUROFLUX) neuroflux++;
     if (!isSoA(candidate.name)) nonSoA++;
   }
@@ -820,48 +853,206 @@ export function selectAffordableBatch(input: {
  * optimum there — and close with them, which is well inside the error of the rest of
  * a package estimate. */
 export function estimatedCost(candidates: readonly PurchaseCandidate[], ctx: PriceContext): number {
-  return totalCost(greedyOrder(candidates), ctx);
+  // Fast path for the shape the portfolio search actually sends 300k+ times a
+  // virtual hour: unique names, no prerequisite sold inside the same set. The
+  // greedy order is then exactly the static (baseCost descending, name
+  // ascending) sort — every item is ready from the start, so the Kahn walk
+  // pops in rank order — and the whole dedupe/indegree/heap apparatus can be
+  // skipped. Same elements, same order, same accumulation sequence: the
+  // returned float is bit-identical to the slow path's.
+  const names = new Set<string>();
+  let plain = true;
+  for (const candidate of candidates) names.add(candidate.name);
+  if (names.size === candidates.length) {
+    for (const candidate of candidates) {
+      const prereqs = candidate.aug.prereqs;
+      for (let i = 0; i < prereqs.length; i++) {
+        if (names.has(prereqs[i]!)) {
+          plain = false;
+          break;
+        }
+      }
+      if (!plain) break;
+    }
+  } else {
+    plain = false;
+  }
+  if (names.size !== candidates.length) return totalCost(greedyOrder(candidates), ctx);
+  const order = [...candidates].sort((a, b) => {
+    const costDiff = b.aug.baseCost - a.aug.baseCost;
+    return costDiff !== 0 ? costDiff : a.name < b.name ? -1 : 1;
+  });
+  // Unique names but an in-set prerequisite: reuse the sorted copy and the
+  // name set — the readiness scan needs nothing greedyOrder's dedupe adds.
+  return totalCost(plain ? order : placeByPriority(order, names), ctx);
 }
 
-/** Most-expensive-ready-first. Optimal without prerequisites, and the starting
- * point for the local search above the exact limit. */
-function greedyOrder(candidates: readonly PurchaseCandidate[]): PurchaseCandidate[] {
-  const byName = new Map(candidates.map((candidate) => [candidate.name, candidate]));
-  const placed = new Set<string>();
-  const order: PurchaseCandidate[] = [];
-
-  // Each round wants ONE candidate: the most expensive ready one, name as the
-  // tiebreak. Materialising the ready list and sorting it to read element zero
-  // costs a fresh array and an O(n log n) sort per placement, and this is the
-  // inner loop of the portfolio search. A single pass keeping the running best
-  // picks the same element — the comparator never returns 0, because names are
-  // unique Map keys, so there is no tie for stability to resolve.
-  const sortsFirst = (candidate: PurchaseCandidate, incumbent: PurchaseCandidate): boolean => {
-    const costDiff = incumbent.aug.baseCost - candidate.aug.baseCost;
-    return costDiff !== 0 ? costDiff < 0 : candidate.name < incumbent.name;
-  };
-  const ready = (candidate: PurchaseCandidate): boolean =>
-    candidate.aug.prereqs.every((prereq) => !byName.has(prereq) || placed.has(prereq));
-
-  // `placed` is the only bookkeeping needed: skipping placed entries while
-  // walking `byName` visits exactly what a shrinking copy of it would, in the
-  // same insertion order, without copying the map per call.
-  while (order.length < byName.size) {
-    let next: PurchaseCandidate | undefined;
-    for (const candidate of byName.values()) {
-      if (placed.has(candidate.name) || !ready(candidate)) continue;
-      if (next === undefined || sortsFirst(candidate, next)) next = candidate;
+/** {@link estimatedCost} over bare {@link AugInfo}s — same order, same
+ * arithmetic, same float. The portfolio's union pricing calls this 300k+
+ * times a virtual hour with names it just resolved from the catalog (where
+ * key === aug.name), and wrapping each in a `PurchaseCandidate` only to read
+ * `.name` and `.aug` back out was a measurable allocation cost. */
+export function estimatedAugSetCost(augs: readonly AugInfo[], ctx: PriceContext): number {
+  const names = new Set<string>();
+  for (const aug of augs) names.add(aug.name);
+  if (names.size !== augs.length) {
+    // Duplicate names (repeated NeuroFlux): the candidate pipeline owns that
+    // dedupe rule. Rare — a union list is closure output, already unique.
+    return estimatedCost(augs.map((aug) => ({ name: aug.name, aug, faction: "" })), ctx);
+  }
+  let plain = true;
+  for (const aug of augs) {
+    const prereqs = aug.prereqs;
+    for (let i = 0; i < prereqs.length; i++) {
+      if (names.has(prereqs[i]!)) {
+        plain = false;
+        break;
+      }
     }
-    if (next === undefined) {
-      // A prerequisite cycle, or a prereq nobody in the set sells. Emit the
-      // rest in a stable order rather than looping forever.
-      order.push(...[...byName.values()]
+    if (!plain) break;
+  }
+  const sorted = [...augs].sort((a, b) => {
+    const costDiff = b.baseCost - a.baseCost;
+    return costDiff !== 0 ? costDiff : a.name < b.name ? -1 : 1;
+  });
+  const order = plain ? sorted : placeAugsByPriority(sorted, names);
+  let total = 0;
+  let nonSoA = 0;
+  let neuroflux = ctx.neurofluxLevel;
+  for (const aug of order) {
+    total += augMoneyCost(aug, ctx, nonSoA, neuroflux);
+    if (aug.name === NEUROFLUX) neuroflux++;
+    if (!isSoA(aug.name)) nonSoA++;
+  }
+  return total;
+}
+
+/** {@link placeByPriority} over bare AugInfos; kept in step with it. */
+function placeAugsByPriority(entries: readonly AugInfo[], inSet: { has(name: string): boolean }): AugInfo[] {
+  const size = entries.length;
+  const placed = new Set<string>();
+  const order: AugInfo[] = [];
+  let scanFrom = 0;
+  while (order.length < size) {
+    let advanced = false;
+    for (let i = scanFrom; i < size; i++) {
+      const candidate = entries[i]!;
+      if (placed.has(candidate.name)) {
+        if (i === scanFrom) scanFrom++;
+        continue;
+      }
+      const prereqs = candidate.prereqs;
+      let ready = true;
+      for (let p = 0; p < prereqs.length; p++) {
+        const prereq = prereqs[p]!;
+        if (inSet.has(prereq) && !placed.has(prereq)) {
+          ready = false;
+          break;
+        }
+      }
+      if (!ready) continue;
+      order.push(candidate);
+      placed.add(candidate.name);
+      advanced = true;
+      if (i === scanFrom) {
+        scanFrom = i + 1;
+        continue;
+      }
+      break;
+    }
+    if (!advanced) {
+      order.push(...entries
         .filter((candidate) => !placed.has(candidate.name))
         .sort((a, b) => (a.name < b.name ? -1 : 1)));
       break;
     }
-    order.push(next);
-    placed.add(next.name);
+  }
+  return order;
+}
+
+/** Most-expensive-ready-first. Optimal without prerequisites, and the starting
+ * point for the local search above the exact limit.
+ *
+ * "Take the highest-priority READY item, repeatedly" under a FIXED priority —
+ * (baseCost descending, name ascending), which never changes as items are
+ * placed — is a single scan of the priority-sorted set that REWINDS when a
+ * placement unblocks an item it already passed: the first unplaced ready item
+ * from the scan position on is the global maximum, because everything before
+ * it is placed or still blocked. Real sets carry a handful of short chains
+ * (the Cranial Signal Processor generations, the Netburner Module line), so
+ * the rewind bookkeeping is a few integers, not a heap — this sits under
+ * `estimatedCost`, 300k+ calls per virtual hour of a BN1 run, where both a
+ * rescan-per-placement and a build-the-whole-Kahn-apparatus-per-call version
+ * measurably drowned in their own per-call overhead. */
+function greedyOrder(candidates: readonly PurchaseCandidate[]): PurchaseCandidate[] {
+  // Dedupe by name exactly as the Map the scan used to build did: last value
+  // wins (first occurrence fixes nothing — order comes from the priority).
+  const byName = new Map<string, PurchaseCandidate>();
+  for (const candidate of candidates) byName.set(candidate.name, candidate);
+  const entries = [...byName.values()];
+  const size = entries.length;
+  if (size <= 1) return entries;
+
+  entries.sort((a, b) => {
+    const costDiff = b.aug.baseCost - a.aug.baseCost;
+    return costDiff !== 0 ? costDiff : a.name < b.name ? -1 : 1;
+  });
+  return placeByPriority(entries, byName);
+}
+
+/** The readiness scan behind {@link greedyOrder}: place a PRIORITY-SORTED,
+ * name-unique set most-expensive-ready-first. `inSet` answers "is this name
+ * sold inside the set" — a Map or Set of exactly the entries' names. */
+function placeByPriority(
+  entries: readonly PurchaseCandidate[],
+  inSet: { has(name: string): boolean },
+): PurchaseCandidate[] {
+  const size = entries.length;
+  // `scanFrom` is the floor: every position below it is placed, so any
+  // unplaced (in particular, still-blocked) item sits at or above it, and the
+  // first ready item a scan meets from the floor up is the global maximum.
+  const placed = new Set<string>();
+  const order: PurchaseCandidate[] = [];
+  let scanFrom = 0;
+  while (order.length < size) {
+    let advanced = false;
+    for (let i = scanFrom; i < size; i++) {
+      const candidate = entries[i]!;
+      if (placed.has(candidate.name)) {
+        if (i === scanFrom) scanFrom++;
+        continue;
+      }
+      const prereqs = candidate.aug.prereqs;
+      let ready = true;
+      for (let p = 0; p < prereqs.length; p++) {
+        const prereq = prereqs[p]!;
+        if (inSet.has(prereq) && !placed.has(prereq)) {
+          ready = false;
+          break;
+        }
+      }
+      if (!ready) continue;
+      order.push(candidate);
+      placed.add(candidate.name);
+      advanced = true;
+      if (i === scanFrom) {
+        // Placed at the floor: nothing below it was blocked, so nothing this
+        // placement unblocks can outrank the scan ahead. Keep going.
+        scanFrom = i + 1;
+        continue;
+      }
+      // Placed past a blocked item: the placement may have unblocked it, and
+      // it outranks everything ahead — restart from the floor.
+      break;
+    }
+    if (!advanced) {
+      // A prerequisite cycle, or a self-prerequisite. Emit the rest in a
+      // stable order rather than looping forever — the old fallback.
+      order.push(...entries
+        .filter((candidate) => !placed.has(candidate.name))
+        .sort((a, b) => (a.name < b.name ? -1 : 1)));
+      break;
+    }
   }
   return order;
 }
