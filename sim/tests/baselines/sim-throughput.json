@@ -44,39 +44,41 @@
   ],
   "provenance": {
     "recordedAt": "2026-08-24",
-    "gitRev": "49e75edb plus the shared/ hot-path pass",
+    "gitRev": "fed225bc plus the joint-packing inline pass",
     "bun": "1.3.14",
     "machine": "darwin arm64",
-    "recordedFrom": "the hot-path pass that followed the first measurement"
+    "recordedFrom": "the joint-packing inline pass measured against fed225bc"
   },
   "profiles": {
     "bn1-full-1h": {
       "command": "--profile bn1-full --seed 1 --horizon 1h --compact --perf --cost",
       "horizonHours": 1,
-      "vhPerWallMinute": 5.04,
-      "wallSeconds": 11.9,
+      "vhPerWallMinute": 5.46,
+      "wallSeconds": 11.0,
       "what": "THE A/B METRIC. One virtual hour of cold BN1, so both sides do identical work.",
-      "note": "Median of three, spread under 1%. Every record of the equivalent full-telemetry run is byte-identical to the pre-optimisation tree's, across bn1-full seeds 1/2/3, bn1-speedrun and bn1-progression.",
+      "note": "Median of three, spread under 1%. Against fed225bc on the same machine: 11.6s / 5.16 vh/min before, 11.0s / 5.46 after (1.06x throughput). Full telemetry is byte-identical for bn1-full seed 1 at 1h, bn1-full seed 2 at 45m, bn1-speedrun seed 1 at 1h, and bn1-progression seed 1 at 30m.",
       "history": [
-        "49e75edb: 3.47 vh/min, 17.3s. The hot-path pass took it to 5.04 vh/min, 11.9s -- 1.45x."
+        "49e75edb: 3.47 vh/min, 17.3s. The first hot-path pass took it to 5.04 vh/min, 11.9s -- 1.45x.",
+        "fed225bc remeasured immediately before this pass: 5.16 vh/min, 11.6s. Inlining the joint-packing placements took it to 5.46 vh/min, 11.0s -- 1.06x."
       ]
     },
     "bn1-full": {
       "command": "--profile bn1-full --seed 1 --compact --perf --wall-budget 2m --cost",
       "wallBudget": "2m",
-      "vhPerWallMinute": 2.84,
-      "decayPct": -78,
-      "firstHalfVhPerMin": 4.61,
-      "lastHalfVhPerMin": 1.03,
-      "virtualHoursReached": 5.68,
-      "events": 795648,
-      "usPerEvent": 150.9,
-      "nsCalls": 2531766,
+      "vhPerWallMinute": 2.97,
+      "decayPct": -82,
+      "firstHalfVhPerMin": 5.03,
+      "lastHalfVhPerMin": 0.91,
+      "virtualHoursReached": 5.95,
+      "events": 985088,
+      "usPerEvent": 121.8,
+      "nsCalls": 2840537,
       "what": "Cold BN1 start under the settings bench:sim:bn1-full uses. A diagnostic, not an A/B -- see the header.",
-      "note": "THE PROBLEM. Per-event cost fell from 249.8us to 150.9us and the first half of the window nearly doubled, 3.37 -> 4.61 vh/min, yet the window still ends at the same virtual hour: the run now reaches the expensive late state sooner and decays harder there, -30% before against -78% after. Decay, not per-event cost, is what makes bn1-full unfinishable. That is the next thing to fix.",
-      "lead": "The clock's cancelled-timer backlog spikes hard late in the window -- heap 19,701 with 19,350 of it cancelled, so ~98% of the scheduled queue is dead timers awaiting lazy deletion (sim/clock.ts, #cancelled). Spiky across samples rather than monotonic, so bursts of kills rather than a plain leak, but it is the strongest lead the harness currently offers.",
+      "note": "THE PROBLEM REMAINS. The packing pass improves identical early work and buys 5.95 virtual hours in this diagnostic window, but the first half still collapses from 5.03 to 0.91 vh/min in the second (-82%). A faster simulator reaches the expensive late state sooner; this endpoint is not the A/B metric.",
+      "lead": "Cancelled-timer compaction was tested and reverted: it bounded the dead backlog but produced the same 2.84 vh/min / -78% diagnostic as the uncompacted tree, and no fixed-horizon improvement at 1h or 2h. The post-change CPU profile is flat again: latestJitStart 3.7%, Map 3.6%, filter 2.6%, packsScan 2.5%, buildView 2.2%; no single remaining lead clears 4% self time.",
       "history": [
-        "49e75edb: 2.89 vh/min, 5.79 virtual hours, -30% decay, 249.8us/event. Hot paths were marginalCostPerGb sorting a supply list (9.7%), targeting's solveCycle (20.4%) and the factions portfolio evaluator (20.7%)."
+        "49e75edb: 2.89 vh/min, 5.79 virtual hours, -30% decay, 249.8us/event. Hot paths were marginalCostPerGb sorting a supply list (9.7%), targeting's solveCycle (20.4%) and the factions portfolio evaluator (20.7%).",
+        "The first hot-path pass: 2.84 vh/min, 5.68 virtual hours, -78% decay, 150.9us/event."
       ]
     }
   }

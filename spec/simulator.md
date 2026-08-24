@@ -290,10 +290,31 @@ here changed a decision; each is the same computation arranged differently.
   pruned, because RAM is a cost this module also pays in-game.
 - **Allocating inside the innermost loop.** The packing scan declared its
   placement closure per host, inside that same 26-probe bisection.
+- **Calling through the remaining placement closure.** A fixed-horizon profile
+  showed that joint packing was still the only cohesive block large enough to
+  clear the noise floor. The scan now selects grow-first or hack-first once and
+  inlines both placements in that loop. It performs the same `floor`, `min`,
+  subtraction and early-return sequence over the same hosts, but pays neither
+  two calls nor a role-order branch per host per probe. On the same machine the
+  one-hour `bn1-full` median moved 11.6 s / 5.16 vh/min to 11.0 s / 5.46 vh/min
+  (1.06x throughput, spread under 1%). Full telemetry remained byte-identical
+  to `fed225bc` for both `bn1-full` seeds and the `bn1-speedrun` and
+  `bn1-progression` checks in the performance protocol.
 
-What is left is flat: after this pass no single function exceeds 6% self time,
-and the remaining mass is spread across `dispatch.ts` view construction, Map
-building, and object spreads. There is no next easy win of this kind.
+What is left is flat. In the post-change two-minute CPU profile `solveCycle`
+fell from 17.1% total to 8.4% and the separate `place` frames disappeared. The
+largest self-time entries are now `latestJitStart` 3.7%, native `Map` 3.6%,
+native `filter` 2.6%, `packsScan` 2.5%, and `buildView` 2.2%; remaining mass is
+spread across dispatcher view construction, containers and object spreads.
+
+The cancelled-timer lead was tested before the packing change. An amortised,
+in-place heap compaction preserved `(time, seq)` ordering and bounded the dead
+backlog, but it did not move the fixed 1 h or 2 h horizons and produced the same
+2.84 vh/min / -78% two-minute diagnostic. It was reverted. The backlog is a
+visible consequence of late cancellation bursts, not the cause of the decay.
+The packing pass improves identical early work, but a fresh non-profiled window
+still decays 5.03 -> 0.91 vh/min (-82%) while reaching 5.95 virtual hours. That
+run-length pathology remains open.
 
 The measurement that matters is a FIXED HORIZON, not a wall budget. Under
 `--wall-budget` a faster simulator reaches the expensive late state sooner, so

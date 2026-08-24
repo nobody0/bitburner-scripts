@@ -361,31 +361,54 @@ export function solveCycle(
       // first, so hard-coding grow-first rejects a perfectly placeable layout
       // whenever hack is the bigger block (e.g. blocks [100, 60] with a 100 GB
       // hack and a 60 GB grow: grow-first eats the only host hack fits on).
-      // `place` and the residual it consumes are hoisted out of both loops
-      // below. They used to be declared per host, inside a scan the bisection
-      // repeats up to 26 times per candidate — one fresh closure per host per
-      // call, on the hottest path in the evaluator. Same arithmetic, one
-      // allocation per evaluation.
-      let residualGb = 0;
-      const place = (blockGb: number, need: number): number => {
-        if (need <= 0) return need;
-        if (blockGb <= 0) return 0; // a zero-sized role always fits
-        const taken = Math.min(need, Math.floor(residualGb / blockGb));
-        residualGb -= taken * blockGb;
-        return need - taken;
-      };
+      // The two role orders are separate loops so the inner host scan pays no
+      // closure calls and no per-host grow-first branch. The arithmetic and its
+      // order are the same as placing the larger block and then the smaller one
+      // through a shared residual.
       const growFirst = growGb >= hackGb;
       const packsScan = (hackNeed: number, growNeed: number): boolean => {
-        for (const hostGb of caps.hostBlocksGb!) {
-          residualGb = hostGb;
-          if (growFirst) {
-            growNeed = place(growGb, growNeed);
-            hackNeed = place(hackGb, hackNeed);
-          } else {
-            hackNeed = place(hackGb, hackNeed);
-            growNeed = place(growGb, growNeed);
+        if (growFirst) {
+          for (const hostGb of caps.hostBlocksGb!) {
+            let residualGb = hostGb;
+            if (growNeed > 0) {
+              if (growGb <= 0) growNeed = 0;
+              else {
+                const taken = Math.min(growNeed, Math.floor(residualGb / growGb));
+                residualGb -= taken * growGb;
+                growNeed -= taken;
+              }
+            }
+            if (hackNeed > 0) {
+              if (hackGb <= 0) hackNeed = 0;
+              else {
+                const taken = Math.min(hackNeed, Math.floor(residualGb / hackGb));
+                residualGb -= taken * hackGb;
+                hackNeed -= taken;
+              }
+            }
+            if (hackNeed <= 0 && growNeed <= 0) return true;
           }
-          if (hackNeed <= 0 && growNeed <= 0) return true;
+        } else {
+          for (const hostGb of caps.hostBlocksGb!) {
+            let residualGb = hostGb;
+            if (hackNeed > 0) {
+              if (hackGb <= 0) hackNeed = 0;
+              else {
+                const taken = Math.min(hackNeed, Math.floor(residualGb / hackGb));
+                residualGb -= taken * hackGb;
+                hackNeed -= taken;
+              }
+            }
+            if (growNeed > 0) {
+              if (growGb <= 0) growNeed = 0;
+              else {
+                const taken = Math.min(growNeed, Math.floor(residualGb / growGb));
+                residualGb -= taken * growGb;
+                growNeed -= taken;
+              }
+            }
+            if (hackNeed <= 0 && growNeed <= 0) return true;
+          }
         }
         return false;
       };
