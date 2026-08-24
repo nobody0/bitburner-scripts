@@ -67,7 +67,6 @@ export interface GameState {
   darknetContractListings?: Record<string, DarknetContractListing>;
   /** Newest listing already given a terminal solver outcome, by contract key. */
   darknetContractHandledAt?: Record<string, number>;
-  contractSolverVersion?: number;
   /** Injected feature switches. Empty in the real game; a simulation sets them
    *  to isolate a feature. Applied in caps(), so every consumer agrees. */
   featureOverrides?: FeatureOverrides;

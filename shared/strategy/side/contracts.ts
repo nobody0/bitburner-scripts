@@ -13,10 +13,6 @@
 
 export type ContractSolver = (data: unknown) => unknown;
 
-/** Bump after changing answer behavior so a hot handoff releases contracts
- * quarantined by an older solver build. */
-export const CONTRACT_SOLVER_VERSION = 1;
-
 /** Local work stays broad enough to drain efficiently; telemetry carries only
  * the front batch plus totals. Keep these limits shared so probe and driver
  * cannot silently disagree. */
@@ -296,27 +292,125 @@ function sanitizeParentheses(data: unknown): string[] {
   return [...out];
 }
 
-/** Insert +, -, and * between digits to hit a target. */
+/** Insert +, -, and * between digits to hit a target.
+ *
+ * The contract asks for every expression, and twelve digits admit 4^11 of them,
+ * so this is a search and the cost is per-node. Three things hold it down.
+ *
+ * Nothing is rendered on the way down: each token's inclusive end and the
+ * operator in front of it pack into one preallocated slot, and a string is built
+ * only for an accepting leaf, of which a target in [-100, 100] admits very few.
+ *
+ * The last two digits are resolved where they are reached rather than by
+ * recursive calls into a base case, which removes the call overhead from the two
+ * widest levels of the tree.
+ *
+ * And a reach bound prunes whole subtrees. `*` rescales only the CURRENT term —
+ * it can never touch a total that earlier terms already committed — so the
+ * amount a suffix can still move the running total is bounded, by
+ * `reachA[i] + |term| * reachB[i]`. Once the running total has drifted further
+ * from the target than the remaining digits can pull it back, the subtree is
+ * dead. That is about half of all node entries on a twelve-digit instance. */
 function validMathExpressions(data: unknown): string[] {
   const [digits, target] = data as [string, number];
+  const length = digits.length;
   const out: string[] = [];
-  const visit = (index: number, expression: string, total: number, term: number): void => {
-    if (index === digits.length) {
-      if (total === target) out.push(expression);
-      return;
+  if (length === 0) return out;
+  const values = new Int32Array(length);
+  for (let i = 0; i < length; i++) values[i] = digits.charCodeAt(i) - 48;
+  // path[depth] packs the token's inclusive end index with the operator in
+  // front of it (0 = "+", 1 = "-", 2 = "*"); depth 0 carries no operator.
+  const path = new Int32Array(length);
+  const OPERATORS = "+-*";
+
+  // reachA[i] + T * reachB[i] bounds how far digits[i..] can still move the
+  // total, given the current term has magnitude T. Taking the token at i with
+  // value v: "+v" and "-v" move by at most v and hand v on as the next term,
+  // while "*v" moves by at most T * |v - 1| and hands on T * v. Maximising each
+  // coefficient separately over every token length keeps the bound linear in T,
+  // which is all that is needed for it to be sound.
+  const reachA = new Float64Array(length + 1);
+  const reachB = new Float64Array(length + 1);
+  for (let i = length - 1; i >= 0; i--) {
+    const last = values[i] === 0 ? i : length - 1;
+    let value = 0;
+    let boundA = 0;
+    let boundB = 0;
+    for (let end = i; end <= last; end++) {
+      value = value * 10 + values[end]!;
+      const carried = reachB[end + 1]!;
+      const additive = value + reachA[end + 1]! + value * carried;
+      const scaling = (value >= 1 ? value - 1 : 1) + value * carried;
+      if (additive > boundA) boundA = additive;
+      if (scaling > boundB) boundB = scaling;
     }
-    for (let end = index; end < digits.length && (end === index || digits[index] !== "0"); end++) {
-      const token = digits.slice(index, end + 1);
-      const value = Number(token);
-      if (index === 0) visit(end + 1, token, value, value);
-      else {
-        visit(end + 1, `${expression}+${token}`, total + value, value);
-        visit(end + 1, `${expression}-${token}`, total - value, -value);
-        visit(end + 1, `${expression}*${token}`, total - term + term * value, term * value);
+    reachA[i] = boundA;
+    reachB[i] = boundB;
+  }
+
+  const render = (depth: number): string => {
+    let expression = digits.slice(0, (path[0]! >> 2) + 1);
+    for (let d = 1; d < depth; d++) {
+      const packed = path[d]!;
+      expression += OPERATORS[packed & 3]! + digits.slice((path[d - 1]! >> 2) + 1, (packed >> 2) + 1);
+    }
+    return expression;
+  };
+  /** A token that closes the expression: its three operators are three leaves. */
+  const close = (depth: number, span: number, total: number, term: number, value: number): void => {
+    if (total + value === target) { path[depth] = span; out.push(render(depth + 1)); }
+    if (total - value === target) { path[depth] = span | 1; out.push(render(depth + 1)); }
+    if (total - term + term * value === target) { path[depth] = span | 2; out.push(render(depth + 1)); }
+  };
+  const tail = values[length - 1]!;
+  const tailSpan = (length - 1) << 2;
+
+  const visit = (index: number, depth: number, total: number, term: number): void => {
+    const gap = target - total;
+    const reach = reachA[index]! + (term < 0 ? -term : term) * reachB[index]!;
+    if (gap > reach || -gap > reach) return;
+    // A token may not carry a leading zero, so a zero here stands alone.
+    const last = values[index] === 0 ? index : length - 1;
+    let value = 0;
+    for (let end = index; end <= last; end++) {
+      value = value * 10 + values[end]!;
+      const span = end << 2;
+      if (end + 1 === length) {
+        // Inlined rather than routed through close(): this is the widest level
+        // of the tree, so a call here costs more than the duplication does.
+        if (total + value === target) { path[depth] = span; out.push(render(depth + 1)); }
+        if (total - value === target) { path[depth] = span | 1; out.push(render(depth + 1)); }
+        if (total - term + term * value === target) { path[depth] = span | 2; out.push(render(depth + 1)); }
+      } else if (end + 2 === length) {
+        // One digit will be left over, so both remaining levels resolve here.
+        path[depth] = span;
+        close(depth + 1, tailSpan, total + value, value, tail);
+        path[depth] = span | 1;
+        close(depth + 1, tailSpan, total - value, -value, tail);
+        path[depth] = span | 2;
+        close(depth + 1, tailSpan, total - term + term * value, term * value, tail);
+      } else {
+        path[depth] = span;
+        visit(end + 1, depth + 1, total + value, value);
+        path[depth] = span | 1;
+        visit(end + 1, depth + 1, total - value, -value);
+        path[depth] = span | 2;
+        visit(end + 1, depth + 1, total - term + term * value, term * value);
       }
     }
   };
-  visit(0, "", 0, 0);
+
+  // The first token carries no operator, so the top level is its own loop.
+  const first = values[0] === 0 ? 0 : length - 1;
+  let value = 0;
+  for (let end = 0; end <= first; end++) {
+    value = value * 10 + values[end]!;
+    path[0] = end << 2;
+    if (end + 1 === length) {
+      if (value === target) out.push(render(1));
+    } else if (end + 2 === length) close(1, tailSpan, value, value, tail);
+    else visit(end + 1, 1, value, value);
+  }
   return out;
 }
 
@@ -407,46 +501,96 @@ function lzDecompress(data: unknown): string {
   return plain;
 }
 
-/** Shortest valid encoding via a four-state suffix dynamic program. */
+/** Shortest valid encoding via a four-state suffix dynamic program.
+ *
+ * The game accepts any encoding that round-trips and is no longer than its own
+ * (`answer.length <= encoded.length && decode(answer) === plain`), so only the
+ * LENGTH of the encoding is ever compared. That makes the value of a state an
+ * integer rather than a string: the table prices every suffix state in
+ * characters, and one forward walk renders the single winning encoding. The
+ * older form carried candidate result strings through the memo and broke ties
+ * lexicographically, which built and compared O(n^2) characters of strings to
+ * decide something no validator looks at.
+ */
+const LZ_UNREACHABLE = 0x3fff_ffff;
+/** State index for "encoding plain[at..], where the next chunk is a literal
+ * or a back-reference, with or without a zero-length chunk still available". */
+const LZ_LITERAL_SKIP = 3;
+const LZ_LITERAL_ONLY = 2;
+const LZ_REFERENCE_SKIP = 1;
+const LZ_REFERENCE_ONLY = 0;
+
 function lzCompress(data: unknown): string {
   const plain = data as string;
-  const memo = new Map<string, string | null>();
-  const better = (best: string | undefined, candidate: string): string =>
-    best === undefined || candidate.length < best.length || (candidate.length === best.length && candidate < best)
-      ? candidate
-      : best;
-  const encode = (at: number, literal: boolean, maySkip: boolean): string | undefined => {
-    if (at === plain.length) return "";
-    const key = `${at}:${literal ? 1 : 0}:${maySkip ? 1 : 0}`;
-    const cached = memo.get(key);
-    if (cached !== undefined) return cached ?? undefined;
-    let best: string | undefined;
-    if (maySkip) {
-      const suffix = encode(at, !literal, false);
-      if (suffix !== undefined) best = `0${suffix}`;
+  const length = plain.length;
+  if (length === 0) return "";
+  const cost = new Int32Array((length + 1) * 4);
+  for (let at = length - 1; at >= 0; at--) {
+    // A literal chunk costs its length digit plus the characters it carries.
+    let literalBest = LZ_UNREACHABLE;
+    for (let run = 1; run <= 9 && at + run <= length; run++) {
+      const total = 1 + run + cost[(at + run) * 4 + LZ_REFERENCE_SKIP]!;
+      if (total < literalBest) literalBest = total;
     }
+    // A back-reference costs two characters whatever its length, so only the
+    // reachable lengths matter — and they extend while the copy still holds.
+    let referenceBest = LZ_UNREACHABLE;
+    for (let offset = 1; offset <= 9 && offset <= at; offset++) {
+      for (let run = 1; run <= 9 && at + run <= length; run++) {
+        if (plain[at + run - 1] !== plain[at + run - 1 - offset]) break;
+        const total = 2 + cost[(at + run) * 4 + LZ_LITERAL_SKIP]!;
+        if (total < referenceBest) referenceBest = total;
+      }
+    }
+    // The zero-length chunk spends one character to swap the chunk type, and
+    // cannot be spent twice in a row — so it reads the no-skip state opposite.
+    const skipToReference = 1 + referenceBest;
+    const skipToLiteral = 1 + literalBest;
+    cost[at * 4 + LZ_LITERAL_ONLY] = literalBest;
+    cost[at * 4 + LZ_REFERENCE_ONLY] = referenceBest;
+    cost[at * 4 + LZ_LITERAL_SKIP] = skipToReference < literalBest ? skipToReference : literalBest;
+    cost[at * 4 + LZ_REFERENCE_SKIP] = skipToLiteral < referenceBest ? skipToLiteral : referenceBest;
+  }
+  let out = "";
+  let at = 0;
+  let state = LZ_LITERAL_SKIP;
+  while (at < length) {
+    const target = cost[at * 4 + state]!;
+    const literal = state === LZ_LITERAL_SKIP || state === LZ_LITERAL_ONLY;
+    const maySkip = state === LZ_LITERAL_SKIP || state === LZ_REFERENCE_SKIP;
+    if (maySkip && 1 + cost[at * 4 + (literal ? LZ_REFERENCE_ONLY : LZ_LITERAL_ONLY)]! === target) {
+      out += "0";
+      state = literal ? LZ_REFERENCE_ONLY : LZ_LITERAL_ONLY;
+      continue;
+    }
+    let advanced = 0;
     if (literal) {
-      for (let length = 1; length <= 9 && at + length <= plain.length; length++) {
-        const suffix = encode(at + length, false, true);
-        if (suffix !== undefined) best = better(best, `${length}${plain.slice(at, at + length)}${suffix}`);
+      for (let run = 1; run <= 9 && at + run <= length; run++) {
+        if (1 + run + cost[(at + run) * 4 + LZ_REFERENCE_SKIP]! !== target) continue;
+        out += `${run}${plain.slice(at, at + run)}`;
+        advanced = run;
+        state = LZ_REFERENCE_SKIP;
+        break;
       }
     } else {
-      for (let offset = 1; offset <= 9 && offset <= at; offset++) {
-        for (let length = 1; length <= 9 && at + length <= plain.length; length++) {
-          let valid = true;
-          for (let j = 0; j < length; j++) {
-            if (plain[at + j] !== plain[at + j - offset]) { valid = false; break; }
-          }
-          if (!valid) break;
-          const suffix = encode(at + length, true, true);
-          if (suffix !== undefined) best = better(best, `${length}${offset}${suffix}`);
+      for (let offset = 1; offset <= 9 && offset <= at && advanced === 0; offset++) {
+        for (let run = 1; run <= 9 && at + run <= length; run++) {
+          if (plain[at + run - 1] !== plain[at + run - 1 - offset]) break;
+          if (2 + cost[(at + run) * 4 + LZ_LITERAL_SKIP]! !== target) continue;
+          out += `${run}${offset}`;
+          advanced = run;
+          state = LZ_LITERAL_SKIP;
+          break;
         }
       }
     }
-    memo.set(key, best ?? null);
-    return best;
-  };
-  return encode(0, true, true) ?? "";
+    // The walk only follows transitions the table priced, so finding none means
+    // table and walk disagree. Throwing is caught by solve(), which then makes
+    // no attempt at all — strictly better than submitting a wrong encoding.
+    if (advanced === 0) throw new Error("LZ reconstruction lost the priced path");
+    at += advanced;
+  }
+  return out;
 }
 
 function nearestSquareRoot(data: unknown): bigint {
@@ -462,28 +606,60 @@ function nearestSquareRoot(data: unknown): bigint {
   return value - root * root < upper * upper - value ? root : upper;
 }
 
-/** Segmented sieve over the game's at-most-one-million-wide interval. */
+/** Segmented sieve over the game's at-most-one-million-wide interval.
+ *
+ * Three things carry the cost here, and each is addressed. The segment holds
+ * only ODD candidates — two is counted by hand and every prime steps by
+ * `2 * prime` — which halves both the allocation and the marking. The marking
+ * loop then walks slot indices directly, since an odd multiple stepping by
+ * `2 * prime` in value steps by exactly `prime` in slot index. And the final
+ * tally reads the segment four bytes at a time as 32-bit words: slots hold 0 or
+ * 1, so summing a word's bytes counts its marks without a branch per slot. */
 function totalPrimes(data: unknown): number {
   let [low, high] = data as [number, number];
-  low = Math.max(low, 2);
+  if (low < 2) low = 2;
   if (low > high) return 0;
-  const limit = Math.floor(Math.sqrt(high));
-  const composite = new Uint8Array(limit + 1);
-  const primes: number[] = [];
-  for (let n = 2; n <= limit; n++) {
-    if (composite[n]) continue;
-    primes.push(n);
-    if (n * n <= limit) for (let multiple = n * n; multiple <= limit; multiple += n) composite[multiple] = 1;
-  }
-  const range = new Uint8Array(high - low + 1);
-  for (const prime of primes) {
-    for (let multiple = Math.max(prime * prime, Math.ceil(low / prime) * prime); multiple <= high; multiple += prime) {
-      range[multiple - low] = 1;
-    }
-  }
   let count = 0;
-  for (const marked of range) if (!marked) count++;
-  return count;
+  if (low === 2) {
+    count = 1;
+    low = 3;
+    if (low > high) return count;
+  }
+  // Slot i covers the odd number `first + 2 * i`.
+  const first = low % 2 === 0 ? low + 1 : low;
+  if (first > high) return count;
+  const size = ((high - first) >> 1) + 1;
+  // Padded to whole 32-bit words so the tally can read words, not bytes.
+  const words = (size + 3) >> 2;
+  const segment = new Uint8Array(words * 4);
+  const limit = Math.floor(Math.sqrt(high));
+  // Odd base primes up to sqrt(high) — at most ~2450 for this contract's range.
+  const baseSize = limit < 3 ? 0 : ((limit - 3) >> 1) + 1;
+  const baseComposite = new Uint8Array(baseSize);
+  for (let i = 0; i < baseSize; i++) {
+    if (baseComposite[i]) continue;
+    const prime = 3 + 2 * i;
+    if (prime * prime <= limit) {
+      for (let multiple = prime * prime; multiple <= limit; multiple += 2 * prime) {
+        baseComposite[(multiple - 3) >> 1] = 1;
+      }
+    }
+    // Both `prime * prime` and the adjusted `ceil(first / prime) * prime` are
+    // odd multiples of an odd prime, so the later of the two is one as well.
+    let start = Math.ceil(first / prime) * prime;
+    if (start % 2 === 0) start += prime;
+    if (prime * prime > start) start = prime * prime;
+    for (let slot = (start - first) >> 1; slot < size; slot += prime) segment[slot] = 1;
+  }
+  // Marking the padding as composite keeps it out of the word-wise tally.
+  for (let slot = size; slot < words * 4; slot++) segment[slot] = 1;
+  const packed = new Uint32Array(segment.buffer);
+  let marked = 0;
+  for (let w = 0; w < words; w++) {
+    const word = packed[w]!;
+    marked += (word & 0xff) + ((word >>> 8) & 0xff) + ((word >>> 16) & 0xff) + (word >>> 24);
+  }
+  return count + words * 4 - marked;
 }
 
 /** Largest all-zero rectangle via one monotonic-stack pass per row. */

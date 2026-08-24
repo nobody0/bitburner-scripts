@@ -4,7 +4,6 @@ import {
   CONTRACT_BATCH_SIZE,
   CONTRACT_QUEUE_LIMIT,
   CONTRACT_REPORT_LIMIT,
-  CONTRACT_SOLVER_VERSION,
   solve,
   SOLVERS,
 } from "../../../shared/strategy/side/contracts.ts";
@@ -107,12 +106,6 @@ const side: FeatureDriver = {
     const topic = ctx.state.topics.side;
     if (!topic) return;
 
-    // A hot handoff keeps game state. A solver change is the one safe reason
-    // to release the old build's quarantine and try those contracts again.
-    if (ctx.state.contractSolverVersion !== CONTRACT_SOLVER_VERSION) {
-      ctx.state.contractSolverVersion = CONTRACT_SOLVER_VERSION;
-      ctx.state.contractQuarantine = {};
-    }
     const quarantine = ctx.state.contractQuarantine ??= {};
 
     const now = Date.now();
@@ -291,7 +284,6 @@ export const sideModule: FeatureModule = {
     delete state.topics.side;
     state.contractQuarantine = {};
     delete state.contractQueue;
-    state.contractSolverVersion = CONTRACT_SOLVER_VERSION;
     clearContractPipeline();
   },
   claims: (ctx) => (ctx.state.contractQueue?.length ?? ctx.state.topics.side?.contracts?.length)
