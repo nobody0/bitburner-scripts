@@ -184,6 +184,35 @@ function weakenThreadsFor(exact: number): number {
   return Math.ceil(exact) + Math.floor(exact * (THREAD_WEAKEN_UPSCALE - 1));
 }
 
+/** Memo for the joint-packing scan, keyed on the (hackNeed, growNeed) pair it
+ * actually depends on.
+ *
+ * ONE Map, module-level, `clear()`ed per candidate rather than allocated per
+ * candidate: this sits directly under the evaluator's inner loop, where a fresh
+ * Map per evaluation would trade one allocation cost for another. The scan is
+ * synchronous and single-threaded, so a cleared cache cannot be observed by any
+ * candidate but the one that cleared it — `prediction.test.ts` pins that.
+ *
+ * It cannot grow without bound, and not by a pruning policy: the number of
+ * probes per candidate is fixed at {@link PACKS_PROBE_LIMIT}, so that is the
+ * hard ceiling on distinct keys between two clears. This matters because the
+ * same module runs in-game, where a script pays RAM for what it retains. */
+const PACKS_CACHE = new Map<number, boolean>();
+/** Two endpoint probes plus the bisection's iteration cap below. The assertion
+ * this documents is checked in the test suite, so a change to the bisection
+ * that would let the memo grow fails loudly instead of leaking quietly. */
+const PACKS_PROBE_LIMIT = 26;
+/** Pair-packing radix. A pair at or above this could alias another, so the memo
+ * steps aside and the scan runs instead. */
+const PACKS_KEY_SPAN = 2 ** 24;
+
+/** Test seam: the memo's occupancy after the last candidate solved. */
+export function packsCacheSize(): number {
+  return PACKS_CACHE.size;
+}
+
+export { PACKS_PROBE_LIMIT };
+
 const GOLDEN = (Math.sqrt(5) - 1) / 2;
 /** Steal-fraction ceiling; exported so the score bounds (bounds.ts) share the
  * solver's exact thread-domain edge instead of re-declaring it. */
@@ -332,19 +361,23 @@ export function solveCycle(
       // first, so hard-coding grow-first rejects a perfectly placeable layout
       // whenever hack is the bigger block (e.g. blocks [100, 60] with a 100 GB
       // hack and a 60 GB grow: grow-first eats the only host hack fits on).
-      const packsAt = (periodS: number): boolean => {
-        let hackNeed = Math.ceil(hackTimeS / periodS);
-        let growNeed = caps.growBlockGb === undefined ? 0 : Math.ceil(growTimeS / periodS);
-        const growFirst = growGb >= hackGb;
+      // `place` and the residual it consumes are hoisted out of both loops
+      // below. They used to be declared per host, inside a scan the bisection
+      // repeats up to 26 times per candidate — one fresh closure per host per
+      // call, on the hottest path in the evaluator. Same arithmetic, one
+      // allocation per evaluation.
+      let residualGb = 0;
+      const place = (blockGb: number, need: number): number => {
+        if (need <= 0) return need;
+        if (blockGb <= 0) return 0; // a zero-sized role always fits
+        const taken = Math.min(need, Math.floor(residualGb / blockGb));
+        residualGb -= taken * blockGb;
+        return need - taken;
+      };
+      const growFirst = growGb >= hackGb;
+      const packsScan = (hackNeed: number, growNeed: number): boolean => {
         for (const hostGb of caps.hostBlocksGb!) {
-          let residualGb = hostGb;
-          const place = (blockGb: number, need: number): number => {
-            if (need <= 0) return need;
-            if (blockGb <= 0) return 0; // a zero-sized role always fits
-            const taken = Math.min(need, Math.floor(residualGb / blockGb));
-            residualGb -= taken * blockGb;
-            return need - taken;
-          };
+          residualGb = hostGb;
           if (growFirst) {
             growNeed = place(growGb, growNeed);
             hackNeed = place(hackGb, hackNeed);
@@ -355,6 +388,28 @@ export function solveCycle(
           if (hackNeed <= 0 && growNeed <= 0) return true;
         }
         return false;
+      };
+      // The scan reads the period ONLY through the two integer slot counts it
+      // implies, and everything else it touches is fixed for this candidate. So
+      // the bisection below re-runs an identical scan whenever two periods
+      // round to the same pair — which is most of its later steps, once the
+      // interval has narrowed past the point where a midpoint crosses a ceiling
+      // boundary. Memoising on the pair is exact, not an approximation.
+      PACKS_CACHE.clear();
+      const packsAt = (periodS: number): boolean => {
+        const hackNeed = Math.ceil(hackTimeS / periodS);
+        const growNeed = caps.growBlockGb === undefined ? 0 : Math.ceil(growTimeS / periodS);
+        // Outside the packing range the key could collide, so skip the memo and
+        // scan: correctness never rests on the cache being consulted.
+        if (!(hackNeed >= 0 && hackNeed < PACKS_KEY_SPAN && growNeed >= 0 && growNeed < PACKS_KEY_SPAN)) {
+          return packsScan(hackNeed, growNeed);
+        }
+        const key = hackNeed * PACKS_KEY_SPAN + growNeed;
+        const hit = PACKS_CACHE.get(key);
+        if (hit !== undefined) return hit;
+        const packs = packsScan(hackNeed, growNeed);
+        PACKS_CACHE.set(key, packs);
+        return packs;
       };
       const slowestPeriodS = Math.max(hackTimeS, caps.growBlockGb === undefined ? 0 : growTimeS);
       if (!packsAt(slowestPeriodS)) return undefined;

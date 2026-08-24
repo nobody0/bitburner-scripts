@@ -62,11 +62,23 @@ export function factionFavorPointValues(view: FactionsView): Map<string, FavorPo
     view.repContext.factionWorkRepGain,
   );
   const neuroflux = view.catalog.get(NEUROFLUX);
-  const nfgSeller = neuroflux
-    ? [...view.factions]
-        .filter((standing) => standing.joined && neuroflux.factions.includes(standing.name))
-        .sort((a, b) => b.favor - a.favor || b.rep - a.rep || (a.name < b.name ? -1 : 1))[0]?.name
-    : undefined;
+  // One pass for one winner. The copy-filter-sort this replaces allocated three
+  // arrays and ordered the whole list to read its head, on a path the faction
+  // planner runs constantly.
+  let nfgBest: (typeof view.factions)[number] | undefined;
+  if (neuroflux) {
+    for (const standing of view.factions) {
+      if (!standing.joined || !neuroflux.factions.includes(standing.name)) continue;
+      // Most favour, then most rep, then first by name — and on a full tie the
+      // earlier entry stays, matching what a stable sort would have kept.
+      const better = nfgBest === undefined
+        || (standing.favor - nfgBest.favor
+          || standing.rep - nfgBest.rep
+          || (standing.name < nfgBest.name ? 1 : -1)) > 0;
+      if (better) nfgBest = standing;
+    }
+  }
+  const nfgSeller = nfgBest?.name;
   const nfgRepTarget = nfgSeller !== undefined
     ? neurofluxTargetRep(view, incomePerSec * horizonSec)
     : 0;

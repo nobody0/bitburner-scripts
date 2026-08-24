@@ -79,6 +79,21 @@ function compareSupply(a: RamSupplyQuote, b: RamSupplyQuote): number {
     || (a.host ?? "").localeCompare(b.host ?? "");
 }
 
+/** The single cheapest quote under {@link compareSupply}.
+ *
+ * `quotes.sort(compareSupply)[0]` and this pick the same element — sort is
+ * stable and the comparator is a strict total order over generated quotes, so
+ * both return the first minimum in generation order — but only one of them
+ * orders the whole list to read one entry. The comparator is not cheap (two
+ * `Math.log2`, two `localeCompare`), and this runs on every hacking tick. */
+function cheapestQuote(quotes: readonly RamSupplyQuote[]): RamSupplyQuote | undefined {
+  let best: RamSupplyQuote | undefined;
+  for (const quote of quotes) {
+    if (best === undefined || compareSupply(quote, best) < 0) best = quote;
+  }
+  return best;
+}
+
 function cloudQuotes(state: NonNullable<RamSupplyState["cloud"]>): RamSupplyQuote[] {
   const rungs = powerOfTwoRungs(state.maxRam);
   const out: RamSupplyQuote[] = [];
@@ -140,17 +155,30 @@ export function marginalCostPerGb(
   }
   const cloud = state.cloud;
   if (!cloud) return undefined;
-  const quotes = cloudQuotes(cloud).sort(compareSupply);
-  const best = quotes[0];
+  const quotes = cloudQuotes(cloud);
+  const best = cheapestQuote(quotes);
   if (!best) return undefined;
   const equalPrice = (quote: RamSupplyQuote): boolean =>
     Math.abs(quote.costPerGb - best.costPerGb) <= Math.max(1, best.costPerGb) * 1e-12;
-  const availableGb = best.kind === "buyServer"
-    ? best.targetRam * cloud.slotsAvailable
-    : [...new Set(cloud.servers.map((server) => server.host))].reduce((sum, host) => {
-        const perHost = quotes.filter((quote) => quote.host === host && quote.kind === best.kind && equalPrice(quote));
-        return sum + Math.max(0, ...perHost.map((quote) => quote.addedRam));
-      }, 0);
+  let availableGb: number;
+  if (best.kind === "buyServer") {
+    availableGb = best.targetRam * cloud.slotsAvailable;
+  } else {
+    // Per host, the largest equally-priced upgrade of the winning kind. One
+    // pass over the quotes rather than a filter of all of them per host: a
+    // buyServer quote carries no host, so it can never match a real one.
+    const bestPerHost = new Map<string, number>();
+    for (const quote of quotes) {
+      if (quote.host === undefined || quote.kind !== best.kind || !equalPrice(quote)) continue;
+      const held = bestPerHost.get(quote.host);
+      if (held === undefined || quote.addedRam > held) bestPerHost.set(quote.host, quote.addedRam);
+    }
+    availableGb = 0;
+    // Distinct hosts: a host listed twice must still contribute once.
+    for (const host of new Set(cloud.servers.map((server) => server.host))) {
+      availableGb += Math.max(0, bestPerHost.get(host) ?? 0);
+    }
+  }
   return { ...best, availableGb: Math.max(best.addedRam, availableGb) };
 }
 
@@ -168,12 +196,21 @@ export function roundedRamPurchase(
     return quote && quote.cost <= budget + 1e-9 ? quote : undefined;
   }
   const cloud = state.cloud;
-  const marginal = marginalCostPerGb(source, state);
-  if (!cloud || !marginal) return undefined;
+  if (!cloud) return undefined;
+  // One generation, not two: `marginalCostPerGb` would build the same list
+  // again, and only its price per GB is wanted here.
+  const quotes = cloudQuotes(cloud);
+  const marginal = cheapestQuote(quotes);
+  if (!marginal) return undefined;
   const desiredGb = budget / Math.max(Number.EPSILON, marginal.costPerGb);
-  return cloudQuotes(cloud)
-    .filter((quote) => quote.cost <= budget + 1e-9 && quote.addedRam <= desiredGb + 1e-9)
-    .sort((a, b) => b.addedRam - a.addedRam || a.cost - b.cost || compareSupply(a, b))[0];
+  const affordableFirst = (a: RamSupplyQuote, b: RamSupplyQuote): number =>
+    b.addedRam - a.addedRam || a.cost - b.cost || compareSupply(a, b);
+  let choice: RamSupplyQuote | undefined;
+  for (const quote of quotes) {
+    if (quote.cost > budget + 1e-9 || quote.addedRam > desiredGb + 1e-9) continue;
+    if (choice === undefined || affordableFirst(quote, choice) < 0) choice = quote;
+  }
+  return choice;
 }
 
 export function cheapestRamSupply(state: RamSupplyState): RamSupplyQuote | undefined {

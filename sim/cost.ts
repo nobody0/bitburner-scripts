@@ -28,11 +28,22 @@ import type { Clock } from "./clock.ts";
  * same constraint that makes `currentNodeMults` and the patched timers module
  * state. Left `undefined` when cost reporting is off, so an uninstrumented run
  * pays one null check per ns call and nothing else. */
-let buckets: Record<string, number> | undefined;
+const CALL_COUNTS = new Map<string, number>();
+/** Points at {@link CALL_COUNTS} while a meter is armed, `undefined` otherwise.
+ * Arming and disarming move this reference rather than allocating or dropping a
+ * map, and both ends clear it, so a finished run retains nothing and a second
+ * run in the same process cannot inherit the first one's counts. */
+let buckets: Map<string, number> | undefined;
 
-/** Count one call against `name`. Hot: called once per Netscript call. */
+/** Count one call against `name`. Hot: called once per Netscript call.
+ *
+ * A Map rather than a plain object: the keys are Netscript paths coming from a
+ * Proxy, so a plain object would inherit `constructor` and friends from its
+ * prototype and count `ns.toString` against `Object.prototype.toString`. Map
+ * also keeps its shape as names accumulate, where a growing object literal
+ * forces the engine to rebuild hidden classes on the hottest path here. */
 export function countCall(name: string): void {
-  if (buckets !== undefined) buckets[name] = (buckets[name] ?? 0) + 1;
+  if (buckets !== undefined) buckets.set(name, (buckets.get(name) ?? 0) + 1);
 }
 
 export interface CostSample {
@@ -109,13 +120,14 @@ export class CostMeter {
     this.#engineCycles = options.engineCycles;
     this.#records = options.records;
     this.#onSample = options.onSample;
-    buckets = {};
+    CALL_COUNTS.clear();
+    buckets = CALL_COUNTS;
   }
 
   /** Number of ns calls counted so far. */
   get nsCalls(): number {
     let total = 0;
-    for (const count of Object.values(buckets ?? {})) total += count;
+    if (buckets !== undefined) for (const count of buckets.values()) total += count;
     return total;
   }
 
@@ -140,14 +152,17 @@ export class CostMeter {
     const wallMs = wallNow - this.#startWall;
     const virtualMs = this.#clock.now();
     const virtualHours = virtualMs / MS_PER_VIRTUAL_HOUR;
-    const calls = Object.entries(buckets ?? {})
-      .map(([name, count]) => ({
-        name,
-        count,
-        perVirtualHour: virtualHours > 0 ? count / virtualHours : 0,
-      }))
-      .sort((a, b) => b.count - a.count);
+    const calls: CostReport["calls"] = [];
+    if (buckets !== undefined) {
+      for (const [name, count] of buckets) {
+        calls.push({ name, count, perVirtualHour: virtualHours > 0 ? count / virtualHours : 0 });
+      }
+      calls.sort((a, b) => b.count - a.count);
+    }
+    // Disarm the hook — `countCall` costs one null check per Netscript call
+    // once a run is over — and release what the counters held.
     buckets = undefined;
+    CALL_COUNTS.clear();
     return {
       wallMs,
       virtualMs,

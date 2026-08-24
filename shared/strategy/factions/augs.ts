@@ -827,26 +827,41 @@ export function estimatedCost(candidates: readonly PurchaseCandidate[], ctx: Pri
  * point for the local search above the exact limit. */
 function greedyOrder(candidates: readonly PurchaseCandidate[]): PurchaseCandidate[] {
   const byName = new Map(candidates.map((candidate) => [candidate.name, candidate]));
-  const remaining = new Map(byName);
   const placed = new Set<string>();
   const order: PurchaseCandidate[] = [];
 
-  while (remaining.size > 0) {
-    const ready = [...remaining.values()].filter((candidate) =>
-      candidate.aug.prereqs.every((prereq) => !byName.has(prereq) || placed.has(prereq)),
-    );
-    if (ready.length === 0) {
-      order.push(...[...remaining.values()].sort((a, b) => (a.name < b.name ? -1 : 1)));
+  // Each round wants ONE candidate: the most expensive ready one, name as the
+  // tiebreak. Materialising the ready list and sorting it to read element zero
+  // costs a fresh array and an O(n log n) sort per placement, and this is the
+  // inner loop of the portfolio search. A single pass keeping the running best
+  // picks the same element — the comparator never returns 0, because names are
+  // unique Map keys, so there is no tie for stability to resolve.
+  const sortsFirst = (candidate: PurchaseCandidate, incumbent: PurchaseCandidate): boolean => {
+    const costDiff = incumbent.aug.baseCost - candidate.aug.baseCost;
+    return costDiff !== 0 ? costDiff < 0 : candidate.name < incumbent.name;
+  };
+  const ready = (candidate: PurchaseCandidate): boolean =>
+    candidate.aug.prereqs.every((prereq) => !byName.has(prereq) || placed.has(prereq));
+
+  // `placed` is the only bookkeeping needed: skipping placed entries while
+  // walking `byName` visits exactly what a shrinking copy of it would, in the
+  // same insertion order, without copying the map per call.
+  while (order.length < byName.size) {
+    let next: PurchaseCandidate | undefined;
+    for (const candidate of byName.values()) {
+      if (placed.has(candidate.name) || !ready(candidate)) continue;
+      if (next === undefined || sortsFirst(candidate, next)) next = candidate;
+    }
+    if (next === undefined) {
+      // A prerequisite cycle, or a prereq nobody in the set sells. Emit the
+      // rest in a stable order rather than looping forever.
+      order.push(...[...byName.values()]
+        .filter((candidate) => !placed.has(candidate.name))
+        .sort((a, b) => (a.name < b.name ? -1 : 1)));
       break;
     }
-    ready.sort((a, b) => {
-      const costDiff = b.aug.baseCost - a.aug.baseCost;
-      return costDiff !== 0 ? costDiff : a.name < b.name ? -1 : 1;
-    });
-    const next = ready[0]!;
     order.push(next);
     placed.add(next.name);
-    remaining.delete(next.name);
   }
   return order;
 }

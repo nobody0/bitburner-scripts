@@ -266,6 +266,40 @@ profile cannot distinguish "this function is expensive" from "this function is
 called more often the longer the run goes", and as the next section records,
 this simulator's worst performance bugs have all been the second kind.
 
+## Hot paths the first CPU profile found (FIXED)
+
+A 1.45x on identical work — one virtual hour of `bn1-full` seed 1 went from
+17.3s to 11.9s — with every record of the run byte-identical to the tree before
+it, across `bn1-full` seeds 1/2/3, `bn1-speedrun` and `bn1-progression`. Nothing
+here changed a decision; each is the same computation arranged differently.
+
+- **Sorting a list to read its head.** `marginalCostPerGb`
+  (`shared/strategy/ram-supply.ts`) ordered every cloud quote under a comparator
+  doing two `Math.log2` and two `localeCompare`, then took element zero — on
+  every hacking tick. Now a linear scan. `roundedRamPurchase` did the same and
+  also generated the quote list twice. Same pattern, same fix, in
+  `greedyOrder` (`factions/augs.ts`, which additionally copied a Map per
+  placement) and the NeuroFlux seller pick (`factions/favorValue.ts`). Together
+  these took `ram-supply` off the profile entirely.
+- **Re-running an identical scan.** `solveCycle`'s joint-packing test
+  (`shared/strategy/targeting.ts`) reads its period argument ONLY through the
+  two integer slot counts it implies, and the bisection above it probes up to 26
+  periods that increasingly round to the same pair. Memoising on the pair is
+  exact rather than approximate; it is worth 1.10x by itself. The memo is one
+  module-level Map cleared per candidate — bounded by the probe count, never
+  pruned, because RAM is a cost this module also pays in-game.
+- **Allocating inside the innermost loop.** The packing scan declared its
+  placement closure per host, inside that same 26-probe bisection.
+
+What is left is flat: after this pass no single function exceeds 6% self time,
+and the remaining mass is spread across `dispatch.ts` view construction, Map
+building, and object spreads. There is no next easy win of this kind.
+
+The measurement that matters is a FIXED HORIZON, not a wall budget. Under
+`--wall-budget` a faster simulator reaches the expensive late state sooner, so
+this 1.45x moved the two-minute window's virtual hours by -2%. See
+`sim/tests/baselines/sim-throughput.json`, which records both and says why.
+
 ## Run-length pathologies (found and FIXED by profiling factions-join)
 
 The 2-hour factions-join profile was unfinishable — 40+ minutes real per seed,

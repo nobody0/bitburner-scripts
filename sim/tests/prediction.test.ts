@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import { hackPercent, makeHackContext, type HackContext } from "../../shared/formulas.ts";
 import { growThreadsAtLanding, hackThreadsAtLanding, predictAtLanding, projectedSkill, sizeBatchAtLanding, type LedgerOp } from "../../shared/strategy/prediction.ts";
 import { calculateSkill } from "../vendor/bitburner/src/PersonObjects/formulas/skill.ts";
-import { solveCycle, type TargetStatics } from "../../shared/strategy/targeting.ts";
+import { PACKS_PROBE_LIMIT, packsCacheSize, solveCycle, type TargetStatics } from "../../shared/strategy/targeting.ts";
 import { applyGrow, applyHack, applyWeaken, serverFromSpec, type SimServer } from "../core/effects.ts";
 import { mockPerson, mockServer } from "../core/mocks.ts";
 import { getBitNodeMultipliers } from "../vendor/bitburner/src/BitNode/BitNodeMults.ts";
@@ -51,6 +51,52 @@ function scenario(skill: number): { ctx: HackContext; person: ReturnType<typeof 
 function relClose(a: number, b: number, tol = 1e-9): void {
   expect(Math.abs(a - b) / Math.max(1, Math.abs(b))).toBeLessThan(tol);
 }
+
+describe("joint-packing memo", () => {
+  // solveCycle memoises the host-packing scan on the (hackNeed, growNeed) pair
+  // it depends on, in a module-level cache cleared per candidate. That is only
+  // exact if no result can survive into a candidate with different caps, so pin
+  // it: interleaving two shapes must give each the same answer it gives alone.
+  // Only the HOST LAYOUT differs. Everything the memo key is built from —
+  // hack time, grow time, the probe periods — comes from ctx/statics, so both
+  // calls query the SAME key while needing different answers. That is exactly
+  // the collision a cache surviving into the next candidate would get wrong.
+  const capsWithHosts = (hostBlocksGb: number[]) => ({
+    hackBlockGb: 4096,
+    growBlockGb: 4096,
+    batchGb: 1_000_000,
+    farmGb: 1_000_000,
+    hostBlocksGb,
+  });
+
+  test("does not leak a packing verdict between candidates", () => {
+    const { ctx } = scenario(300);
+    const roomy = capsWithHosts([2048, 2048, 2048]);
+    const cramped = capsWithHosts([8]);
+
+    const roomyAlone = solveCycle(ctx, JOESGUNS, 1, roomy);
+    const crampedAlone = solveCycle(ctx, JOESGUNS, 1, cramped);
+    // Vacuum guard: the layouts must actually reach different verdicts.
+    expect(roomyAlone).not.toEqual(crampedAlone);
+
+    for (let round = 0; round < 3; round++) {
+      expect(solveCycle(ctx, JOESGUNS, 1, cramped)).toEqual(crampedAlone);
+      expect(solveCycle(ctx, JOESGUNS, 1, roomy)).toEqual(roomyAlone);
+    }
+  });
+
+  test("cannot grow past one candidate's probe count", () => {
+    // The memo is retained between candidates and only cleared, never pruned,
+    // so its ceiling has to come from the bisection being finite. Solving many
+    // candidates in a row must not accumulate: RAM is a cost this module pays
+    // in-game too.
+    const { ctx } = scenario(300);
+    for (let hosts = 1; hosts <= 40; hosts++) {
+      solveCycle(ctx, JOESGUNS, 1, capsWithHosts(Array.from({ length: hosts }, () => 64 * hosts)));
+      expect(packsCacheSize()).toBeLessThanOrEqual(PACKS_PROBE_LIMIT);
+    }
+  });
+});
 
 describe("predictAtLanding", () => {
   test("a full HWGW batch folds to exactly what the game effects produce", () => {
