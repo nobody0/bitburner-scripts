@@ -53,6 +53,14 @@ let specRequest = 0;
  * while the drawer is open, so the markdown parse must not be repeated. */
 const specCache = new Map<string, string>();
 const specPending = new Map<string, Promise<string>>();
+/** Error text per feature id, for a spec whose fetch FAILED. Kept apart from
+ * specCache — that map holds parsed markdown, and a failure parked in it could
+ * never be told from a real spec nor replaced by a later success. Without a memo
+ * of some kind the open drawer re-fetched on every frame: twice a second against
+ * the hub, with the body flashing between "loading…" and the error. */
+const specFailed = new Map<string, string>();
+/** Load token for loadStored, the way specRequest is one for renderSpec. */
+let loadRequest = 0;
 
 const TAB_ORDER: { id: TabId; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -70,12 +78,16 @@ function renderTabs(): void {
   const links = TAB_ORDER.map((tab) => {
     const feature = FEATURES.find((f) => f.id === tab.id);
     const unlocked = feature ? state.caps.unlocked[feature.id] : "yes";
-    const cls = [tab.id === active ? "on" : "", unlocked === "no" ? "locked" : unlocked === "unknown" ? "unknown" : ""]
+    const current = tab.id === active;
+    const cls = [current ? "on" : "", unlocked === "no" ? "locked" : unlocked === "unknown" ? "unknown" : ""]
       .filter(Boolean)
       .join(" ");
     const title = feature ? feature.problem : "Cross-feature view";
     const mark = unlocked === "no" ? "✕ " : unlocked === "unknown" ? "? " : "";
-    return `<a class="tab ${cls}" href="#/${tab.id}" title="${esc(title)}">${mark}${esc(tab.label)}</a>`;
+    // aria-current is emitted off the same test as `.on`, in the same
+    // expression so the two cannot drift: `.on` is a colour and a weight, so
+    // nothing programmatic said which tab was the current one.
+    return `<a class="tab ${cls}"${current ? ` aria-current="page"` : ""} href="#/${tab.id}" title="${esc(title)}">${mark}${esc(tab.label)}</a>`;
   }).join("");
   const feature = FEATURES.find((candidate) => candidate.id === active);
   const spec = feature
@@ -109,6 +121,15 @@ async function renderSpec(): Promise<void> {
     return;
   }
 
+  // Read BEFORE the loading note, not after the fetch: a feature whose spec
+  // cannot be read renders the error steadily instead of flashing "loading…"
+  // at the reader on every frame.
+  const failed = specFailed.get(feature.id);
+  if (failed !== undefined) {
+    morph($("specbody"), note(`spec unavailable: ${failed}`));
+    return;
+  }
+
   morph($("specbody"), note("loading checked-in specification..."));
   const request = specRequest;
   let pending = specPending.get(feature.id);
@@ -136,6 +157,11 @@ async function renderSpec(): Promise<void> {
       morph($("specbody"), rendered);
     }
   } catch (error) {
+    // Remembered, not merely displayed: render() calls renderSpec on every
+    // frame while the drawer is open, so an unremembered failure is a fresh
+    // request twice a second. The hub answers a moved or missing spec file with
+    // a 404 by design, and a restarting hub fails the same way.
+    specFailed.set(feature.id, String(error));
     if (request === specRequest) {
       morph($("specbody"), note(`spec unavailable: ${String(error)}`));
     }
@@ -224,7 +250,11 @@ function render(): void {
   renderTabs();
   void renderSpec();
   renderView();
-  $("scrubt").textContent = cutoff === Infinity ? "" : fmtTime(cutoff - (run.t0 ?? 0));
+  const offset = cutoff === Infinity ? "" : fmtTime(cutoff - (run.t0 ?? 0));
+  $("scrubt").textContent = offset;
+  // The slider's value is a raw epoch millisecond — announced as a 13-digit
+  // number — while what the operator is choosing is the offset beside it.
+  $("scrub").setAttribute("aria-valuetext", offset || "end of run");
 }
 
 /** Minimum wall-clock between live re-renders.
@@ -261,6 +291,9 @@ $("tabs").addEventListener("click", (ev) => {
   const toggle = (ev.target as HTMLElement | null)?.closest<HTMLElement>("[data-spec-toggle]");
   if (!toggle) return;
   specOpen = !specOpen;
+  // Reopening the drawer IS the retry: a spec that failed because the hub was
+  // restarting must not stay unavailable until the page is reloaded.
+  if (specOpen) specFailed.delete(active);
   renderTabs();
   void renderSpec();
 });
@@ -328,9 +361,19 @@ $("view").addEventListener("input", (ev) => {
 
 // --- run selection & replay ------------------------------------------------
 
+/** The picker key of the LOADED run: a live run is keyed by its run id, a
+ * stored run by its catalogue file name. The selection and the pin rule are
+ * both derived from this instead of read back out of the `<select>`, which is
+ * what let a vanished key drop the picker to option 0 while `run` still pointed
+ * elsewhere — the header naming one run over panels showing another. */
+function runKey(): string | null {
+  if (run.id === null) return null;
+  return run.live ? `live:${run.id}` : `file:${run.id}`;
+}
+
 function refreshPicker(): void {
   const pick = $<HTMLSelectElement>("runpick");
-  const current = pick.value;
+  const loaded = runKey();
   const liveInstallIds = new Set(liveRuns.map((entry) => entry.metadata?.identity?.install.id).filter(Boolean));
   const choices = [
     ...liveRuns.map((summary) => ({
@@ -357,7 +400,16 @@ function refreshPicker(): void {
   // closes the dropdown under the operator, and the hub re-sends the catalogue
   // whenever any run starts, ends or is pinned. `data-key` lets a lineage that
   // moved up the recency order be MOVED rather than rewritten.
-  morph(pick, groups.map(([lineageId, entries]) => {
+  // The loaded run's own option can be absent from the catalogue: a live key
+  // stops existing the moment the run closes, pinning renames the file under
+  // pinned/, and the filter above hides a stored entry while the game holds the
+  // same install live. A single <select> cannot show a key it has no option
+  // for, so it sat on option 0 and named a run the panels were not showing.
+  // One synthetic option keeps the header honest instead.
+  const orphan = loaded !== null && !choices.some((choice) => choice.key === loaded)
+    ? `<option data-key="${esc(loaded)}" value="${esc(loaded)}">${esc(`${run.id} — no longer listed`)}</option>`
+    : "";
+  morph(pick, orphan + groups.map(([lineageId, entries]) => {
     entries.sort((a, b) =>
       (a.metadata?.identity?.bitNode?.startedAt ?? 0) - (b.metadata?.identity?.bitNode?.startedAt ?? 0) ||
       (a.metadata?.identity?.install.startedAt ?? 0) - (b.metadata?.identity?.install.startedAt ?? 0)
@@ -389,11 +441,20 @@ function refreshPicker(): void {
       );
     }).join("")}</optgroup>`;
   }).join(""));
-  if ([...pick.options].some((o) => o.value === current)) pick.value = current;
-  // Only an unpinned stored run can be pinned.
-  const selected = pick.value;
+  // Re-asserted after the patch, not before: morph can ADD the loaded run's
+  // option (a lineage that just appeared in the catalogue) or remove and
+  // re-add the node around it, and a `<select>` whose selected option is
+  // detached falls back to option 0. `syncValue` no longer clears selectedness
+  // — an absent `selected` attribute means "the builder stated no selection" —
+  // so this is the only place that states one.
+  if (loaded !== null) pick.value = loaded;
+  // Only an unpinned stored run the hub still lists can be pinned, and the rule
+  // reads the LOADED run, never pick.value: while the select was falling back
+  // to option 0 this re-enabled for a run the operator had never opened, and
+  // one further click pinned it.
   const pin = $<HTMLButtonElement>("simpin");
-  pin.disabled = !selected.startsWith("file:") || selected.startsWith("file:pinned/");
+  pin.disabled = loaded === null || !loaded.startsWith("file:") || loaded.startsWith("file:pinned/") ||
+    !storedRuns.some((entry) => entry.file === run.id);
 }
 
 /** Load a stored run.
@@ -405,41 +466,88 @@ function refreshPicker(): void {
  * that genuinely needs the history. So the trade is made explicit: a compacted
  * run loads instantly and says its timeline is gone. */
 async function loadStored(file: string): Promise<void> {
+  // Every load carries a token, the way renderSpec's fetch does, and nothing
+  // is committed once it is stale. Two orderings were observed without one: a
+  // 7.9 MB run fetched whole resolved seconds after the operator had moved on
+  // to a small one and overwrote it, leaving the picker naming one run and
+  // every panel showing another; and a stored load landing after attachLive
+  // set run.live = false, which silently disarmed the `records` guard below and
+  // froze the live panel with no way back.
+  const token = ++loadRequest;
   const size = storedRuns.find((r) => r.file === file)?.size ?? 0;
   const compact = size > compactOverBytes;
   setStatus(`loading ${file}…`);
 
   let records: LogRecord[];
   let total: number;
-  if (compact) {
-    const body = (await fetch(`/runs/${encodeURIComponent(file)}?compact=1`).then((r) => r.json())) as {
-      entries: LogRecord[];
-      records: number;
-      t0: number | null;
-    };
-    records = body.entries;
-    total = body.records;
-    run.t0 = body.t0;
-  } else {
-    const text = await fetch(`/runs/${encodeURIComponent(file)}`).then((r) => r.text());
-    records = text
-      .split("\n")
-      .filter(Boolean)
-      .flatMap((line) => {
-        try {
-          return [JSON.parse(line) as LogRecord];
-        } catch {
-          return []; // a live run's last line can be a partial write
-        }
-      });
-    total = records.length;
-    run.t0 = records[0]?.t ?? null;
+  let t0: number | null;
+  try {
+    if (compact) {
+      const response = await fetch(`/runs/${encodeURIComponent(file)}?compact=1`);
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      const body = (await response.json()) as {
+        entries: LogRecord[];
+        records: number;
+        t0: number | null;
+      };
+      if (token !== loadRequest) return;
+      records = body.entries;
+      total = body.records;
+      t0 = body.t0;
+    } else {
+      // `ok` is checked before the body is ever parsed: the hub answers a swept
+      // or renamed run with a 404 whose body is the text "not found", and the
+      // per-line guard below cannot tell that apart from a live run's partial
+      // trailing write — so a missing run used to commit as "replay — 0
+      // records", an empty run the file never was.
+      const response = await fetch(`/runs/${encodeURIComponent(file)}`);
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      const text = await response.text();
+      if (token !== loadRequest) return;
+      records = text
+        .split("\n")
+        .filter(Boolean)
+        .flatMap((line) => {
+          try {
+            return [JSON.parse(line) as LogRecord];
+          } catch {
+            return []; // a live run's last line can be a partial write
+          }
+        });
+      total = records.length;
+      t0 = records[0]?.t ?? null;
+    }
+  } catch (error) {
+    if (token !== loadRequest) return;
+    // Clear the whole run rather than leave the previous one on screen under
+    // the new one's name. `cutoff` goes back to Infinity because render() would
+    // otherwise print a scrub offset against no run, and the scrubber is hidden
+    // by hand because renderView never touches it.
+    run.id = null;
+    run.src = null;
+    run.live = false;
+    run.records = null;
+    run.t0 = null;
+    cutoff = Infinity;
+    $("scrubrow").style.display = "none";
+    state = emptyState();
+    // A failed load also proves this client's catalogue is stale: sweep()
+    // unlinks unpinned runs past the retention window and broadcasts nothing.
+    // Drop the entry, or the same dead run stays one click away forever.
+    storedRuns = storedRuns.filter((entry) => entry.file !== file);
+    refreshPicker();
+    setStatus(`could not load ${file}: ${String(error)}`);
+    render();
+    return;
   }
 
   run.records = records;
   run.id = file;
   run.src = records[0]?.src ?? null;
   run.live = false;
+  // Assigned here with the rest of the run rather than at the fetch, so a load
+  // the operator has abandoned cannot leave its t0 on the run still on screen.
+  run.t0 = t0;
   cutoff = Infinity;
 
   // The slider spans the run's own timeline. `min` must be t0, not 0: game
@@ -462,6 +570,7 @@ async function loadStored(file: string): Promise<void> {
     compact ? `compacted · ${total}→${records.length} records (${fmtBytes(size)})` : `replay — ${total} records`,
     compact ? "run too large to load whole: topics are folded server-side, so there is no timeline to scrub" : "",
   );
+  refreshPicker();
   render();
 }
 
@@ -478,6 +587,9 @@ function fmtBytes(bytes: number): string {
 }
 
 function attachLive(summary: RunSummaryLike): void {
+  // Cancels any stored load still in flight: one landing after this point would
+  // set run.live = false and freeze the live panel (see loadStored's token).
+  loadRequest++;
   run.id = summary.id;
   run.src = summary.hello?.src ?? null;
   run.live = true;
@@ -491,7 +603,14 @@ function attachLive(summary: RunSummaryLike): void {
       const key = `${r.run}\0${r.seq}`;
       return seen.has(key) ? false : (seen.add(key), true);
     });
-  run.t0 = initial[0]?.t ?? null;
+  // The run's OWN start, not the snapshot's. The hub's tail is bounded in
+  // BYTES (store.ts TAIL_BYTES), so its oldest record is where the snapshot
+  // window begins: reading that as t0 made a six-hour run's "elapsed" tile say
+  // five minutes while the picker beside it read 6h off this same object's
+  // metadata.firstT. The fallback is for a legacy summary carrying no metadata;
+  // a null firstT means nothing was ever ingested, and the `records` handler
+  // below then fills t0 from the first record that arrives.
+  run.t0 = summary.metadata?.firstT ?? initial[0]?.t ?? null;
   cutoff = Infinity;
   $("scrubrow").style.display = "none";
 
@@ -501,6 +620,7 @@ function attachLive(summary: RunSummaryLike): void {
   state.live = true;
   state.t0 = run.t0;
   appendRecords(state, initial);
+  refreshPicker();
   render();
 }
 
@@ -533,6 +653,8 @@ interface HubMessage {
   code?: number;
   output?: string;
   syncBusy?: boolean;
+  /** Snapshot: whether a simulation is already running. */
+  simBusy?: boolean;
   /** Snapshot: whether the game holds its Remote File API connection. */
   rfaConnected?: boolean;
   /** rfa-status: the same, live. */
@@ -555,6 +677,15 @@ function refreshSyncButton(): void {
     : "Bitburner is not connected — enable the Remote API in the game options";
 }
 
+/** The sim button, kept in module state for the same reason as the sync button:
+ * it has to be reconstructible from a snapshot. No connection term — a sim
+ * spawns `bun run sim/run.ts` locally and does not need the game attached. */
+let simRunning = false;
+
+function refreshSimButton(): void {
+  $<HTMLButtonElement>("simrun").disabled = simRunning;
+}
+
 function connect(): void {
   const ws = new WebSocket(`ws://${location.host}/live`);
   ws.onopen = () => {
@@ -573,15 +704,43 @@ function connect(): void {
       if (msg.compactOverBytes !== undefined) compactOverBytes = msg.compactOverBytes;
       syncRunning = Boolean(msg.syncBusy);
       gameConnected = Boolean(msg.rfaConnected);
+      // The snapshot is the only channel that can tell a reloaded or
+      // reconnected page a sim is in flight: broadcast() sends nothing while no
+      // viewer is attached, so sim-status and sim-finished can both be missed.
+      simRunning = Boolean(msg.simBusy);
       refreshSyncButton();
+      refreshSimButton();
+      if (simRunning) setStatus("sim running…");
       refreshPicker();
-      if (liveRuns.length > 0) {
-        $<HTMLSelectElement>("runpick").value = `live:${liveRuns[0]!.id}`;
-        attachLive(liveRuns[0]!);
-      } else if (storedRuns.length > 0) {
-        $<HTMLSelectElement>("runpick").value = `file:${storedRuns[0]!.file}`;
-        void loadStored(storedRuns[0]!.file);
+      // A snapshot arrives on EVERY /live open (ui/server.ts websocket.open)
+      // and is indistinguishable on the wire from the first one. This branch
+      // used to treat each of them as first load, so a two-second socket blip
+      // discarded a replay's retained records and scrub position and attached
+      // whatever live run the hub happened to list first. Auto-attach only when
+      // nothing is loaded.
+      if (run.id === null) {
+        if (liveRuns.length > 0) attachLive(liveRuns[0]!);
+        else if (storedRuns.length > 0) void loadStored(storedRuns[0]!.file);
+        else render();
+      } else if (run.live && liveRuns.some((entry) => entry.id === run.id)) {
+        // Re-folded from the new snapshot rather than appended to the state
+        // already held: appendRecords has no seq dedupe across snapshots (that
+        // filter lives inside attachLive), so folding this tail in on top of
+        // the old one would double-count every counter and event.
+        attachLive(liveRuns.find((entry) => entry.id === run.id)!);
+      } else if (run.live) {
+        // The snapshot carries the whole live list, so a run missing from it has
+        // ended — and its run-ended was broadcast while this viewer was gone.
+        // Freeze it here, or the panel keeps counting a dead run's forecasts
+        // against the wall clock.
+        run.live = false;
+        state.live = false;
+        setStatus("run ended");
+        refreshPicker();
+        render();
       } else {
+        // A stored run's file cannot have changed under it: keep the replay and
+        // the scrub position exactly where the operator left them.
         render();
       }
     } else if (msg.type === "run-started" && msg.run) {
@@ -589,16 +748,38 @@ function connect(): void {
       if (existing < 0) liveRuns.push({ ...msg.run, state: [], tail: [] });
       else liveRuns[existing] = { ...liveRuns[existing], ...msg.run };
       refreshPicker();
-      if (existing < 0 && liveRuns.length === 1) {
-        $<HTMLSelectElement>("runpick").value = `live:${msg.run.id}`;
-        attachLive(liveRuns[0]!);
+      // Gated on "nothing loaded" rather than on this being the only live run:
+      // pressing sync while a deliberately chosen replay was open started a
+      // game run, and that used to yank the operator straight off the replay.
+      if (run.id === null) {
+        const summary = liveRuns.find((entry) => entry.id === msg.run!.id);
+        if (summary) attachLive(summary);
       }
     } else if (msg.type === "run-ended" && msg.run) {
       liveRuns = liveRuns.filter((r) => r.id !== msg.run!.id);
       if (msg.stored) storedRuns = msg.stored;
       if (run.id === msg.run.id) {
         run.live = false;
+        // The live key stops existing the moment the run closes, so the loaded
+        // run has to become its stored file or the picker cannot name it at
+        // all: metadata.file is basename(store.file), exactly the relative name
+        // listRunFiles() emits for an unpinned run. `records` stays null —
+        // reproject() returns early for a run with no retained history, so the
+        // folded state and the hidden scrub row remain correct — and pin now
+        // enables for the run actually on screen.
+        if (msg.run.metadata?.file) run.id = msg.run.metadata.file;
+        // A run that has ended has no more records, so its countdowns must
+        // freeze at the last observed record time instead of racing the wall
+        // clock into "ready now" (bitnode.ts picks Date.now() on this flag).
+        // Mutated on `state` directly and not through the projection:
+        // reproject() bails for a run with no retained records and
+        // appendRecords never reads run metadata, so there is no other channel.
+        state.live = false;
         setStatus("run ended");
+        // Nothing else re-renders here — setStatus only rewrites #status, and
+        // the `records` branch is now gated off by run.live — so without this
+        // the panel keeps its last wall-clock frame until some unrelated click.
+        render();
       }
       refreshPicker();
     } else if (msg.type === "runs-changed") {
@@ -607,9 +788,12 @@ function connect(): void {
       if (msg.stored) storedRuns = msg.stored;
       refreshPicker();
     } else if (msg.type === "sim-status") {
-      $<HTMLButtonElement>("simrun").disabled = Boolean(msg.busy);
+      simRunning = Boolean(msg.busy);
+      refreshSimButton();
+      if (msg.busy) setStatus("sim running…");
     } else if (msg.type === "sim-finished") {
-      $<HTMLButtonElement>("simrun").disabled = false;
+      simRunning = false;
+      refreshSimButton();
       if (msg.stored) {
         storedRuns = msg.stored;
         refreshPicker();
@@ -673,42 +857,67 @@ $("sync").addEventListener("click", async () => {
 });
 
 $("simrun").addEventListener("click", async () => {
-  $<HTMLButtonElement>("simrun").disabled = true;
+  simRunning = true;
+  refreshSimButton();
   const profile = $<HTMLSelectElement>("simprofile").value;
   const save = $<HTMLSelectElement>("simsave").value;
-  const res = await fetch("/sim", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      // A profile brings its own goals, seeds and horizon; the boxes only
-      // override what the operator actually typed over.
-      ...(profile ? { profile } : { goals: $<HTMLInputElement>("simgoal").value.trim().split(/\s+/).filter(Boolean) }),
-      ...(save ? { save } : {}),
-      seeds: $<HTMLInputElement>("simseeds").value.trim(),
-      horizon: $<HTMLInputElement>("simhorizon").value.trim(),
-      ...(profile ? {} : { label: "dashboard" }),
-    }),
-  });
-  const body = (await res.json()) as { error?: string };
-  if (!res.ok) {
-    $<HTMLButtonElement>("simrun").disabled = false;
-    setStatus(`sim error: ${body.error}`);
-  } else {
-    setStatus("sim running…");
+  try {
+    const res = await fetch("/sim", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        // A profile brings its own goals, seeds and horizon; the boxes only
+        // override what the operator actually typed over.
+        ...(profile ? { profile } : { goals: $<HTMLInputElement>("simgoal").value.trim().split(/\s+/).filter(Boolean) }),
+        ...(save ? { save } : {}),
+        seeds: $<HTMLInputElement>("simseeds").value.trim(),
+        horizon: $<HTMLInputElement>("simhorizon").value.trim(),
+        ...(profile ? {} : { label: "dashboard" }),
+      }),
+    });
+    const body = (await res.json()) as { error?: string };
+    if (!res.ok) {
+      simRunning = false;
+      refreshSimButton();
+      // statusText as the fallback: an error response carrying no `error` key
+      // used to render as "sim error: undefined".
+      setStatus(`sim error: ${body.error ?? res.statusText}`);
+    } else {
+      // Left disabled on purpose: sim-status and sim-finished own the button
+      // from here, because the simulation outlives this request.
+      setStatus("sim running…");
+    }
+  } catch (error) {
+    // The request never reached the hub — the same condition the socket's 2s
+    // reconnect exists for — so no sim-status will ever arrive to release the
+    // button, and the launcher stayed dead until the page was reloaded.
+    simRunning = false;
+    refreshSimButton();
+    setStatus(`sim failed: ${String(error)}`);
   }
 });
 
 $("simpin").addEventListener("click", async () => {
-  const value = $<HTMLSelectElement>("runpick").value;
-  if (!value.startsWith("file:")) return;
-  const file = value.slice("file:".length);
+  // The loaded run, not pick.value: the two agree now, and the button pins what
+  // the panels are showing.
+  const key = runKey();
+  if (key === null || !key.startsWith("file:")) return;
+  const file = key.slice("file:".length);
   const res = await fetch("/pin", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ file }),
   });
   const body = (await res.json()) as { error?: string; pinned?: string };
-  setStatus(res.ok ? `pinned ${body.pinned}` : `pin failed: ${body.error}`);
+  // Follow the rename: pinning moves x.jsonl to pinned/x.jsonl, so a run.id
+  // left on the old name names a file the hub no longer has. runs-changed can
+  // land before this response, which is why refreshPicker has to survive the
+  // gap rather than this being the only correction.
+  if (res.ok && body.pinned && !run.live && run.id === file) {
+    run.id = body.pinned;
+    refreshPicker();
+  }
+  setStatus(res.ok ? `pinned ${body.pinned}` : `pin failed: ${body.error ?? res.statusText}`);
 });
 
 active = readHash();

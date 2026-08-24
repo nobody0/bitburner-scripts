@@ -141,6 +141,33 @@ export function seriesBounds(series: ChartSeries[], fit = false): SeriesBounds {
   return { x0, x1, y0, y1 };
 }
 
+/** Whether a set of series has a TIMELINE to draw, not merely points.
+ *
+ * The point count is the wrong test, and it is the one every caller reached for
+ * first. `game/lib/telemetry-sink.ts` mirrors `player` to `getPlayer` in the
+ * same flush, so a game run pushes each money sample into the series twice at
+ * one millisecond: two points, zero span. `drawSeries`' x-scale then divides by
+ * `Math.max(1, x1 - x0)`, which collapses both to the left edge and draws a
+ * full-width axis with three identical time labels — a chart asserting a
+ * timeline over a single observation, which is worse than drawing nothing.
+ *
+ * A caller gates on this and swaps in `note(...)`; the empty state stays HTML,
+ * in the same vocabulary as every other "nothing yet" in the viewer, rather than
+ * becoming a second one painted into a bitmap. */
+export function hasSpan(...series: readonly (readonly [number, number][])[]): boolean {
+  for (const pts of series) {
+    if (pts.length < 2) continue;
+    let x0 = Infinity;
+    let x1 = -Infinity;
+    for (const p of pts) {
+      if (p[0] < x0) x0 = p[0];
+      if (p[0] > x1) x1 = p[0];
+    }
+    if (x1 > x0) return true;
+  }
+  return false;
+}
+
 export function drawSeries(
   canvas: HTMLCanvasElement,
   series: ChartSeries[],
@@ -163,6 +190,16 @@ export function drawSeries(
     return;
   }
 
+  // Resolved ONCE. Each `color()` is a fresh getComputedStyle on the document
+  // element — a forced style resolution — and the loops below asked for the same
+  // four tokens per gridline. They still come from the CSS custom properties, so
+  // the chart follows the theme with no second palette; they simply cannot
+  // change in the middle of one draw.
+  const baselineColor = color("--baseline");
+  const gridColor = color("--grid");
+  const mutedColor = color("--muted");
+  const monoFont = color("--font-mono") || 'JetBrainsMono, "Courier New", monospace';
+
   const pad = options.compact ? { l: 34, r: 4, t: 4, b: 14 } : { l: 56, r: 10, t: 8, b: 22 };
   const lines = options.compact ? 2 : 4;
   const { x0, x1, y0, y1 } = seriesBounds(drawn, options.fitY);
@@ -175,19 +212,19 @@ export function drawSeries(
   // stronger stroke. With `y0 === 0` that is the bottom line, exactly as when
   // zero was the hard floor.
   const zeroish = (v: number) => Math.abs(v) <= (y1 - y0) * 1e-9;
-  ctx.font = `${options.compact ? 9 : 11}px ${color("--font-mono") || 'JetBrainsMono, "Courier New", monospace'}`;
+  ctx.font = `${options.compact ? 9 : 11}px ${monoFont}`;
   let drewZero = false;
   for (let i = 0; i <= lines; i++) {
     const v = y0 + ((y1 - y0) / lines) * i;
     const y = sy(v);
     if (zeroish(v)) drewZero = true;
-    ctx.strokeStyle = zeroish(v) ? color("--baseline") : color("--grid");
+    ctx.strokeStyle = zeroish(v) ? baselineColor : gridColor;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(pad.l, y);
     ctx.lineTo(w - pad.r, y);
     ctx.stroke();
-    ctx.fillStyle = color("--muted");
+    ctx.fillStyle = mutedColor;
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
     ctx.fillText(fmtY(v), pad.l - 6, y);
@@ -195,7 +232,7 @@ export function drawSeries(
   // A signed chart's gridlines rarely land on zero, and the sign of the curve
   // is the reading — so where no gridline drew it, zero gets its own rule.
   if (!drewZero && y0 < 0 && y1 > 0) {
-    ctx.strokeStyle = color("--baseline");
+    ctx.strokeStyle = baselineColor;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(pad.l, sy(0));
@@ -212,9 +249,10 @@ export function drawSeries(
   }
   const dot = options.compact ? 1.6 : 2.4;
   for (const s of drawn) {
+    const stroke = color(s.color);
     if (s.kind === "points") {
       // Independent observations: a mark each, no path between them.
-      ctx.fillStyle = color(s.color);
+      ctx.fillStyle = stroke;
       for (const p of s.pts) {
         ctx.beginPath();
         ctx.arc(sx(p[0]), sy(p[1]), dot, 0, Math.PI * 2);
@@ -222,7 +260,7 @@ export function drawSeries(
       }
       continue;
     }
-    ctx.strokeStyle = color(s.color);
+    ctx.strokeStyle = stroke;
     ctx.lineWidth = 2;
     ctx.lineJoin = "round";
     ctx.beginPath();
@@ -239,17 +277,35 @@ export function drawSeries(
  * accumulated listener on every mouse move. */
 const wired = new WeakSet<HTMLCanvasElement>();
 
-/** Wire crosshair + tooltip once; the chart itself is redrawn on every frame. */
+/** Wire crosshair + tooltip once; the chart itself is redrawn on every frame.
+ *
+ * COALESCED through requestAnimationFrame. The handler used to redraw on every
+ * mousemove, and a redraw is not cheap: `drawSeries` reassigns
+ * `canvas.width`/`height`, which reallocates the bitmap, then re-strokes every
+ * point of every series — the allocation chart carries three series of up to
+ * SERIES_LIMIT points each, so ~6,000 path ops, on the same main thread that is
+ * already repainting panels twice a second. Pointer motion produces one of those
+ * per event per chart crossed. Now several events collapse into one frame.
+ *
+ * Two details the coalescing makes load-bearing: `mouseleave` has to CANCEL a
+ * pending frame, or a queued crosshair repaints itself after the tooltip is
+ * hidden; and the frame has to re-read the geometry, because the 500 ms render
+ * loop may have replaced the series between the event and the frame. */
 export function attachChartHover(canvas: HTMLCanvasElement, tooltip: HTMLElement): void {
   if (wired.has(canvas)) return;
   wired.add(canvas);
-  canvas.addEventListener("mousemove", (ev) => {
+  let frame = 0;
+  let pointerX = 0;
+
+  const paint = (): void => {
+    frame = 0;
+    // Re-read rather than close over: the panel re-renders on its own clock and
+    // the geom under this canvas is replaced wholesale when it does.
     const geom = geoms.get(canvas);
     if (!geom) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    const rect = canvas.getBoundingClientRect();
-    const mx = ev.clientX - rect.left;
+    const mx = pointerX;
     // Nearest point on the FIRST series anchors the crosshair; the tooltip
     // reports every series at that time.
     const anchor = geom.series[0]!;
@@ -294,10 +350,30 @@ export function attachChartHover(canvas: HTMLCanvasElement, tooltip: HTMLElement
     }
     tooltip.style.display = "block";
     tooltip.textContent = `${fmtTime(at - redrawn.t0)} — ${readings.join(" · ")}`;
-    tooltip.style.left = `${Math.min(redrawn.w - 140, redrawn.sx(at) + 10)}px`;
+    // MEASURED, not assumed — and after the text is set, because `offsetWidth`
+    // on a `display: none` element is zero. The old clamp pinned `left` at
+    // `w - 140`, and 140 was never the tooltip's width: a three-series reading
+    // ("hack 40% · grow 35% · weaken 25%") is over 300px of `nowrap` text, so its
+    // right end landed outside the card — which CLIPS, because `overflow-x: auto`
+    // on `section.card` makes the vertical axis compute to `auto` as well and the
+    // card a scroll container in both. Flipping the tip to the left of the
+    // crosshair when it will not fit on the right keeps it whole.
+    const width = tooltip.offsetWidth;
+    const right = redrawn.sx(at) + 10;
+    const left = right + width > redrawn.w ? Math.max(0, redrawn.sx(at) - 10 - width) : right;
+    tooltip.style.left = `${left}px`;
     tooltip.style.top = `${Math.max(0, redrawn.sy(best[1]) - 30)}px`;
+  };
+
+  canvas.addEventListener("mousemove", (ev) => {
+    pointerX = ev.clientX - canvas.getBoundingClientRect().left;
+    if (frame === 0) frame = requestAnimationFrame(paint);
   });
   canvas.addEventListener("mouseleave", () => {
+    if (frame !== 0) {
+      cancelAnimationFrame(frame);
+      frame = 0;
+    }
     tooltip.style.display = "none";
     const geom = geoms.get(canvas);
     if (geom) drawSeries(canvas, geom.series, geom.t0, geom.fmtY, geom.options);

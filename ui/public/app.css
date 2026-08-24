@@ -43,8 +43,12 @@ nav#tabs {
   border-color: var(--bb-well-light);
   font-weight: 500;
 }
-.tab.locked { color: var(--bb-secondary-dark); opacity: 0.65; }
-.tab.unknown { color: var(--bb-secondary); opacity: 0.8; font-style: italic; }
+/* Recession carried by colour and a non-colour channel, not by alpha. #666 at
+   0.65 composites to ~#424242 — 2.2:1, in the primary navigation — while the
+   strike-through and the `✕ `/`? ` marks main.ts already prefixes say the same
+   thing without colour at all. */
+.tab.locked { color: var(--bb-secondary); opacity: 1; text-decoration: line-through; }
+.tab.unknown { color: var(--bb-secondary); opacity: 1; font-style: italic; }
 .tab.spec-toggle { margin-left: auto; align-self: center; }
 
 /* Checked-in feature documentation. It is a sibling of the live panel rather
@@ -170,6 +174,7 @@ canvas.microchart { height: 88px; }
 .k5 { color: var(--series-5); }
 .charttip {
   position: absolute;
+  max-width: 100%;
   pointer-events: none;
   background: var(--bb-well);
   border: 2px solid var(--bb-white);
@@ -276,13 +281,24 @@ canvas.microchart { height: 88px; }
 .nodegrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin-top: 10px; }
 .node { border: 1px solid var(--bb-well-light); padding: 8px; background: var(--bb-background); }
 .node .n { font-weight: 600; font-size: var(--fs-md); display: flex; justify-content: space-between; }
-.node .lvl { background: var(--bb-primary-dark); color: var(--bb-white); padding: 0 6px; font-size: var(--fs-xs); }
+.node .lvl { background: var(--bb-primary-dark); color: var(--bb-black); padding: 0 6px; font-size: var(--fs-xs); }
 .node .nm { font-size: var(--fs-sm); color: var(--text-secondary); }
 .node .ft { font-size: var(--fs-xs); color: var(--muted); }
 .node.current { border-color: var(--series-1); box-shadow: inset 0 0 0 1px var(--series-1); }
-.node.todo { opacity: 0.5; }
+/* Recede by colour, not by dimming the whole card: at 0.5 the node's own name
+   sat at ~2.8:1. The border does the "not yet" work. */
+.node.todo { border-color: var(--bb-well); }
+.node.todo .nm, .node.todo .ft { color: var(--muted); }
 
 /* --- Stanek gift grid --- */
+/* Two grids, side by side while the column allows it and stacked when it does
+   not: the observed occupancy and the candidate packing are only readable
+   against each other. The 420px cap is a lone grid's; in a pair each takes its
+   share of the row instead, so neither is cropped in the narrow column. */
+.gifts { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; }
+.gifts > div { flex: 1 1 160px; min-width: 0; }
+.gifts .gift { max-width: 100%; margin: 4px 0 0; }
+.giftlab { font-size: var(--fs-xs); color: var(--muted); }
 .gift { display: grid; gap: 2px; margin: 10px 0; max-width: 420px; }
 .gift .cell { aspect-ratio: 1; background: var(--grid); }
 .swatch { display: inline-block; width: 10px; height: 10px; margin-right: 5px; }
@@ -424,9 +440,15 @@ canvas.microchart { height: 88px; }
    different statements there are, so they must not look alike. */
 .netmap .rowlabel.airgap { fill: var(--bb-secondary-dark); font-style: italic; }
 .netmap .rowlabel.labyrinth { fill: var(--series-5); }
+/* The floor marker: with no labyrinth sighting the net's depth is one past the
+   deepest host we hold, so this row says "there may be more below" rather than
+   naming a depth we have looked at. It must not read as a real row — muted
+   italic, and the faintest rule of the three. */
+.netmap .rowlabel.floor { fill: var(--muted); font-style: italic; }
 .netmap .rowrule { stroke: var(--bb-well); stroke-width: 1; }
 .netmap .rowrule.depth { stroke-dasharray: 2 6; }
 .netmap .rowrule.airgap { stroke: var(--bb-secondary-dark); stroke-dasharray: 1 3; opacity: 0.6; }
+.netmap .rowrule.floor { stroke: var(--bb-well); stroke-dasharray: 1 5; opacity: 0.5; }
 
 /* Edges. The game draws straight diagonals on a 6000px canvas; at panel scale
    those cross into noise, so these are routed orthogonally through the gutter. */
@@ -469,7 +491,7 @@ canvas.microchart { height: 88px; }
 .netmap .node .meta { fill: var(--muted); }
 .netmap .node .status { fill: var(--bb-secondary); }
 .netmap .node.auth-session .status { fill: var(--good); }
-.netmap .node.gone .status { fill: var(--critical); }
+.netmap .node.gone .status { fill: var(--critical-text); }
 .netmap .node .ramtext { fill: var(--muted); }
 
 /* Blocked RAM is not "used" in any sense we control — it is the server owner's,
@@ -480,7 +502,9 @@ canvas.microchart { height: 88px; }
 .netmap .ram.blocked { fill: var(--critical); }
 
 /* "Believed, not confirmed". The net rewires itself every few seconds, so a
-   value we hold and a value we trust must not look the same. */
+   value we hold and a value we trust must not look the same. Fired by every
+   PERISHABLE fact having expired — identity facts never expire, and requiring
+   those to be stale too kept this fade off for every host on the wire. */
 .netmap .node.stale { opacity: 0.55; }
 /* Search highlights rather than removes: the shape of the net is the thing you
    came to look at, and filtering it down to seven boxes destroys it. */
@@ -530,6 +554,17 @@ canvas.microchart { height: 88px; }
 /* A candidate is a question; the exit is an answer. Hollow until it is settled. */
 .labmaze .exit { fill: none; stroke: var(--series-5); stroke-width: 1; stroke-dasharray: 2 2; }
 .labmaze .exit.known { fill: var(--series-5); stroke-dasharray: none; }
+/* The four punched doors, in the same grammar as the exit — hollow while the
+   crossing is still one of several candidates, filled once a slot is seen open —
+   but in the edge colour rather than the exit's gold, because a door is a way
+   THROUGH and an exit is a way OUT. `shut` is the third state and the reason
+   these are drawn at all: a slot the planner has already priced at Infinity is
+   an inference the walker never writes back, so on the grid it is
+   indistinguishable from one nobody has reached. An explicit fill is required on
+   all three — an SVG circle with no fill paints solid black. */
+.labmaze .door { fill: none; stroke: var(--series-1); stroke-width: 0.75; stroke-dasharray: 1.5 1.5; }
+.labmaze .door.found { fill: var(--series-1); stroke-dasharray: none; }
+.labmaze .door.shut { fill: none; stroke: var(--bb-secondary-dark); stroke-dasharray: none; opacity: 0.55; }
 /* The pinned walker gets the stasis colour, the same token the net map uses. */
 .labmaze .walker { fill: var(--good); stroke: var(--bb-background); stroke-width: 0.5; }
 .labmaze .walker.pinned { stroke: var(--series-5); stroke-width: 1.2; }
@@ -543,6 +578,7 @@ canvas.microchart { height: 88px; }
 .labkey .sw.seamkey { height: 0; width: 14px; border-radius: 0; border-top: 1px dashed var(--bb-secondary-dark); }
 .labkey .sw.walkerkey { background: var(--good); border-radius: 50%; }
 .labkey .sw.exitkey { border: 1px dashed var(--series-5); border-radius: 50%; }
+.labkey .sw.doorkey { border: 1px dashed var(--series-1); border-radius: 50%; }
 
 /* The walker row. */
 .labwalkers { display: flex; flex-direction: column; gap: var(--sp-1); margin-top: var(--sp-2); }
@@ -614,11 +650,13 @@ canvas.microchart { height: 88px; }
 .augstate.planned { color: var(--bb-warning); }
 .augstate.buyable { color: var(--bb-primary); }
 .augstate.short { color: var(--text-secondary); }
-.augstate.locked { color: var(--muted); opacity: 0.6; }
+.augstate.locked { color: var(--muted); opacity: 1; }
 
 /* Installed rows recede and planned rows are marked, so the three groups are
    separable without reading a column. */
-tbody tr.installed td { opacity: 0.55; }
+/* The row recedes by colour: at 0.55 a whole row of #0c0 dropped to ~3.1:1, and
+   the INSTALLED word in the state column is the row's real signal anyway. */
+tbody tr.installed td { color: var(--bb-secondary); }
 tbody tr.planned td:first-child { box-shadow: inset 2px 0 0 var(--bb-warning); }
 
 /* `gives` is the widest column and the only wrapping one now, so its chips set

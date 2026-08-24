@@ -67,7 +67,17 @@ function syncValue(oldEl: Element, newEl: Element): void {
     if (oldEl.type === "checkbox" || oldEl.type === "radio") oldEl.checked = newEl.hasAttribute("checked");
     else if (oldEl.value !== newEl.getAttribute("value")) oldEl.value = newEl.getAttribute("value") ?? "";
   } else if (oldEl instanceof HTMLOptionElement && newEl instanceof HTMLOptionElement) {
-    oldEl.selected = newEl.hasAttribute("selected");
+    // `selected` is not a reflected property — the content attribute drives
+    // `defaultSelected`, and once selectedness is dirty the attribute stops
+    // moving it — so an ABSENT attribute means "the panel builder did not state
+    // a selection", not "deselect". Clearing it made the run picker's chosen
+    // option lose selectedness whenever its own label changed (the live row
+    // embeds a duration, so it changes on every catalogue re-send), leaving a
+    // single-select to fall back to its first option. The focus guard above
+    // cannot cover this: for a `<select>` the activeElement is the SELECT,
+    // never the OPTION. Asserting is enough — setting one option true deselects
+    // its siblings.
+    if (newEl.hasAttribute("selected")) oldEl.selected = true;
   }
 }
 

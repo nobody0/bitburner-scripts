@@ -14,7 +14,7 @@ import {
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { WebSocketServer, type WebSocket as RfaSocket } from "ws";
-import { TELEMETRY_PORT, type WireMessage } from "../shared/telemetry/schema.ts";
+import { TELEMETRY_PORT, type HelloBody, type LogRecord } from "../shared/telemetry/schema.ts";
 import { loadConfig } from "../tools/config.ts";
 import { RfaSession } from "../tools/rfa-session.ts";
 import { runSync, syncOptionsFrom, type SyncOptions } from "../tools/sync.ts";
@@ -52,7 +52,7 @@ const REPO_ROOT = modulePath("..");
 const RETENTION_MS = 24 * 3_600_000;
 const SWEEP_EVERY_MS = 3_600_000;
 
-type SocketData = { role: "ingest"; store?: RunStore } | { role: "live" };
+type SocketData = { role: "ingest"; store?: RunStore; warned?: boolean } | { role: "live" };
 
 /** Keyed by run id. Closed runs stay here (live=false) until the sweep, so a
  * reconnecting client reattaches to its store instead of truncating the file. */
@@ -379,19 +379,47 @@ function snapshotFor(): unknown {
 
 const SIM_ARG = /^[\w.,:+~-]+$/;
 
-/** Move a stored run out of the retention sweep's reach. */
+/** Move a stored run out of the retention sweep's reach.
+ *
+ * Not a bare renameSync: a RunStore may still hold this path. Closed stores stay
+ * in `runs` for the whole retention window, so pinning the install you are
+ * playing — exactly what an operator does to preserve an A/B artifact — left the
+ * store writing its sidecar beside a vacant `runs/<name>.jsonl`, and on the
+ * emitter's next hello `attach()` recreated that file empty while `recordCount`,
+ * `firstT` and the span table carried over. The catalog then advertised a second
+ * artifact claiming the whole run's records for a file holding only the tail. */
 function pinRun(name: string): Response {
   if (!name || name.startsWith("pinned/")) {
     return Response.json({ error: "nothing to pin" }, { status: 400 });
   }
-  const from = path.join(RUNS_DIR, path.basename(name));
+  const base = path.basename(name);
+  const from = path.join(RUNS_DIR, base);
   if (Bun.file(from).size === 0) return Response.json({ error: "no such run" }, { status: 404 });
   mkdirSync(PINNED_DIR, { recursive: true });
-  const to = path.join(PINNED_DIR, path.basename(name));
-  renameSync(from, to);
+  const to = path.join(PINNED_DIR, base);
+  // `runs` is keyed by install id, not by file name, so the owning store has to
+  // be found by the path it writes to.
+  const store = [...runs.values()].find((candidate) => candidate.file === from);
+  try {
+    renameSync(from, to);
+  } catch (error) {
+    // An explicit JSON error: the route's .catch used to report an EPERM here as
+    // "bad JSON", and Bun.serve's own 500 is an HTML page the viewer parses as
+    // JSON before it looks at res.ok.
+    console.error(`failed to pin ${base}:`, error);
+    return Response.json({ error: `could not pin ${base}: ${String(error)}` }, { status: 500 });
+  }
   try { renameSync(`${from}.meta.json`, `${to}.meta.json`); } catch { /* legacy file */ }
+  if (store) {
+    store.relocate(to);
+    // RunSummary.file carries the path, so a live run's viewers need the
+    // corrected summary and not just a fresh catalog. Only a live one: the
+    // viewer merges run-started into its live list, so sending it for a closed
+    // store would resurrect the run there.
+    if (store.live) broadcast({ type: "run-started", run: store.summary() });
+  }
   broadcast({ type: "runs-changed", stored: listRunFiles() });
-  return Response.json({ pinned: `pinned/${path.basename(name)}` });
+  return Response.json({ pinned: `pinned/${base}` });
 }
 
 interface SimRequest {
@@ -424,13 +452,25 @@ async function launchSim(body: SimRequest): Promise<Response> {
     return Response.json({ error: "invalid characters in arguments" }, { status: 400 });
   }
 
+  // The flag is set only once the child exists. Bun.spawn throws synchronously
+  // (`bun` missing from a thin PATH, a bad cwd, EMFILE in a long-lived hub), and
+  // nothing else ever clears `simBusy`, so setting it first meant one failed
+  // spawn answered every later /sim with 409 "already running" until the hub was
+  // restarted. There is no await between the 409 guard above and here and
+  // Bun.serve's fetch is single-threaded, so the move costs no exclusion.
+  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
+  try {
+    proc = Bun.spawn(["bun", "run", "sim/run.ts", ...args], {
+      cwd: REPO_ROOT,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+  } catch (error) {
+    console.error("sim launch failed:", error);
+    return Response.json({ error: `could not launch the simulator: ${String(error)}` }, { status: 500 });
+  }
   simBusy = true;
   broadcast({ type: "sim-status", busy: true });
-  const proc = Bun.spawn(["bun", "run", "sim/run.ts", ...args], {
-    cwd: REPO_ROOT,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
   void (async () => {
     const [out, err, code] = await Promise.all([
       new Response(proc.stdout).text(),
@@ -440,7 +480,15 @@ async function launchSim(body: SimRequest): Promise<Response> {
     simBusy = false;
     console.log(`sim finished (exit ${code})\n${out}${err}`);
     broadcast({ type: "sim-finished", code, output: (out + err).slice(-4_000), stored: listRunFiles() });
-  })();
+  })().catch((error: unknown) => {
+    // An unhandled rejection from a detached task exits Bun, and this process
+    // holds every live run's WriteStream. Not sim-finished: the viewer renders
+    // that as "sim finished (exit N)" and drops the output, so it would claim a
+    // sim ran when the pipes died; the honest broadcast is only "not busy".
+    simBusy = false;
+    console.error("sim output pipe failed:", error);
+    broadcast({ type: "sim-status", busy: false });
+  });
   return Response.json({ started: true, args });
 }
 
@@ -502,6 +550,13 @@ rfaServer.on("connection", (socket: RfaSocket) => {
   rfa = { session: new RfaSession(socket), socket };
   console.log(`Bitburner connected on ws://${config.host}:${RFA_PORT}`);
   broadcast({ type: "rfa-status", connected: true });
+  // ws emits 'error' on transport faults — an ECONNRESET when the game reloads
+  // mid-frame — and an unhandled 'error' EVENT is itself fatal. It does not catch
+  // a malformed frame: a synchronous throw out of a 'message' listener goes to
+  // whoever called emit, never to 'error'. That guard lives in RfaSession.
+  socket.on("error", (error: Error) => {
+    console.error("Bitburner connection error:", error.message);
+  });
   socket.on("close", () => {
     if (rfa?.socket !== socket) return;
     rfa = undefined;
@@ -517,6 +572,61 @@ rfaServer.on("error", (error: Error) => {
 mkdirSync(RUNS_DIR, { recursive: true });
 backfillLegacyMetadata();
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+/** The hello an /ingest frame carries, or undefined if it cannot be trusted.
+ *
+ * A throw out of the Bun websocket callback is uncaught and exits the hub,
+ * taking every OTHER live run's buffered tail and held spans with it — so one
+ * emitter's malformed frame must cost that frame and nothing more. Three shapes
+ * each killed the hub before this guard: a JSON primitive (`"hello" in
+ * message`), `{"v":1}` (`message.records[0]`), and `{"v":1,"hello":{}}`
+ * (`safeName(undefined)` in the store's constructor, whose `undefined-undefined`
+ * file name is a bad artifact even when it does not throw). What is checked is
+ * what the hub dereferences or bakes into that name: this is not a schema
+ * validator, and the wire TYPE is not evidence about what a socket sent. */
+function validHello(value: unknown): HelloBody | undefined {
+  if (!isObject(value)) return;
+  if (typeof value["run"] !== "string" || value["run"] === "") return;
+  if (value["src"] !== "game" && value["src"] !== "sim") return;
+  if (typeof value["script"] !== "string" || value["script"] === "") return;
+  if (typeof value["startedAt"] !== "number" || !Number.isFinite(value["startedAt"])) return;
+  const identity = value["identity"];
+  // Absent on legacy clients, but a half-built one throws on
+  // `identity.install.id` — the value the artifact is keyed, named and grouped
+  // by, so a partial identity is worse than none.
+  if (identity !== undefined) {
+    if (!isObject(identity) || !isObject(identity["install"]) || !isObject(identity["lineage"])) return;
+    if (typeof identity["install"]["id"] !== "string" || identity["install"]["id"] === "") return;
+    if (typeof identity["lineage"]["id"] !== "string") return;
+  }
+  return value as unknown as HelloBody;
+}
+
+function validRecords(value: unknown): LogRecord[] | undefined {
+  if (!Array.isArray(value)) return;
+  return (value as unknown[]).filter((record): record is LogRecord => {
+    if (!isObject(record)) return false;
+    if (typeof record["run"] !== "string" || record["run"] === "") return false;
+    if (typeof record["seq"] !== "number" || !Number.isFinite(record["seq"])) return false;
+    if (typeof record["t"] !== "number" || !Number.isFinite(record["t"])) return false;
+    if (typeof record["kind"] !== "string") return false;
+    // The store keys `state` and `#spans` by it.
+    return record["kind"] !== "state" || typeof record["key"] === "string";
+  });
+}
+
+/** Once per socket: the game flushes twice a second and reconnects on its own,
+ * so a persistently bad emitter would bury the sync and sim output this console
+ * exists to show the operator. */
+function warnFrame(ws: Bun.ServerWebSocket<SocketData>, reason: string): void {
+  if (ws.data.role !== "ingest" || ws.data.warned) return;
+  ws.data.warned = true;
+  console.warn(`ignoring /ingest frame: ${reason} — later frames from this socket fail silently`);
+}
+
 const server = Bun.serve<SocketData, never>({
   port: PORT,
   fetch(req, srv) {
@@ -525,7 +635,10 @@ const server = Bun.serve<SocketData, never>({
     if (url.pathname === "/live" && srv.upgrade(req, { data: { role: "live" } as SocketData })) return;
 
     if (url.pathname === "/sim" && req.method === "POST") {
-      return req.json().then(launchSim).catch(() => Response.json({ error: "bad JSON" }, { status: 400 }));
+      // The rejection handler covers req.json() and nothing else. A .catch()
+      // chained after .then(launchSim) reported a spawn failure to the operator
+      // as "bad JSON" — a lie about their own request.
+      return req.json().then(launchSim, () => Response.json({ error: "bad JSON" }, { status: 400 }));
     }
     if (url.pathname === "/sync" && req.method === "POST") {
       // An empty body (the dashboard button) means default options.
@@ -564,10 +677,12 @@ const server = Bun.serve<SocketData, never>({
       });
     }
     if (url.pathname === "/pin" && req.method === "POST") {
-      return req
-        .json()
-        .then((body: { file?: string }) => pinRun(body.file ?? ""))
-        .catch(() => Response.json({ error: "bad JSON" }, { status: 400 }));
+      // Same narrowing as /sim: a rename failure inside pinRun is its own JSON
+      // error, not a parse error.
+      return req.json().then(
+        (body: { file?: string }) => pinRun(body?.file ?? ""),
+        () => Response.json({ error: "bad JSON" }, { status: 400 }),
+      );
     }
     if (url.pathname.startsWith("/runs/")) {
       const name = decodeURIComponent(url.pathname.slice("/runs/".length));
@@ -593,33 +708,59 @@ const server = Bun.serve<SocketData, never>({
     },
     message(ws, raw) {
       if (ws.data.role !== "ingest") return;
-      let message: WireMessage;
+      let message: unknown;
       try {
-        message = JSON.parse(String(raw)) as WireMessage;
+        message = JSON.parse(String(raw));
       } catch {
+        warnFrame(ws, "not JSON");
         return;
       }
-      if ("hello" in message) {
-        const artifactId = message.hello.identity?.install.id ?? message.hello.run;
+      if (!isObject(message)) {
+        warnFrame(ws, "not an object");
+        return;
+      }
+      if (message["hello"] !== undefined) {
+        const hello = validHello(message["hello"]);
+        if (!hello) {
+          warnFrame(ws, "hello without a usable run/src/script/startedAt/identity");
+          return;
+        }
+        const artifactId = hello.identity?.install.id ?? hello.run;
         const existing = runs.get(artifactId);
         if (existing) {
-          existing.attach(message.hello);
+          existing.attach(hello);
           ws.data.store = existing;
           console.log(`run reattached: ${existing.id}`);
         } else {
-          const resume = message.hello.identity
+          const resume = hello.identity
             ? listRunFiles().find((entry) => !entry.pinned && entry.identity?.install.id === artifactId)
             : undefined;
-          ws.data.store = new RunStore(RUNS_DIR, message.hello, resume);
+          ws.data.store = new RunStore(RUNS_DIR, hello, resume);
           runs.set(artifactId, ws.data.store);
-          console.log(`run started: ${message.hello.src}/${message.hello.script} (${message.hello.run})`);
+          console.log(`run started: ${hello.src}/${hello.script} (${hello.run})`);
         }
         broadcast({ type: "run-started", run: ws.data.store.summary() });
         return;
       }
-      const store = ws.data.store ?? (message.records[0] && runs.get(message.records[0].run));
-      if (!store) return;
-      const accepted = store.append(message.records);
+      const records = validRecords(message["records"]);
+      if (!records) {
+        warnFrame(ws, "neither a hello nor a records array");
+        return;
+      }
+      if (records.length !== (message["records"] as unknown[]).length) warnFrame(ws, "unusable records dropped");
+      const store = ws.data.store;
+      if (!store) {
+        // Every emitter sends hello in onopen before its first flush
+        // (game/lib/telemetry.ts), so records on a socket that never said hello
+        // are a client bug and not a store to be guessed at. The fallback that
+        // stood here looked `runs` up by `record.run` — the EMITTER id, while
+        // `runs` is keyed by INSTALL id — so for any identity-carrying client it
+        // could never hit and the batch vanished with no log at all.
+        warnFrame(ws, "records before hello");
+        return;
+      }
+      if (records.length === 0) return;
+      const accepted = store.append(records);
       if (accepted.length > 0) broadcast({ type: "records", run: store.id, records: accepted });
     },
     close(ws) {
@@ -631,7 +772,17 @@ const server = Bun.serve<SocketData, never>({
       if (store) {
         const closing = store.detach();
         if (closing) void closing.then(() => {
-          console.log(`run ended: ${store.id} (${store.recordCount} records -> ${store.file})`);
+          // The stream's close callback is a threadpool round trip while queued
+          // ws frames drain on the loop, so a reconnecting emitter's hello can
+          // land first: attach() has then already reopened the writer and
+          // broadcast run-started. The viewer treats run-ended as terminal — it
+          // drops the run from its live list and gates further records on
+          // run.live — so a stale one kills a still-streaming run's feed until
+          // the page is reloaded, and the log line would claim a run ended while
+          // it is writing.
+          if (store.live) return;
+          const dropped = store.dropped > 0 ? `, ${store.dropped} unwritable` : "";
+          console.log(`run ended: ${store.id} (${store.recordCount} records${dropped} -> ${store.file})`);
           broadcast({ type: "run-ended", run: store.summary(), stored: listRunFiles() });
         }).catch((error) => console.error(`failed to close run ${store.id}:`, error));
       }
@@ -641,6 +792,48 @@ const server = Bun.serve<SocketData, never>({
 
 sweep();
 setInterval(sweep, SWEEP_EVERY_MS);
+
+/** Ctrl-C is how this hub is stopped, and it was the one case where the span
+ * guarantee did not hold: every state key sitting mid-span holds its last
+ * observation in memory only (RunStore's `#flushSpans`), so a topic that held
+ * one value for four hours became indistinguishable from one sampled once —
+ * the exact ambiguity the collapse exists to avoid — plus whatever whole lines
+ * were still queued in each writer. Registering a signal handler suppresses the
+ * default termination, so this has to exit itself.
+ *
+ * The crash paths are narrower than they were (RunStore reports a broken writer,
+ * the RFA session and the /ingest handler no longer let a stranger's frame throw)
+ * but a kill -9 still resumes from a throttled sidecar and so undercounts. */
+let stopping = false;
+function stop(signal: string): void {
+  // A second signal is an operator who wants out now, not a request to wait.
+  if (stopping) process.exit(130);
+  stopping = true;
+  const closing = [...runs.values()]
+    .map((store) => store.close())
+    .filter((promise): promise is Promise<void> => promise !== undefined);
+  console.log(`${signal}: closing ${closing.length} live run(s)`);
+  // A stuck fd must not hold the terminal hostage: the span lines are already
+  // handed to the stream, and the timeout only gives up on the final sidecar.
+  // The catch is not decoration: `close()` rejects when the writer errors while
+  // it is being ended, and an unhandled rejection here would exit before the
+  // OTHER stores' sidecars were written — one failing run taking the shutdown of
+  // every healthy one with it, which is the whole failure this handler exists to
+  // prevent. `allSettled`, so one rejection cannot short-circuit the rest.
+  void Promise.race([Promise.allSettled(closing), Bun.sleep(1_000)])
+    .then((settled) => {
+      for (const result of Array.isArray(settled) ? settled : []) {
+        if (result.status === "rejected") console.error("failed to close a run cleanly:", result.reason);
+      }
+      process.exit(0);
+    })
+    .catch((error: unknown) => {
+      console.error("shutdown failed:", error);
+      process.exit(1);
+    });
+}
+process.on("SIGINT", () => stop("SIGINT"));
+process.on("SIGTERM", () => stop("SIGTERM"));
 
 console.log(
   `telemetry hub on http://127.0.0.1:${server.port} (ws /ingest, /live; POST /sim, /sync; retention ${RETENTION_MS / 3_600_000}h); Remote File API on ws://${config.host}:${RFA_PORT}`,

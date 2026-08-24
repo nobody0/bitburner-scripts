@@ -47,7 +47,15 @@
   --series-4: var(--bb-secondary);
   --series-5: var(--bb-money);
   --good: var(--bb-primary);
+  /* Two critical tokens, because one cannot serve both jobs. `--critical`
+     (#c00) is 3.6:1 on black: ample for a STROKE — the netmap's broken edge, an
+     offline box, a `.need.bad` border — and under AA for the ~50 places a tab
+     paints a whole sentence with it ("resident lost", "gone", "unreachable"),
+     which are the sentences an operator most needs to read. `--bb-hp` is the
+     game's own red at 4.6:1, so prose stays inside Bitburner's palette and
+     legible. Do not collapse these back into one. */
   --critical: var(--bb-error);
+  --critical-text: var(--bb-hp);
 
   --fs-xs: 11px;
   --fs-sm: 12px;
@@ -96,13 +104,25 @@ summary:focus-visible {
   outline: 2px solid var(--bb-primary-light);
   outline-offset: 2px;
 }
-input::placeholder { color: var(--bb-primary-dark); opacity: 1; }
+/* Links inherit the panel's green rather than the user agent's blue. Only two
+   places emit one — the tab bar and the Overview's feature links — and both were
+   rendering in `-webkit-link` blue, then visited purple, which is the one pair of
+   colours the game's palette does not contain. */
+a { color: var(--bb-primary); text-decoration-color: var(--bb-primary-dark); }
+a:hover { color: var(--bb-primary-light); }
+a:visited { color: var(--bb-primary); }
+
+/* Measured against the input's own `--bb-button` (#333) ground, NOT the page
+   black — which is what makes the greener token look safe when it is not: #090
+   on #333 is 3.3:1. Every search box in the viewer is placeholder-only until it
+   is typed into, so this text is the only thing that says what the box filters. */
+input::placeholder { color: var(--bb-secondary-light); opacity: 1; }
 input[type="range"] { accent-color: var(--bb-primary); }
 input.search { padding: 2px var(--sp-2); font-size: var(--fs-sm); min-width: 18ch; }
 
 .muted { color: var(--bb-secondary); }
 .good { color: var(--bb-primary-light); }
-.bad, .fail { color: var(--critical); }
+.bad, .fail { color: var(--critical-text); }
 .warn { color: var(--bb-warning); }
 
 /* A loose flex line of label/value fragments (factions plan, career). */
@@ -166,13 +186,20 @@ th .sortby.sel { font-weight: 600; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chips.filters { gap: var(--sp-1); }
 .chip { font-size: var(--fs-sm); padding: 2px var(--sp-2); border: 1px solid var(--border); }
-.chip.on { background: var(--bb-primary-dark); color: var(--bb-white); border-color: transparent; }
+/* Black on the dark green, not white on it: #fff on #090 is 3.8:1, and the
+   selected chip is the most important state in the whole control vocabulary.
+   #000 on the SAME fill is 5.6:1, so the light/mid/dark green tiering survives —
+   filling with `--bb-primary` would make a selected chip as bright as the table
+   numbers around it. */
+.chip.on { background: var(--bb-primary-dark); color: var(--bb-black); border-color: transparent; }
 .chip.idle { color: var(--text-secondary); }
-.chip.off { color: var(--muted); opacity: 0.55; }
+/* Recession by colour, never by alpha on text: `opacity` multiplies a contrast
+   budget that a grey has already spent. */
+.chip.off { color: var(--muted); opacity: 1; }
 .chip.unknown { color: var(--muted); font-style: italic; }
 .chip.pick { cursor: pointer; background: none; color: var(--text-secondary); font: inherit; font-size: var(--fs-sm); }
 .chip.pick:hover { color: var(--bb-primary-light); }
-.chip.pick.sel { background: var(--bb-primary-dark); color: var(--bb-white); border-color: transparent; }
+.chip.pick.sel { background: var(--bb-primary-dark); color: var(--bb-black); border-color: transparent; }
 .chip .badge { margin-left: 5px; opacity: 0.7; font-variant-numeric: tabular-nums; }
 
 /* --- proportional bar --- */

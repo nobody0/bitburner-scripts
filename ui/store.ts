@@ -35,7 +35,9 @@ function safeName(value: string): string {
  * so process handoffs and reconnects keep writing to the same file. */
 export class RunStore {
   readonly id: string;
-  readonly file: string;
+  /** Not readonly: pinning renames the file under a store that still holds it.
+   * See `relocate`. */
+  file: string;
   readonly hello: HelloBody;
   readonly state = new Map<string, StateRecord>();
   readonly ring: LogRecord[] = [];
@@ -50,6 +52,11 @@ export class RunStore {
   #emitters = new Set<string>();
   #metaFile: string;
   #createdAt = Date.now();
+  /** The writer failed and this artifact is no longer being persisted. */
+  #broken = false;
+  /** Lines the broken stream never took. Counted apart from `recordCount` so
+   * the sidecar and the summary can never claim a line that is not on disk. */
+  #dropped = 0;
   /** Run-length collapse of unchanged state, keyed by state key: the last
    * payload actually written, and the newest record repeating it that has not
    * been written yet. See `#writeState`. */
@@ -70,20 +77,58 @@ export class RunStore {
       this.#createdAt = resume.createdAt;
       for (const emitter of resume.emitters) this.#emitters.add(emitter);
     }
-    this.#writer = createWriteStream(this.file, { flags: "a" });
+    this.#writer = this.#open();
     this.attach(hello);
+  }
+
+  /** Open the JSONL for append, with a PERMANENT error listener.
+   *
+   * A WriteStream whose 'error' has no listener throws out of the EventEmitter,
+   * which under Bun exits the process — so ENOSPC on one run used to take every
+   * other live run's buffered tail and held spans with it. A failed stream is a
+   * reported condition instead: writes stop, `recordCount` stops climbing (the
+   * catalog must not advertise records that were never written), and the next
+   * emitter connect retries the open through `attach`, which is the only
+   * recovery available to a hub that must not be restarted. */
+  #open(): WriteStream {
+    const writer = createWriteStream(this.file, { flags: "a" });
+    writer.on("error", (error: Error) => {
+      // Only the CURRENT writer's failure breaks the store: a late second error
+      // from a stream that `attach` has already replaced would otherwise
+      // condemn its healthy successor.
+      if (this.#writer !== writer || this.#broken) return;
+      this.#broken = true;
+      console.error(`run ${this.id} stopped persisting to ${this.file}: ${error.message}`);
+    });
+    this.#broken = false;
+    return writer;
   }
 
   /** An emitter attached to this install artifact. */
   attach(hello: HelloBody): void {
     this.#attachments++;
     this.#emitters.add(hello.run);
-    if (!this.live) {
-      this.#writer = createWriteStream(this.file, { flags: "a" });
+    // A broken writer is reopened even while the store counts as live: the
+    // reopen is the only path back to persisting, and `!this.live` alone would
+    // never take it.
+    if (!this.live || this.#broken) {
+      this.#writer = this.#open();
       this.live = true;
       this.closedAt = undefined;
     }
     this.#writeMetadata();
+  }
+
+  /** Follow the file to a new path (a pin moved it).
+   *
+   * The open fd already follows the renamed inode, so the writer is deliberately
+   * left alone — ending and reopening it would race the writes in flight. Only
+   * the two path strings move, so the next `#writeMetadata()` and any later
+   * `attach()` land on the pinned file instead of recreating an empty twin of
+   * the run in `runs/` that inherits this store's record count. */
+  relocate(file: string): void {
+    this.file = file;
+    this.#metaFile = `${file}.meta.json`;
   }
 
   /** Serialized size of `ring[i]`, so the tail can be bounded in bytes without
@@ -180,8 +225,17 @@ export class RunStore {
   }
 
   #write(line: string): void {
+    if (this.#broken) {
+      this.#dropped++;
+      return;
+    }
     this.#writer.write(line + "\n");
     this.recordCount++;
+  }
+
+  /** Records this store accepted but could not persist. */
+  get dropped(): number {
+    return this.#dropped;
   }
 
   /** Newest records that fit in `maxBytes`, oldest first. Always yields at
@@ -201,9 +255,34 @@ export class RunStore {
   detach(): Promise<void> | undefined {
     this.#attachments = Math.max(0, this.#attachments - 1);
     if (this.#attachments > 0) return;
+    return this.close();
+  }
+
+  /** Shut the artifact's file down: spans first, metadata last.
+   *
+   * The order is load-bearing. `#flushSpans()` runs before the stream is ended
+   * because `metadata().records` counts lines that were written; the sidecar is
+   * written after the stream has closed because `metadata()` stats the file for
+   * `size` and reports `live`, so writing it in between records a short size and
+   * a `live: true` the file contradicts.
+   *
+   * Public because the last emitter disconnecting is not the only way a run
+   * ends: the hub's signal handler calls this so a Ctrl-C still keeps the
+   * FIRST-and-LAST-of-every-span guarantee. Early return on a closed store keeps
+   * it idempotent — SIGINT then SIGTERM, or a signal after detach, must not
+   * re-end an ended stream. */
+  close(): Promise<void> | undefined {
+    if (!this.live) return;
     this.#flushSpans();
     this.live = false;
     this.closedAt = Date.now();
+    if (this.#broken) {
+      // A failed stream is already destroyed and will not emit 'close' again, so
+      // awaiting it would hang the caller forever. What was written is still
+      // worth describing.
+      this.#writeMetadata();
+      return Promise.resolve();
+    }
     const closed = new Promise<void>((resolve, reject) => {
       this.#writer.once("close", resolve);
       this.#writer.once("error", reject);
@@ -232,11 +311,26 @@ export class RunStore {
     };
   }
 
+  #metaFailed = false;
+
   #writeMetadata(): void {
     this.#metaWrittenAt = Date.now();
     const temporary = `${this.#metaFile}.tmp`;
-    writeFileSync(temporary, JSON.stringify(this.metadata(), null, 2) + "\n");
-    renameSync(temporary, this.#metaFile);
+    try {
+      writeFileSync(temporary, JSON.stringify(this.metadata(), null, 2) + "\n");
+      renameSync(temporary, this.#metaFile);
+    } catch (error) {
+      // Synchronous, and reached from append() on every batch, so the same
+      // ENOSPC/EACCES that breaks the writer would throw out of the hub's
+      // websocket callback and exit the process — losing every live run's tail
+      // to a failure in one run's sidecar. The sidecar only caches what the
+      // JSONL already holds (the resume path is its one reader), so a stale one
+      // is worth a log line, not the hub. Logged once: the throttle still fires
+      // every couple of seconds per emitter.
+      if (this.#metaFailed) return;
+      this.#metaFailed = true;
+      console.error(`run ${this.id} could not write ${this.#metaFile}: ${String(error)}`);
+    }
   }
 
   summary(): RunSummary {

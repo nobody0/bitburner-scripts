@@ -7,14 +7,16 @@ import {
   serverRanges,
   type RootState,
 } from "../../../shared/features/servers.ts";
-import { bar, card, collapsible, dataTable, dot, filters, hint, meter, NONE, note, outcome, rankedTable, search, table, tiles, waiting, type Column } from "../lib/dom.ts";
+import { effectiveBitNodeMultipliers, worldDaemonSkill } from "../../../shared/features/bitnode.ts";
+import { sfLevel } from "../../../shared/features/unlock.ts";
+import { bar, card, collapsible, dataTable, definitions, dot, filters, hint, meter, NONE, note, outcome, rankedTable, search, table, tiles, waiting, type Column } from "../lib/dom.ts";
 import { inline, raw, type Html } from "../lib/html.ts";
-import { chartCanvas, mountChart, type ChartSeries } from "../lib/chart.ts";
+import { chartCanvas, hasSpan, mountChart, type ChartSeries } from "../lib/chart.ts";
 import { decisionHistory } from "../lib/history.ts";
 import { esc, fmtMoney, fmtMs, fmtNum, fmtPct, fmtRam, fmtTime } from "../lib/format.ts";
 import { hackTimeSeconds, makeHackContext, type HackContext } from "../../../shared/formulas.ts";
 import { view } from "../lib/viewstate.ts";
-import type { BatchAggregateReport, FarmRollup } from "../../../shared/telemetry/topics/hacking.ts";
+import type { BatchAggregateReport, FarmRollup, FleetRollup } from "../../../shared/telemetry/topics/hacking.ts";
 import type { FarmHealthSeries, ProjectedState, SettledBatchView } from "../project.ts";
 import type { Tab } from "./index.ts";
 import { contractHosts, serverInspector } from "./hacking-server.ts";
@@ -35,10 +37,12 @@ interface Row {
   server: Server;
   root: RootState;
   /** Time one hack call takes against this host AT ITS CURRENT SECURITY, in
-   * ms. Undefined only when the player record has not arrived yet. Computed
-   * here rather than telemetered: the formula is pure and both inputs are
-   * already in the projection, so telemetering it would be a per-server field
-   * that goes stale the moment the skill ticks. */
+   * ms. Undefined when the player record has not arrived yet, or when the
+   * BitNode is unknown — `HackingSpeedMultiplier` is 0.3 in BN14, so a default
+   * of 1.0 there is a 3.3x error presented as a measurement. Computed here
+   * rather than telemetered: the formula is pure and both inputs are already in
+   * the projection, so telemetering it would be a per-server field that goes
+   * stale the moment the skill ticks. */
   hackTimeMs?: number;
   /** The same call once the host is at MINIMUM security — what the farm will
    * actually see in steady state, and often less than half the current
@@ -58,6 +62,10 @@ interface Row {
   secRoll?: number;
   moneyRange?: readonly [number, number];
   securityRange?: readonly [number, number];
+  /** The generated skill-requirement range, node-scaled where the node scales
+   * it — which is w0r1d_d43m0n and nothing else. Absent when the host has no
+   * documented range, or when it is the daemon and the BitNode is unknown. */
+  skillRange?: readonly [number, number];
 }
 
 const ROOT_DOT: Record<RootState, { status: "good" | "ready" | "bad"; label: string }> = {
@@ -71,11 +79,15 @@ const ROOT_DOT: Record<RootState, { status: "good" | "ready" | "bad"; label: str
  * Both halves are needed: the player's own multipliers and the BitNode's. A
  * missing player record means no context at all rather than a default one —
  * hack times computed against skill 0 would be wrong by orders of magnitude
- * and there is no way to mark a number in a table as "computed from nothing". */
-function hackContext(state: ProjectedState): HackContext | undefined {
+ * and there is no way to mark a number in a table as "computed from nothing".
+ * The node half is the same refusal: `node` is the whole effective multiplier
+ * record, so its absence means the BitNode itself is unknown, and a silent 1.0
+ * for `HackingSpeedMultiplier` would be a 3.3x error in BN14 stated as a fact.
+ * The record is passed WHOLE rather than hand-picking one field, so a formula
+ * that starts reading another mult needs no change here. */
+function hackContext(state: ProjectedState, node: Record<string, number> | undefined): HackContext | undefined {
   const player = state.player;
-  if (!player?.mults || player.skills?.hacking === undefined) return undefined;
-  const node = state.topics.progression?.multipliers;
+  if (!player?.mults || player.skills?.hacking === undefined || !node) return undefined;
   return makeHackContext(
     {
       skill: player.skills.hacking,
@@ -88,21 +100,34 @@ function hackContext(state: ProjectedState): HackContext | undefined {
         hacking_grow: player.mults.hacking_grow ?? 1,
       },
     },
-    {
-      ...(node?.["HackingSpeedMultiplier"] !== undefined
-        ? { HackingSpeedMultiplier: node["HackingSpeedMultiplier"] }
-        : {}),
-    },
+    node,
   );
 }
 
 function buildRows(state: ProjectedState): Row[] {
   const skill = state.player?.skills?.hacking ?? 0;
   const openers = state.topics.fleet?.portOpeners ?? 0;
-  const mults = state.topics.progression?.multipliers;
-  const maxMoneyMult = mults?.["ServerMaxMoney"] ?? 1;
-  const startSecMult = mults?.["ServerStartingSecurity"] ?? 1;
-  const ctx = hackContext(state);
+  // The pinned STATIC table, not `progression.multipliers`, and computed once
+  // so the hack-time context and the roll percentiles below cannot disagree.
+  //
+  // That topic field is SF5/BN5-gated, so in most nodes it is permanently
+  // ABSENT rather than late — which makes the old `?? 1` a wrong answer rather
+  // than a stale one, asserted as fact in a tooltip. BN2's ServerMaxMoney of
+  // 0.08 printed a generated-money range 12.5x too high with this save's roll
+  // clamped to p0 underneath it (the meter's own max sitting below the stated
+  // minimum was the visible tell), and BN14's HackingSpeedMultiplier of 0.3 put
+  // every hack time out by 3.3x. `effectiveBitNodeMultipliers` is free, needs
+  // no SF5, lets an observed table win field by field where one exists, and is
+  // the same call the game's own consumers make (game/lib/features/factions.ts).
+  // Undefined from it is an unknown BitNode, and every reading that multiplies
+  // by a mult is dropped rather than guessed.
+  const p = state.topics.progression;
+  const sf12 = sfLevel(p?.sourceFiles, 12);
+  const node = effectiveBitNodeMultipliers(p?.bitNode, sf12, p?.multipliers);
+  const maxMoneyMult = node?.["ServerMaxMoney"];
+  const startSecMult = node?.["ServerStartingSecurity"];
+  const daemonSkill = worldDaemonSkill(p?.bitNode, sf12);
+  const ctx = hackContext(state, node);
 
   return [...state.servers.values()].map((server) => {
     const ranges = serverRanges(server.hostname);
@@ -111,8 +136,15 @@ function buildRows(state: ProjectedState): Row[] {
     const min = server.minDifficulty ?? 1;
     const current = server.hackDifficulty ?? min;
 
-    const rolled = rolledMoney(server.moneyMax, maxMoneyMult);
-    const rolledSec = rolledSecurity(server.baseDifficulty, startSecMult);
+    const rolled = maxMoneyMult === undefined ? undefined : rolledMoney(server.moneyMax, maxMoneyMult);
+    const rolledSec = startSecMult === undefined ? undefined : rolledSecurity(server.baseDifficulty, startSecMult);
+    // `requiredHackingSkill` is stored unscaled for every host except
+    // w0r1d_d43m0n, whose requirement is the base 3,000 times
+    // WorldDaemonDifficulty (5 in BN2/BN14, 3 in BN4/BN13). The skill cell was
+    // printing "fixed at 3,000" beside the scaled number it had been handed.
+    const skillRange = server.hostname === "w0r1d_d43m0n"
+      ? (daemonSkill === undefined ? undefined : ([daemonSkill, daemonSkill] as const))
+      : ranges?.skill;
 
     // A host we cannot hack has no meaningful hack time: the formula would
     // still produce a number, but it describes a call the game would refuse.
@@ -136,14 +168,18 @@ function buildRows(state: ProjectedState): Row[] {
       secFrac: Math.max(0, Math.min(1, (current - min) / Math.max(1, 100 - min))),
       atMinSec: current <= min + 0.01,
       ...(rolled !== undefined ? { moneyRoll: rollPercentile(rolled, ranges?.money) } : {}),
-      ...(ranges?.money
+      ...(ranges?.money && maxMoneyMult !== undefined
         ? { moneyRange: [ranges.money[0] * 25 * maxMoneyMult, ranges.money[1] * 25 * maxMoneyMult] as const }
         : {}),
+      // Kept on an unknown node, unlike the two rolls around it: the skill
+      // requirement is assigned unscaled, so this percentile is right whatever
+      // the node is, and blanking it would hide a correct reading.
       ...(server.requiredHackingSkill !== undefined
         ? { skillRoll: rollPercentile(server.requiredHackingSkill, ranges?.skill) }
         : {}),
+      ...(skillRange ? { skillRange } : {}),
       ...(rolledSec !== undefined ? { secRoll: rollPercentile(rolledSec, ranges?.sec) } : {}),
-      ...(ranges?.sec
+      ...(ranges?.sec && startSecMult !== undefined
         ? { securityRange: [Math.min(100, ranges.sec[0] * startSecMult), Math.min(100, ranges.sec[1] * startSecMult)] as const }
         : {}),
     };
@@ -173,7 +209,7 @@ const COLUMNS: Column<Row>[] = [
       // Colour matches the dot's reasoning: the number is the reason we cannot
       // take the host, so it should read as the blocker.
       const cls = r.root === "rooted" ? "muted" : r.root === "ready" ? "" : "bad";
-      const range = serverRanges(r.server.hostname)?.skill;
+      const range = r.skillRange;
       const detail = range
         ? range[0] === range[1]
           ? `fixed at ${fmtNum(range[0])}`
@@ -239,7 +275,9 @@ const COLUMNS: Column<Row>[] = [
     sort: (r) => r.hackTimeMs ?? Infinity,
     cell: (r) => {
       if (r.hackTimeMs === undefined) {
-        return `<span class="muted" title="${esc("needs root-level skill and a player record to compute")}">–</span>`;
+        return `<span class="muted" title="${esc(
+          "needs root-level skill, a player record and a known BitNode to compute — HackingSpeedMultiplier is not 1 in every node",
+        )}">–</span>`;
       }
       // The prepped figure is the one the farm's cycle is built on, so it is
       // the one shown when the two differ; the current figure explains a
@@ -511,7 +549,12 @@ function allocationDetail(state: ProjectedState): string {
   ];
 
   const ratios = table(["", "hack", "grow", "weaken", "per hack"], rows, { left: [0, 4] });
-  const chart = state.allocShare.hack.length >= 2 ? chartCanvas("allocchart") : "";
+  // `hasSpan`, not a point count: three shares stacked at one timestamp draw a
+  // chart with no x extent, which reads as a flat trend rather than as no
+  // trend at all.
+  const chart = hasSpan(state.allocShare.hack, state.allocShare.grow, state.allocShare.weaken)
+    ? chartCanvas("allocchart")
+    : note("no allocation timeline yet — the shares are differenced over a window, so a curve needs two of them");
   return collapsible("hacking.allocDetail", "farm segment: planned vs observed, core leverage", split + ratios + chart);
 }
 
@@ -668,18 +711,34 @@ interface BatchTotals {
   abandoned: number;
   /** Ops the abandoned batches launched and never landed. */
   opsLost: number;
+  /** Whether any kind reported the eviction counters AT ALL. Absence is not
+   * zero: the counters landed after this tab did, so a replay of an older run
+   * has no value for them — and "0 / every batch settled" would assert a
+   * healthy farm rather than an unmeasured one, which is exactly what the topic
+   * comment on `abandoned` exists to prevent. Same treatment as `graded` in
+   * `batchColumn`, for the same reason.
+   *
+   * One flag rather than one per counter, deliberately: all three are declared
+   * non-optional in the dispatcher, initialised together and incremented
+   * together, so a run carrying `abandoned` without `abandonedOps` is a wire
+   * state that cannot occur and a second flag would imply it can. */
+  abandonedKnown: boolean;
 }
 
 function batchTotals(state: ProjectedState): BatchTotals {
   let settled = 0;
   let abandoned = 0;
   let opsLost = 0;
+  let abandonedKnown = false;
+  // Over the same kind list the per-kind columns walk, so the tile and the
+  // columns cannot disagree about what was measured.
   for (const [, entry] of activeBatchKinds(state)) {
     settled += entry.batches;
     abandoned += entry.abandoned ?? 0;
     opsLost += (entry.abandonedOps ?? 0) - (entry.abandonedLanded ?? 0);
+    if (entry.abandoned !== undefined) abandonedKnown = true;
   }
-  return { settled, abandoned, opsLost };
+  return { settled, abandoned, opsLost, abandonedKnown };
 }
 
 /** Run-level throughput and earnings, and the loss curve.
@@ -692,23 +751,58 @@ function throughputStrip(state: ProjectedState): string {
   // `opsLost` here is the ops the abandoned batches took with them. A batch
   // only settles once its last op lands, so an abandoned batch is the ONLY
   // place a lost op is ever counted.
-  const { settled, abandoned, opsLost } = batchTotals(state);
+  const { settled, abandoned, opsLost, abandonedKnown } = batchTotals(state);
   let perSec = 0;
   for (const series of Object.values(state.batchSeries)) perSec += series.perSec.at(-1)?.[1] ?? 0;
   const residual = state.farmHealth.opsLost.at(-1)?.[1];
+
+  // A measured zero is the reading this tile exists for. `foldFarmSeries` pushes
+  // a real `settled / dtSec` point on every rollup once a baseline exists, 0
+  // included, so collapsing 0 to NONE made a STALLED farm — the most urgent
+  // thing this card can say — look exactly like a run whose window has not
+  // opened yet.
+  const measured = Object.values(state.batchSeries).some((series) => series.perSec.length > 0);
+  // Painting the zero red unconditionally would over-claim: a farm with no
+  // farmable target, or one that has yielded its RAM elsewhere, settles nothing
+  // legitimately. Work IN FLIGHT that is not settling is the fault.
+  const inFlight = farm?.inFlight;
+  const adriftNow = inFlight ? KINDS.reduce((sum, kind) => sum + inFlight[kind], 0) : 0;
+  const stalled = measured && perSec === 0 && adriftNow > 0;
+  // The span the newest rate points were ACTUALLY differenced over, not the one
+  // the panel asked for — early against a long-cycle target the real span is
+  // seconds under a caption that used to claim minutes.
+  const span = state.farmWindowActualMs;
+  const spanTip = (span === undefined
+    ? "no two rollups have been differenced yet, so nothing has been averaged over anything"
+    : "the span actually differenced over") +
+    `. The window requested is ${fmtTime(state.farmWindowMs)} — one target weakenTime, clamped — and the two ` +
+    "diverge while the sample ring is shorter than it, and again when a gap in the rollup stream makes it longer.";
 
   const strip = tiles([
     { label: "$/sec", value: farm?.moneyRate !== undefined ? `${fmtMoney(farm.moneyRate)}/s` : NONE },
     {
       label: "settling",
-      value: perSec > 0 ? `${fmtNum(perSec, 2)}/s` : NONE,
-      sub: `over ${fmtTime(state.farmWindowMs)}`,
+      value: !measured
+        ? NONE
+        : stalled
+          ? raw(`<span class="bad">${fmtNum(perSec, 2)}/s</span>`)
+          : `${fmtNum(perSec, 2)}/s`,
+      sub: span === undefined
+        ? hint("waiting for a second rollup", spanTip)
+        : hint(measured && perSec === 0 ? `nothing settled in ${fmtTime(span)}` : `over ${fmtTime(span)}`, spanTip),
     },
     { label: "settled", value: fmtNum(settled), sub: "batches, this install" },
     {
+      // Absence is not zero, and it is not "healthy" either: the eviction
+      // counters postdate this panel, so an older replay has no value for them.
       label: "abandoned",
-      value: abandoned > 0 ? raw(`<span class="bad">${fmtNum(abandoned)}</span>`) : "0",
-      sub: abandoned > 0 ? `${fmtNum(opsLost)} ops never arrived` : "every batch settled",
+      value: !abandonedKnown ? NONE : abandoned > 0 ? raw(`<span class="bad">${fmtNum(abandoned)}</span>`) : "0",
+      sub: !abandonedKnown
+        ? hint(
+            "not reported by this run",
+            "the eviction counters postdate this recording — the farm may or may not have lost batches, and this run cannot say",
+          )
+        : abandoned > 0 ? `${fmtNum(opsLost)} ops never arrived` : "every batch settled",
     },
     {
       label: "ops adrift",
@@ -721,7 +815,12 @@ function throughputStrip(state: ProjectedState): string {
 
   // A magnitude, so the axis keeps zero: zero adrift is the healthy reading and
   // the distance from it is the finding.
-  const chart = state.farmHealth.opsLost.length >= 2
+  //
+  // Gated on `hasSpan` rather than on a point count: two points sharing one
+  // timestamp draw a chart with no x extent, which is a flat mark the reader
+  // reads as a flat trend. A replay whose identical rollups the hub collapsed
+  // is the ordinary way that happens.
+  const chart = hasSpan(state.farmHealth.opsLost)
     ? chartCanvas("ops-lost", "micro") +
       note(hint(
         raw(`<span class="k4">ops adrift</span> over time`),
@@ -743,7 +842,6 @@ function throughputStrip(state: ProjectedState): string {
  * worth looking at. */
 function batchTimeline(state: ProjectedState): string {
   const history = state.batchHistory;
-  const metric = batchMetric();
   const chips = filters(
     "hacking.batchMetric",
     BATCH_METRIC_ORDER.map((key) => ({
@@ -753,15 +851,20 @@ function batchTimeline(state: ProjectedState): string {
     })),
     DEFAULT_BATCH_METRIC,
   );
-  if (history.length < 2) {
+  // `hasSpan` over the drawn series, not `history.length`: a scatter needs an x
+  // extent, and a compacted replay's surviving tail — or two batches that
+  // settled in the same millisecond — gives it points without one.
+  const shown = batchTimelineSeries(state);
+  if (!hasSpan(...shown.map((series) => series.pts))) {
     return chips + note(
       state.compacted
         ? "this run was served compacted — its per-batch history is not recoverable, only the final rollup"
-        : "waiting for a second batch to settle",
+        : history.length < 2
+          ? "waiting for a second batch to settle"
+          : "every sampled batch settled at the same instant — there is no timeline to plot against yet",
     );
   }
 
-  const shown = batchTimelineSeries(state);
   const legend =
     `<div class="barkey">` +
     VERDICTS.filter((entry) => shown.some((series) => series.label === entry.label))
@@ -993,26 +1096,40 @@ function batchColumn(state: ProjectedState, kind: string, entry: BatchAggregateR
   // test is whether this kind has ever produced a verdict, not what it is
   // called.
   //
-  // Shown as a FRACTION rather than a percentage, because the denominator is
-  // every batch of the kind including the ungradeable ones: a bare red "0.0%"
-  // asserts that every batch mis-landed, where "0 / 265" invites the reader to
-  // notice what is being divided by.
+  // Shown as a FRACTION rather than a percentage so the denominator is visible:
+  // a bare red "0.0%" asserts that every batch mis-landed, where "0 / 265"
+  // invites the reader to notice what is being divided by.
+  //
   // Whether this kind lands on a grid at all, reported by the dispatcher
   // rather than inferred from the verdicts: inferring it from
   // `inOrder + noHack > 0` hid the one case worth surfacing, a kind that has
   // a grid and mis-ordered every batch of it.
   // Runs recorded before the dispatcher published it fall back to the old
   // inference, which is right whenever it fires at all.
-  const graded = entry.graded !== undefined ? entry.graded > 0 : entry.inOrder + entry.noHack > 0;
+  const gradedCount = entry.graded;
+  const graded = gradedCount !== undefined ? gradedCount > 0 : entry.inOrder + entry.noHack > 0;
+  // The denominator is `graded` where the dispatcher published it, not
+  // `batches`. Two code paths open batches under the SAME kind string — the JIT
+  // planner lands on a grid, the atomic path deliberately emits a whole batch
+  // at once with no roles — so `graded < batches` is normal, and dividing by
+  // every settled batch painted a kind critical-red for batches that had no
+  // order to be right about. It also disagreed with the "landed in order" trend
+  // on this same tab, which is `inOrder / graded`; one run cannot have two
+  // in-order figures. `batches` is not lost: the loss line above prints it.
+  const denom = gradedCount ?? entry.batches;
   const order = !settledAny
     ? `<p class="bad" title="${esc(
         "no batch of this kind has ever settled, so there is no landing order to grade",
       )}">nothing settled</p>`
     : graded
-    ? `<p class="${entry.inOrder >= entry.batches ? "good" : "bad"}" title="${esc(
-        "batches whose effects landed in the order the cycle planned, out of every batch of this kind. " +
-          "A batch launched without a landing grid can never contribute, so this reads low on a kind that only sometimes lands on a grid.",
-      )}">${fmtNum(entry.inOrder)} / ${fmtNum(entry.batches)} in order</p>`
+    ? `<p class="${entry.inOrder >= denom ? "good" : "bad"}" title="${esc(
+        gradedCount !== undefined
+          ? "batches whose effects landed in the planned order, out of the batches of this kind that HAD a landing grid. " +
+            "The shortfall is mis-ordered batches plus no-hack ones — a batch that landed its support with nothing stolen " +
+            "is graded and is the costlier of the two failures."
+          : "batches whose effects landed in the order the cycle planned, out of every batch of this kind. This run does " +
+            "not publish the graded count, so the denominator includes batches that never had a grid to be right about.",
+      )}">${fmtNum(entry.inOrder)} / ${fmtNum(denom)}${gradedCount !== undefined ? " graded batches in order" : " in order"}</p>`
     : `<p class="muted" title="${esc(
         "this kind has never produced a landing-order verdict — its batches land as a group with no intended internal sequence",
       )}">no landing grid</p>`;
@@ -1097,12 +1214,19 @@ const HEALTH_TRENDS: {
   },
   {
     id: "landingerror",
-    label: "landing error",
-    title: "observed minus planned landing time, signed mean and worst absolute. A mean far from zero means the " +
-      "duration model is biased; a worst case above one landing gap means effects are reordering.",
+    // "since install", stated in the label, because this one CANNOT be windowed:
+    // the wire carries a single cumulative mean, not the per-window figures the
+    // other curves are differenced into. Plotting it beside them without saying
+    // so made a lifetime average read as a trend — a bias that arrived in the
+    // first minute stays in the mean for hours, and the flat line that follows
+    // reads as "landing is fine now".
+    label: "landing error (since install)",
+    title: "observed minus planned landing time: the signed mean over the WHOLE install, not over the window the " +
+      "other curves use. A mean far from zero means the duration model is biased; because it is cumulative, a " +
+      "recent recovery barely moves it.",
     color: "--series-4",
     fit: false,
-    series: (health) => health.landingErrorMeanMs,
+    series: (health) => health.landingErrorMeanSinceInstallMs,
     fmt: (value) => fmtMs(value),
   },
   {
@@ -1117,10 +1241,16 @@ const HEALTH_TRENDS: {
   },
 ];
 
-/** The trends that have enough points to draw. Shared by render and mount so
- * the two cannot disagree about which canvases exist. */
+/** The trends that have a TIMELINE to draw. Shared by render and mount so the
+ * two cannot disagree about which canvases exist.
+ *
+ * `hasSpan` rather than a point count: a gauge read twice inside one
+ * millisecond — a replay whose identical records the hub collapsed to a first
+ * and a last, or two rollups flushed together — passes a count test and then
+ * draws a mark with no x extent, which reads as a flat trend rather than as no
+ * trend yet. */
 function drawableTrends(state: ProjectedState): typeof HEALTH_TRENDS {
-  return HEALTH_TRENDS.filter((trend) => trend.series(state.farmHealth).length >= 2);
+  return HEALTH_TRENDS.filter((trend) => hasSpan(trend.series(state.farmHealth)));
 }
 
 function healthTrends(state: ProjectedState): string {
@@ -1140,6 +1270,129 @@ function healthTrends(state: ProjectedState): string {
   );
 }
 
+/** Why RAM is leaving the farm for `share`, when the dispatcher published the
+ * comparison that decided it.
+ *
+ * The bar above shows a share slice and nothing else did: the panel that shows
+ * RAM being taken away from hacking could say neither why share took it nor why
+ * it did not, so a large slice was indistinguishable from RAM leaking out of
+ * the farm. The two regimes have to stay apart. A PRICED cutover reserves GB
+ * away from hacking at the marginal crossing; on the FREE TAIL share rides
+ * otherwise-idle RAM because the active work already earns reputation, and
+ * there `allotmentGb` is legitimately 0 under a slice that can be very large. */
+function shareEvidence(farm: FarmRollup): string {
+  const share = farm.shareDecision;
+  if (!share) return "";
+  // `hackMarginal` is NOT optional on the wire: the producer collapses an
+  // UNMEASURED hacking marginal to 0, and `shared/strategy/share.ts` is
+  // explicit that an absent hacking marginal is not a zero one — reading it as
+  // zero once handed share the whole fleet and cost 20% of hacking income.
+  // A positive figure is unambiguous, a 0 is not, so the 0 renders as unknown
+  // rather than as a confident "hacking earns nothing per GB". Printing it
+  // honestly needs the producer to omit the field instead.
+  const hackKnown = share.hackMarginal > 0;
+  const marginal = (value: number): string => `${fmtNum(value, 3)} <span class="muted">BN-s/GB</span>`;
+  const winner = (won: boolean): string => (won ? ` <span class="good">◀ decides</span>` : "");
+  return definitions([
+    [
+      hint("share holds", "the live share slice of the bar above — what share is occupying right now"),
+      esc(fmtRam(farm.ramPie?.share)),
+    ],
+    [
+      hint("threads · bonus", "share workers running, and the shared-power bonus they are currently producing"),
+      `${fmtNum(share.threads)} · ${fmtNum(share.bonus, 3)}x`,
+    ],
+    share.freeTail
+      ? [
+          hint(
+            "free tail",
+            "not taken from hacking: the player's active work already earns faction reputation, so share multiplies a " +
+              "rate being produced anyway and rides the residual free RAM. The reserved allotment is 0 by construction here.",
+          ),
+          `<span class="muted">nothing reserved from hacking</span>`,
+        ]
+      : [
+          hint(
+            "reserved from hacking",
+            "the whole-thread allotment held back from the farm, and the unrounded marginal crossing it was floored to. " +
+              "A crossing under one 4 GB share thread rounds to zero.",
+          ),
+          `${esc(fmtRam(share.allotmentGb))} <span class="muted">of ${esc(fmtRam(share.cutoverGb))} crossing</span>`,
+        ],
+    [
+      hint(
+        "marginal, share vs hacking",
+        "BitNode-seconds saved per GB — share's declining reputation curve against hacking's rising opportunity cost. " +
+          "The crossing between the two is the whole decision.",
+      ),
+      `share ${marginal(share.shareMarginal)}${winner(hackKnown && share.shareMarginal > share.hackMarginal)}` +
+        ` · hack ${hackKnown ? marginal(share.hackMarginal) : `${NONE} <span class="muted">(unmeasured — the wire sends 0 for both)</span>`}` +
+        `${winner(hackKnown && share.hackMarginal >= share.shareMarginal)}`,
+    ],
+  ]);
+}
+
+/** What port openers are owned, and the priced next one.
+ *
+ * The server table colours `ports req.` red on every blocked host and a filter
+ * chip counts them, so the tab states the blocker on every affected row — while
+ * the record that says which program removes it, what it costs, and what
+ * rooting the hosts it unlocks is worth was on the wire and rendered nowhere.
+ *
+ * `null` and `undefined` are different answers and must not share a rendering.
+ * The producer nulls the plan deliberately: the next tier is already owned,
+ * nothing newly rootable is unlocked, or the modelled gain is zero — an
+ * evaluated "nothing worth buying". Only `undefined` is an absence, and only it
+ * gets "waiting". */
+function openerPlanPanel(fleet: FleetRollup): string {
+  const owned = fleet.portOpeners;
+  // `hasTor` is positive evidence only — absent means unknown, never false — so
+  // the chip has an unknown state rather than defaulting to "no".
+  const tor = fleet.hasTor === true
+    ? `<span class="chip on" title="${esc("TOR router owned, so a program can be bought from the darkweb")}">TOR</span>`
+    : `<span class="chip unknown" title="${esc(
+        "unknown: the fleet rollup reports TOR only as positive evidence, so absence is not a 'no'",
+      )}">TOR?</span>`;
+  const head = definitions([
+    [
+      hint(
+        "port openers",
+        "programs owned, inferred from the highest openPortCount seen on the network — a lower bound until the first " +
+          "rooting sweep, exact after it",
+      ),
+      `${owned === undefined ? NONE : fmtNum(owned)} ${tor}`,
+    ],
+  ]);
+  if (fleet.openerPlan === undefined) {
+    return head + waiting("the opener valuation", "it rides the 1 Hz fleet rollup, from the same target solver the farm uses");
+  }
+  if (fleet.openerPlan === null) {
+    return head + note(hint(
+      "no opener worth buying",
+      "evaluated and refused, not missing: either the next tier is already owned, nothing newly rootable is unlocked " +
+        "at the next opener count, or the modelled income and experience gains are both zero",
+    ));
+  }
+  const plan = fleet.openerPlan;
+  return head + table(
+    ["program", "reaches", "cost", "adds $/sec", "adds exp/sec", "return/$"],
+    [[
+      esc(plan.program),
+      `${fmtNum(plan.targetOpeners)} openers`,
+      // The quote already folds in TOR_COST when TOR is not known-owned, so
+      // showing it as the program price would be a claim the data cannot support.
+      fleet.hasTor === true
+        ? fmtMoney(plan.cost)
+        : `${fmtMoney(plan.cost)} <span class="muted">incl. TOR</span>`,
+      fmtMoney(plan.addedMoneyPerSec),
+      fmtNum(plan.addedHackingExpPerSec, 1),
+      // The figure the money arbiter actually ranks the claim on.
+      plan.cost > 0 ? fmtNum(plan.addedMoneyPerSec / plan.cost, 8) : NONE,
+    ]],
+    { left: [0] },
+  );
+}
+
 /** RAM segments now, and how each segment has spent its share across the ops. */
 function ramSegmentsCard(farm: FarmRollup | undefined): string {
   if (!farm?.ramPie) return "";
@@ -1151,30 +1404,63 @@ function ramSegmentsCard(farm: FarmRollup | undefined): string {
     { label: "reserve", value: farm.ramPie.reserve, className: "s5" },
   ]);
 
+  const evidence = shareEvidence(farm);
   const cross = farm.ramWork?.nativeGbMsBySegmentKind;
-  if (!cross) return pie;
+  if (!cross) return pie + evidence;
   // GB·s is cumulative WORK, not the live segment sizes above: the bar says
   // where the RAM is right now, this says where it has been spent. The two
   // disagree whenever a segment was recently resized, and that disagreement is
   // worth being able to see rather than being averaged away.
+  //
+  // And it is the NATIVE half only. Every GB·ms held by `additionalMsec` is RAM
+  // allocated and doing nothing, which `ramPie.free` cannot show either — free
+  // RAM is unallocated, padding is allocated-and-idle — so a column headed
+  // plainly "GB·s" read as the segment's whole RAM-time when it was never that.
   const segments = ["farm", "prep", "share"] as const;
+  const nativeBySegment = farm.ramWork?.nativeGbMsBySegment;
+  const paddingBySegment = farm.ramWork?.paddingGbMsBySegment;
   const rows = segments
     .filter((segment) => cross[segment])
     .map((segment) => {
       const kinds = cross[segment]!;
       const segTotal = KINDS.reduce((sum, kind) => sum + kinds[kind], 0);
+      // The ratio comes from the SEGMENT totals, not from summing the cross
+      // product: `accountReservedPadding` bills padding reserved but never
+      // launched to `paddingGbMsBySegment` and not to the per-kind cross, so a
+      // ratio built from the cross undercounts the farm segment and would
+      // disagree with the metric spec/jit-reference.md §8 tunes against.
+      const native = nativeBySegment?.[segment];
+      const padded = paddingBySegment?.[segment];
       return [
         esc(segment),
-        ...KINDS.map((kind) => (segTotal > 0 ? fmtPct(kinds[kind] / segTotal, 1) : "–")),
+        ...KINDS.map((kind) => (segTotal > 0 ? fmtPct(kinds[kind] / segTotal, 1) : NONE)),
         fmtNum(segTotal / 1000),
+        padded === undefined || native === undefined || !(native > 0) ? NONE : fmtPct(padded / native, 1),
       ];
     });
   return (
     pie +
+    evidence +
     collapsible(
       "hacking.ramCross",
       "work spent per segment, by op",
-      table(["segment", "hack", "grow", "weaken", "GB·s"], rows, { left: [0] }),
+      table(
+        [
+          "segment",
+          "hack",
+          "grow",
+          "weaken",
+          hint("native GB·s", "cumulative NATIVE work — the padding this segment held is excluded and reported beside it"),
+          hint(
+            "padding / native",
+            "idle RAM-time against working RAM-time, from the segment totals. Every padded millisecond is RAM held " +
+              "doing no HGW work, so this is what JIT_LAUNCH_GUARD_MS is tuned down against — tune until the worst " +
+              "padding nears the guard and misses start. Exact zero is not the goal.",
+          ),
+        ],
+        rows,
+        { left: [0] },
+      ),
       true,
     )
   );
@@ -1186,13 +1472,42 @@ export const hackingTab: Tab = {
     const farm = state.topics.farm;
     const fleet = state.topics.fleet;
 
+    // The REALISED rate and the COMMITTED one, side by side.
+    //
+    // `moneyRate`/`expRate` are EMAs of what has already landed and are sent
+    // from the first rollup, initialised to zero — so a farm whose first batch
+    // has not settled reads a confident "$0.00/s" while being minutes from
+    // being the best producer in the run, and the same happens after every
+    // target switch. `predicted` is what the solution already handed to the
+    // fleet will produce at the RAM the farm segment holds, and it is the
+    // figure every other feature's work slot is priced against. It is published
+    // unconditionally, and its own zero is ambiguous — `farmExperienceRate`
+    // returns 0 both for "no solution committed" and for a model carrying no
+    // experience score — so a zero is named rather than printed as a rate.
+    const committed = (value: number | undefined, format: (v: number) => string): string | undefined =>
+      value === undefined ? undefined : value > 0 ? `${format(value)} committed` : "no solution committed yet";
+    const moneyCommitted = committed(farm?.predicted?.moneyPerSec, (v) => `${fmtMoney(v)}/s`);
+    const expCommitted = committed(farm?.predicted?.expPerSec, (v) => fmtNum(v, 1));
+    const realisedTip = (what: string): string =>
+      `realised EMA, lagging by construction — a farm whose first batch has not landed reads zero. "committed" is ` +
+      `the ${what} the solution already given to the fleet will produce at the RAM the farm segment holds, which is ` +
+      "what every other feature's work slot is priced against.";
+
     // Which host is being farmed and which is being prepped now belongs to the
     // pipeline panels below, which can show any number of either. What is left
     // here is the run-level total that belongs to no single pipeline.
     const farmTiles = farm
       ? tiles([
-          { label: "$/sec", value: farm.moneyRate !== undefined ? `${fmtMoney(farm.moneyRate)}/s` : "–" },
-          { label: "exp/sec", value: farm.expRate !== undefined ? fmtNum(farm.expRate, 1) : "–" },
+          {
+            label: hint("$/sec", realisedTip("income")),
+            value: farm.moneyRate !== undefined ? `${fmtMoney(farm.moneyRate)}/s` : "–",
+            ...(moneyCommitted ? { sub: moneyCommitted } : {}),
+          },
+          {
+            label: hint("exp/sec", realisedTip("hacking experience")),
+            value: farm.expRate !== undefined ? fmtNum(farm.expRate, 1) : "–",
+            ...(expCommitted ? { sub: expCommitted } : {}),
+          },
           { label: "earned", value: fmtMoney(farm.totals?.moneyEarned) },
           { label: "hacks", value: String(farm.totals?.hacks ?? 0) },
           {
@@ -1223,13 +1538,27 @@ export const hackingTab: Tab = {
     const segments = ramSegmentsCard(farm);
     const trends = healthTrends(state);
 
+    // A cause split rendered the way the skip row already renders one: the
+    // parts sum to the whole, so the total alone pools several distinct
+    // phenomena. Rounded to three significant digits at publication, like the
+    // skip causes, so a large run's digits are approximate.
+    const causes = (by: Record<string, number> | undefined): string =>
+      by
+        ? ` <span class="muted">(${Object.entries(by)
+            .filter(([, count]) => count > 0)
+            .map(([cause, count]) => `${esc(cause)} ${fmtNum(count)}`)
+            .join(", ") || NONE})</span>`
+        : "";
+
     const health =
       farm &&
       (farm.allocFails !== undefined || farm.execFails !== undefined || farm.batchesSkipped !== undefined ||
         // Planner cost belongs here whether or not anything has failed yet:
         // occupancy is the leading indicator, and the failures below it are
         // what occupancy turns into if it is left unread.
-        farm.pumpMaxMs !== undefined)
+        farm.pumpMaxMs !== undefined ||
+        // A record carrying only the newer counters still deserves the table.
+        farm.execs !== undefined || farm.missedWindow !== undefined || farm.padding !== undefined)
         ? table(
             ["metric", "value"],
             [
@@ -1242,21 +1571,81 @@ export const hackingTab: Tab = {
                     `<span class="bad">${fmtNum(farm.orphanLandings)}</span>`,
                   ]]
                 : []),
-              ["alloc failures", String(farm.allocFails ?? 0)],
-              ["exec failures", String(farm.execFails ?? 0)],
+              // "–" rather than 0 on every counter here: an older replay that
+              // never carried the field would otherwise assert a clean
+              // dispatcher rather than an unmeasured one.
+              [
+                `<span title="${esc(
+                  "RAM reservations the broker could not place, split by the phase that asked. The parts sum to the " +
+                    "whole, exactly like the skip causes below.",
+                )}">alloc failures</span>`,
+                farm.allocFails === undefined ? NONE : `${fmtNum(farm.allocFails)}${causes(farm.allocFailsByPhase)}`,
+              ],
+              ["exec failures", farm.execFails === undefined ? NONE : fmtNum(farm.execFails)],
               [
                 `<span title="${esc(
                   "batches not launched. The by-cause split matters more than the total: arrival-money and " +
                     "arrival-security are the safety brakes working as designed, while deadline and placement " +
                     "mean the pipeline could not be fed.",
                 )}">batches skipped</span>`,
-                farm.batchesSkippedBy
-                  ? `${fmtNum(farm.batchesSkipped ?? 0)} <span class="muted">(${Object.entries(farm.batchesSkippedBy)
-                      .filter(([, count]) => count > 0)
-                      .map(([cause, count]) => `${esc(cause)} ${fmtNum(count)}`)
-                      .join(", ") || "–"})</span>`
-                  : String(farm.batchesSkipped ?? 0),
+                farm.batchesSkipped === undefined
+                  ? NONE
+                  : `${fmtNum(farm.batchesSkipped)}${causes(farm.batchesSkippedBy)}`,
               ],
+              // A different question from the row above, and the two are not
+              // required to agree: that one counts SKIPS, whose parts sum to the
+              // whole, this one counts BATCHES that missed, deduped per batch.
+              // One exceeding the other is not a bug. It exists because a
+              // pipeline once dropped every weakenTime for 4.7 hours and
+              // telemetered as `deadline: 1` while earning nothing.
+              ...(farm.missedWindow
+                ? [[
+                    `<span title="${esc(
+                      "batches that actually lost their window, deduped per batch — the outcome the skip counters only " +
+                        "approximate. The skip row counts skips, whose parts sum to the whole; one exceeding the other " +
+                        "is not a bug. Counts are rounded to three significant digits at publication.",
+                    )}">missed windows</span>`,
+                    `${fmtNum(Object.values(farm.missedWindow).reduce((sum, count) => sum + count, 0))}` +
+                      causes(farm.missedWindow),
+                  ]]
+                : []),
+              // The documented churn pair. `execs` alone answers nothing: it is
+              // fresh processes AGAINST the ops launched, and pooling is what
+              // keeps the first flat while the second climbs. `pool` is omitted
+              // by the producer when there are no resident workers, and the
+              // viewer cannot tell that from "not measured", so the pool half
+              // says "–" rather than inventing an empty pool. `pooling` is the
+              // planner's own verdict, not a proxy for a non-empty pool.
+              ...(farm.execs !== undefined
+                ? [[
+                    `<span title="${esc(
+                      "fresh worker processes started, against the ops launched below them. Pooling exists to keep this " +
+                        "flat while `launched` climbs, because process churn is browser-RAM pressure rather than game RAM.",
+                    )}">processes</span>`,
+                    `${fmtNum(farm.execs)} execs` +
+                      `<span class="muted"> · ${
+                        farm.launched
+                          ? `${fmtNum(KINDS.reduce((sum, kind) => sum + farm.launched![kind], 0))} ops launched`
+                          : `${NONE} ops launched`
+                      } · pool ${farm.pool ? `${fmtNum(farm.pool.busy)}/${fmtNum(farm.pool.workers)} busy` : NONE}` +
+                      `${farm.pooling === undefined ? "" : ` · pooling ${farm.pooling ? "on" : "off"}`}</span>`,
+                  ]]
+                : []),
+              // Every padded millisecond is RAM held doing no native work, so
+              // this is the knob the segment card's padding/native ratio is read
+              // against. JIT_LAUNCH_GUARD_MS is a compile-time constant and is
+              // not on the wire, so it is named and never quoted as a number.
+              ...(farm.padding
+                ? [[
+                    `<span title="${esc(
+                      "additionalMsec actually carried by launched ops. Tune JIT_LAUNCH_GUARD_MS down until the worst " +
+                        "figure here nears the guard and misses start — every padded millisecond is allocated RAM " +
+                        "doing nothing.",
+                    )}">launch padding</span>`,
+                    `${farm.padding.meanMs.toFixed(1)}ms mean` +
+                      `<span class="muted"> (worst ${farm.padding.maxMs.toFixed(1)})</span>`,
+                  ]]
+                : []),
               // The landing grid's only falsifiable measurement, and it was
               // published but rendered nowhere — so the live reading the two
               // disabled timing tightenings wait on could not be taken by
@@ -1366,14 +1755,50 @@ export const hackingTab: Tab = {
             fmtMoney(fleet.homeRamPlan.netOverHorizon),
             fleet.homeRamPlan.worthBuying ? "buy" : "hold",
           ]],
-        )
+        ) +
+        // Said out loud because the Infrastructure ROI table above can carry a
+        // `home → N` rung of its own, priced by a DIFFERENT model — a
+        // cash-bounded rung against this one-step doubling at the singularity
+        // quote. Unlabelled, the two read as one estimate disagreeing with itself.
+        note(hint(
+          "the one-step singularity quote — a full doubling of current home RAM",
+          "scored against the farm's $/s/GB over the node horizon. The `home → …` rung that can appear in the ranked " +
+            "table above is a different model: the largest rung current cash can buy, priced per GB.",
+        ))
       : "";
+
+    // The ceiling that turns "farm value $/s/GB" into zero marginal value, and
+    // the mirror of the producer's own comparison.
+    //
+    // `ramInvestment` gates its whole candidate block on `headroomGb > 0`, so a
+    // saturated fleet publishes an empty `ranked` indefinitely and the card used
+    // to render three tiles over blank space — with no way to tell "not
+    // evaluated yet" from "more RAM would earn ~$0/s". The fleet side of that
+    // comparison is `maxRam` MINUS the RAM arena: the arena is promoted out of
+    // the fleet, so counting it would announce saturation while the planner
+    // still sees headroom.
+    const depthCapGb = farm?.depthCapGb;
+    const demandCeilingGb = depthCapGb === undefined ? undefined : depthCapGb + (farm?.prepBudgetGb ?? 0);
+    const fleetForCeilingGb = Math.max(0, (fleet?.maxRam ?? 0) - (state.topics.ramArena?.arenaGb ?? 0));
+    const saturated = demandCeilingGb !== undefined && fleetForCeilingGb >= demandCeilingGb;
 
     const infrastructurePlan = fleet?.infrastructurePlan
       ? tiles([
           { label: "horizon", value: fmtTime(fleet.infrastructurePlan.horizonSec * 1000) },
           { label: "cash / grant", value: `${fmtMoney(fleet.infrastructurePlan.moneyAvailable)} / ${fmtMoney(fleet.infrastructurePlan.moneyGranted)}` },
           { label: "farm value", value: `${fmtMoney(fleet.infrastructurePlan.incomePerSecPerGb)}/s/GB` },
+          {
+            label: hint(
+              "demand ceiling",
+              "the current target's pipeline depth cap plus the prep reservation — the point past which added RAM " +
+                "prices at its true ~0 marginal income. Compared against the fleet MINUS the RAM arena, which is the " +
+                "comparison the planner itself makes.",
+            ),
+            value: demandCeilingGb === undefined ? NONE : fmtRam(demandCeilingGb),
+            sub: depthCapGb === undefined
+              ? "no depth cap published — the cap is cleared on a retarget"
+              : `${fmtRam(depthCapGb)} depth · ${farm?.prepBudgetGb === undefined ? `${NONE} prep` : `${fmtRam(farm.prepBudgetGb)} prep`}`,
+          },
         ]) +
         (fleet.infrastructurePlan.lastResult ? outcome(fleet.infrastructurePlan.lastResult) : "") +
         (fleet.infrastructurePlan.ranked.length
@@ -1401,7 +1826,21 @@ export const hackingTab: Tab = {
                 total: fleet.infrastructurePlan.rankedTotal,
               },
             )
-          : "")
+          // Never blank. If the plan exists the planner HAS run — `evaluatedAt`
+          // proves it — so an empty ranking is a verdict, not an absence, and
+          // `waiting` would be the wrong word. Two verdicts: the fleet is at the
+          // farm's demand ceiling, or nothing priced above a $0 return.
+          : saturated
+            ? note(hint(
+                "fleet at the farm's demand ceiling — added RAM prices at ~$0/s",
+                "the planner drops every RAM candidate once the fleet (excluding the RAM arena) reaches the depth cap " +
+                  "plus the prep reservation, because RAM past the pipeline's saturation produces nothing",
+              ))
+            : note(hint(
+                "no option priced above a $0 return",
+                "every candidate was scored and none cleared the evidence filter — no buyable rung, or a return per " +
+                  "dollar-second of zero. This is a decision, not missing data.",
+              )))
       : "";
 
     const infrastructureHistory = decisionHistory(state, {
@@ -1489,9 +1928,14 @@ export const hackingTab: Tab = {
       card("Servers", servers + (selected ? serverInspector(selected, state) : ""), serverControls) +
       `</div>` +
       `<div class="col">` +
-      card("Fleet", fleetTiles) +
-      (infrastructurePlan ? card("Infrastructure ROI", infrastructurePlan) :
-        homeRamPlan ? card("Home RAM investment", homeRamPlan) : "") +
+      card("Fleet", fleetTiles + (fleet ? openerPlanPanel(fleet) : "")) +
+      // NOT chained as one ternary. The producer publishes `infrastructurePlan`
+      // on every rollup and `tiles()` is only ever empty for an empty item list,
+      // so the first branch always won and `card("Home RAM …")` could never
+      // render: the singularity home-RAM quote was invisible for the whole life
+      // of the panel. The two are independent readings and now render as such.
+      (infrastructurePlan ? card("Infrastructure ROI", infrastructurePlan) : "") +
+      (homeRamPlan ? card("Home RAM (next upgrade)", homeRamPlan) : "") +
       (infrastructureHistory ? card("Decision history", infrastructureHistory) : "") +
       (segments ? card("RAM segments", segments) : "") +
       (health || trends ? card("Dispatcher health", trends + (health || "")) : "") +

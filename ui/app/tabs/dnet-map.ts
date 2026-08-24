@@ -116,8 +116,10 @@ export const ROW_PITCH = BOX_H + ROW_GAP;
 export const MAP_W = PAD_X + PAD + WIDTH * BOX_W + (WIDTH - 1) * COL_GAP + BOX_W / 2;
 
 /** What a display row is showing, which is not the same question as what depth
- * it is. An empty grid row and an air gap look alike and mean opposite things. */
-export type RowKind = "darkweb" | "depth" | "airgap" | "labyrinth" | "unknown";
+ * it is. An empty grid row and an air gap look alike and mean opposite things,
+ * and neither is `floor` — the marker for "the net may go deeper than the rows
+ * above, we have simply never been told where it ends". */
+export type RowKind = "darkweb" | "depth" | "airgap" | "labyrinth" | "floor" | "unknown";
 
 export interface Placed {
   host: DarknetKnownHost;
@@ -614,6 +616,26 @@ export function layoutNet(hosts: readonly DarknetKnownHost[], opts: LayoutOption
     });
   }
 
+  // A floor drawn as an extent is the "fully surveyed" lie the every-depth loop
+  // above exists to prevent, one level up: with no labyrinth sighting `netDepth`
+  // is only one past the deepest host we hold, so the bottom grid row IS the
+  // deepest thing we have seen and there is not even an empty row past it.
+  // `netDepthGuessed` said so all along and nothing drew it.
+  //
+  // Emitted here rather than in `netMap` so `height`, the row keys and the
+  // gutter all follow from the same `displayRow` counter — a row drawn at
+  // `yOf(displayRow)` after the layout returned sits past the viewBox and is
+  // silently clipped, which is the bug the `MAP_W` stagger note records.
+  //
+  // Two conditions, because either one would make the hedge a false claim: a
+  // drawn labyrinth already marks the bottom (`isLabyrinth` also matches on the
+  // model id, so an unlisted lab host puts a lab row below us while leaving
+  // `declared` undefined), and at `LIMIT` there is no deeper for the net to go.
+  if (netDepthGuessed && labs.length === 0 && netDepth < LIMIT) {
+    label(`depth ≥ ${netDepth} · no labyrinth sighted, so this is a floor`, "floor");
+    displayRow++;
+  }
+
   // The goal, pinned to the bottom where upstream draws it. Its own reported
   // depth is -1 for all eight of them, so depth is exactly the wrong thing to
   // sort it by; charisma is the ladder's real order.
@@ -699,13 +721,31 @@ export function factLife(
   return staleness({ value: undefined, at }, key, now, { ...expiry, immune });
 }
 
-/** True when nothing we hold about this host is still believable. Drawn faded,
- * because "we believed this five minutes ago" and "this is true" must not look
- * the same on a net that rewires itself every few seconds. */
+/** True when nothing PERISHABLE we hold about this host is still believable.
+ * Drawn faded, because "we believed this five minutes ago" and "this is true"
+ * must not look the same on a net that rewires itself every few seconds.
+ *
+ * Only the facts that CAN expire get a vote, and this used to be `every` over
+ * ALL of them — which no host on the wire could ever satisfy. `describeHost`
+ * sends the identity fields (modelId, difficulty, maxRam, the password shape)
+ * alongside depth and RAM on every report, `expiryMs("identity")` is `Infinity`,
+ * so one never-expiring fact per host held the fade off permanently: the node
+ * opacity, this tooltip line, the legend swatch, the servers-table chip and the
+ * `stale` filter were all unreachable, and every box on the map read confirmed.
+ *
+ * The test is "cannot expire" rather than a list of fact classes on purpose.
+ * `position` is also eternal on a stationary or stasis-linked host, and `expiryMs`
+ * is where that rule lives; a class list here would re-state it and then drift
+ * from it. A host holding only eternal facts has nothing to disbelieve, so it is
+ * not faded — the same answer as a host holding no facts at all. */
 export function isStale(host: DarknetKnownHost, now: number, expiry: ExpiryOpts): boolean {
   const keys = Object.keys(host.facts);
   if (keys.length === 0) return false;
-  return keys.every((key) => factLife(host, key, now, expiry)?.stale === true);
+  const perishable = keys
+    .map((key) => factLife(host, key, now, expiry))
+    .filter((life) => life !== undefined && life.expiresInMs !== Infinity);
+  if (perishable.length === 0) return false;
+  return perishable.every((life) => life?.stale === true);
 }
 
 function clip(text: string, max: number): string {
@@ -735,7 +775,9 @@ function titleOf(host: DarknetKnownHost, options: MapOptions): string {
     );
   }
   if (host.goneAt !== undefined) parts.push("gone");
-  if (isStale(host, options.now, options.expiry)) parts.push("every fact stale — believed, not confirmed");
+  if (isStale(host, options.now, options.expiry)) {
+    parts.push("stale — position and topology believed, not confirmed");
+  }
   return parts.filter(Boolean).join(" · ");
 }
 
@@ -799,8 +841,15 @@ function nodeMarkup(entry: Placed, options: MapOptions): string {
     // data-view-key is the whole selection mechanism: main.ts's delegated
     // handler resolves `closest()` on SVG elements and SVGElement carries
     // `.dataset`, so no listener is needed and main.ts needs no change.
+    //
+    // And no ARIA role on the group. It used to carry `role="button"`, which
+    // promised a keyboard affordance the map does not have: main.ts delegates
+    // click and nothing else, and there is no tabindex, so the role advertised
+    // something no key could reach. The accessible route to selection is the
+    // real button in the servers table's host column; the SVG stays a picture
+    // (`role="img"` on the svg) with that table as its equivalent.
     `<g class="${classes.join(" ")}" data-key="node:${esc(host.hostname)}"`
-    + ` data-view-key="dnet.sel" data-view-value="${esc(host.hostname)}" role="button">`
+    + ` data-view-key="dnet.sel" data-view-value="${esc(host.hostname)}">`
     + `<title>${esc(titleOf(host, options))}</title>`
     + `<rect class="box" x="${x}" y="${y}" width="${BOX_W}" height="${BOX_H}" rx="2"></rect>`
     + (host.stasisLinked ? `<rect class="stasis" x="${x}" y="${y}" width="3" height="${BOX_H}"></rect>` : "")
@@ -924,7 +973,11 @@ export function netLegend(): string {
     // and never carried a `linked` class that anything styled, so the swatch was
     // describing a class the map does not render.
     + swatch("stasis", "stasis")
-    + swatch("stale", "faded = believed, not confirmed")
+    // "perishable", not "every fact": identity facts never expire, so the fade
+    // is a statement about position, topology and RAM going unconfirmed. Same
+    // word as the servers table's chip, deliberately — the table and the map
+    // must not describe two different conditions.
+    + swatch("stale", "faded = stale: perishable facts expired")
     + `</div>`
     + `<div class="netlegend">`
     + swatch("ram-ours", "RAM: ours")
@@ -1025,7 +1078,12 @@ export function netMap(hosts: readonly DarknetKnownHost[], options: MapOptions):
     // viewBox is CONSTANT and only width/height change, so zoom is two patched
     // attributes and SVG scales the text and strokes for free.
     + `<svg class="netmap" role="img"`
-    + ` aria-label="darknet map, ${hosts.length} hosts over ${layout.netDepth} depths"`
+    // "at least N" when the depth is a floor: the one-sentence label is the whole
+    // map for a screen reader, so it must not be the one place that states an
+    // inference as a fact.
+    + ` aria-label="darknet map, ${hosts.length} hosts over ${
+      layout.netDepthGuessed ? `at least ${layout.netDepth}` : layout.netDepth
+    } depths"`
     + ` viewBox="0 0 ${MAP_W} ${layout.height}"`
     + ` width="${Math.round(MAP_W * scale)}" height="${Math.round(layout.height * scale)}">`
     + rowMarkup(layout)

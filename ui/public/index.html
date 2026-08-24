@@ -11,8 +11,11 @@
 <header>
   <h1>bitburner telemetry</h1>
   <div class="group">
-    <select id="runpick"></select>
-    <span id="status">connecting…</span>
+    <select id="runpick" title="Live or stored run to view"></select>
+    <!-- The viewer's only failure channel: a lost socket, a failed sync and a
+         sim error all land here, and nowhere else. Announced, so they reach a
+         screen reader at all. -->
+    <span id="status" aria-live="polite" aria-atomic="true">connecting…</span>
     <button id="simpin" title="Move this stored run into runs/pinned/, where the retention sweep cannot delete it">pin</button>
   </div>
   <div class="group launch">
@@ -37,7 +40,7 @@
   <article id="specbody"></article>
 </aside>
 <div id="scrubrow">
-  <span>replay</span>
+  <label for="scrub">replay</label>
   <input type="range" id="scrub" min="0" max="1000" value="1000" />
   <span id="scrubt"></span>
 </div>

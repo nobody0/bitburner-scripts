@@ -19,13 +19,41 @@ function inlineMarkdown(source: string): string {
   return rendered.replace(/\u0000(\d+)\u0000/g, (_match, index: string) => code[Number(index)] ?? "");
 }
 
+/** Split a table row on its DELIMITERS only. GFM requires a literal pipe inside
+ * a cell to be escaped — code spans included — and the specs do exactly that
+ * (`spec/strategy/features/dnet.md:27` has `` `BN15 \|\| activeSF15 > 0 …` ``).
+ * Splitting on every pipe exploded that 3-column row into seven cells and tore
+ * the code span across them, so its backticks printed literally. The trailing
+ * strip has to be escape-aware for the same reason, or a cell that legitimately
+ * ends in `\|` loses its real delimiter. One helper, so the divider test and the
+ * cell split cannot drift apart. */
+function rowCells(line: string): string[] {
+  return line.trim().replace(/^\||(?<!\\)\|$/g, "").split(/(?<!\\)\|/);
+}
+
 function isTableDivider(line: string): boolean {
-  const cells = line.trim().replace(/^\||\|$/g, "").split("|");
+  const cells = rowCells(line);
   return cells.length > 0 && cells.every((cell) => /^\s*:?-{3,}:?\s*$/.test(cell));
 }
 
 function tableCells(line: string): string[] {
-  return line.trim().replace(/^\||\|$/g, "").split("|").map((cell) => inlineMarkdown(cell.trim()));
+  // Unescape only AFTER the split, so the backtick pair is back inside one cell
+  // and inlineMarkdown's code-span extraction still sees it. Doing this in
+  // inlineMarkdown instead would strip `\|` from paragraphs and list items,
+  // where the backslash is meaningful text.
+  return rowCells(line).map((cell) => inlineMarkdown(cell.trim().replace(/\\\|/g, "|")));
+}
+
+/** Where a wrapped continuation line stops. The specs wrap at ~80 columns, so
+ * both the paragraph join and the list-item join have to keep consuming until
+ * the next block actually starts; sharing one predicate keeps the two loops from
+ * drifting apart. */
+const BLOCK_START = /^(#{1,4})\s|^```|^\s*[-*]\s|^\s*\d+[.)]\s|^>\s|^---$/;
+
+function startsBlock(lines: string[], index: number): boolean {
+  const line = lines[index] ?? "";
+  if (!line.trim() || BLOCK_START.test(line)) return true;
+  return line.includes("|") && isTableDivider(lines[index + 1] ?? "");
 }
 
 export function renderMarkdown(source: string): string {
@@ -83,14 +111,28 @@ export function renderMarkdown(source: string): string {
     const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
     if (unordered || ordered) {
       const tag = unordered ? "ul" : "ol";
+      const marker = unordered ? /^\s*[-*]\s+(.+)$/ : /^\s*\d+[.)]\s+(.+)$/;
       const items: string[] = [];
       while (index < lines.length) {
-        const match = unordered
-          ? (lines[index] ?? "").match(/^\s*[-*]\s+(.+)$/)
-          : (lines[index] ?? "").match(/^\s*\d+[.)]\s+(.+)$/);
+        const match = (lines[index] ?? "").match(marker);
         if (!match) break;
-        items.push(`<li>${inlineMarkdown(match[1]!)}</li>`);
         index++;
+        // The item text is not just the marker line. Every spec wraps at ~80
+        // columns, and taking only `match[1]` ended the list on the first
+        // continuation: it became its own `<p>`, the next bullet opened a fresh
+        // `<ul>`, and any `**` or `` ` `` span that opened on the marker line
+        // and closed on the wrap leaked its delimiters as literal text. Prose
+        // already survives that via the paragraph join below; bullets must too.
+        // Indentation is what separates a continuation from the next block, but
+        // `startsBlock` is tested FIRST so an indented nested bullet still
+        // becomes its own item instead of being glued into its parent's text.
+        const text = [match[1]!];
+        while (index < lines.length && !startsBlock(lines, index) && /^\s/.test(lines[index] ?? "")) {
+          text.push((lines[index++] ?? "").trim());
+        }
+        // One call on the joined string: that is what repairs a torn span, and
+        // it keeps the escaping in one place rather than joining rendered halves.
+        items.push(`<li>${inlineMarkdown(text.join(" "))}</li>`);
       }
       out.push(`<${tag}>${items.join("")}</${tag}>`);
       continue;
@@ -105,12 +147,8 @@ export function renderMarkdown(source: string): string {
 
     const paragraph: string[] = [line.trim()];
     index++;
-    while (index < lines.length) {
-      const next = lines[index] ?? "";
-      if (!next.trim() || /^(#{1,4})\s|^```|^\s*[-*]\s|^\s*\d+[.)]\s|^>\s|^---$/.test(next)) break;
-      if (next.includes("|") && isTableDivider(lines[index + 1] ?? "")) break;
-      paragraph.push(next.trim());
-      index++;
+    while (index < lines.length && !startsBlock(lines, index)) {
+      paragraph.push((lines[index++] ?? "").trim());
     }
     out.push(`<p>${inlineMarkdown(paragraph.join(" "))}</p>`);
   }

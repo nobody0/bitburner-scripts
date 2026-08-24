@@ -110,7 +110,13 @@ export function serverInspector(row: ServerExplorerRow, state: ProjectedState): 
         "hack time",
         row.hackTimeMs === undefined ? "–" : esc(fmtTime(row.hackTimeMs)),
         row.hackTimeMinMs === undefined ? "–" : esc(fmtTime(row.hackTimeMinMs)),
-        row.atMinSec ? "prepped" : "current security slows it",
+        // With no time computed there is nothing for security to be slowing:
+        // the row's caller withholds both figures when the player record or the
+        // BitNode is unknown, and "current security slows it" beside two dashes
+        // reads as a measurement of something.
+        row.hackTimeMs === undefined
+          ? "–"
+          : row.atMinSec ? "prepped" : "current security slows it",
       ],
     ],
     { left: [0, 3] },

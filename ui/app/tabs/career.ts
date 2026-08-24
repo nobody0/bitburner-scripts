@@ -1,7 +1,9 @@
 import { skillProgress } from "../../../shared/formulas.ts";
 import type { CareerPlan } from "../../../shared/telemetry/topics/career.ts";
-import { card, collapsible, dataTable, dot, meter, note, table, tiles, waiting, type Column } from "../lib/dom.ts";
+import { ago, nowFor, stamp } from "../lib/clock.ts";
+import { card, collapsible, dataTable, dot, meter, NONE, note, table, tiles, waiting, waitingPanel, type Column } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtPct, fmtTime } from "../lib/format.ts";
+import { html } from "../lib/html.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
 
@@ -73,7 +75,12 @@ interface RequestGroup {
   target?: number;
   /** The hardest target in the group, when it is not the one shown. */
   finalTarget?: number;
+  /** The summed weight of every request in the group, because that is what the
+   *  planner prices — see the aggregation below. */
   weight: number;
+  /** How many requests were merged. Not `askers.length`: two requests from the
+   *  same feature are two weights but one asker. */
+  asks: number;
   askers: string[];
 }
 
@@ -96,11 +103,22 @@ function groupRequests(plan: CareerPlan | undefined): RequestGroup[] {
         ...(request.target !== undefined ? { target: request.target } : {}),
         ...(request.target !== undefined ? { finalTarget: request.target } : {}),
         weight: request.weight,
+        asks: 1,
         askers: request.by ? [request.by] : [],
       });
       continue;
     }
-    existing.weight = Math.max(existing.weight, request.weight);
+    // Weights ADD, they do not compete. Two factions wanting the same
+    // `companyRep` at weight 1 are a weight-2 outcome everywhere in the
+    // decision path — `needWeights` and `needValueSeconds` sum same-key
+    // requests (shared/strategy/needs.ts), and `channelWorth` folds
+    // `rankingValueSec` per key into one per-channel total
+    // (shared/strategy/income.ts). Taking the maximum priced ONE asker for work
+    // the planner priced N askers for, so the column an operator sorts by to
+    // see what dominates the board ranked a single weight-3 ask above eleven
+    // weight-1 asks worth 3.7x as much. A one-member group is unchanged.
+    existing.weight += request.weight;
+    existing.asks += 1;
     if (request.by && !existing.askers.includes(request.by)) existing.askers.push(request.by);
     // The furthest target is worth keeping — it is where this work ends — but
     // only as a note beside the milestone actually being shown.
@@ -165,14 +183,58 @@ const REQUEST_COLUMNS: Column<RequestGroup>[] = [
       return `<span class="muted" title="${esc(r.askers.join("\n"))}">${r.askers.length} requesters</span>`;
     },
   },
-  { id: "weight", label: "weight", sort: (r) => r.weight, cell: (r) => fmtNum(r.weight, 2) },
+  {
+    id: "weight",
+    label: "weight",
+    sort: (r) => r.weight,
+    // A merged row's weight is a COMBINED ask, so the cell says so rather than
+    // letting a number that changed meaning look like the one a single request
+    // posted. Urgency is still part of the group key, so the sum is one band of
+    // the channel, not the channel's whole worth.
+    cell: (r) =>
+      r.asks > 1
+        ? `<span title="${esc(`${r.asks} asks, weights combined — this urgency band only`)}">${fmtNum(r.weight, 2)}</span>`
+        : fmtNum(r.weight, 2),
+  },
 ];
+
+/** Expected karma REDUCTION per second — the planner's own `karmaPerSec`
+ * (shared/strategy/career/crimes.ts), recomputed from fields already on the
+ * row: a failed attempt still pays a quarter of the karma, so the factor is
+ * `0.25 + 0.75 * chance`.
+ *
+ * `Math.abs` because the sign convention is not settled across the repo: the
+ * probe copies the game's positive magnitude, one in-game consumer defends
+ * against a negative one, and a negative rate here would claim karma is
+ * RISING. `undefined` rather than a number whenever the inputs cannot support
+ * one — an absent karma field on a replayed pre-field log, or a zero duration
+ * — because Infinity and 0 both read as measurements. */
+function karmaRate(crime: { karma?: number; chance?: number; timeMs?: number }): number | undefined {
+  const karma = crime.karma;
+  const timeMs = crime.timeMs;
+  if (karma === undefined || !Number.isFinite(karma)) return undefined;
+  if (timeMs === undefined || !(timeMs > 0)) return undefined;
+  return ((0.25 + 0.75 * (crime.chance ?? 0)) * Math.abs(karma)) / (timeMs / 1000);
+}
+
+/** Skill keys shortened so the per-attempt experience table fits one wrapped
+ * cell. Keys arrive off the wire as a bare record, so an unknown one is passed
+ * through (and escaped) rather than dropped. */
+const EXP_SHORT: Record<string, string> = {
+  hacking: "hack",
+  strength: "str",
+  defense: "def",
+  dexterity: "dex",
+  agility: "agi",
+  charisma: "cha",
+  intelligence: "int",
+};
 
 export const careerTab: Tab = {
   id: "career",
   render(state: ProjectedState) {
     const c = state.topics.career;
-    if (!c) return waiting("the career probe");
+    if (!c) return waitingPanel("Career", "the career probe");
 
     // --- observed work and the structured decision beside it ---
     const work = c.currentWork;
@@ -180,14 +242,34 @@ export const careerTab: Tab = {
     const nowParts: string[] = [];
     if (work) {
       nowParts.push(
+        // The faction work SUBTYPE belongs on this line: `doing FACTION:
+        // Sector-12` cannot say whether that is hacking, field or security
+        // work, and the continuation guard decides on exactly that field
+        // (`work.workType !== last.workType` in shared/strategy/factions/
+        // decide.ts). The factions tab cannot cover it either — while the work
+        // runs, that plan emits `idle / continue` and carries no subtype.
         `<div class="row"><span class="muted">doing</span> <strong>${esc(work.type)}</strong>` +
           `${work.detail ? `: ${esc(work.detail)}` : ""}` +
+          `${work.workType ? ` <span class="muted">${esc(work.workType)}</span>` : ""}` +
           `${work.focused ? "" : ` <span class="muted">(unfocused)</span>`}</div>`,
       );
       if (work.cyclesWorked !== undefined) {
         // Cycles are 200 ms of game time each; the raw count means nothing.
+        // The observation is up to a probe interval (30 s) old, so the driver
+        // reconstructs elapsed time as `cyclesWorked*200 + (now - observedAt)`
+        // (game/lib/features/career.ts) and this line does the same — but only
+        // when the observation is STAMPED. `observedAt` is optional on the wire
+        // and real records omit it; folding an absent stamp in made the whole
+        // sum NaN, which fmtTime renders as "–", erasing the figure the drift
+        // was meant to sharpen. The age is shown rather than silently baked in,
+        // so both the reconstruction and what it rests on are visible.
+        //
+        // CrimeWork keeps `cyclesWorked` cumulative across repeated units, so
+        // this is time in the ACTIVITY, not the age of the current unit.
+        const drift = work.observedAt !== undefined ? Math.max(0, nowFor(state) - work.observedAt) : 0;
         nowParts.push(
-          `<div class="muted">${fmtTime(work.cyclesWorked * 200)} spent so far (${fmtNum(work.cyclesWorked, 0)} cycles)</div>`,
+          `<div class="muted">${fmtTime(work.cyclesWorked * 200 + drift)} spent so far ` +
+            `(${fmtNum(work.cyclesWorked, 0)} cycles, ${stamp(state, work.observedAt, "observed ")})</div>`,
         );
       }
     } else {
@@ -195,31 +277,106 @@ export const careerTab: Tab = {
     }
 
     if (plan) {
-      nowParts.push(
-        `<div class="row"><span class="muted">chose</span> ` +
-          `<strong>${esc(plan.action.type)}${plan.action.subject ? `: ${esc(plan.action.subject)}` : ""}</strong>` +
-          `${plan.action.field ? ` <span class="muted">${esc(plan.action.field)}</span>` : ""}` +
-          `${plan.priority ? ` <span class="muted">(${esc(plan.priority.band)}, worth ${fmtNum(plan.priority.value, 2)}s)</span>` : ""}</div>`,
-      );
+      // `plan.priority` describes `ranked[0]`, NOT the emitted action — the
+      // producer states it at its own claim site ("`ranked[0]` is the option the
+      // slot would actually run — the emitted action can be idle or continue",
+      // game/lib/features/career.ts). `stepCareer` returns idle with the ranking
+      // intact whenever the best option needs a slot career does not hold,
+      // whenever the crime menu is still filling, and whenever progress work is
+      // in flight, so hanging the band and BN-seconds off the chosen action
+      // printed `chose idle (blocking, worth 14.20s)`: doing nothing, priced as
+      // the thing we would rather be doing. In the steady state where another
+      // feature owns the slot that was every frame's reading.
+      //
+      // `stop` is NOT a hold — it is an action career took to cancel abandoned
+      // work — so it keeps the `chose` row and only loses the parenthetical.
+      const top = plan.ranked[0];
+      const holding = plan.action.type === "idle" && top !== undefined;
+      // With an empty ranking the producer's `?? 0` publishes a confident
+      // `worth 0.00s` for a number nobody measured, so there is no bid to state.
+      const bid = top && plan.priority
+        ? ` <span class="muted">(${esc(plan.priority.band)}, worth ${fmtNum(plan.priority.value, 2)}s)</span>`
+        : "";
+      if (holding) {
+        // Why the leader is not running is on the wire in another topic: the
+        // arbiter's slot holder. The bids themselves already have a table on the
+        // BitNode tab, so this links there rather than copying it.
+        const slot = state.topics.arbitration?.slot;
+        nowParts.push(
+          `<div class="row"><span class="muted">holding</span> ` +
+            (slot && slot.by !== "career"
+              ? `<a href="#/${esc(slot.by)}">${esc(slot.by)}</a> ` +
+                `<span class="muted">has the work slot, ${fmtTime(slot.heldMs)} so far</span>`
+              : `<span class="muted">nothing started this pass</span>`) +
+            `</div>`,
+        );
+      } else {
+        nowParts.push(
+          `<div class="row"><span class="muted">chose</span> ` +
+            `<strong>${esc(plan.action.type)}${plan.action.subject ? `: ${esc(plan.action.subject)}` : ""}</strong>` +
+            `${plan.action.field ? ` <span class="muted">${esc(plan.action.field)}</span>` : ""}` +
+            `${plan.action.type === "stop" ? "" : bid}</div>`,
+        );
+      }
+      // Stated as the leader's own price whenever the leader is not what ran.
+      if (top && (holding || plan.action.type === "stop")) {
+        nowParts.push(
+          `<div class="row"><span class="muted">best option</span> <strong>${esc(top.label)}</strong>${bid}</div>`,
+        );
+      }
       if (plan.incomeFallback) {
-        nowParts.push(note("the chosen option serves no posted need — it won on the rates it produces"));
+        // The flag is computed from `best`, so on a hold it describes the option
+        // that leads the ranking, not one that was chosen.
+        nowParts.push(
+          note(
+            holding
+              ? "the best option serves no posted need — it leads on the rates it produces"
+              : "the chosen option serves no posted need — it won on the rates it produces",
+          ),
+        );
       }
       if (plan.lastResult) {
+        // `lastResult` is module-level in the driver and cleared only on reset,
+        // and `execute` is skipped entirely for an idle decision or a
+        // backed-off action key — so an hour-old failure keeps rendering here.
+        // Undated it reads as the current state, which is exactly the line an
+        // operator checks when career looks stuck behind the execute backoff.
         nowParts.push(
           `<div class="row"><span class="muted">last</span> ` +
             `<span class="${plan.lastResult.ok ? "good" : "bad"}">${esc(plan.lastResult.action)}: ${esc(
               plan.lastResult.detail,
-            )}</span></div>`,
+            )}</span> ${stamp(state, plan.lastResult.at)}</div>`,
         );
       }
       const schedule = plan.schedule;
       if (schedule) {
         const last = schedule.lastCompletion;
+        // The plan is only re-merged when the review is DUE, and progress mode
+        // is never due (shared/strategy/career/schedule.ts) — so while a Heist
+        // or a program write runs, this decision can be ten minutes old while
+        // `mode`/`reason` still describe the frame it was made in. Hence
+        // "decided", dated: the age is the load-bearing half.
+        //
+        // An absent `nextReviewAt` is not one state: progress mode publishes
+        // none because the completion is the next review, and idle mode
+        // publishes none because the driver re-decides at frame rate.
+        const next =
+          schedule.nextReviewAt !== undefined
+            ? `next review in ${fmtTime(Math.max(0, schedule.nextReviewAt - nowFor(state)))}`
+            : schedule.mode === "progress"
+              ? "next review at completion"
+              : schedule.mode === "idle"
+                ? "re-decided every frame"
+                : "no next review published";
         nowParts.push(
-          `<div class="muted">reviewed on ${esc(schedule.reason)} / ${esc(schedule.mode)}` +
+          `<div class="muted">decided ${esc(ago(state, schedule.reviewedAt))} on ${esc(schedule.reason)} / ${esc(schedule.mode)}` +
+            `; ${esc(next)}` +
             (last
               ? `; last completion ${esc(last.type)}${last.detail ? `: ${esc(last.detail)}` : ""} ` +
-                `${fmtTime(Date.now() - last.at)} ago`
+                // Wall time made a replayed completion read hours old, and grew
+                // while scrubbing backwards; the run's own clock is the only
+                // reference that means anything here.
+                `${esc(ago(state, last.at))}`
               : "") +
             `</div>`,
         );
@@ -262,13 +419,31 @@ export const careerTab: Tab = {
     });
 
     const requests = groupRequests(plan);
+    // A card cannot infer a decision mode from an empty list. With no plan on
+    // the wire there has been no decision at all — the driver requires
+    // Singularity, so `plan` is absent for a whole pre-SF4 BitNode while the
+    // local probe keeps filling this topic — and even with a plan the `stop` and
+    // empty-ranking branches report `incomeFallback: false` with nothing being
+    // served. This line used to assert "income fallback is active" in both
+    // states, two cards below one saying no decision had been made yet.
+    const noRequests = !plan
+      ? waiting("the first career decision")
+      : note(plan.incomeFallback ? "no open career requests — earning instead (see Now)" : "no open career requests");
+    // No `empty` option on the table: it is only built when there are rows, and
+    // carrying a second wording for the empty case is what let the two drift.
     const requestTable = requests.length
-      ? dataTable("career.requests", requests, REQUEST_COLUMNS, {
-          defaultSort: { key: "what", dir: 1 },
-          empty: "no open career requests",
-        })
-      : note("no open career requests; income fallback is active");
+      ? dataTable("career.requests", requests, REQUEST_COLUMNS, { defaultSort: { key: "what", dir: 1 } })
+      : noRequests;
 
+    // The decision trail marks the option that is RUNNING, keyed off `ranked[0]`
+    // by identity rather than by label: "continue"/"stop"/"idle" are decision
+    // verbs that never appear as an option label, and the published label drops
+    // `action.field`, so "apply: ECorp" can legitimately appear twice. Every
+    // non-idle/non-stop return in `stepCareer` is built from `ranked[0]`, and
+    // `dataTable` sorts a copy and hands `rowClass` the row object, so the mark
+    // survives re-sorting. On an idle or stop pass nothing is marked — giving
+    // the leader `.picked` there would claim work the feature is not doing.
+    const chosen = plan && plan.action.type !== "idle" && plan.action.type !== "stop" ? plan.ranked[0] : undefined;
     const options = plan?.ranked.length
       ? dataTable(
           "career.options",
@@ -314,8 +489,13 @@ export const careerTab: Tab = {
                 : `<span class="muted">nothing priced</span>`,
             },
           ],
-          { defaultSort: { key: "score", dir: -1 }, limit: 12, empty: "no viable career options" },
-        )
+          {
+            defaultSort: { key: "score", dir: -1 },
+            limit: 12,
+            empty: "no viable career options",
+            rowClass: (o) => (o === chosen ? "picked" : ""),
+          },
+        ) + (chosen === undefined ? note("nothing started this pass — the top row is the bid, not the work") : "")
       : note("no viable career options");
 
     const jobs = Object.keys(c.jobs).length
@@ -351,9 +531,70 @@ export const careerTab: Tab = {
             },
             { id: "money", label: "payout", sort: (x) => x.money, cell: (x) => fmtMoney(x.money) },
             { id: "time", label: "time", sort: (x) => x.timeMs, cell: (x) => fmtTime(x.timeMs) },
-            { id: "karma", label: "karma", sort: (x) => x.karma, cell: (x) => fmtNum(x.karma, 1) },
+            {
+              // The per-attempt karma is not the question this card exists to
+              // answer. Printed raw under a meter counting toward -54,000 it
+              // ranked Heist (15 karma per ten minutes) above Homicide (3 per
+              // three seconds), so sorting the column put the best karma farm in
+              // the game near the bottom. The rate is the planner's own
+              // `karmaPerSec`; the per-attempt figure stays in the tooltip so a
+              // reader can still cross-check the game's crime menu.
+              id: "karma",
+              label: "karma/s down",
+              sort: (x) => karmaRate(x) ?? -1,
+              cell: (x) => {
+                const rate = karmaRate(x);
+                if (rate === undefined) {
+                  return `<span class="muted" title="no karma or duration on this record — not measured">${NONE}</span>`;
+                }
+                return `<span title="${esc(
+                  `each attempt costs ${fmtNum(Math.abs(x.karma), 2)} karma; karma counts DOWN toward the gang gate`,
+                )}">${fmtNum(rate, 3)}</span>`;
+              },
+            },
+            {
+              // The experience table is a decision input, not decoration: the
+              // combat-stat gates other features wait on are trained here, and
+              // the planner prices a combat need as the MINIMUM of the four
+              // combat exp rates. Per successful attempt, as published — turning
+              // it into a rate would mean re-deriving the multipliers the
+              // planner applies, and the viewer does not re-derive the
+              // objective. Zero-valued skills are skipped, matching the
+              // planner's own `expPerSec`.
+              id: "exp",
+              label: "exp / attempt",
+              left: true,
+              wrap: true,
+              sort: (x) => Object.values(x.exp ?? {}).reduce((sum, amount) => sum + amount, 0),
+              cell: (x) => {
+                const parts = Object.entries(x.exp ?? {})
+                  .filter(([, amount]) => amount > 0)
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([skill, amount]) => `${esc(EXP_SHORT[skill] ?? skill)} ${fmtNum(amount, 1)}`);
+                return parts.length ? `<span class="muted">${parts.join(" · ")}</span>` : `<span class="muted">${NONE}</span>`;
+              },
+            },
+            {
+              // Blank at zero, dash when the field never arrived: absence is not
+              // "this crime kills nobody".
+              id: "kills",
+              label: "kills",
+              sort: (x) => x.kills ?? -1,
+              cell: (x) => (x.kills === undefined ? `<span class="muted">${NONE}</span>` : x.kills > 0 ? fmtNum(x.kills, 0) : ""),
+            },
           ],
-          { defaultSort: { key: "rate", dir: -1 }, limit: 15, empty: "no crimes ranked" },
+          {
+            defaultSort: { key: "rate", dir: -1 },
+            limit: 15,
+            empty: "no crimes ranked",
+            // Marks what is RUNNING, off the observed work rather than off
+            // `plan.action.subject`: the chosen crime and the running one differ
+            // while a completion is pending, and `subject` is a bare string
+            // shared with company, course and travel actions. The join is the
+            // one the game side already uses (`crime.name === work.detail`).
+            rowClass: (x) =>
+              work?.type?.toUpperCase() === "CRIME" && work.detail === x.name ? "picked" : "",
+          },
         )
       : note("crime ranking needs BN4 or SF4 (Singularity)");
 
@@ -367,7 +608,23 @@ export const careerTab: Tab = {
       card("Career", summary + karma) +
       card("Skills", table(["skill", "level", "next"], skillRows, { left: [0] })) +
       card("Employment", jobs) +
-      card("Ranked options", collapsible("career.ranked", `${plan?.ranked.length ?? 0} option(s) scored`, options)) +
+      card(
+        "Ranked options",
+        collapsible(
+          "career.ranked",
+          // "N option(s) scored" was a claim about the size of the RANKING, and
+          // the digest carries `ranked.slice(0, 8)` with no total beside it —
+          // while the menu is routinely 20-30 priced options (12 crimes, the
+          // training courses, the requested port openers, per-company
+          // apply/promote/quit/travel). So the count is worded as what was
+          // published. The true count needs `rankedTotal` on the career topic,
+          // which is a producer change this panel cannot make.
+          plan?.ranked.length
+            ? html`<span title="the digest publishes the leading options only; the size of the full ranking is not on the wire">top ${String(plan.ranked.length)} scored option(s)</span>`
+            : "no scored options",
+          options,
+        ),
+      ) +
       `</div>`
     );
   },

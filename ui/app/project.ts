@@ -81,7 +81,7 @@ export interface FarmSample {
   byKind: Record<string, BatchCounters>;
 }
 
-/** The four cumulative figures a batch kind's series are built from. */
+/** The cumulative figures a batch kind's series are differenced from. */
 export interface BatchCounters {
   batches: number;
   /** Ops launched by settled batches of this kind. Kept for the reset test —
@@ -90,6 +90,23 @@ export interface BatchCounters {
    * for a band that could never open. */
   ops: number;
   moneyEarned: number;
+  /** Summed start-to-settle spans, and the graded / in-order counts, retained
+   * so the health card's span and in-order curves can be DIFFERENCED like
+   * every other rate here.
+   *
+   * They have to be, because the producer never resets them: `settleBatch`
+   * accumulates into `memory.stats.batchesByKind` for the dispatcher's whole
+   * life. Pushing `spanMs / batches` straight off one rollup therefore drew a
+   * LIFETIME mean on the card whose whole claim is "is this getting worse" —
+   * after an hour the denominator is tens of thousands of batches, so a
+   * pipeline that starts slipping now cannot visibly move the curve.
+   *
+   * Deliberately NOT added to the reset sentinel that `ops` serves: `graded` is
+   * optional on the wire and a kind can drop out of a rollup on its own, so a
+   * record that simply omits one would read as an install and wipe the ring. */
+  spanMs: number;
+  graded: number;
+  inOrder: number;
 }
 
 /** One batch kind's curves.
@@ -105,20 +122,25 @@ export interface BatchCounters {
  * an op never settles and is evicted instead — and the run-level residual in
  * `FarmHealthSeries.opsLost`. Both are real and both open. */
 export interface BatchKindSeries {
-  /** Batches SETTLED per second, over `farmWindowMs`. A rate belongs here and
-   * not on the op counters: a batch is a discrete completion, so its rate is a
-   * throughput, where an op backlog is a level. */
+  /** Batches SETTLED per second, differenced against the oldest sample at or
+   * before the requested window — so the span these were averaged over is
+   * `farmWindowActualMs`, which is `farmWindowMs` only once the ring is that
+   * deep. A rate belongs here and not on the op counters: a batch is a
+   * discrete completion, so its rate is a throughput, where an op backlog is a
+   * level. */
   perSec: [number, number][];
   /** Mean money one batch of this kind earned across the window. Says whether
    * the target is drying out, which a batch count alone never shows. */
   moneyPerBatch: [number, number][];
 }
 
-/** The market's capital and earnings over time, for the CURRENT install.
+/** The market's capital and earnings over time, for one install.
  *
- * Every one of these is dropped at an install: the book is destroyed and every
- * symbol's price, spread and volatility is re-rolled, so a curve spanning one
- * is two different runs of capital drawn as one line. See `foldStockSeries`.
+ * One install, because one artifact IS one install — the run file is keyed on
+ * the install id and a prestige starts a new one — so no curve here can ever
+ * span an install boundary and none of them is ever dropped mid-stream. See
+ * `foldStockSeries`, which used to drop them on a signal that meant something
+ * else entirely.
  *
  * The pairing is the same idea as `BatchKindSeries`: what is being read is the
  * BAND between two levels, not either level's rate. `value` against `cost` is
@@ -150,17 +172,6 @@ export interface StockSeries {
 export function emptyStockSeries(): StockSeries {
   return { value: [], cost: [], realized: [], unlockSpend: [] };
 }
-
-/** What one install's market activity closed out at. */
-export interface StockInstall {
-  realized: number;
-  unlockSpend: number;
-  endedAt: number;
-}
-
-/** Closed books retained. One entry per install and a run rarely sees ten, so
- * this is a runaway guard rather than a window. */
-export const STOCK_INSTALL_RING = 32;
 
 /** One settled batch, with the size-normalised figures the per-batch view
  * compares on. Derived once when the batch is folded in rather than on every
@@ -203,16 +214,27 @@ export interface FarmHealthSeries {
   /** Planner cost as a share of wall clock. Healthy sits near 5%; past ~20%
    * the engine starves. */
   pumpOccupancy: [number, number][];
-  /** Observed-minus-planned landing time, signed mean and worst absolute. */
-  landingErrorMeanMs: [number, number][];
-  landingErrorMaxAbsMs: [number, number][];
+  /** Observed-minus-planned landing time, signed mean and worst absolute,
+   * SINCE THE INSTALL rather than over the window — `accumulateLandingError`
+   * keeps a running count/sum and a monotone max, and nothing resets them.
+   * The names carry that because it cannot be fixed here: only the mean is on
+   * the wire, and a windowed version would need `sumMs`/`count` published raw
+   * (the rollup's `roundSigFigs` on a run-long sum would quantize away exactly
+   * the deltas it would be differenced from). A panel drawing these beside the
+   * windowed curves has to say which is which. */
+  landingErrorMeanSinceInstallMs: [number, number][];
+  landingErrorMaxAbsSinceInstallMs: [number, number][];
   /** Main-thread starvation, which leads landing error by a weaken time. */
   engineLatenessMs: [number, number][];
-  /** Mean start-to-settle span of the batches settling in the window. Rising
-   * span is a pipeline slipping, and it moves before income does. */
+  /** Mean start-to-settle span of the batches that settled IN THE WINDOW:
+   * summed span deltas over summed batch deltas. Rising span is a pipeline
+   * slipping and it moves before income does — a claim only the windowed form
+   * can support, which is why this is folded with the rates and not with the
+   * gauges. */
   batchSpanMs: [number, number][];
-  /** Share of graded batches that landed in the planned order, 0..1. Anchored
-   * near 1.0 in a healthy run, which is why its chart needs a y floor. */
+  /** Share of the batches GRADED IN THE WINDOW that landed in the planned
+   * order, 0..1. Anchored near 1.0 in a healthy run, which is why its chart
+   * needs a y floor. Windowed for the same reason as the span. */
   inOrderShare: [number, number][];
 }
 
@@ -279,22 +301,41 @@ export interface ProjectedState {
    * moved backwards means a reset (an install wipes the topic), and the ring
    * is dropped rather than differenced into a negative rate. */
   farmSamples: FarmSample[];
-  /** The averaging window the current rate points were taken over, in ms, so
-   * the panel can say what it averaged instead of implying "per second,
-   * instantaneously". */
+  /** The averaging window the rate points were REQUESTED over, in ms: the
+   * target's weakenTime, which is the batch period, clamped. A decision, not a
+   * measurement — what was actually averaged is `farmWindowActualMs`. */
   farmWindowMs: number;
-  /** The stock market's capital and earnings curves for the current install. */
+  /** The span the newest rate points were actually differenced over, in ms.
+   *
+   * A separate field because the two genuinely diverge and the panel used to
+   * print the requested one as though it were this one. `baselineFor`
+   * deliberately falls back to the oldest sample it holds, so early against a
+   * long-cycle target the real span is seconds under a caption claiming
+   * minutes; and a gap in the rollup stream — a stalled emitter, or a replay of
+   * a file whose identical spans the hub collapsed — makes it longer instead.
+   *
+   * Absent until a second rollup has been folded, and cleared on a counter
+   * reset, so a panel says it is waiting rather than captioning a fresh run's
+   * first points with the previous run's window. */
+  farmWindowActualMs?: number;
+  /** The stock market's capital and earnings curves for this install. */
   stockSeries: StockSeries;
-  /** Closed-out books from earlier installs, oldest first. The only thing that
-   * survives a reset that drops every stock series. */
-  stockInstalls: StockInstall[];
-  /** `t` of the first observed trade cashflow — the denominator of the measured
-   * $/sec, which reproduces the driver's own `measuredStockIncomePerSec` from
-   * the wire and is therefore the rate its working-capital claim bids with. */
-  stockFlowSince: number | null;
-  /** Last observed `market.tick`. The only counter on the stock topic that is
-   * monotone within an install, and so the reset sentinel. */
-  stockTick: number | null;
+  /** `t` of the first trade the viewer WATCHED land, and the only honest
+   * denominator for a measured $/sec.
+   *
+   * Null is not "no trade yet" on its own — read it with `sawStockLedgerOpen`.
+   * Null with that flag set is a market that has genuinely not traded; null
+   * with it clear is an attach (or a compacted replay) that arrived after the
+   * ledger was already running, where the denominator is not on the wire at
+   * all: the driver holds it as `StockFlows.tradeFlowSince` and does not
+   * publish it. A panel has to say so rather than divide a whole install's
+   * realised P/L by the age of the attach, which is what the previous
+   * "first record I happened to see" arming did. */
+  stockRateSince: number | null;
+  /** Whether an explicit `tradeCashFlow === 0` was ever observed — i.e. whether
+   * this viewer saw the ledger before its first trade. An ABSENT ledger is not
+   * the same evidence; see `foldStockSeries`. */
+  sawStockLedgerOpen: boolean;
   /** Running totals behind `earned`/`hacks` when the farm rollup is absent.
    *  Held on the state so an incremental fold can continue them. */
   hackDoneEarned: number;
@@ -309,8 +350,8 @@ function emptyFarmHealth(): FarmHealthSeries {
   return {
     opsLost: [],
     pumpOccupancy: [],
-    landingErrorMeanMs: [],
-    landingErrorMaxAbsMs: [],
+    landingErrorMeanSinceInstallMs: [],
+    landingErrorMaxAbsSinceInstallMs: [],
     engineLatenessMs: [],
     batchSpanMs: [],
     inOrderShare: [],
@@ -347,9 +388,8 @@ export function emptyState(): ProjectedState {
     farmSamples: [],
     farmWindowMs: DEFAULT_RATE_WINDOW_MS,
     stockSeries: emptyStockSeries(),
-    stockInstalls: [],
-    stockFlowSince: null,
-    stockTick: null,
+    stockRateSince: null,
+    sawStockLedgerOpen: false,
     hackDoneEarned: 0,
     hackDoneCount: 0,
     sawHackDone: false,
@@ -476,8 +516,6 @@ const SAMPLE_RING = 400;
 
 /** Turn the stock topic into the tab's capital and earnings curves.
  *
- * Two rules carry all of the difficulty.
- *
  * ABSENCE IS NOT ZERO. `portfolioValue`/`portfolioCost` come from the 3-second
  * `stock.tick` probe, while `tradeCashFlow`/`unlockSpend` are written only by
  * the driver's `execute()` — so they are genuinely missing until this install's
@@ -485,50 +523,48 @@ const SAMPLE_RING = 400;
  * even when in fact it had not yet traded. Each series is pushed only when its
  * OWN inputs are present.
  *
- * A RESET DROPS EVERYTHING. `foldFarmSeries` detects one by a counter moving
- * backwards, which cannot work here: `tradeCashFlow` is a cash delta and goes
- * deeply negative on every position it opens, so "went backwards" is its
- * normal behaviour. The one monotone-within-install counter on the wire is
- * `market.tick`, and the other tell is the ledger vanishing after having been
- * present — `stockModule.reset` deletes the whole topic at an install, and
- * nothing else ever removes those fields, so a `realized` ring holding points
- * against a topic that no longer reports one can only be a wipe.
+ * NOTHING IS DROPPED HERE, and that is a correction. This fold used to close
+ * out a "previous install" mid-stream, on two sentinels that cannot mean an
+ * install: one artifact IS one install. `ui/store.ts` keys the run file on
+ * `hello.identity.install.id`, that id is keyed on `lastAugReset` and is stable
+ * across controller restarts and build handoffs, and the simulator rotates the
+ * JSONL on prestige — so an install boundary is a different file, loaded as a
+ * different run, and cannot appear inside one record stream at all.
  *
- * The curves are then dropped rather than spliced, for three reasons: the
- * positions are destroyed and every symbol is re-rolled, so the old book
- * describes a market that no longer exists; `tradeCashFlow` restarts at zero,
- * so a spliced curve is a cliff; and `drawSeries` scales y from the global
- * extent, so one pre-install peak would flatten every later segment
- * permanently. What survives is one scalar per install, which is exactly what
- * an install boundary means here: `plan.flat` is required to install at all, so
- * the closing value IS that install's closed-out trading profit. */
+ * What CAN appear mid-stream is a controller HANDOFF, and both old sentinels
+ * were handoff signals:
+ *  - `market.tick` is `memory.history.tick` off a module-level `let`, so it
+ *    restarts at 0 whenever a build push replaces the module instance;
+ *  - the ledger vanishing is the same event seen from the other side — the
+ *    rebuilt topic starts empty and `tradeCashFlow` is merged again only by the
+ *    next `execute()`.
+ * Both fired while the thing they claimed to close out was still running:
+ * `gameGlobal.stockFlows` is parked in the page realm precisely so a handoff
+ * cannot zero it, and only `resetStockState` — an install — deletes it. So the
+ * reset threw away the live install's whole capital history and pushed a
+ * phantom closed book carrying the current cumulative realised, which the tab
+ * then counted a second time on top of the still-live topic. The market and the
+ * ledger both survive a handoff; so, now, do the curves. */
 function foldStockSeries(state: ProjectedState, t: number, stock: StockState | undefined): void {
   if (!stock) return;
-  const tick = stock.market?.tick;
-  const reset =
-    (tick !== undefined && state.stockTick !== null && tick < state.stockTick) ||
-    (state.stockSeries.realized.length > 0 && stock.tradeCashFlow === undefined);
-  if (reset) {
-    const closing = state.stockSeries.realized[state.stockSeries.realized.length - 1];
-    const spent = state.stockSeries.unlockSpend[state.stockSeries.unlockSpend.length - 1];
-    if (closing) {
-      state.stockInstalls.push({ realized: closing[1], unlockSpend: spent?.[1] ?? 0, endedAt: closing[0] });
-      if (state.stockInstalls.length > STOCK_INSTALL_RING) {
-        state.stockInstalls.splice(0, state.stockInstalls.length - STOCK_INSTALL_RING);
-      }
-    }
-    state.stockSeries = emptyStockSeries();
-    state.stockFlowSince = null;
-    state.stockTick = null;
-  }
-  if (tick !== undefined) state.stockTick = tick;
-
   const series = state.stockSeries;
   if (typeof stock.portfolioValue === "number") push(series.value, t, stock.portfolioValue);
   if (typeof stock.portfolioCost === "number") push(series.cost, t, stock.portfolioCost);
   if (typeof stock.unlockSpend === "number") push(series.unlockSpend, t, stock.unlockSpend);
   if (typeof stock.tradeCashFlow === "number") {
-    if (state.stockFlowSince === null && stock.tradeCashFlow !== 0) state.stockFlowSince = t;
+    // The measured-rate clock is armed only by having WATCHED the ledger open.
+    // An explicit zero is proof that no trade has happened yet this install —
+    // the ledger survives a handoff and only an install zeroes it — while the
+    // ledger merely being ABSENT proves nothing, because a handoff-rebuilt
+    // topic carries no ledger while the parked one holds hours of flow.
+    //
+    // Arming on the first non-zero figure the viewer happened to see divided a
+    // whole install's realised P/L by the age of the ATTACH: a live attach
+    // folds the hub snapshot plus a 2 MB tail, and a compacted replay keeps one
+    // record per state key, so its single `stock` record sits seconds from
+    // `lastT`. Left null, the panel has to admit it has no denominator.
+    if (stock.tradeCashFlow === 0) state.sawStockLedgerOpen = true;
+    else if (state.sawStockLedgerOpen && state.stockRateSince === null) state.stockRateSince = t;
     push(series.realized, t, stock.tradeCashFlow + Math.max(0, stock.portfolioCost ?? 0));
   }
 }
@@ -537,13 +573,18 @@ function foldStockSeries(state: ProjectedState, t: number, stock: StockState | u
  *
  * Two kinds of curve come out of here, and the difference is the whole design:
  *
- *  - GAUGES, pushed as they arrive: the dispatcher health series, read straight
- *    off each rollup. Folded BEFORE the windowing below, deliberately — making
- *    them wait for a baseline a full window old left every health curve empty
- *    for the first thirty seconds of a run, and permanently on a short one.
- *  - WINDOWED quantities — the allocation share, the batch settle rate — which
- *    are differenced against a sample one batch period old rather than against
- *    the previous rollup. The farm publishes at 1 Hz but its cycle is one
+ *  - GAUGES, pushed as they arrive: occupancy, engine lateness, the ops-adrift
+ *    residual, the since-install landing error. Folded BEFORE the windowing
+ *    below, deliberately — making them wait for a baseline a full window old
+ *    left every health curve empty for the first thirty seconds of a run, and
+ *    permanently on a short one.
+ *  - WINDOWED quantities — the allocation share, the batch settle rate, the
+ *    mean batch span and the in-order share — which are differenced against a
+ *    sample one batch period old rather than against the previous rollup.
+ *    The last two used to be folded with the gauges, which quietly made them
+ *    lifetime means: their denominators are cumulative for the dispatcher's
+ *    whole life, so the card built to answer "is it getting worse" could not.
+ *    See `BatchCounters`. The farm publishes at 1 Hz but its cycle is one
  *    weakenTime, minutes against a real target, so an adjacent-sample
  *    difference asks "how many batches settled during this particular second",
  *    whose honest answer is almost always exactly zero. Measured on a live run:
@@ -572,6 +613,9 @@ function foldFarmSeries(state: ProjectedState, t: number, farm: FarmRollup | und
       batches: entry.batches,
       ops: entry.ops,
       moneyEarned: entry.moneyEarned,
+      spanMs: entry.spanMs,
+      graded: entry.graded ?? 0,
+      inOrder: entry.inOrder,
     };
   }
   const sample: FarmSample = {
@@ -601,6 +645,9 @@ function foldFarmSeries(state: ProjectedState, t: number, farm: FarmRollup | und
     state.batchHistory = [];
     state.batchSeen.clear();
     state.farmHealth = emptyFarmHealth();
+    // Including the measured span: a span left over from the previous run would
+    // caption this one's first points with the old one's window.
+    delete state.farmWindowActualMs;
   }
   samples.push(sample);
   if (samples.length > SAMPLE_RING) samples.splice(0, samples.length - SAMPLE_RING);
@@ -620,6 +667,9 @@ function foldFarmSeries(state: ProjectedState, t: number, farm: FarmRollup | und
   if (!base) return;
   const dtSec = (t - base.t) / 1_000;
   if (dtSec <= 0) return;
+  // After the guards, not beside `base`: both of them return without pushing a
+  // point, and a span recorded there would caption points that do not exist.
+  state.farmWindowActualMs = t - base.t;
 
   // Share of the threads the farm launched across the window. A window with no
   // launches at all contributes no point rather than a 0/0 — the ratio is
@@ -633,6 +683,14 @@ function foldFarmSeries(state: ProjectedState, t: number, farm: FarmRollup | und
     }
   }
 
+  // Summed across kinds, for the two health curves below: summed numerators
+  // over summed denominators, not a mean of means, because the kinds settle at
+  // wildly different rates and averaging their averages would weight a rare
+  // prep wave the same as thousands of farm cycles.
+  let settledAll = 0;
+  let spanDelta = 0;
+  let gradedDelta = 0;
+  let inOrderDelta = 0;
   for (const [kind, now] of Object.entries(sample.byKind)) {
     const series = state.batchSeries[kind] ?? (state.batchSeries[kind] = {
       perSec: [],
@@ -640,20 +698,35 @@ function foldFarmSeries(state: ProjectedState, t: number, farm: FarmRollup | und
     });
     // A kind absent from the baseline is one that settled its first batch
     // inside this window, so zero is its true starting point rather than a gap.
-    const before = base.byKind[kind] ?? { batches: 0, ops: 0, moneyEarned: 0 };
+    const before = base.byKind[kind] ?? { batches: 0, ops: 0, moneyEarned: 0, spanMs: 0, graded: 0, inOrder: 0 };
     const settled = now.batches - before.batches;
     push(series.perSec, t, settled / dtSec);
     // 0/0 is not 0. A window that settled nothing has no money-per-batch, and
     // plotting zero there would read as "a batch now earns nothing".
     if (settled > 0) push(series.moneyPerBatch, t, (now.moneyEarned - before.moneyEarned) / settled);
+    settledAll += settled;
+    spanDelta += now.spanMs - before.spanMs;
+    gradedDelta += now.graded - before.graded;
+    inOrderDelta += now.inOrder - before.inOrder;
   }
+  // Same "0/0 is not 0" rule: a window that settled nothing has no mean span,
+  // and one that graded nothing has no in-order share. A negative graded delta
+  // is a rollup that stopped reporting `graded` (it is optional on the wire),
+  // which is also not a share.
+  if (settledAll > 0) push(state.farmHealth.batchSpanMs, t, spanDelta / settledAll);
+  if (gradedDelta > 0) push(state.farmHealth.inOrderShare, t, inOrderDelta / gradedDelta);
 }
 
 /** Dispatcher health curves, from fields that were already on the wire.
  *
  * All of these were published and rendered as a single latest value in a table.
  * A gauge with no history cannot say whether it is getting worse, which is the
- * only thing an operator wants from it. */
+ * only thing an operator wants from it.
+ *
+ * Only true gauges belong here. The mean batch span and the in-order share used
+ * to be pushed from this function and are now differenced in `foldFarmSeries`:
+ * their denominators are cumulative for the dispatcher's whole life, so read
+ * straight off a rollup they were lifetime means wearing a trend's caption. */
 function foldFarmHealth(state: ProjectedState, t: number, farm: FarmRollup): void {
   const health = state.farmHealth;
 
@@ -670,30 +743,15 @@ function foldFarmHealth(state: ProjectedState, t: number, farm: FarmRollup): voi
   }
 
   if (typeof farm.pumpOccupancy === "number") push(health.pumpOccupancy, t, farm.pumpOccupancy);
+  // A gauge only in the sense that it is read straight off the rollup: the
+  // dispatcher accumulates count/sum and a monotone max for the whole install
+  // and never resets them, so these two are since-install statistics that
+  // cannot be differenced from what is on the wire. The names carry that.
   if (farm.landingError) {
-    push(health.landingErrorMeanMs, t, farm.landingError.meanMs);
-    push(health.landingErrorMaxAbsMs, t, farm.landingError.maxAbsMs);
+    push(health.landingErrorMeanSinceInstallMs, t, farm.landingError.meanMs);
+    push(health.landingErrorMaxAbsSinceInstallMs, t, farm.landingError.maxAbsMs);
   }
   if (farm.engineLatenessMs) push(health.engineLatenessMs, t, farm.engineLatenessMs.meanMs);
-
-  // Mean span and in-order share across every kind. Summed numerators over
-  // summed denominators, not a mean of means: the kinds settle at wildly
-  // different rates and averaging their averages would weight a rare prep wave
-  // the same as thousands of farm cycles.
-  let batches = 0;
-  let spanMs = 0;
-  let graded = 0;
-  let inOrder = 0;
-  for (const entry of Object.values(farm.batches ?? {})) {
-    batches += entry.batches;
-    spanMs += entry.spanMs;
-    graded += entry.graded ?? 0;
-    inOrder += entry.inOrder;
-  }
-  if (batches > 0) push(health.batchSpanMs, t, spanMs / batches);
-  // Only when something was gradeable. Plotting zero for an ungraded run would
-  // read as "every batch mis-landed", which is a claim about correctness.
-  if (graded > 0) push(health.inOrderShare, t, inOrder / graded);
 }
 
 /** Accumulate the rollup's bounded recent-batch ring into a full history.

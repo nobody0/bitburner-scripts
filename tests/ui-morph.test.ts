@@ -95,6 +95,30 @@ describe("morph", () => {
     expect(input.value).toBe("new");
   });
 
+  test("a select keeps its selection when an option's label changes", () => {
+    root.replaceChildren();
+    // The run picker's live row embeds a duration, so the selected option's own
+    // markup changes on every catalogue re-send. `selected` is not a reflected
+    // property, so an absent attribute must not be read as "deselect".
+    render(`<select id="runpick"><option data-key="a" value="a">a 1s</option>` +
+      `<option data-key="b" value="b">b 1s</option></select>`);
+    const select = root.querySelector("select") as HTMLSelectElement;
+    select.value = "b";
+    render(`<select id="runpick"><option data-key="a" value="a">a 1s</option>` +
+      `<option data-key="b" value="b">b 2s</option></select>`);
+    expect(root.querySelector("select")).toBe(select);
+    expect(select.value).toBe("b");
+  });
+
+  test("markup that declares `selected` moves the selection", () => {
+    root.replaceChildren();
+    render(`<select id="p"><option value="a">a</option><option value="b">b</option></select>`);
+    const select = root.querySelector("select") as HTMLSelectElement;
+    expect(select.value).toBe("a");
+    render(`<select id="p"><option value="a">a</option><option value="b" selected>b</option></select>`);
+    expect(select.value).toBe("b");
+  });
+
   test("a keyed child that moved is moved, not rebuilt", () => {
     root.replaceChildren();
     render(`<div><p data-key="a">a</p><p data-key="b">b</p><p data-key="c">c</p></div>`);

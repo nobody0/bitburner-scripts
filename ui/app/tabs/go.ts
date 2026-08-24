@@ -1,7 +1,10 @@
-import { NONE, card, note, table, tiles, waiting } from "../lib/dom.ts";
+import { nowFor } from "../lib/clock.ts";
+import { NONE, card, note, rankedTable, table, tiles, waiting, waitingPanel } from "../lib/dom.ts";
 import { esc, fmtMs, fmtNum, fmtPct, fmtTime } from "../lib/format.ts";
+import { html } from "../lib/html.ts";
 import type { ProjectedState } from "../project.ts";
 import { territoryOwners } from "../../../shared/strategy/go/rules.ts";
+import type { GoGameCandidate } from "../../../shared/strategy/go/rewards.ts";
 import type { GoDispatchBreakdown } from "../../../shared/strategy/go/tick.ts";
 import type { GoActionDigest, GoResponse, GoState } from "../../../shared/telemetry/topics/go.ts";
 import type { GoMove } from "../../../shared/strategy/go/rules.ts";
@@ -183,6 +186,12 @@ function decisionMarkup(g: GoState, reference: number): string {
   // The digest belongs to the completed turn. Go replaces the plan object on
   // the microtask that starts the next one, so a copy parked there would
   // rarely survive long enough to be read.
+  //
+  // That microtask is also why the played action is read from `result.action`
+  // and never from `plan.action`: for the whole dispatch window `plan` is the
+  // move being sent (or, briefly, the one just sent) while `lastTurn` answers
+  // the PREVIOUS move, so a tile labelled "selected" beside "actual reply"
+  // invited reading White's reply as the answer to a move that had not landed.
   const prediction = result?.prediction;
   // Ages earn their space only once something has stalled; at roughly a turn a
   // second they would otherwise read "0s ago" forever.
@@ -210,22 +219,39 @@ function decisionMarkup(g: GoState, reference: number): string {
     ? plan.ranked.find((move) => move.x === selectedAction.x && move.y === selectedAction.y)
     : undefined;
   // Only a seed-assured turn has an alignment to report. A reset, a resume or
-  // the unseeded fallback has none, and showing its bare duration under
-  // "actual reply" invited reading engine latency into what is neither.
+  // the unseeded fallback has none, so it says so and gives the duration
+  // alone; reading engine latency into a turn that never aligned is wrong.
+  // The action is not repeated here — the tile's value already carries it.
   const timingDetail = !result
     ? "waiting"
     : prediction
       ? `${prediction.boundaryRetries ? "boundary-replan" : "same-slot"}; full turn ${fmtMs(result.durationMs)}`
-      : `${describeAction(result.action)} took ${fmtMs(result.durationMs)}`;
+      : `unseeded; took ${fmtMs(result.durationMs)}`;
   // The verification runs between turns, so its cost lands in the NEXT turn's
   // admit segment. Publishing it here is the only thing that explains that.
   const verify = result?.boardVerify;
+  // A persistence note cannot use the sub-5s suppression above, which returns
+  // nothing: here "recent" and "unknown" have to read differently.
+  const since = (at: number): string => {
+    const age = staleAge(at);
+    return age ? `${age} ago` : "just now";
+  };
   // Survives the unverified flag clearing, so a corrected desync stays visible
-  // instead of healing silently.
+  // instead of healing silently. Which is exactly why each counter carries its
+  // own age: both are monotonic and never cleared, so without one the note read
+  // identically for a resync on this turn and one hundreds of turns ago.
+  //
+  // Built with html`` rather than a concatenated string: `note` is a TEXT slot
+  // and escapes what it is given, so the esc() this replaced escaped the reason
+  // twice and printed `&amp;quot;` at the operator — and the reason is a game
+  // error string (`turn refused: ${detail}`), the one input here that can carry
+  // a quote or an ampersand.
   const resyncNote = g.boardResyncs
-    ? note(`board resynced ${g.boardResyncs}x`
-      + (g.boardDrifts ? ` (${g.boardDrifts} verified drift)` : "")
-      + (g.lastBoardResyncReason ? `: ${esc(g.lastBoardResyncReason)}` : ""))
+    ? note(html`board resynced ${g.boardResyncs}x${
+      g.lastBoardResyncAt ? `, last ${since(g.lastBoardResyncAt)}` : ""}${
+      g.boardDrifts ? ` (${g.boardDrifts} verified drift${
+        g.lastBoardDriftAt ? `, ${since(g.lastBoardDriftAt)}` : ""})` : ""}${
+      g.lastBoardResyncReason ? `: ${g.lastBoardResyncReason}` : ""}`)
     : "";
   const breakdown = prediction?.dispatchBreakdown;
   const latencyTile = breakdown
@@ -275,7 +301,10 @@ function decisionMarkup(g: GoState, reference: number): string {
   return (
     tiles([
       {
-        label: "selected",
+        // "planned", not "next move": between the turn merge and the re-plan
+        // this is the move that was just played, and after it the one being
+        // dispatched — never reliably the next one.
+        label: "planned",
         value: describeAction(plan.action),
         sub: selectedMove ? `win ${fmtPct(selectedMove.score)} · ${selectedMove.captures} capture(s)` : undefined,
       },
@@ -287,7 +316,9 @@ function decisionMarkup(g: GoState, reference: number): string {
         sub: `position win ${fmtPct(plan.planning.positionValue)}; history ${plan.input.previousBoards.length}`
           + (planAge ? `; computed ${planAge} ago` : ""),
       },
-      { label: "actual reply", value: response, sub: timingDetail },
+      result
+        ? { label: "played", value: describeAction(result.action), sub: `reply ${response}; ${timingDetail}` }
+        : { label: "played", value: "waiting", sub: "no turn has landed yet" },
       latencyTile,
       { label: "forecast support", value: support, sub: "forecast weight on the reply that arrived" },
     ]) +
@@ -304,9 +335,32 @@ function decisionMarkup(g: GoState, reference: number): string {
   );
 }
 
+/** The bounded search ranking, with the dispatched action marked.
+ *
+ * Row 1 is the network's top move, which is not always the move that was
+ * sent: a certified-playbook dispatch overrides the action and keeps this
+ * ranking, so the marker is the only thing in the card that says which option
+ * was acted on. When the action is absent from the ranking the caption says
+ * exactly that and no more — `GoPlan` carries no playbook flag, and the flag
+ * that exists belongs to the COMPLETED turn, so naming the playbook as the
+ * cause would attribute turn N's override to turn N+1's ranking. */
 function rankingMarkup(g: GoState): string {
   const ranked = g.plan?.ranked ?? [];
-  return table(
+  const action = g.plan?.action;
+  const selectedAction = action?.type === "move" ? action : undefined;
+  const selected = (index: number): boolean => {
+    const move = ranked[index];
+    return move !== undefined && move.x === selectedAction?.x && move.y === selectedAction?.y;
+  };
+  // A pass, a resume, a new game or a cheat is absent structurally — the
+  // ranking holds moves only — so that case is worded as a fact about the
+  // table rather than as an override.
+  const unmarked = ranked.length > 0 && action !== undefined && !ranked.some((_, index) => selected(index))
+    ? selectedAction
+      ? note(`selected ${describeAction(action)} is not in this ranking`)
+      : note(`${describeAction(action)} was dispatched; this ranking lists moves only`)
+    : "";
+  return rankedTable(
     ["#", "move", "win", "power/round", "certainty", "take", "predicted reply"],
     ranked.map((move, index) => [
       String(index + 1),
@@ -317,18 +371,47 @@ function rankingMarkup(g: GoState): string {
       String(move.captures),
       esc(predictions(move)),
     ]),
-    { empty: "no legal candidates for this decision", wrap: [6] },
-  );
+    { selected, empty: "no legal candidates for this decision", wrap: [6] },
+  ) + unmarked;
 }
 
-/** The demand a candidate is priced against: the bottleneck seconds its reward
- * touches, and the fraction of them the lifted subsystem actually supplies.
- * Both halves matter — a full runway at three percent is a rounding error, and
- * reading only the seconds is how the ranking used to be misread. */
-function demandCell(demand: { seconds: number; share: number; gainCap?: number } | undefined): string {
+/** The demand a candidate is priced against, and why the saving beside it is
+ * so much smaller.
+ *
+ * `GoEtaDemand.seconds` is UNSHARED and UNCLIPPED by contract: the ranking
+ * clips it against the install runway left after the alignment wait, and only
+ * then applies `share` and the relative multiplier gain. Printing the seconds
+ * and the share alone put "6000s x 12%" beside a transient saving of 9s with
+ * nothing on the panel bridging them, so the cell now names the clip and the
+ * multiplier transition the gain comes from.
+ *
+ * It deliberately does NOT recompute the saving. Both clamps live in
+ * `demandGain` (shared/strategy/go/rewards.ts) and a copy here would drift
+ * from the ranker; the product is already published as the "transient saved"
+ * column — whose horizon half is priced over the bounded continuation tree
+ * and does not decompose this way at all. */
+function demandCell(candidate: GoGameCandidate, installRemainingSec: number | undefined): string {
+  const demand = candidate.transientDemand;
   if (!demand) return `<span class="dim">none</span>`;
+  const runway = installRemainingSec === undefined
+    ? undefined
+    : Math.max(0, installRemainingSec - candidate.waitSec);
+  // Never 0s for a missing runway: the forecast is optional on the wire, and a
+  // zero would read as "this reward has run out of time" rather than as "we do
+  // not know how much time is left".
+  const clip = runway === undefined
+    ? " (runway unknown)"
+    : runway < demand.seconds
+      ? ` clipped to ${fmtNum(runway, 0)}s`
+      : "";
   const cap = demand.gainCap === undefined ? "" : ` cap ${fmtPct(demand.gainCap)}`;
-  return `${fmtNum(demand.seconds, 0)}s x ${fmtPct(demand.share)}${esc(cap)}`;
+  const tip = "unclipped bottleneck seconds; the ranking prices"
+    + " min(seconds, install runway - alignment wait) x share x the capped multiplier gain,"
+    + " and publishes the product as the transient saved column";
+  return `<span title="${esc(tip)}">`
+    + esc(`${fmtNum(demand.seconds, 0)}s${clip} x ${fmtPct(demand.share)}${cap}`
+      + ` x mult ${fmtNum(candidate.multiplierBefore, 3)}→${fmtNum(candidate.multiplierAfter, 3)}`)
+    + `</span>`;
 }
 
 function incomeShareSummary(shares: Record<string, number> | undefined): string | undefined {
@@ -336,7 +419,9 @@ function incomeShareSummary(shares: Record<string, number> | undefined): string 
     .filter(([, share]) => share > 0)
     .sort((a, b) => b[1] - a[1]);
   if (ranked.length === 0) return undefined;
-  return esc(ranked.map(([source, share]) => `${source} ${fmtPct(share)}`).join(" · "));
+  // Unescaped on purpose: the only consumer is a tile value, a TEXT slot that
+  // escapes for us. An esc() here would print `&amp;` at the operator.
+  return ranked.map(([source, share]) => `${source} ${fmtPct(share)}`).join(" · ");
 }
 
 function opponentMarkup(g: GoState): string {
@@ -368,9 +453,22 @@ function opponentMarkup(g: GoState): string {
   // for a Go that has stopped starting games.
   const ramGate = g.plan?.selection.ramGate;
   const ramNote = ramGate && !ramGate.pays
-    ? note(`no new game: ${esc(ramGate.opponent)} at ${fmtNum(ramGate.utilityPerSec * 60, 2)}s saved/min against ${fmtNum(ramGate.displacedGb, 1)} GB displaced of ${fmtNum(ramGate.usableGb, 0)} GB usable`)
+    ? note(`no new game: ${ramGate.opponent} at ${fmtNum(ramGate.utilityPerSec * 60, 2)}s saved/min against ${fmtNum(ramGate.displacedGb, 1)} GB displaced of ${fmtNum(ramGate.usableGb, 0)} GB usable`)
     : "";
-  return evidence + scheduleNote + ramNote + table(
+  // Rank order is the saving rate, which is not always the game we will start:
+  // a filler schedule deliberately prefers a shorter game that fits inside the
+  // leader's certified entry window. Records arrive as JSON, so the chosen row
+  // is found by the tuple `rankGoGames` keys on — object identity can never
+  // match across the wire.
+  const preferred = g.plan?.selection.preferred;
+  const isPreferred = (index: number): boolean => {
+    const candidate = candidates[index];
+    return candidate !== undefined && preferred !== undefined
+      && candidate.opponent === preferred.opponent
+      && candidate.boardSize === preferred.boardSize
+      && candidate.aligned === preferred.aligned;
+  };
+  return evidence + scheduleNote + ramNote + rankedTable(
     ["opponent", "board", "wait", "win", "streak", "horizon", "node power", "demand", "transient saved", "favor event", "favor gain", "favor saved", "saved/min"],
     candidates.map((candidate) => [
       esc(candidate.opponent),
@@ -379,15 +477,20 @@ function opponentMarkup(g: GoState): string {
       fmtPct(candidate.winProbability),
       String(candidate.currentWinStreak),
       `${candidate.planningGames} games / ${fmtNum(candidate.planningGames * candidate.expectedGameSec, 0)}s`,
-      `${fmtNum(candidate.expectedNodePower, 1)} now / ${fmtNum(candidate.horizonNodePower, 1)} horizon`,
-      demandCell(candidate.transientDemand),
+      // The one column with no visible derivation. Every term is on the wire,
+      // so the tooltip names them instead of leaving the number unexplained; a
+      // cell is a RAW slot, so the attribute is escaped here.
+      `<span title="${esc(`${fmtNum(candidate.expectedBlackScore, 1)} expected score × ${fmtNum(candidate.difficultyMultiplier, 2)} difficulty`
+        + ` → win ${fmtNum(candidate.powerIfWin, 1)} / loss ${fmtNum(candidate.powerIfLoss, 1)} at ${fmtPct(candidate.winProbability)}`)}">`
+        + `${fmtNum(candidate.expectedNodePower, 1)} now / ${fmtNum(candidate.horizonNodePower, 1)} horizon</span>`,
+      demandCell(candidate, context?.installRemainingSec),
       `${fmtNum(candidate.transientSecSaved, 1)}s now / ${fmtNum(candidate.horizonTransientSecSaved, 1)}s horizon`,
       fmtPct(candidate.favorEventProbability),
       fmtNum(candidate.expectedFavorGain, 2),
       `${fmtNum(candidate.favorSecSaved, 1)}s now / ${fmtNum(candidate.horizonFavorSecSaved, 1)}s horizon`,
       `${fmtNum(candidate.utilityPerSec * 60, 2)}s`,
     ]),
-    { empty: "waiting for ETA-valued game candidates" },
+    { selected: isPreferred, empty: "waiting for ETA-valued game candidates" },
   );
 }
 
@@ -395,7 +498,7 @@ export const goTab: Tab = {
   id: "go",
   render(state: ProjectedState) {
     const g = state.topics.go;
-    if (!g) return waiting("the Go probe");
+    if (!g) return waitingPanel("Go", "the Go probe");
 
     const summary = tiles([
       { label: "opponent", value: g.opponent ?? "waiting" },
@@ -439,7 +542,7 @@ export const goTab: Tab = {
       `</div>` +
       `<div class="col">` +
       card("Subnet", summary + boardMarkup(g)) +
-      card("Latest turn", decisionMarkup(g, state.lastT || Date.now())) +
+      card("Latest turn", decisionMarkup(g, nowFor(state))) +
       `</div>`
     );
   },

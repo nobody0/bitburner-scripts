@@ -82,15 +82,27 @@ export class RfaSession {
   }
 
   #handleMessage(data: unknown): void {
-    const text =
-      typeof data === "string" ? data : data instanceof Uint8Array ? Buffer.from(data).toString("utf8") : String(data);
-    const message = JSON.parse(text) as RfaResponse;
-    const pending = this.#pending.get(message.id);
-    if (!pending) return;
-    clearTimeout(pending.timeout);
-    this.#pending.delete(message.id);
-    if (message.error !== undefined) pending.reject(new Error(message.error));
-    else pending.resolve(message.result);
+    // A frame that is not JSON-RPC is a warning, never a fatality. The hub owns
+    // the Remote File API port for its whole lifetime and it is an
+    // unauthenticated localhost listener, so anything on the machine can put a
+    // frame here — and a throw out of this ws 'message' listener escapes into
+    // the emitter, exits the process, and takes the buffered tail and held spans
+    // of every live telemetry run with it. A stranger's frame does not get to
+    // decide the hub's lifetime. The whole body is guarded rather than the parse
+    // alone: `JSON.parse("null")` succeeds and reading `.id` off it throws next.
+    try {
+      const text =
+        typeof data === "string" ? data : data instanceof Uint8Array ? Buffer.from(data).toString("utf8") : String(data);
+      const message = JSON.parse(text) as RfaResponse;
+      const pending = this.#pending.get(message.id);
+      if (!pending) return;
+      clearTimeout(pending.timeout);
+      this.#pending.delete(message.id);
+      if (message.error !== undefined) pending.reject(new Error(message.error));
+      else pending.resolve(message.result);
+    } catch (error) {
+      console.warn(`ignoring unusable Remote File API frame: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 }
 

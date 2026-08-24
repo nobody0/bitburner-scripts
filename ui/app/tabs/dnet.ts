@@ -15,9 +15,10 @@ import {
   table,
   tiles,
   waiting,
+  waitingPanel,
   type Status,
 } from "../lib/dom.ts";
-import { raw, type Markup } from "../lib/html.ts";
+import { html, raw, type Markup } from "../lib/html.ts";
 import { esc, fmtNum, fmtPct, fmtRam, fmtTime } from "../lib/format.ts";
 import { view } from "../lib/viewstate.ts";
 import type { ProjectedState } from "../project.ts";
@@ -63,6 +64,60 @@ import type { Tab } from "./index.ts";
 /** How many rows the server table shows before saying it truncated. The MAP
  * never truncates; a table is where a limit belongs. */
 const TABLE_LIMIT = 60;
+
+/** How often the darknet driver publishes, and how far past that the digest has
+ * stopped being a current reading.
+ *
+ * Every other age on this page is measured against `knowledge.at` — the digest
+ * IS the clock, which is right for fact-versus-observation arithmetic and blind
+ * to the digest's own lag: a driver that stops publishing freezes every one of
+ * those ages at whatever it last said, and nothing on the page could contradict
+ * it. The cadence is the driver's own `everyMs` — 5s (game/lib/features/dnet.ts)
+ * — restated here because it is not on the wire, and it is the number the tile's
+ * sub-line prints at the operator, so a stand-in would be a false statement
+ * about the producer. The MUTATION clock is the wrong scale for this — ~6s at
+ * depth 5, so a two-mutation threshold would paint the tile red on almost every
+ * healthy frame and teach the reader to ignore it.
+ *
+ * The stale mark is a MULTIPLE of that period rather than three ticks: at 5s a
+ * three-tick threshold is 15s, and the digest record shares the 1 Hz publish
+ * with every other topic and rides one serially-awaited feature pass, so a busy
+ * frame or a slow fold jitters past 15s on a perfectly healthy run. Six periods
+ * is half a minute of complete silence — no longer jitter, and still an order of
+ * magnitude sooner than the 90s this used to wait. */
+const DIGEST_PUBLISH_MS = 5_000;
+const DIGEST_STALE_MS = 6 * DIGEST_PUBLISH_MS;
+
+/** The RAM a resident needs, for the two places this panel judges room for one.
+ *
+ * Mirrors `coverage()`'s own `agentRamGb` default (shared/strategy/dnet/
+ * knowledge.ts) rather than `DEFAULT_SPREAD_LIMITS.agentRamGb`, and the
+ * difference is load-bearing: every caller of `coverage()` passes three
+ * arguments, so the `plantable` count this panel prints two cards away is
+ * counted against that default, while the planner refuses on 5.4 GB (resident
+ * plus prober). Painting the `free` column against the planner's figure would
+ * make the panel contradict its own count.
+ *
+ * It was written out twice — the filter and the colouring — which is how the two
+ * could drift apart from each other and from `plantable` silently. One name and
+ * a tooltip that quotes it is as far as this side of the process boundary
+ * reaches; real parity needs the budget on the wire or one shared constant, and
+ * neither exists yet. */
+const AGENT_RAM_GB = 2.6;
+
+/** How long a walk may be quiet before this panel stops calling its pace an
+ * estimate.
+ *
+ * The producer's own kill window for a long-lived job is LONG_JOB_BEAT_MS =
+ * 30_000 (game/dnet/shared.ts): past it the overseer has already given up on the
+ * job, so a digest still carrying the walker means home's copy is stale rather
+ * than the walk being slow — `home.lab` is deliberately never blanked, so the
+ * last snapshot of a dead overseer's walk can sit on this card indefinitely.
+ * `ui/app` imports nothing from `game/`, so the number is restated rather than
+ * reached for. Doubled, because a move on a deep rung is a whole
+ * authentication and the eta tile would otherwise flap between a figure and a
+ * dash on a healthy slow walk. */
+const WALK_STALE_MS = 2 * 30_000;
 
 /** `1 radar` rather than `1 radars`. The walk's counters start at one and stay
  * small for a while, so the ungrammatical case is the one a reader sees first. */
@@ -185,19 +240,61 @@ function factRows(host: DarknetKnownHost, now: number, expiry: ExpiryOpts): [Mar
   return rows;
 }
 
+/** The host the whole panel is about, resolved ONCE.
+ *
+ * The map rings this name, both host tables chip-highlight it and the detail
+ * card describes it, so all three have to be handed the same one. The card used
+ * to run its own fallback chain instead, which meant that until the operator
+ * clicked something the panel rendered a full card for a host nothing on the
+ * 240-box map identified — and after an explicit selection left the digest the
+ * ring vanished while the card silently swapped subject.
+ *
+ * The default is DARKWEB, the map's own root, and deliberately not the
+ * best-ranked stasis candidate: `plan.ranked` is re-scored against a topology
+ * that mutates every ~6s, so ringing it would walk the white box around the map
+ * with no operator action — the shimmer the digest is depth-sorted to avoid —
+ * and would assert a selection nobody made, next to a Decision card that
+ * refuses to highlight a ranked row for that same reason. Now that the ring is
+ * DERIVED, its default has to be stable. */
+/** A "select this host" button, worded once.
+ *
+ * Four places offer one — the neighbour strip, the lost-reachable table and both
+ * host tables — and before this they disagreed twice over: two of them painted
+ * the selection with `.sel` and two never marked it at all, so clicking a host
+ * in one table left the same host looking unselected in another. And `.sel` is a
+ * background colour, which is the channel a screen reader cannot see.
+ *
+ * `aria-current`, not the `aria-pressed` that `filters()` emits: these are not
+ * toggles. Pressing one does not turn anything on, it moves a single selection —
+ * exactly what `aria-current` describes, and pressing the selected one again is
+ * a no-op rather than a release. */
+function hostChip(name: string, selected: string): string {
+  const on = name === selected;
+  return (
+    `<button class="chip pick${on ? " sel" : ""}"${on ? ` aria-current="true"` : ""}` +
+    ` data-view-key="dnet.sel" data-view-value="${esc(name)}">${esc(name)}</button>`
+  );
+}
+
+function effectiveSel(hosts: readonly DarknetKnownHost[], picked: string): string {
+  if (hosts.some((host) => host.hostname === picked)) return picked;
+  return (hosts.find((host) => host.isDarkweb) ?? hosts[0])?.hostname ?? "";
+}
+
 function detailCard(
   d: DarknetState,
   hosts: readonly DarknetKnownHost[],
   selected: string,
+  /** An explicit selection that is no longer in the digest, when there is one.
+   *  Re-pointing an operator's choice in silence is the more misleading half of
+   *  the fallback, so the card says whose card it is NOT. */
+  lost: string,
   now: number,
   expiry: ExpiryOpts,
 ): string {
-  const host = hosts.find((entry) => entry.hostname === selected)
-    // Nothing is "selected" by the plan any more, so the fallback is the
-    // best-ranked stasis candidate: the host the panel has most to say about.
-    ?? hosts.find((entry) => entry.hostname === d.plan?.ranked[0]?.hostname)
-    ?? hosts.find((entry) => entry.isDarkweb)
-    ?? hosts[0];
+  // Resolved by `effectiveSel` before the map was drawn, so this is a lookup
+  // rather than a second chain that could pick a different host from the ring.
+  const host = hosts.find((entry) => entry.hostname === selected);
   if (!host) return card("Host", note("no host selected"));
 
   const ram = ramBuckets(host);
@@ -286,7 +383,7 @@ function detailCard(
   const neighbours = (host.neighbours ?? []).length > 0
     ? `<div class="chips">`
       + (host.neighbours ?? [])
-        .map((name) => `<button class="chip pick" data-view-key="dnet.sel" data-view-value="${esc(name)}">${esc(name)}</button>`)
+        .map((name) => hostChip(name, selected))
         .join("")
       + `</div>`
     : note("no adjacency known — this host is a rumour until an agent stands next to it");
@@ -295,7 +392,8 @@ function detailCard(
     // raw(), because `card` escapes a plain string title and the hostname is
     // already escaped here.
     raw(esc(host.hostname)),
-    summary
+    (lost === "" ? "" : note(`${lost} has left the digest — forgotten, or past the KNOWLEDGE_MAX_HOSTS cap`))
+    + summary
     + (host.credentialKnown ? `<p class="good">credential held</p>` : "")
     + (host.agent
       ? host.agent.alive
@@ -325,7 +423,19 @@ function detailCard(
  * resident is, what each is doing, and where they die. This is the card that
  * answers "is the thing running at all" — which out there is a real question,
  * because the coordinator lives on a host that reboots. */
-function crewCard(d: DarknetState, hosts: readonly DarknetKnownHost[], now: number): string {
+function crewCard(
+  d: DarknetState,
+  hosts: readonly DarknetKnownHost[],
+  now: number,
+  /** The digest-age caveat, or "" while the topic is publishing. Every "alive"
+   *  and every beat below was decided controller-side at publish time, so the
+   *  panel must not re-derive liveness here — that would have it contradict the
+   *  controller. What it can do is say as of WHEN the answer was true. */
+  digestNote: string,
+  /** So the roster's own host buttons mark the selection the rest of the tab
+   *  is showing; see `hostChip`. */
+  selected: string,
+): string {
   const knowledge = d.knowledge;
   const overseer = knowledge?.overseer;
   const queue = knowledge?.queue;
@@ -365,16 +475,29 @@ function crewCard(d: DarknetState, hosts: readonly DarknetKnownHost[], now: numb
     },
   ]);
 
+  // Newest beat first is the right default for "is the thing running at all",
+  // but with a cap of sixteen it hid exactly the rows this card exists to show:
+  // the dropped tail is always the stalest beats, which is every resident that
+  // died, so the `N lost` figure in the tile above had no rows behind it. The
+  // cap is now the tab's own, and the chips keep the lost reachable inside it
+  // rather than flipping the default and truncating the crew doing the work.
+  const crewShow = view("dnet.crewshow", "all");
+  const lost = residents.filter((r) => !r.agent.alive);
+  const shown = crewShow === "lost" ? lost : residents;
+  const crewFilters = filters("dnet.crewshow", [
+    { value: "all", label: "all", badge: String(residents.length) },
+    { value: "lost", label: "lost", badge: String(lost.length) },
+  ], "all");
+
   const roster = dataTable(
     "dnet.crew",
-    residents,
+    shown,
     [
       {
         id: "host",
         label: "host",
         left: true,
-        cell: (r) =>
-          `<button class="chip pick" data-view-key="dnet.sel" data-view-value="${esc(r.hostname)}">${esc(r.hostname)}</button>`,
+        cell: (r) => hostChip(r.hostname, selected),
         sort: (r) => r.hostname,
       },
       {
@@ -406,10 +529,17 @@ function crewCard(d: DarknetState, hosts: readonly DarknetKnownHost[], now: numb
         sort: (r) => r.agent.failed ?? 0,
       },
     ],
-    { defaultSort: { key: "beat", dir: 1 }, empty: "no resident is standing anywhere yet", limit: 16 },
+    {
+      defaultSort: { key: "beat", dir: 1 },
+      // Chosen by the FILTER, not by the table: "no resident is standing
+      // anywhere yet" under the `lost` chip is a lie about a perfectly healthy
+      // net. `dataTable` only knows that the list it was handed is empty.
+      empty: crewShow === "lost" ? "no resident has been lost yet" : "no resident is standing anywhere yet",
+      limit: TABLE_LIMIT,
+    },
   );
 
-  return card("Beachhead", summary + roster);
+  return card("Beachhead", summary + digestNote + crewFilters + roster);
 }
 
 export const dnetTab: Tab = {
@@ -419,7 +549,10 @@ export const dnetTab: Tab = {
     // ONE representation. Home's own one-hop probe folds into the same knowledge
     // an agent feeds, so there is no second shape to render before the first
     // report lands — only a map that starts at `darkweb` and grows.
-    if (!d?.knowledge) return waiting("the darknet probe");
+    // A titled card rather than a bare paragraph: this is the same empty state
+    // as `lockedPanel()` for the same feature, and it lands in the same
+    // two-track grid, so the two have to look like each other.
+    if (!d?.knowledge) return waitingPanel("Darknet", "the darknet probe");
 
     const knowledge = d.knowledge;
     const hosts: DarknetKnownHost[] = knowledge.hosts;
@@ -429,18 +562,56 @@ export const dnetTab: Tab = {
     // still acting on. `stasisLinked` needs no set here — it arrives already
     // decided, as a per-host boolean.
     const now = knowledge.at;
+    // The RUN's clock, beside the digest's own — the one thing that makes the
+    // digest's age observable at all. It is the newest RECORD stamp and
+    // deliberately not `Date.now()`: records are stamped by the emitter, so a
+    // replay and a SIMULATED run (virtual time under `sim/realm/timers.ts`,
+    // streamed live into the hub with `live === true`) are in the same clock
+    // domain as `knowledge.at` while the viewer's wall clock is not — against
+    // it a sim run would report a fabricated lag of days, on the one run type
+    // this whole tab is A/B-read on. Floored at the digest stamp, because the
+    // digest record can be the newest thing the viewer holds and "-40ms ago" is
+    // the kind of detail that makes a reader distrust the page.
+    //
+    // `nowFor` deliberately NOT used, and it is the one panel that abstains:
+    // this figure is what makes the darknet's OWN silence visible against every
+    // other topic still publishing, so its ceiling has to be the newest record
+    // and never wall time — which for a live game run `nowFor` folds in.
+    const runNow = Math.max(state.lastT, knowledge.at);
+    const digestLagMs = runNow - now;
+    // Stated ONCE, and only when it matters: past a few publish intervals every
+    // "alive", every beat and every countdown on this page is a statement about
+    // a moment that has passed, and the cards that carry those say so rather
+    // than each re-deriving liveness from a clock the controller never saw.
+    const digestNote = digestLagMs > DIGEST_STALE_MS
+      ? note(`the darknet topic stopped publishing ${fmtTime(digestLagMs)} ago — every reading below is as of then`)
+      : "";
     // `netDepth` matters here twice. Every expiry below is derived from the
     // mutation clock, which is `30_000 / netDepth` — so leaving it out would put
     // the panel on the `DEFAULT_NET_DEPTH` fallback (5) while the driver ran on
     // the real depth, and the two would disagree about what is still believable.
     // It is also what lets the map draw the rows we have NOT reached; failing
     // the topic, the layout infers it from any labyrinth we have seen.
+    // `backdoored` is the one `ExpiryOpts` input the digest does not carry, and
+    // it is a SWITCH rather than a scale: `mutationBudget` branches on
+    // `backdoored > 0` (rates.ts), which lifts `deleted` and `restarted` and
+    // lowers everything else. So with one backdoor installed the panel and the
+    // driver disagree in BOTH directions — position and topology expire ~11%
+    // sooner here, resource facts ~35% later — and closing that needs the count
+    // the tick itself used (`home.backdoored.size`) on the wire. Not guessed
+    // here: a fabricated switch would be a second wrong answer rather than the
+    // absence of one.
     const expiry: ExpiryOpts = {
       bitNode: state.topics.progression?.bitNode,
       ...(d.netDepth !== undefined ? { netDepth: d.netDepth } : {}),
     };
 
     const options = mapOptions(now, expiry, d.netDepth);
+    // The ring, both table chips and the detail card, all off ONE name — see
+    // `effectiveSel`. `dnet.sel` stays the operator's override; this only fills
+    // in the default and drops a selection the digest no longer carries.
+    const picked = view("dnet.sel");
+    options.selected = effectiveSel(hosts, picked);
     const matched = options.query ? hosts.filter((host) => matches(host, options.query)) : hosts;
 
     // The three probe-only readings. They arrive from the DODGED PROBE and the
@@ -452,7 +623,13 @@ export const dnetTab: Tab = {
 
     const summary = tiles([
       {
-        label: "hosts known",
+        // QUALIFIED, and it has to stay qualified: the Knowledge card carries
+        // the controller's uncapped census under the same words, and past the
+        // digest cap the two are different populations with no wording to
+        // separate them. This tile counts the rows the page actually draws —
+        // the map below it and the `all` filter badge are the same rows — so it
+        // is named after them, and the census keeps the word "known".
+        label: hint("hosts on the map", "non-gone hosts in the published digest; the full census is in the Knowledge card"),
         // Counted OVER THE ROWS WE HAVE, not `hosts.length - gone`: the digest
         // caps `hosts` at KNOWLEDGE_MAX_HOSTS while `gone` is counted over every
         // host the controller holds (`publish.ts`), so subtracting one from the
@@ -461,9 +638,23 @@ export const dnetTab: Tab = {
         value: String(knowledge.hosts.filter((entry) => entry.goneAt === undefined).length),
         // The digest caps at KNOWLEDGE_MAX_HOSTS, and a capped count that says
         // nothing about the cap is a smaller net than the one we are flying.
+        // `totalHosts` counts gone hosts too — a third population — so the sub
+        // says "seen" rather than letting it read as a total of this tile.
         sub: knowledge.truncated && knowledge.totalHosts !== undefined
-          ? `of ${knowledge.totalHosts} — digest capped`
+          ? `of ${knowledge.totalHosts} seen — digest capped`
           : undefined,
+      },
+      {
+        // The digest's OWN age. Every other age on this page is measured
+        // against `knowledge.at`, so a driver that stops publishing froze all
+        // of them at whatever they last said and nothing here could contradict
+        // it: the map drew no fade, the crew card reported a fresh beat for a
+        // resident nobody has heard from, and a countdown counted no further.
+        label: hint("digest", "when the darknet driver last published; every other age on this page is measured against that stamp"),
+        value: digestLagMs > DIGEST_STALE_MS
+          ? html`<span class="bad">${fmtTime(digestLagMs)} ago</span>`
+          : digestLagMs < 1_000 ? "now" : `${fmtTime(digestLagMs)} ago`,
+        sub: `driver publishes every ${fmtTime(DIGEST_PUBLISH_MS)}`,
       },
       // -1 is getDepth's "no idea", not a depth. Rendering it would put the
       // sentinel on screen next to real rows.
@@ -536,7 +727,7 @@ export const dnetTab: Tab = {
       switch (showFilter) {
         case "cracked": return host.credentialKnown === true;
         case "locked": return host.authState === "auth-required";
-        case "roomy": return (host.freeRam ?? 0) >= 2.6;
+        case "roomy": return (host.freeRam ?? 0) >= AGENT_RAM_GB;
         case "stale": return isStale(host, now, expiry);
         case "gone": return host.goneAt !== undefined;
         default: return true;
@@ -553,9 +744,7 @@ export const dnetTab: Tab = {
           left: true,
           // The accessible route to selection: a real button, unlike the SVG
           // group, which cannot be activated from the keyboard.
-          cell: (h) =>
-            `<button class="chip pick${h.hostname === options.selected ? " sel" : ""}"`
-            + ` data-view-key="dnet.sel" data-view-value="${esc(h.hostname)}">${esc(h.hostname)}</button>`,
+          cell: (h) => hostChip(h.hostname, options.selected),
           sort: (h) => h.hostname,
         },
         {
@@ -590,7 +779,10 @@ export const dnetTab: Tab = {
           cell: (h) => {
             if (h.maxRam === undefined) return NONE;
             const free = h.freeRam ?? 0;
-            return `<span class="${free >= 2.6 ? "good" : "bad"}">${fmtRam(free)}</span>`;
+            // The threshold explains itself here rather than in the column
+            // label: `Column.label` is typed `string` and `dataTable` escapes
+            // it, so a `hint()` there would print its own markup at the reader.
+            return html`<span class="${free >= AGENT_RAM_GB ? "good" : "bad"}" title="green = a resident fits: ${fmtRam(AGENT_RAM_GB)}">${fmtRam(free)}</span>`;
           },
           sort: (h) => h.freeRam ?? -1,
         },
@@ -682,9 +874,7 @@ export const dnetTab: Tab = {
           id: "host",
           label: "host",
           left: true,
-          cell: (h) =>
-            `<button class="chip pick${h.hostname === options.selected ? " sel" : ""}"`
-            + ` data-view-key="dnet.sel" data-view-value="${esc(h.hostname)}">${esc(h.hostname)}</button>`,
+          cell: (h) => hostChip(h.hostname, options.selected),
           sort: (h) => h.hostname,
         },
         { id: "model", label: "model", left: true, cell: (h) => esc(h.modelId ?? ""), sort: (h) => h.modelId ?? "" },
@@ -825,7 +1015,11 @@ export const dnetTab: Tab = {
     const cover = d.coverage;
     const reach = cover
       ? definitions([
-        ["hosts known", String(cover.known)],
+        // The CENSUS, uncapped — the header tile counts the digest's rows, and
+        // the two are different populations past KNOWLEDGE_MAX_HOSTS. Kept as
+        // `cover.known` because the next row uses it as a denominator, so both
+        // have to stay over the same population.
+        ["hosts known (census)", String(cover.known)],
         ["adjacency known", `${cover.adjacencyKnown} / ${cover.known}`],
         ["believed fresh", meter(cover.freshFraction, fmtPct(cover.freshFraction))],
         ["gone", String(cover.gone)],
@@ -854,7 +1048,9 @@ export const dnetTab: Tab = {
     // attributable rather than a blank.
     const codes = Object.entries(d.codes ?? {})
       .sort((a, b) => b[1] - a[1])
-      .map(([code, count]) => [code, esc(codeName(Number(code))), String(count)]);
+      // A table cell is a RAW slot (lib/dom.ts): the key is a wire string, not
+      // a number, so it is escaped like every other Record key in this file.
+      .map(([code, count]) => [esc(code), esc(codeName(Number(code))), String(count)]);
 
     // Why the net is not growing. `planSpread` names every refusal and nothing
     // rendered them, so a planner that had run out of reachable hosts looked
@@ -880,9 +1076,15 @@ export const dnetTab: Tab = {
       ? card(
         "Farming",
         definitions([
+          // The caption sits on the ROW rather than over the card because
+          // neither of these lists is homogeneous: `admitted` is what the LAST
+          // derivation admitted, while `karma` below it is cumulative for the
+          // run and the phish window under that is live engine state. A block
+          // caption would mislabel two of the three. `kind` is not `esc`-ed —
+          // `hint()` takes a TEXT slot and escapes it for us.
           ...Object.entries(farming.admitted)
             .sort((a, b) => b[1] - a[1])
-            .map(([kind, n]) => [esc(kind), String(n)] as [string, string]),
+            .map(([kind, n]) => [hint(kind, "tasks the last derivation admitted"), String(n)] as [Markup, Markup]),
           ...(farming.cacheHunter !== undefined
             ? [[
               hint("cache hunter", "one .d.cache every three minutes for the WHOLE net, and the roll scales with threads — so the threads go to one deep resident rather than being spread thin"),
@@ -903,7 +1105,12 @@ export const dnetTab: Tab = {
             ? [[
               hint("phish window", "one .d.cache every three minutes for the WHOLE net; while it is shut every call falls through to money"),
               (() => {
-                const left = PHISH_CACHE_COOLDOWN_MS - (now - farming.lastPhishCacheAt!);
+                // Against the RUN clock, not the digest's: this is an absolute
+                // engine window rather than the age of an observation, so on
+                // `now` it only ever moved when the digest moved — a
+                // three-minute countdown in thirty-second jumps, frozen for
+                // good the moment the driver stopped.
+                const left = PHISH_CACHE_COOLDOWN_MS - (runNow - farming.lastPhishCacheAt!);
                 return left <= 0
                   ? `<span class="good">open</span>`
                   : `<span class="muted">shut — ${fmtTime(left)} left</span>`;
@@ -954,18 +1161,37 @@ export const dnetTab: Tab = {
     // lived in a different card from the maze.
     const labRefusals = (d.hold?.examples ?? []).filter((entry) => entry.host === labHost);
     const walkers = lab?.walkers ?? [];
-    const explored = lab ? labExplored(lab) : undefined;
-    const etaMs = lab ? labEtaMs(lab) : undefined;
     // Empty for a grid that does not match its own dimensions — a shape change
     // between a running overseer and a rebuilt panel. The legend follows the
     // maze rather than the digest, so a card that could not draw one does not
     // caption it either.
     const maze = lab === undefined ? "" : labMaze(lab, labPriorFor(lab));
+    // And it does not QUOTE numbers off that grid either. `labExplored` reads
+    // the same string at the same stride and treats every out-of-range cell as
+    // unknown, so a grid the renderer refused used to print a confident
+    // "mapped 0%" and "0 of N wall slots resolved" beside a deliberately blank
+    // maze. The maze's own emptiness IS the shape test; comparing the lengths
+    // again here would be a second copy of it, free to drift from the first.
+    const explored = lab !== undefined && maze !== "" ? labExplored(lab) : undefined;
+    const etaMs = lab ? labEtaMs(lab) : undefined;
+    // Whether the picture has stopped moving. `home.lab` is intentionally never
+    // blanked — the card would flicker between a map and an empty state — so
+    // once the overseer dies with its host the digest keeps shipping the last
+    // walker snapshot, and the beat is the only thing that can say so.
+    const walkStalled = walkers.length > 0 && walkers.every((walker) => now - walker.beatAt > WALK_STALE_MS);
 
     /** One walker, as a line rather than a table row: the numbers matter less
-     *  than which of the two we cannot afford to lose. */
+     *  than which of the two we cannot afford to lose.
+     *
+     *  `startedAt` and `beatAt` travel on every walker and reached nothing but
+     *  `walkerEtaMs`' arithmetic, which is why a walk holding a host for hours
+     *  could not say how long it had been running — and why a walk that stopped
+     *  beating kept printing the same estimate. Both halves of that quotient are
+     *  stamps, so when they freeze the figure does too. */
     const walkerLine = (walker: DarknetLabWalker): string => {
-      const eta = walkerEtaMs(walker);
+      const beatAge = Math.max(0, now - walker.beatAt);
+      const stalled = beatAge > WALK_STALE_MS;
+      const eta = stalled ? undefined : walkerEtaMs(walker);
       const role = "finisher";
       return `<div class="labwalker">`
         + `<span class="who ${role}">${dot(walker.pinned ? "good" : "wait", walker.pinned
@@ -977,7 +1203,16 @@ export const dnetTab: Tab = {
         + (walker.walls > 0 ? ` · ${plural(walker.walls, "wall")}` : "")
         + (walker.radars > 0 ? ` · ${plural(walker.radars, "radar")}` : "")
         + `</span>`
-        + (eta !== undefined ? `<span class="num">~${fmtTime(eta)} left</span>` : "")
+        + `<span class="num">for ${fmtTime(Math.max(0, now - walker.startedAt))}</span>`
+        // The status class sits on a span of its OWN: `.labwalker .num` is
+        // specificity (0,2,0) and would beat `.bad` at (0,1,0), so a `num bad`
+        // would silently render muted. And the line says STALLED rather than
+        // dropping the estimate, so the card explains why the number went away.
+        + (stalled
+          ? `<span class="bad" title="the overseer gives up on a long-lived job after 30s of silence, so a walker still on this card is a frozen snapshot rather than a slow walk">`
+            + `beat ${fmtTime(beatAge)} ago — stalled</span>`
+          : `<span class="num">beat ${fmtTime(beatAge)} ago</span>`
+            + (eta !== undefined ? `<span class="num">~${fmtTime(eta)} left</span>` : ""))
         + `</div>`;
     };
 
@@ -1006,8 +1241,13 @@ export const dnetTab: Tab = {
             ? [
               {
                 label: hint("mapped", "wall slots the walkers have resolved, out of the ones the generator actually decides"),
+                // The dash is reachable for the first time here, and on its own
+                // it would read as "no walk yet" — a different and wrong claim —
+                // so the shape fact goes in the sub the size already occupies.
                 value: explored === undefined ? NONE : fmtPct(explored.fraction),
-                sub: `${lab.width} x ${lab.height}`,
+                sub: explored === undefined
+                  ? `grid does not match ${lab.width} x ${lab.height}`
+                  : `${lab.width} x ${lab.height}`,
               },
               {
                 label: hint(
@@ -1015,8 +1255,15 @@ export const dnetTab: Tab = {
                   "the planner's own plan cost, calibrated for its optimism (median 1.31x, quartiles 0.97-1.81) and"
                   + " priced at this walk's own measured pace — so threads, charisma and The B00ts are already in it",
                 ),
-                value: etaMs === undefined ? NONE : fmtTime(etaMs),
-                sub: walkers.length > 1 ? `soonest of ${walkers.length}` : undefined,
+                // Suppressed rather than restated once the walkers stop
+                // beating: the pace is `beatAt - startedAt` over `attempts`, so
+                // a frozen walker prints the same "~14m left" forever on the
+                // panel's lead card. The MAP stays either way — a map does not
+                // go stale, a pace does.
+                value: walkStalled || etaMs === undefined ? NONE : fmtTime(etaMs),
+                sub: walkStalled
+                  ? "no walker is beating"
+                  : walkers.length > 1 ? `soonest of ${walkers.length}` : undefined,
               },
             ]
             : [
@@ -1140,9 +1387,12 @@ export const dnetTab: Tab = {
               : `${linked.length} / ${d.stasisLinkLimit}`
               + (linked.length > 0 ? ` <span class="muted">· ${esc(linked.join(", "))}</span>` : ""),
           ],
+          // Per-derivation, and captioned per row for the same reason as the
+          // Farming list: `pinned` above it is live stasis state, not a count of
+          // anything this tick admitted.
           ...Object.entries(hold.admitted)
             .sort((a, b) => b[1] - a[1])
-            .map(([kind, n]) => [esc(kind), String(n)] as [Markup, Markup]),
+            .map(([kind, n]) => [hint(kind, "actions the last derivation admitted"), String(n)] as [Markup, Markup]),
         ])
         + refusals(hold.refused, hold.examples, "nothing was declined")
         + (backdoors
@@ -1199,9 +1449,13 @@ export const dnetTab: Tab = {
           ...(stormReport.firedAt !== undefined
             ? [[
               hint("last storm", "the engine mints no seed for 30 minutes after a storm; the clock is our own stamp"),
-              `${Math.round((now - stormReport.firedAt) / 60_000)}m ago · `
-              + (now - stormReport.firedAt < STORM_COOLDOWN_MS
-                ? `seed eligible in ${Math.ceil((STORM_COOLDOWN_MS - (now - stormReport.firedAt)) / 60_000)}m`
+              // The cooldown is the engine's own thirty minutes, so it is
+              // measured against the run clock for the same reason as the phish
+              // window above; the seed SIGHTING a few rows up stays on `now`,
+              // because that one is the age of an observation.
+              `${Math.round((runNow - stormReport.firedAt) / 60_000)}m ago · `
+              + (runNow - stormReport.firedAt < STORM_COOLDOWN_MS
+                ? `seed eligible in ${Math.ceil((STORM_COOLDOWN_MS - (runNow - stormReport.firedAt)) / 60_000)}m`
                 : "a new seed can mint"),
             ] as [Markup, Markup]]
             : []),
@@ -1260,7 +1514,7 @@ export const dnetTab: Tab = {
           { value: "all", label: "all", badge: String(hosts.length) },
           { value: "cracked", label: "cracked" },
           { value: "locked", label: "auth required" },
-          { value: "roomy", label: "has RAM" },
+          { value: "roomy", label: "has RAM", title: `free RAM >= one resident (${fmtRam(AGENT_RAM_GB)})` },
           { value: "stale", label: "stale" },
           { value: "gone", label: "gone" },
         ], "all")
@@ -1285,11 +1539,18 @@ export const dnetTab: Tab = {
       // sighting draws no card at all, so this reorders nothing until there is
       // something to reorder.
       + labCard
-      + detailCard(d, hosts, options.selected, now, expiry)
-      + crewCard(d, hosts, now)
+      + detailCard(d, hosts, options.selected, picked === options.selected ? "" : picked, now, expiry)
+      + crewCard(d, hosts, now, digestNote, options.selected)
       + card("Knowledge", reach)
       + card("Report channel", delivery)
-      + card("Response codes", table(["code", "meaning", "n"], codes, { empty: "no darknet call has answered yet", left: [0, 1] }))
+      // The one count on this tab that is NOT per-derivation, said in the
+      // header: the planner rollups above are what the last derivation
+      // admitted, and reading these as the same unit is off by the whole run.
+      + card("Response codes", table(
+        ["code", "meaning", hint("n", "cumulative since this install; the count resets when the generation changes")],
+        codes,
+        { empty: "no darknet call has answered yet", left: [0, 1] },
+      ))
       + holdCard
       + spreadCard
       + farmCard

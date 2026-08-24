@@ -14,8 +14,14 @@ import { augRows } from "../ui/app/tabs/factions-aug.ts";
 const OWNED = "Neurotrainer I";
 const QUEUED = "Neurotrainer II";
 const PLANNED = "Nuoptimal Nootropic Injector Implant";
+const NFG = "NeuroFlux Governor";
 
-function factionsState(over: Record<string, unknown> = {}): ProjectedState {
+function factionsState(
+  over: Record<string, unknown> = {},
+  /** The progression topic, which is what says how much of `factions.ownedAugs`
+   *  is merely QUEUED. `null` means it never arrived. */
+  progression: Record<string, unknown> | null = { plan: { queuedAugmentations: [QUEUED] } },
+): ProjectedState {
   const state = emptyState();
   state.topics.factions = {
     joined: ["CyberSec"],
@@ -92,9 +98,9 @@ function factionsState(over: Record<string, unknown> = {}): ProjectedState {
     },
     ...over,
   } as ProjectedState["topics"]["factions"];
-  state.topics.progression = {
-    plan: { queuedAugmentations: [QUEUED] },
-  } as ProjectedState["topics"]["progression"];
+  // Through `unknown`: these fixtures are deliberately PARTIAL topics, which is
+  // what the wire delivers before every probe has run.
+  if (progression) state.topics.progression = progression as unknown as ProjectedState["topics"]["progression"];
   return state;
 }
 
@@ -108,8 +114,11 @@ describe("an augmentation's state is a word, not a shade of dot", () => {
     expect(by(OWNED)?.state).toBe("installed");
     expect(by(QUEUED)?.state).toBe("queued");
     expect(by(PLANNED)?.state).toBe("planned");
-    // Something no joined faction sells is locked, not merely "not ready".
-    expect(rows.some((row) => row.state === "locked")).toBe(true);
+    // With no live offer there is nothing to say `rep short` or `locked` WITH:
+    // the bundled table knows neither this node's sellers nor the reputation
+    // gate, and it used to answer both from its own static columns.
+    expect(rows.some((row) => row.state === "unknown")).toBe(true);
+    expect(rows.some((row) => row.state === "locked")).toBe(false);
   });
 
   test("the rendered table carries the state and the score", () => {
@@ -183,5 +192,83 @@ describe("the plan is a set, and says how long a cycle it is for", () => {
     expect(html).not.toContain("cycle budget");
     // ...and the rest of the tab still renders.
     expect(html).toContain("Augmentations");
+  });
+});
+
+describe("what we own is split by the wire, not by a digest that lags it", () => {
+  const by = (rows: ReturnType<typeof augRows>, name: string) => rows.find((row) => row.name === name);
+
+  test("the two ownership lists are differenced, so a stale plan cannot report a purchase as installed", () => {
+    // `factions.ownedAugs` gains a purchase the instant it is made, while the
+    // plan's `queuedAugmentations` is republished once a minute — so during the
+    // end-loaded sweep the plan says the queue is empty and it is not.
+    const rows = augRows(factionsState({}, { ownedAugs: { [OWNED]: 1 }, plan: { queuedAugmentations: [] } }));
+    expect(by(rows, OWNED)?.state).toBe("installed");
+    expect(by(rows, QUEUED)?.state).toBe("queued");
+  });
+
+  test("installed ownership alone is enough — no plan needed", () => {
+    const rows = augRows(factionsState({}, { ownedAugs: { [OWNED]: 1 } }));
+    expect(by(rows, OWNED)?.state).toBe("installed");
+    expect(by(rows, QUEUED)?.state).toBe("queued");
+  });
+
+  test("NeuroFlux installed at level 3 with one more bought still reads queued", () => {
+    const rows = augRows(
+      factionsState({ ownedAugs: [OWNED, NFG, NFG] }, { ownedAugs: { [OWNED]: 1, [NFG]: 3 } }),
+    );
+    // The duplicate list entries ARE the queued levels, so the count is
+    // compared against "one installed copy", not deduped away.
+    expect(by(rows, NFG)?.state).toBe("queued");
+  });
+
+  test("with no progression topic at all a purchase is owned, never installed", () => {
+    const rows = augRows(factionsState({}, null));
+    expect(by(rows, OWNED)?.state).toBe("owned");
+    expect(by(rows, QUEUED)?.state).toBe("owned");
+    expect(rows.some((row) => row.state === "installed")).toBe(false);
+  });
+});
+
+describe("the bundled catalogue is not presented as a measurement", () => {
+  test("an augmentation with no live offer is unknown, not rep short", () => {
+    const rows = augRows(factionsState({ offers: [] }));
+    const bitwire = rows.find((row) => row.name === "BitWire")!;
+    // CyberSec (joined) sells it in the bundled table, which used to be enough
+    // to print "rep short" against an unscaled base reputation.
+    expect(bitwire.priced).toBe("bundled");
+    expect(bitwire.state).toBe("unknown");
+    expect(rows.some((row) => row.state === "short")).toBe(false);
+  });
+
+  test("a live catalogue proven complete replaces the bundled seller list", () => {
+    // The Red Pill is removed from Daedalus in BN15. `offers.length === augTotal`
+    // is the probe's own proof that its capped result is the whole catalogue.
+    const rows = augRows(factionsState({ joined: ["CyberSec", "Daedalus"], augTotal: 1 }));
+    const pill = rows.find((row) => row.name === "The Red Pill")!;
+    expect(pill.sellerSource).toBe("live");
+    expect(pill.factions).toEqual([]);
+    expect(pill.state).not.toBe("short");
+  });
+
+  test("a capped or empty live catalogue keeps the bundled list", () => {
+    const capped = augRows(factionsState({ joined: ["Daedalus"], augTotal: 99 }));
+    expect(capped.find((row) => row.name === "The Red Pill")!.sellerSource).toBe("bundled");
+    // `augTotal === 0` with an empty `offers` would satisfy the equality test on
+    // an empty catalogue, which must NOT blank every seller list.
+    const empty = augRows(factionsState({ joined: ["Daedalus"], offers: [], augTotal: 0 }));
+    expect(empty.find((row) => row.name === "The Red Pill")!.factions).toContain("Daedalus");
+  });
+
+  test("the inspector marks a bundled price, and its state chip is markup not text", () => {
+    setView("augs.mode", "all");
+    setView("augs.selected", "BitWire");
+    const html = TABS["factions"].render(factionsState({ offers: [] }));
+    // A tile value is a TEXT slot: the chip used to arrive escaped, so the
+    // operator read `&lt;span class=…` where the word should have been.
+    expect(html).toContain(`<div class="v"><span class="augstate`);
+    expect(html).toContain("the bundled v3.0.1 table");
+    setView("augs.selected", "");
+    setView("augs.mode", "available");
   });
 });

@@ -1,9 +1,10 @@
 import { STOCK_METADATA } from "../../../shared/features/stocks.ts";
-import { chartCanvas, mountChart } from "../lib/chart.ts";
-import { NONE, card, dataTable, dot, hint, meter, note, table, tiles, waiting } from "../lib/dom.ts";
+import { chartCanvas, hasSpan, mountChart } from "../lib/chart.ts";
+import { ageMs, stamp } from "../lib/clock.ts";
+import { NONE, card, dataTable, dot, hint, meter, note, table, tiles, waitingPanel } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtPct, fmtTime } from "../lib/format.ts";
 import { decisionHistory } from "../lib/history.ts";
-import { html, raw, type Html } from "../lib/html.ts";
+import { html, raw, type Html, type Markup } from "../lib/html.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
 
@@ -29,7 +30,7 @@ export const stockTab: Tab = {
   id: "stock",
   render(state: ProjectedState) {
     const s = state.topics.stock;
-    if (!s) return waiting("the stock probe");
+    if (!s) return waitingPanel("Stocks", "the stock probe");
 
     // Every field below `hasWseAccount` can be genuinely absent: the four
     // account flags come from `stock.account`, which runs unconditionally, while
@@ -40,6 +41,14 @@ export const stockTab: Tab = {
     const portfolioValue = s.portfolioValue ?? 0;
     const portfolioCost = s.portfolioCost ?? 0;
     const unrealised = portfolioValue - portfolioCost;
+    // Whether the book was MEASURED, which is a different question from what it
+    // is worth. `stock.tick` is gated on the TIX API, so a WSE-only run — and
+    // the first seconds of any run, and any replay projected at that moment —
+    // carries the flags and no book at all. Rendering the `?? 0` locals there
+    // printed "deployed $0" beside a GREEN "unrealised P/L $0", i.e. asserted a
+    // book that had been read and found exactly break-even. The locals stay for
+    // the arithmetic; only the display is gated.
+    const priced = s.portfolioValue !== undefined && s.portfolioCost !== undefined;
 
     // --- Capital: what went in, what came out ------------------------------
     //
@@ -56,9 +65,32 @@ export const stockTab: Tab = {
     // position leaves this untouched, so it moves only on a realised gain or
     // loss.
     const realised = cash === undefined ? undefined : cash + Math.max(0, portfolioCost);
-    const elapsedSec = state.stockFlowSince === null ? 0 : (state.lastT - state.stockFlowSince) / 1_000;
-    const rate = realised !== undefined && elapsedSec > 0 ? realised / elapsedSec : undefined;
-    const lifetime = state.stockInstalls.reduce((sum, install) => sum + install.realized, 0) + (realised ?? 0);
+    // The measured $/sec has THREE states, not two, and collapsing the last two
+    // is how this tile came to divide a whole install's realised P/L by the age
+    // of the browser tab. `stockRateSince` is the first trade this viewer
+    // actually watched land; null with `sawStockLedgerOpen` set means the market
+    // has genuinely not traded yet, and null with it clear means we attached
+    // after the ledger was already running — the driver holds that start as
+    // `StockFlows.tradeFlowSince` and does not publish it, so the denominator is
+    // not on the wire and the honest answer is "unknown". A compacted run is the
+    // same case by construction: its history before the tail is gone.
+    // `ageMs`, not `state.lastT` arithmetic: the run's own clock is the shared
+    // one (lib/clock.ts), and it is the only one that keeps a live GAME run's
+    // denominator from lagging a publish interval behind while treating a
+    // replay's and a simulated run's stamps as the virtual time they are.
+    const elapsedMs = ageMs(state, state.stockRateSince);
+    const rate =
+      !state.compacted && realised !== undefined && elapsedMs !== undefined && elapsedMs > 0
+        ? realised / (elapsedMs / 1_000)
+        : undefined;
+    const rateNote: Markup =
+      rate !== undefined
+        ? `${fmtSigned(rate)}/s since first trade`
+        : state.compacted
+          ? hint("rate unknown", "a compacted run keeps only the last write of each topic, so the first trade is not in it")
+          : state.sawStockLedgerOpen
+            ? "no trade yet"
+            : hint("rate unknown", "attached after the first trade: the ledger is cumulative and survives a controller handoff, so when it opened is not on the wire");
 
     const capitalTiles = tiles([
       {
@@ -69,12 +101,36 @@ export const stockTab: Tab = {
       {
         label: "realised P/L",
         value: realised === undefined ? NONE : pnl(realised),
-        sub: rate === undefined ? "no trade yet" : `${fmtSigned(rate)}/s since first trade`,
+        sub: rateNote,
       },
-      { label: "deployed", value: fmtMoney(portfolioCost), sub: `${fmtMoney(portfolioValue)} at market` },
-      { label: "unrealised P/L", value: pnl(unrealised), sub: portfolioCost ? fmtPct(unrealised / portfolioCost) : undefined },
+      {
+        label: "deployed",
+        value: priced ? fmtMoney(portfolioCost) : NONE,
+        sub: priced ? `${fmtMoney(portfolioValue)} at market` : undefined,
+      },
+      {
+        label: "unrealised P/L",
+        value: priced ? pnl(unrealised) : NONE,
+        sub: priced && portfolioCost ? fmtPct(unrealised / portfolioCost) : undefined,
+      },
       { label: "wealth", value: fmtMoney(s.wealth), sub: "cash + book, one snapshot" },
-      ...(s.unlockSpend ? [{ label: "unlocks paid", value: fmtMoney(s.unlockSpend), sub: "WSE · TIX · 4S" }] : []),
+      // Not gated on truthiness: a measured $0 is a real reading, and hiding the
+      // tile for it is the same error as printing an unmeasured 0. What it can
+      // NOT do is carry the whole price of admission — `unlockSpend` is
+      // cumulative since the INSTALL while the WSE/TIX/4S flags survive every
+      // install, so on any install after the one that bought a rung the ledger
+      // honestly reads $0 and the earlier spend sits in another run artifact,
+      // which this viewer never sees. The sub says which of the two a $0 is;
+      // there is nothing on the wire to carry the earlier figure forward.
+      ...(s.unlockSpend !== undefined
+        ? [{
+            label: "unlocks paid",
+            value: fmtMoney(s.unlockSpend),
+            sub: s.unlockSpend > 0
+              ? "WSE · TIX · 4S, this install"
+              : hint("none this install", "the ladder survives an install and this ledger does not: a rung bought in an earlier install is not on the wire"),
+          }]
+        : []),
     ]);
 
     // Two charts, each drawn for its CROSSING rather than its level. Book value
@@ -82,18 +138,18 @@ export const stockTab: Tab = {
     // under cumulative unlock spend is a market that has not yet earned back the
     // price of admission. Both bands are levels, never rates — see StockSeries.
     //
-    // Withheld entirely until something can be drawn: a series under two points
-    // draws nothing (see drawSeries), and a pair of empty boxes under a legend
-    // reads as a broken panel rather than as a market that has not moved yet.
+    // Withheld entirely until something can be drawn: a series with no time
+    // SPAN draws nothing worth reading (see hasSpan — a point COUNT is the wrong
+    // test, because one flush can push two samples at the same millisecond), and
+    // a pair of empty boxes under a legend reads as a broken panel rather than
+    // as a market that has not moved yet.
     // PER CHART, not one flag for both: `value`/`cost` come from the 3-second
     // tick probe and `realized`/`unlockSpend` only from a completed trade, so
     // before the first trade the book chart has data and the earnings chart has
     // none. One shared gate would draw the empty one anyway, which is the
     // "pair of empty boxes reads as a broken panel" failure this is avoiding.
-    const drawable = (...points: [number, number][][]): boolean =>
-      points.some((series) => series.length >= 2);
-    const hasBook = drawable(state.stockSeries.value, state.stockSeries.cost);
-    const hasEarnings = drawable(state.stockSeries.realized, state.stockSeries.unlockSpend);
+    const hasBook = hasSpan(state.stockSeries.value, state.stockSeries.cost);
+    const hasEarnings = hasSpan(state.stockSeries.realized, state.stockSeries.unlockSpend);
     const hasSeries = hasBook || hasEarnings;
     // A 140px chart has no room for a legend, and the two curves coincide
     // exactly in the good case — so the caption carries the colour key.
@@ -109,16 +165,11 @@ export const stockTab: Tab = {
         ) : "") +
         (hasEarnings ? banded(
           "stock-earnings",
-          "realised net against the cumulative WSE/TIX/4S spend. Until the first curve clears the second, the market has not paid for its own access.",
+          "realised net against THIS INSTALL'S WSE/TIX/4S spend. The first curve clearing the second is the market paying for its own access — but only on the install that bought a rung: the unlocks survive an install and the ledger measuring them does not, so a later install plots a truthful $0 spend against access that was already paid for, and the crossing there says nothing.",
           html`<span class="k1">${realised === undefined ? NONE : fmtSigned(realised)} realised</span>`,
-          html`<span class="k5">${fmtMoney(s.unlockSpend ?? 0)} unlocks</span>`,
+          html`<span class="k5">${fmtMoney(s.unlockSpend)} unlocks, this install</span>`,
         ) : "") +
         `</div>`
-      : "";
-
-    const closed = state.stockInstalls.length;
-    const installs = closed
-      ? note(html`${closed} earlier install${closed === 1 ? "" : "s"} · lifetime realised ${fmtSigned(lifetime)}`)
       : "";
 
     // --- Market state ------------------------------------------------------
@@ -136,6 +187,17 @@ export const stockTab: Tab = {
             access("WSE", s.hasWseAccount, "$200m — the exchange UI; a script reads nothing through it"),
             access("TIX", s.hasTixApiAccess, "$5b — prices, positions, buy and sell"),
             access("4S", s.has4SDataApi, "$25b — getForecast and getVolatility; without it forecasts are estimated"),
+            // The $1b ticker, and deliberately NOT a rung of the ladder:
+            // `getForecast` checks `has4SDataTixApi`, so owning this buys a
+            // script nothing, and a fourth green dot would claim reach the
+            // driver does not have. Shown only when the wire says true — the
+            // driver never buys it and a darknet cache grants it, so its
+            // presence is the surprise worth a pixel, while `false` is the
+            // intended steady state and `undefined` is a flag an older run
+            // never measured; a permanent grey rung would state both as facts.
+            ...(s.has4SData === true
+              ? [html`${dot("off", "the $1b 4S Market Data is owned — a darknet cache grants it, the driver never buys it; getForecast/getVolatility check has4SDataTixApi, so a script gains nothing")}<span class="muted">4S data</span>`]
+              : []),
           ]
             .map(String)
             .join(" "),
@@ -155,7 +217,14 @@ export const stockTab: Tab = {
             (clock.lastV !== undefined ? ` · v ${clock.lastV.toFixed(2)}` : "")
           : undefined,
       },
-      { label: "symbols", value: String(positions.length), sub: `${positions.filter((p) => p.shares > 0 || p.sharesShort > 0).length} held` },
+      // Gated on `positions` itself, not on `priced`: the count comes from the
+      // array while the three money figures are merged as a set, and "symbols 0"
+      // for 33 symbols nobody has read yet is the same lie in a smaller font.
+      {
+        label: "symbols",
+        value: s.positions === undefined ? NONE : String(positions.length),
+        sub: s.positions === undefined ? undefined : `${positions.filter((p) => p.shares > 0 || p.sharesShort > 0).length} held`,
+      },
     ]);
 
     // --- Plan -------------------------------------------------------------
@@ -223,7 +292,15 @@ export const stockTab: Tab = {
           { empty: "no actions this tick", left: [0, 1, 2] },
         ) +
         (plan.lastResult
-          ? note(html`last: <span class="${plan.lastResult.ok ? "good" : "bad"}">${plan.lastResult.action}</span> — ${plan.lastResult.detail}`)
+          // With no age this line reads as the state of the market right now.
+          // `planDigest` re-emits the newest result every 500 ms, but `execute`
+          // WRITES one only on a pass that ran a batch and only an install clears
+          // it — so in reserve mode ("no entry clears its round trip yet") a red
+          // failure from twenty minutes ago sits beside "no actions this tick"
+          // for the rest of the run. The age comes off the run's own clock (see
+          // lib/clock.ts), never the wall clock: a scrubbed-back replay would
+          // otherwise invent hours of it.
+          ? note(html`last: <span class="${plan.lastResult.ok ? "good" : "bad"}">${plan.lastResult.action}</span> — ${plan.lastResult.detail} · ${stamp(state, plan.lastResult.at)}`)
           : "")
       : note("no plan yet");
 
@@ -233,10 +310,24 @@ export const stockTab: Tab = {
       { id: "sym", label: "sym", left: true, cell: (p) => esc(p.sym), sort: (p) => p.sym },
       { id: "shares", label: "shares", cell: (p) => fmtNum(p.shares || -p.sharesShort, 0), sort: (p) => p.shares || -p.sharesShort },
       { id: "avg", label: "avg", cell: (p) => fmtMoney(p.shares > 0 ? p.avgPx : p.avgPxShort), sort: (p) => (p.shares > 0 ? p.avgPx : p.avgPxShort) },
-      { id: "bid", label: "bid", cell: (p) => fmtMoney(p.bid), sort: (p) => p.bid },
+      // A long exits at the bid; a short buys back at the ask, which is why the
+      // probe marks a short as `2 * avgPxShort - ask`. Showing the bid on a short
+      // row made the P/L in the next column underivable from the prices beside
+      // it — on a wide symbol by enough to invert its apparent sign. The `id`
+      // stays "bid" because it is the persisted sort key; only the label moved.
+      // Same `shares > 0` predicate as the `avg` and `shares` columns, which
+      // already fold a both-sides symbol onto the long side.
+      { id: "bid", label: "close", cell: (p) => fmtMoney(p.shares > 0 ? p.bid : p.ask), sort: (p) => (p.shares > 0 ? p.bid : p.ask) },
       { id: "value", label: "value", cell: (p) => fmtMoney(p.value), sort: (p) => p.value },
       { id: "pl", label: "P/L", cell: (p) => pnl(p.value - p.costBasis), sort: (p) => p.value - p.costBasis },
-    ], { defaultSort: { key: "value", dir: -1 }, empty: "no open positions" });
+    ], {
+      defaultSort: { key: "value", dir: -1 },
+      // "no open positions" is a claim about the book; before the TIX probe has
+      // run there is no book to claim anything about. Plain strings, because
+      // `dataTable` routes `empty` through `note()`, which escapes a string —
+      // `waiting()` would print its own tags at the operator.
+      empty: s.positions === undefined ? "waiting for the TIX price probe" : "no open positions",
+    });
 
     // 4S/BN8 only, and we never place one — so anything here is the game's, and
     // worth seeing precisely because we did not put it there. The probe pays RAM
@@ -254,6 +345,11 @@ export const stockTab: Tab = {
     // is static game data, not a probed field.
     const signal = (sym: string) => s.signals?.[sym];
     const ranked = new Map((plan?.ranked ?? []).map((r) => [r.sym, r]));
+    // Which symbols the farm is DRIVING right now. By symbol rather than by
+    // host, because `manipulation` is keyed by host and a symbol with two
+    // farmable hosts collapses here, which is the question the column asks.
+    // Built once per render: the tab re-renders twice a second.
+    const driving = new Set(Object.values(s.manipulation ?? {}).map((m) => m.sym));
     const market = dataTable(
       "stock.market",
       positions,
@@ -270,13 +366,25 @@ export const stockTab: Tab = {
           // The other half of this feature: hack pushes a symbol down and grow
           // pushes it up, so a symbol whose host the farm can currently drive is
           // one we could PUSH rather than merely wait on. See spec/targeting.md.
+          //
+          // THREE states, and `plan.ranked` is the authority on none of them: the
+          // digest carries only the top 8 by return on capital, and a position
+          // already at `maxShares` sorts LAST there (no room left to size, so its
+          // return on capital is -Infinity) — which is exactly the symbol the farm
+          // would be driving. So this column used to print the muted dash for a
+          // symbol the Manipulation card on the same screen listed as drivable.
+          // That card is emitted per farmable HOST and is therefore proof of
+          // manipulability, which is why an active intent leads here; and the dash
+          // is UNKNOWN, not "no", for the ~25 rows the digest never mentioned.
           id: "farm",
           label: "farm",
-          sort: (p) => (ranked.get(p.sym)?.manipulable ? 1 : 0),
+          sort: (p) => (driving.has(p.sym) ? 2 : ranked.get(p.sym)?.manipulable ? 1 : 0),
           cell: (p) =>
-            ranked.get(p.sym)?.manipulable
-              ? dot("ready", "the farm can drive this symbol's host, so a position in it can be pushed")
-              : `<span class="muted">–</span>`,
+            driving.has(p.sym)
+              ? dot("good", "the farm is driving this symbol's host right now — see Manipulation")
+              : ranked.get(p.sym)?.manipulable
+                ? dot("ready", "the farm can drive this symbol's host, so a position in it can be pushed")
+                : `<span class="muted" title="not in the top-8 ranking and not being driven — manipulability is unpublished for this symbol">–</span>`,
         },
         { id: "price", label: "price", sort: (p) => p.price, cell: (p) => fmtMoney(p.price) },
         {
@@ -315,10 +423,36 @@ export const stockTab: Tab = {
         {
           id: "breakeven",
           label: "break-even",
-          sort: (p) => ranked.get(p.sym)?.breakEvenTicks ?? Infinity,
+          // -1 is the producer's INFINITY SENTINEL, not a measurement:
+          // `planDigest` collapses a non-finite break-even to it (the wire type
+          // says only `number`, which is what produced the `>= 0` guard here in
+          // the first place). Drawn as the muted dash it was indistinguishable
+          // from the 25 symbols the digest never sent, on the one cell that
+          // answers "why did nothing trade?"; and `?? Infinity` made it the
+          // SMALLEST sort key, so one click ranked every unactionable symbol
+          // above every real candidate.
+          //
+          // One finite key, because `Column.sort` returns a single number that
+          // dom.ts multiplies by the direction — there is no second level to
+          // push both cases down in either direction. `Number.MAX_VALUE` sorts
+          // unsent and never-clears worst, which reads as worst-first when
+          // descending, and it also removes the `Infinity - Infinity` = NaN
+          // comparison the unsent rows used to produce.
+          sort: (p) => {
+            const be = ranked.get(p.sym)?.breakEvenTicks;
+            return be === undefined || be < 0 ? Number.MAX_VALUE : be;
+          },
           cell: (p) => {
             const be = ranked.get(p.sym)?.breakEvenTicks;
-            return be !== undefined && be >= 0 ? `${be.toFixed(1)} ticks` : `<span class="muted">–</span>`;
+            if (be === undefined) return `<span class="muted">–</span>`;
+            // "never at this size" and not "never": the solver also returns
+            // Infinity when the affordable size is zero — an empty cash budget,
+            // or a symbol already at `maxShares` — so the symbol itself is not
+            // necessarily unprofitable.
+            if (be < 0) {
+              return html`<span class="bad" title="no position this budget can afford clears the spread and commission — check the cash budget and the drift">never at this size</span>`;
+            }
+            return `${be.toFixed(1)} ticks`;
           },
         },
         {
@@ -334,7 +468,13 @@ export const stockTab: Tab = {
         },
         { id: "max", label: "max shares", sort: (p) => p.maxShares, cell: (p) => fmtNum(p.maxShares, 0) },
       ],
-      { defaultSort: { key: "forecast", dir: -1 }, empty: "no symbols" },
+      {
+        defaultSort: { key: "forecast", dir: -1 },
+        // As with the positions table: 33 symbols nobody has priced yet is not
+        // "no symbols". Plain string — `empty` goes through `note()`, which
+        // escapes it.
+        empty: s.positions === undefined ? "waiting for the TIX price probe" : "no symbols",
+      },
     );
 
     const manipulation = table(
@@ -356,7 +496,7 @@ export const stockTab: Tab = {
 
     return (
       `<div class="col wide">` +
-      card("Capital", capitalTiles + charts + installs) +
+      card("Capital", capitalTiles + charts) +
       card("Market", marketTiles + market) +
       `</div>` +
       `<div class="col">` +
@@ -370,7 +510,12 @@ export const stockTab: Tab = {
         ? ""
         : card(
             html`Forecasts (${hint("estimated", "no 4S API: forecasts are estimated from up-tick frequency and the shared per-tick volatility roll. The $1b 4S Market Data is deliberately never bought — only the $25b TIX API unlocks getForecast for a script.")})`,
-            note("no 4S API — hover for how forecasts are estimated"),
+            // The ticker being owned belongs here and nowhere else: an operator
+            // who can read exact forecasts in the game's own UI needs to know
+            // that the script beside it still cannot.
+            s.has4SData === true
+              ? note("the $1b 4S Market Data is owned, the $25b TIX API is not — the game's own UI shows exact forecasts while a script still estimates them")
+              : note("no 4S API — hover for how forecasts are estimated"),
           )) +
       `</div>`
     );

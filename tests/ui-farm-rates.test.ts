@@ -138,6 +138,24 @@ describe("farm series projection", () => {
     // The ring is shorter than the window this early, so the rate is averaged
     // over what exists rather than withheld for the first three minutes.
     expect(state.batchSeries.hwgw!.perSec.at(-1)![1]).toBeCloseTo(1, 6);
+    // And the span it was ACTUALLY averaged over is reported separately, because
+    // it is five seconds and not the 3m 36s the window asked for. The panel used
+    // to caption the one with the other — a ~43x overclaim for the first minutes
+    // of every long-cycle target, which is the phase being watched.
+    expect(state.farmWindowActualMs).toBe(5_000);
+  });
+
+  test("the measured span is absent until there is one, and dropped at a reset", () => {
+    const state = emptyState();
+    // One rollup: no baseline, so there is no rate point to caption.
+    appendRecords(state, [rollup(1_000, { launched: counts(1, 1, 1), landed: counts(1, 1, 1) })]);
+    expect(state.farmWindowActualMs).toBeUndefined();
+    appendRecords(state, [rollup(4_000, { launched: counts(2, 2, 2), landed: counts(2, 2, 2) })]);
+    expect(state.farmWindowActualMs).toBe(3_000);
+    // An install wipes the topic and the ring with it. A span left over from the
+    // previous run would caption this one's first points with the old window.
+    appendRecords(state, [rollup(5_000, { launched: counts(0, 0, 0), landed: counts(0, 0, 0) })]);
+    expect(state.farmWindowActualMs).toBeUndefined();
   });
 
   test("a counter reset drops the ring rather than differencing across it", () => {
@@ -244,12 +262,54 @@ describe("dispatcher health curves", () => {
         launched: counts(1, 1, 1),
         landed: counts(1, 1, 1),
         batches: {
-          hgw: aggregate({ batches: 50, graded: 50, inOrder: 45 }),
+          hgw: aggregate({ batches: 100, graded: 100, inOrder: 100 }),
           prep: aggregate({ batches: 50, graded: 0, inOrder: 0 }),
         },
       }),
+      rollup(2_000, {
+        launched: counts(2, 2, 2),
+        landed: counts(2, 2, 2),
+        batches: {
+          hgw: aggregate({ batches: 110, graded: 110, inOrder: 109 }),
+          prep: aggregate({ batches: 60, graded: 0, inOrder: 0 }),
+        },
+      }),
     ]);
-    expect(state.farmHealth.inOrderShare).toEqual([[1_000, 0.9]]);
+    // Ten graded batches in the window, one of them out of order — 0.9, and NOT
+    // the 109/110 lifetime figure that reads as a healthy 0.99. The card is
+    // captioned "is it getting worse", which a denominator that only grows
+    // cannot answer: after an hour it is tens of thousands of batches deep and a
+    // pipeline that starts slipping now moves the curve by a rounding error.
+    expect(state.farmHealth.inOrderShare).toEqual([[2_000, 0.9]]);
+  });
+
+  test("the mean batch span is the batches that settled in the window", () => {
+    const state = appendRecords(emptyState(), [
+      rollup(1_000, {
+        launched: counts(1, 1, 1),
+        landed: counts(1, 1, 1),
+        // A long, healthy history: 100 batches averaging 10 s.
+        batches: { hgw: aggregate({ batches: 100, spanMs: 1_000_000 }) },
+      }),
+      rollup(2_000, {
+        launched: counts(2, 2, 2),
+        landed: counts(2, 2, 2),
+        // The two that settled since took 30 s each. The lifetime mean barely
+        // twitches (10.2 s); the windowed one says what is happening now.
+        batches: { hgw: aggregate({ batches: 102, spanMs: 1_060_000 }) },
+      }),
+    ]);
+    expect(state.farmHealth.batchSpanMs).toEqual([[2_000, 30_000]]);
+  });
+
+  test("a window that settled nothing contributes no span point", () => {
+    const state = appendRecords(emptyState(), [
+      rollup(1_000, { launched: counts(1, 1, 1), landed: counts(1, 1, 1), batches: { hgw: aggregate({ batches: 4, spanMs: 40_000 }) } }),
+      rollup(2_000, { launched: counts(2, 2, 2), landed: counts(2, 2, 2), batches: { hgw: aggregate({ batches: 4, spanMs: 40_000 }) } }),
+    ]);
+    // 0/0 is not 0, and a zero mean span would read as a farm that had started
+    // settling instantly.
+    expect(state.farmHealth.batchSpanMs).toEqual([]);
   });
 });
 

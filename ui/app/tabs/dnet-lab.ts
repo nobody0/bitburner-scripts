@@ -28,6 +28,12 @@ import type { DarknetLabDigest, DarknetLabWalker } from "../../../shared/telemet
 const UNKNOWN = "?";
 const WALL = "#";
 
+/** The four door draws, in `labPrior`'s order: the vertical seam's upper then
+ * lower half, then the horizontal seam's left then right. Named so a mark can
+ * say WHICH crossing it is — the four are not interchangeable, since each joins
+ * a different pair of quadrants. */
+const DOOR_SIDES = ["north", "south", "west", "east"] as const;
+
 /** SVG units per grid cell. The viewBox is in these units and the element is
  * sized in CSS, so this fixes only the ratio between a cell and the strokes and
  * radii of the overlays drawn on it. */
@@ -152,12 +158,56 @@ export function labMaze(lab: DarknetLabDigest, prior?: LabPrior): string {
   const walls = pathOf(runsOf(grid, width, height, (char) => char === WALL));
   const open = pathOf(runsOf(grid, width, height, (char) => char !== WALL && char !== UNKNOWN));
 
-  // The two seams, faint. They expose the maze's macro-structure: four
-  // sub-mazes joined by punched doors, which is what the route prior exploits.
+  // The two seams, faint. They are the reason the maze has a macro-structure at
+  // all — four sub-mazes joined by four punched doors — and therefore the reason
+  // the marks below matter: every seam slot outside a door set is wall before
+  // the first move, so those four doors are the only ways between quadrants.
+  // Nothing here says which walker takes which pair — the route bias is a
+  // job-side decision (`routePrior`) and no walker entry carries it.
   const seams = prior === undefined || prior.seamX === undefined || prior.seamY === undefined
     ? ""
     : `<path class="seam" d="M${prior.seamX * CELL + CELL / 2} 0V${height * CELL}`
       + `M0 ${prior.seamY * CELL + CELL / 2}H${width * CELL}"/>`;
+
+  // The door candidates, as marks on the seam. Computed here rather than read
+  // off the grid because a ruled-out candidate is an INFERENCE the walker never
+  // writes into `field.slots`: the digest can only carry what was SEEN, so a
+  // slot the planner has already priced at Infinity arrives looking exactly like
+  // an unvisited one, and the seam's dash phase puts its gaps nowhere in
+  // particular. The three states follow `planStep` exactly — seen open is a
+  // door, seen wall is wall, and a slot in an EXCLUSIVE set whose door is
+  // already found is wall too. Without that exclusivity guard the mark would
+  // assert knowledge the planner itself refuses on an overlapping set, which no
+  // real rung produces today but a resize upstream could reintroduce. At most 26
+  // marks on a 61x41 — the same order as the nine exit marks, so the three-node
+  // grid budget above is untouched.
+  const charAt = (x: number, y: number): string => grid[y * width + x] ?? UNKNOWN;
+  // Open exactly as the `open` path decides it, so a mark can never disagree
+  // with the cell it sits on.
+  const isOpen = (at: readonly [number, number]): boolean =>
+    charAt(at[0], at[1]) !== WALL && charAt(at[0], at[1]) !== UNKNOWN;
+  const drawn = new Set<string>();
+  const doors = prior === undefined ? "" : prior.doorSets
+    .flatMap((set, index) => {
+      const found = prior.doorSetExclusive[index] === true
+        && set.some((held) => { const at = parse(held); return at !== undefined && isOpen(at); });
+      return set.map((held) => {
+        // A slot can sit in two sets only when neither is exclusive — in which
+        // case neither closure applies — so drawing it once loses nothing.
+        if (drawn.has(held)) return "";
+        drawn.add(held);
+        const at = parse(held);
+        if (at === undefined || at[0] >= width || at[1] >= height) return "";
+        const open = isOpen(at);
+        const shut = !open && (charAt(at[0], at[1]) === WALL || found);
+        const [cx, cy] = centre(at);
+        const title = `${DOOR_SIDES[index] ?? "seam"} door — `
+          + (open ? "open" : shut ? "provably wall" : `one of ${set.length} candidates`);
+        return `<circle class="door${open ? " found" : shut ? " shut" : ""}"`
+          + ` cx="${cx}" cy="${cy}" r="${CELL * 0.5}"><title>${esc(title)}</title></circle>`;
+      });
+    })
+    .join("");
 
   // Exit candidates. On the shallow rungs there is one and it is known before
   // the first move; on the deep ones there are nine and knocking them down is
@@ -197,12 +247,13 @@ export function labMaze(lab: DarknetLabDigest, prior?: LabPrior): string {
     + `<path class="open" d="${open}"/>`
     + `<path class="wall" d="${walls}"/>`
     + seams
+    + doors
     + marks
     + dots
     + `</svg></div>`;
 }
 
-/** The maze's own legend. Every glyph is a decision the
+/** The maze's own legend. Seven glyphs, and every one of them is a decision the
  * walk actually turns on. */
 export function labMazeLegend(): string {
   return `<div class="labkey">`
@@ -212,5 +263,6 @@ export function labMazeLegend(): string {
     + `<span><i class="sw seamkey"></i>quadrant seam</span>`
     + `<span><i class="sw walkerkey"></i>finisher</span>`
     + `<span><i class="sw exitkey"></i>exit candidate</span>`
+    + `<span><i class="sw doorkey"></i>door candidate (filled = found)</span>`
     + `</div>`;
 }

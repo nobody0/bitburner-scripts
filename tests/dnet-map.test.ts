@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { AUTH_LABEL, BOX_W, COL_PITCH, MAP_W, NET_WIDTH, layoutNet, matches, netLegend, netMap, ramBuckets } from "../ui/app/tabs/dnet-map.ts";
+import { AUTH_LABEL, BOX_H, BOX_W, COL_PITCH, MAP_W, NET_WIDTH, isStale, layoutNet, matches, netLegend, netMap, ramBuckets } from "../ui/app/tabs/dnet-map.ts";
 import { TABS } from "../ui/app/tabs/index.ts";
 import { emptyState } from "../ui/app/project.ts";
 import { setView } from "../ui/app/lib/viewstate.ts";
@@ -276,6 +276,42 @@ describe("layout puts the net on the game's grid", () => {
     }
     expect(layout.netDepth).toBe(7);
     expect(layout.netDepthGuessed).toBe(false);
+  });
+
+  test("with no labyrinth sighted the bottom is drawn as a floor, not as the end", () => {
+    // `netDepthGuessed` was computed, documented and never drawn. Absent a lab
+    // sighting `netDepth` is one past the deepest host we hold, so the last grid
+    // row IS the deepest thing we have seen — and with no marker below it the map
+    // of a net we have barely entered read as a fully surveyed one.
+    const layout = layoutNet([host({ hostname: "a", depth: 0 }), host({ hostname: "b", depth: 2 })]);
+    expect(layout.netDepth).toBe(3);
+    expect(layout.netDepthGuessed).toBe(true);
+    const floor = layout.rowLabels.find((row) => row.kind === "floor")!;
+    expect(floor.label).toContain("depth ≥ 3");
+    // Below every drawn depth row, and inside the viewBox: emitted from `netMap`
+    // instead of from the layout it would sit past `height` and be clipped away.
+    const deepest = Math.max(...layout.rowLabels.filter((row) => row.kind === "depth").map((row) => row.y));
+    expect(floor.y).toBeGreaterThan(deepest);
+    expect(layout.height).toBeGreaterThan(floor.y + BOX_H);
+    // ...and the map's one-sentence accessible name hedges with it.
+    expect(netMap([host({ hostname: "a", depth: 0 })], OPTIONS)).toContain("over at least 1 depths");
+  });
+
+  test("a depth we have actually been told is stated, not hedged", () => {
+    // The hedge has to be exact both ways: a declared depth, and a drawn
+    // labyrinth (which pins the bottom even when the lab is recognised by model
+    // rather than by hostname, so `netDepthGuessed` can still be true), both mean
+    // there is nothing below to claim.
+    const declared = layoutNet([host({ hostname: "a", depth: 0 })], { netDepth: 7 });
+    expect(declared.rowLabels.some((row) => row.kind === "floor")).toBe(false);
+    expect(netMap([host({ hostname: "a", depth: 0 })], { ...OPTIONS, netDepth: 7 }))
+      .toContain("over 7 depths");
+    const withLab = layoutNet([
+      host({ hostname: "a", depth: 0 }),
+      host({ hostname: "renamed_lab", depth: -1, modelId: "(The Labyrinth)" }),
+    ]);
+    expect(withLab.netDepthGuessed).toBe(true);
+    expect(withLab.rowLabels.some((row) => row.kind === "floor")).toBe(false);
   });
 
   test("air-gap depths are labelled as structurally empty, not as unexplored", () => {
@@ -577,7 +613,17 @@ describe("the key describes the map, and not something near it", () => {
     host({ hostname: "dn-offline", depth: 1, authState: "offline" }),
     host({ hostname: "dn-gone", depth: 1, goneAt: NOW }),
     host({ hostname: "dn-pinned", depth: 2, stasisLinked: true }),
-    host({ hostname: "dn-stale", depth: 2, facts: { depth: 1 } }),
+    // A host the publisher can actually emit: `describeHost` sends the identity
+    // fields with every report, so the old `facts: { depth: 1 }` fixture was a
+    // shape no digest produces — and it was the only thing keeping this test
+    // green while the fade was broken for every real host.
+    host({
+      hostname: "dn-stale",
+      depth: 2,
+      modelId: "(Dictionary)",
+      maxRam: 8,
+      facts: { modelId: 1, maxRam: 1, requiredCharisma: 1, depth: 1, neighbours: 1, usedRam: 1 },
+    }),
   ];
 
   test("every legend swatch names a class the map actually renders", () => {
@@ -604,5 +650,43 @@ describe("the key describes the map, and not something near it", () => {
     for (const state of Object.keys(AUTH_LABEL)) {
       expect(markup, `no node carries auth-${state}`).toContain(`auth-${state}`);
     }
+  });
+});
+
+describe("the fade is keyed on the facts that can actually go stale", () => {
+  const OLD = NOW + 60 * 60 * 1000;
+
+  test("a host whose position and topology have expired is stale, identity and all", () => {
+    // THE defect this replaced: `isStale` was `every` over ALL of `host.facts`,
+    // and `expiryMs("identity")` is Infinity, so a single modelId — which every
+    // report carries — held the fade off forever. An hour-old depth read as
+    // confirmed on a net that rewires itself every few seconds.
+    const drifted = host({
+      hostname: "dn-drifted",
+      depth: 3,
+      modelId: "(Dictionary)",
+      facts: { modelId: 1, passwordLength: 1, depth: 1, neighbours: 1 },
+    });
+    expect(isStale(drifted, OLD, {})).toBe(true);
+    // Fresh position, ancient identity: nothing to disbelieve.
+    expect(isStale(host({ ...drifted, facts: { modelId: 1, depth: OLD, neighbours: OLD } }), OLD, {}))
+      .toBe(false);
+  });
+
+  test("nothing that cannot expire is counted as expired", () => {
+    // A stationary host's position is eternal for a REASON — every mutation
+    // branch skips it — so an old `depth` on one is not a stale reading, and the
+    // test is "cannot expire" rather than a hardcoded list of fact classes.
+    const pinned = host({
+      hostname: "darkweb",
+      depth: -1,
+      isStationary: true,
+      facts: { modelId: 1, isStationary: 1, depth: 1 },
+    });
+    expect(isStale(pinned, OLD, {})).toBe(false);
+    // Identity only — the state a webstorm leaves behind — has nothing
+    // perishable in it either, and a host with no facts at all is unchanged.
+    expect(isStale(host({ hostname: "dn-wiped", facts: { modelId: 1 } }), OLD, {})).toBe(false);
+    expect(isStale(host({ hostname: "dn-blank" }), OLD, {})).toBe(false);
   });
 });

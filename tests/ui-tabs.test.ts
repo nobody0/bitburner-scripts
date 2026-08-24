@@ -309,9 +309,14 @@ describe("tab rendering", () => {
     expect(html).toContain("contribution");
     // A P/L is signed OUTSIDE the currency mark, and coloured by direction.
     expect(html).toContain(`<span class="bad">-$4.000e8</span>`);
-    // No records were folded, so there is no interval to divide by and the tile
-    // says so rather than reporting an infinite rate.
-    expect(html).toContain("no trade yet");
+    // No records were folded, so the projection never watched this ledger open.
+    // `tradeCashFlow` is cumulative and survives a controller handoff, so a first
+    // sighting of it says nothing about when trading started: the denominator is
+    // genuinely absent, and "unknown" is a different statement from "has not
+    // traded yet". Dividing here is what produced a rate against the age of the
+    // browser tab.
+    expect(html).toContain("rate unknown");
+    expect(html).not.toContain("/s since first trade");
     // The unlock ladder, three rungs rather than two loose yes/no bits. 4S is
     // unpaid here, so it is the one rung that is not `good`.
     expect(html).toContain("the unlock ladder");
@@ -338,9 +343,15 @@ describe("tab rendering", () => {
   test("the capital charts appear once the fold has a curve to draw", () => {
     const record = (t: number, stock: Partial<StateMap["stock"]>): LogRecord =>
       ({ t, seq: t, run: "r", src: "sim", kind: "state", key: "stock", data: { hasWseAccount: true, hasTixApiAccess: true, ...stock } }) as LogRecord;
+    // The first record carries an explicit `tradeCashFlow: 0` — the one
+    // observation that proves this install had not traded yet, and so the only
+    // thing that can arm the rate's denominator. Without it the fold cannot tell
+    // "opened just now" from "opened before we attached", and the tile has to say
+    // unknown (covered by the test above).
     const state = appendRecords(emptyState(), [
-      record(0, { tradeCashFlow: -10_000, portfolioValue: 10_000, portfolioCost: 10_000, unlockSpend: 5.2e9 }),
-      record(1_000, { tradeCashFlow: -10_000, portfolioValue: 12_000, portfolioCost: 10_000, unlockSpend: 5.2e9 }),
+      record(0, { tradeCashFlow: 0, portfolioValue: 0, portfolioCost: 0, unlockSpend: 5.2e9 }),
+      record(1_000, { tradeCashFlow: -10_000, portfolioValue: 10_000, portfolioCost: 10_000, unlockSpend: 5.2e9 }),
+      record(2_000, { tradeCashFlow: -10_000, portfolioValue: 12_000, portfolioCost: 10_000, unlockSpend: 5.2e9 }),
     ]);
     const html = TABS["stock"].render(state);
     // Both canvases, each paired with its own tooltip — the id convention
@@ -1297,6 +1308,12 @@ describe("career request grouping", () => {
     } as never);
     expect(duplicated.length).toBe(1);
     expect(duplicated[0]!.askers.sort()).toEqual(["career", "factions"]);
+    // Weights ADD, because that is what the planner prices: same-key requests
+    // are summed by `needWeights`/`needValueSeconds` and folded per channel by
+    // `channelWorth`. Taking the maximum (4.6 here) priced one asker for work
+    // two askers asked for, and inverted the column an operator sorts by.
+    expect(duplicated[0]!.weight).toBeCloseTo(7.8, 6);
+    expect(duplicated[0]!.asks).toBe(2);
     // The displayed milestone is ONE request, whole: the nearest one, which is
     // what the work will hit first. Taking the closest progress but the
     // furthest target would draw an 89.8% bar labelled "1.35k / 2.50k" — a bar
@@ -1601,7 +1618,29 @@ describe("the Batches card is per-batch", () => {
   });
 
   test("health gauges are drawn as trends, not as a row of latest values", () => {
-    const html = TABS.hacking.render(populated());
+    // A THIRD rollup, because the in-order share is now differenced over a
+    // window rather than read off the rollup as a lifetime mean: the first
+    // rollup has no baseline and the second yields one point, so a curve needs
+    // three. That is the whole point of the change — a cumulative ratio anchored
+    // near 1.0 cannot say whether landing order is getting worse, and this test
+    // used to pass on exactly one lifetime average.
+    const state = appendRecords(populated(), [
+      farm(5_000, {
+        launched: { hack: 30, grow: 30, weaken: 30 },
+        landed: { hack: 29, grow: 29, weaken: 29 },
+        inFlight: { hack: 0, grow: 0, weaken: 0 },
+        pumpOccupancy: 0.08,
+        batches: {
+          hgw: {
+            batches: 60, ops: 240, landed: 240, threads: { hack: 600, grow: 1_200, weaken: 300 },
+            gb: 30_000, moneyEarned: 60_000, hacks: 60, spanMs: 126_000, graded: 60, inOrder: 57,
+            noHack: 0, abandoned: 1, abandonedOps: 4, abandonedLanded: 3,
+          },
+        },
+        recentBatches: [batch(5, 5_000), batch(6, 5_100)],
+      }),
+    ]);
+    const html = TABS.hacking.render(state);
     // Occupancy is the leading indicator the tab's own notes name, and it was
     // published and drawn nowhere.
     expect(html).toContain(`id="health-occupancy"`);
@@ -1643,5 +1682,115 @@ describe("a batch kind that only ever fails is still reported", () => {
     expect(html).toContain("7 abandoned, 16 ops lost");
     // And it is not mistaken for a farm that has not started yet.
     expect(html).not.toContain("waiting for a batch to settle");
+  });
+});
+
+/** The Hacking tab's "absence is not zero" cases, one test each.
+ *
+ * Every one of these rendered a confident figure for something the record does
+ * not say: a stalled farm as an em dash, an unmeasured eviction counter as a
+ * healthy zero, an SF5-gated multiplier as 1.0. */
+describe("the Hacking tab separates an unmeasured reading from a zero one", () => {
+  const rollup = (t: number, over: Record<string, unknown>): LogRecord =>
+    ({ t, seq: t, run: "r", src: "sim", kind: "state", key: "farm",
+       data: { totals: { moneyEarned: 0, hacks: 0 }, ...over } }) as LogRecord;
+
+  const ops = (n: number) => ({ hack: n, grow: n, weaken: n });
+
+  const kind = (over: Record<string, unknown> = {}) => ({
+    batches: 4, ops: 16, landed: 16, threads: { hack: 4, grow: 8, weaken: 4 },
+    gb: 400, moneyEarned: 4_000, hacks: 4, spanMs: 8_000, inOrder: 4, noHack: 0, ...over,
+  });
+
+  test("a farm that settled nothing in the window reads 0.00/s, not a dash", () => {
+    // `foldFarmSeries` pushes a real `settled / dtSec` point on every rollup
+    // once a baseline exists, 0 included — so collapsing 0 to NONE showed a
+    // STALLED farm exactly like a run whose window has not opened yet.
+    const state = appendRecords(emptyState(), [
+      rollup(1_000, { launched: ops(10), landed: ops(10), inFlight: ops(0), batches: { hgw: kind() } }),
+      rollup(3_000, { launched: ops(16), landed: ops(10), inFlight: ops(2), batches: { hgw: kind() } }),
+    ]);
+    const html = TABS.hacking.render(state);
+    // Work in flight and nothing settling is the fault case, so it is coloured.
+    expect(html).toContain(`class="bad">0.00/s`);
+    // Captioned with the span actually differenced over — 2 s — not with the
+    // window the panel asked for.
+    expect(html).toContain("nothing settled in 2s");
+  });
+
+  test("an unreported eviction counter is not a healthy zero", () => {
+    const state = emptyState();
+    state.topics.farm = {
+      totals: { moneyEarned: 0, hacks: 0 },
+      batches: { hgw: kind() },
+    } as StateMap["farm"];
+    const html = TABS.hacking.render(state);
+    // The counters postdate this recording, so the farm may or may not have
+    // lost batches and this run cannot say.
+    expect(html).toContain("not reported by this run");
+    expect(html).not.toContain("every batch settled");
+  });
+
+  test("per-kind in-order divides by the GRADED batches, not by every batch", () => {
+    const state = emptyState();
+    state.topics.farm = {
+      totals: { moneyEarned: 0, hacks: 0 },
+      // Two paths open batches under one kind string: the JIT planner lands on
+      // a grid, the atomic path deliberately does not. So graded < batches is
+      // normal, and dividing by `batches` painted a healthy kind critical-red.
+      batches: { hwgw: kind({ batches: 40, graded: 30, inOrder: 30 }) },
+    } as StateMap["farm"];
+    const html = TABS.hacking.render(state);
+    expect(html).toMatch(/class="good"[^>]*>30 \/ 30 graded batches in order/);
+    expect(html).not.toContain("30 / 40 in order");
+  });
+
+  test("a BitNode multiplier comes from the static table, not from a 1.0 default", () => {
+    // `progression.multipliers` is SF5/BN5-gated, so in most nodes it is
+    // permanently absent — and 1.0 is then a wrong answer stated as a fact.
+    const withNode = (bitNode: number | undefined): string => {
+      const state = emptyState();
+      state.player = { skills: { hacking: 500 }, mults: {} } as never;
+      state.servers.set("phantasy", {
+        hostname: "phantasy", moneyMax: 24_000_000, moneyAvailable: 24_000_000,
+        minDifficulty: 20, hackDifficulty: 20, baseDifficulty: 20,
+        requiredHackingSkill: 100, maxRam: 32, ramUsed: 0, numOpenPortsRequired: 2,
+      } as StateMap["servers"][string]);
+      if (bitNode !== undefined) {
+        state.topics.progression = { bitNode, sourceFiles: {} } as StateMap["progression"];
+      }
+      return TABS.hacking.render(state);
+    };
+    // BN2 scales ServerMaxMoney by 0.08: $48m, not the BN1 $600m.
+    expect(withNode(2)).toContain("range $4.800e7");
+    expect(withNode(1)).toContain("range $6.000e8");
+    // And an unknown BitNode drops the range rather than asserting BN1's.
+    expect(withNode(undefined)).not.toContain("generated maximum-money range");
+  });
+
+  test("the home RAM quote renders beside the infrastructure ranking, not instead of it", () => {
+    // The producer publishes `infrastructurePlan` on every rollup, so chaining
+    // the two cards as one ternary made the home card unreachable for the whole
+    // life of the panel.
+    const state = emptyState();
+    state.topics.fleet = {
+      rootedHosts: 4, totalHosts: 10, maxRam: 512, usedRam: 128,
+      purchased: { count: 0, totalRam: 0 },
+      home: { maxRam: 128, usedRam: 32, cores: 1 },
+      homeRamPlan: {
+        cost: 1e9, addedRam: 128, incomePerSec: 500, paybackSec: 2e6,
+        netOverHorizon: -1e8, worthBuying: false,
+      },
+      infrastructurePlan: {
+        evaluatedAt: 1_000, horizonSec: 3_600, moneyAvailable: 1e6, moneyGranted: 0,
+        incomePerSecPerGb: 12, rankedTotal: 0, ranked: [],
+      },
+    } as StateMap["fleet"];
+    const html = TABS.hacking.render(state);
+    expect(html).toContain("Infrastructure ROI");
+    expect(html).toContain("Home RAM (next upgrade)");
+    // An empty ranking is a verdict, not blank space: nothing here says the
+    // ceiling is met, because no depth cap was published.
+    expect(html).toContain("no option priced above a $0 return");
   });
 });

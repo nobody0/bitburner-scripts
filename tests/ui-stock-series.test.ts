@@ -13,10 +13,16 @@ import { SERIES_LIMIT, appendRecords, emptyState, project } from "../ui/app/proj
  * traded has a book and NO ledger — and drawing that as $0 realised would claim
  * the run broke even when it had not started.
  *
- * A RESET DROPS EVERYTHING. `tradeCashFlow` is a cash delta and goes negative on
- * every position it opens, so the "counter went backwards" test the farm series
- * use is meaningless here. `market.tick` is the sentinel, and a vanished ledger
- * is the second tell. */
+ * NOTHING IS DROPPED. One artifact is one install — the run file is keyed on the
+ * install id — so an install boundary is a different file and cannot appear in
+ * one stream. What does appear is a controller HANDOFF, which restarts
+ * `market.tick` (a module-level counter) and leaves the rebuilt topic without a
+ * ledger for a tick, while the ledger itself is parked in the page realm and
+ * survives. Both of those used to close out a phantom "earlier install".
+ *
+ * A RATE NEEDS A DENOMINATOR IT CAN SEE. The measured $/sec clock is armed only
+ * by observing the ledger at zero; a viewer that attached after the first trade
+ * has no start time on the wire and must say so. */
 
 let seq = 0;
 
@@ -72,16 +78,37 @@ describe("stock capital and earnings series", () => {
     // Not `[[0, 10_000]]`: nothing has been realised because nothing has traded.
     expect(state.stockSeries.realized).toEqual([]);
     expect(state.stockSeries.unlockSpend).toEqual([]);
-    expect(state.stockFlowSince).toBeNull();
+    // An absent ledger is not evidence that the ledger has not traded: a
+    // handoff-rebuilt topic looks exactly like this while the parked ledger
+    // holds hours of flow. So the clock stays unarmed either way.
+    expect(state.stockRateSince).toBeNull();
+    expect(state.sawStockLedgerOpen).toBe(false);
   });
 
-  test("the measured-rate clock starts at the first non-zero cash flow", () => {
+  test("the measured-rate clock starts at the first WATCHED trade", () => {
+    // An explicit zero is the one proof that nothing has traded yet this
+    // install: the ledger survives a handoff and only an install zeroes it.
     const state = appendRecords(emptyState(), [
       stockRecord(0, { tradeCashFlow: 0 }),
       stockRecord(1_000, { tradeCashFlow: -10_000 }),
       stockRecord(2_000, { tradeCashFlow: -4_000 }),
     ]);
-    expect(state.stockFlowSince).toBe(1_000);
+    expect(state.sawStockLedgerOpen).toBe(true);
+    expect(state.stockRateSince).toBe(1_000);
+  });
+
+  test("attaching after the ledger opened leaves the rate clock unarmed", () => {
+    // A live attach folds the hub snapshot plus a 2 MB tail, and a compacted
+    // replay keeps exactly one record per state key — so the first ledger a
+    // viewer sees is routinely an hours-old cumulative figure. Arming on it
+    // divided a whole install's realised P/L by the age of the ATTACH and
+    // printed the result as a confident rate.
+    const state = appendRecords(emptyState(), [
+      stockRecord(0, { tradeCashFlow: 4e8, portfolioValue: 0, portfolioCost: 0 }),
+      stockRecord(1_000, { tradeCashFlow: 4.2e8, portfolioValue: 0, portfolioCost: 0 }),
+    ]);
+    expect(state.stockRateSince).toBeNull();
+    expect(state.sawStockLedgerOpen).toBe(false);
   });
 
   test("the unlock ladder is its own step curve, excluded from realised net", () => {
@@ -94,39 +121,47 @@ describe("stock capital and earnings series", () => {
     expect(state.stockSeries.realized).toEqual([[0, 0], [1_000, 0]]);
   });
 
-  test("a market tick going backwards is an install: the rings drop, the profit is kept", () => {
+  test("a backwards market tick is a controller handoff, and drops nothing", () => {
+    // `market.tick` is `memory.history.tick` off a module-level `let`, so a
+    // build push restarts it at 0 — while `gameGlobal.stockFlows`, the ledger
+    // this was read as closing out, is parked in the page realm precisely so
+    // the same push cannot zero it. An install is a different artifact and a
+    // different file, so it can never be seen from inside one stream.
     const state = appendRecords(emptyState(), [
-      stockRecord(0, { tradeCashFlow: 4e8, unlockSpend: 5.2e9, portfolioValue: 0, portfolioCost: 0, market: { tick: 500, cyclesSeen: 6, lastFlipCount: 0 } }),
-      // A new install re-rolls the market, so the observed tick restarts.
-      stockRecord(1_000, { tradeCashFlow: 0, unlockSpend: 0, portfolioValue: 0, portfolioCost: 0, market: { tick: 1, cyclesSeen: 0, lastFlipCount: 0 } }),
+      stockRecord(0, { tradeCashFlow: 0, unlockSpend: 5.2e9, portfolioValue: 0, portfolioCost: 0, market: { tick: 500, cyclesSeen: 6, lastFlipCount: 0 } }),
+      stockRecord(1_000, { tradeCashFlow: 4e8, unlockSpend: 5.2e9, portfolioValue: 0, portfolioCost: 0, market: { tick: 501, cyclesSeen: 6, lastFlipCount: 0 } }),
+      // The successor process: its market clock restarts, and its rebuilt topic
+      // carries no ledger until the next `execute()` merges the surviving one.
+      stockRecord(2_000, { portfolioValue: 0, portfolioCost: 0, market: { tick: 1, cyclesSeen: 0, lastFlipCount: 0 } }),
+      stockRecord(3_000, { tradeCashFlow: 4.1e8, unlockSpend: 5.2e9, portfolioValue: 0, portfolioCost: 0, market: { tick: 2, cyclesSeen: 0, lastFlipCount: 0 } }),
     ]);
-    expect(state.stockInstalls).toEqual([{ realized: 4e8, unlockSpend: 5.2e9, endedAt: 0 }]);
-    // The pre-install segment is gone, not spliced: it describes a market whose
-    // every price, spread and volatility was re-rolled.
-    expect(state.stockSeries.realized).toEqual([[1_000, 0]]);
-    expect(state.stockSeries.value).toEqual([[1_000, 0]]);
-    expect(state.stockFlowSince).toBeNull();
-    expect(state.stockTick).toBe(1);
+    // Every pre-handoff point is still there, and the ledger's own history is
+    // continuous across the gap rather than restarting from a cliff.
+    expect(state.stockSeries.realized).toEqual([[0, 0], [1_000, 4e8], [3_000, 4.1e8]]);
+    expect(state.stockSeries.value).toEqual([[0, 0], [1_000, 0], [2_000, 0], [3_000, 0]]);
+    expect(state.stockSeries.unlockSpend).toEqual([[0, 5.2e9], [1_000, 5.2e9], [3_000, 5.2e9]]);
+    // And the rate denominator survives too: the trade it dates from happened.
+    expect(state.stockRateSince).toBe(1_000);
   });
 
-  test("a ledger that vanishes after having been present is the same install", () => {
-    // `stockModule.reset` deletes the whole topic, so the rebuilt one carries
-    // the account flags and no ledger at all — and no market clock either, which
-    // is why the tick sentinel cannot be the only one.
+  test("a ledger that vanishes after having been present is a handoff", () => {
+    // `stockModule.reset` deletes the whole topic, but only at an install —
+    // which is a new artifact. Inside one stream the same shape is a successor
+    // controller whose rebuilt topic has no ledger yet, so the curve waits for
+    // the next merge instead of being thrown away.
     const state = appendRecords(emptyState(), [
       stockRecord(0, { tradeCashFlow: 4e8, portfolioValue: 0, portfolioCost: 0 }),
       stockRecord(1_000, {}),
     ]);
-    expect(state.stockInstalls).toEqual([{ realized: 4e8, unlockSpend: 0, endedAt: 0 }]);
-    expect(state.stockSeries.realized).toEqual([]);
+    expect(state.stockSeries.realized).toEqual([[0, 4e8]]);
   });
 
-  test("a topic that never carried a ledger is not mistaken for a reset", () => {
+  test("a topic that never carried a ledger plots the book and no earnings", () => {
     const state = appendRecords(emptyState(), [
       stockRecord(0, { portfolioValue: 1_000, portfolioCost: 1_000 }),
       stockRecord(1_000, { portfolioValue: 1_200, portfolioCost: 1_000 }),
     ]);
-    expect(state.stockInstalls).toEqual([]);
+    expect(state.stockSeries.realized).toEqual([]);
     expect(state.stockSeries.value).toHaveLength(2);
   });
 
@@ -154,7 +189,7 @@ describe("stock capital and earnings series", () => {
     for (const record of records) appendRecords(incremental, [record]);
     const whole = project(records, Infinity, { id: "test", src: "sim", live: true, t0: 0 });
     expect(incremental.stockSeries).toEqual(whole.stockSeries);
-    expect(incremental.stockFlowSince).toBe(whole.stockFlowSince);
-    expect(incremental.stockTick).toBe(whole.stockTick);
+    expect(incremental.stockRateSince).toBe(whole.stockRateSince);
+    expect(incremental.sawStockLedgerOpen).toBe(whole.sawStockLedgerOpen);
   });
 });

@@ -140,6 +140,28 @@ describe("install artifact store", () => {
       }
     });
 
+    /** Ctrl-C is how the hub is actually stopped, and it used to be the one case
+     * where the guarantee did not hold: `#flushSpans()` was reachable only from
+     * detach(), so every key sitting mid-span lost its closing record. */
+    test("close() keeps the span's end when the hub is stopped, not just when the emitter leaves", async () => {
+      const dir = mkdtempSync(path.join(tmpdir(), "bb-store-"));
+      try {
+        const store = new RunStore(dir, hello("r"));
+        store.append([stateRecord(0, 100, { a: 1 }), stateRecord(1, 9_000, { a: 1 })]);
+        // No detach: the emitter is still attached, exactly as it is at a SIGINT.
+        await store.close();
+        expect(lines(store.file).map((record) => record.t)).toEqual([100, 9_000]);
+        const sidecar = JSON.parse(readFileSync(`${store.file}.meta.json`, "utf8")) as { records: number; live: boolean };
+        // Metadata is written after the stream closed, so it describes the
+        // finished file rather than claiming a live run with a short size.
+        expect(sidecar).toMatchObject({ records: 2, live: false });
+        // Idempotent: SIGINT then SIGTERM must not re-end an ended stream.
+        expect(store.close()).toBeUndefined();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     test("the record count reflects what was actually written", async () => {
       const dir = mkdtempSync(path.join(tmpdir(), "bb-store-"));
       try {

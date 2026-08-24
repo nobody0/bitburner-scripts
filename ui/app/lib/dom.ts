@@ -56,6 +56,11 @@ export interface TableOptions {
   left?: number[];
   /** Header cells rendered as-is (already escaped) — used for sort controls. */
   rawHeaders?: boolean;
+  /** Pre-escaped attribute fragment for a header cell, by column index. The
+   *  `rawHeaders` convention applied to the `<th>` itself: `dataTable` uses it
+   *  to publish `aria-sort`, which cannot be expressed in the header's markup
+   *  because it belongs on the cell, not on the button inside it. */
+  headerAttrs?(index: number): string;
   /** Optional class for a row, by index — used for the ranked `.picked` row. */
   rowClass?(index: number): string;
 }
@@ -80,7 +85,7 @@ export function table(
   };
   return (
     `<table><thead><tr>${headers
-      .map((h, i) => `<th${cls(i)}>${options.rawHeaders ? h : inline(h)}</th>`)
+      .map((h, i) => `<th${cls(i)}${options.headerAttrs?.(i) ?? ""}>${options.rawHeaders ? h : inline(h)}</th>`)
       .join("")}</tr></thead><tbody>` +
     rows
       .map((cells, r) => {
@@ -113,6 +118,18 @@ export const NONE = "–";
  * how often, what it costs) belongs in `hint`, shown on hover. */
 export function waiting(probe: Markup, hint = ""): string {
   return `<p class="muted"${hint ? ` title="${esc(hint)}"` : ""}>waiting for ${inline(probe)}</p>`;
+}
+
+/** The "this feature has not reported yet" state for a WHOLE panel.
+ *
+ * A tab's top-level early return is the one place `waiting()` on its own is the
+ * wrong shape: it lands a bare paragraph directly in `main#view`'s two-track
+ * grid, the only thing in the app that is not a card. `lockedPanel()` in main.ts
+ * already renders the locked case as a titled card; this is the same sentence
+ * for "unlocked, nothing on the wire yet", so the two empty states of a feature
+ * look like each other instead of like an accident. */
+export function waitingPanel(title: Markup, probe: Markup, hint = ""): string {
+  return `<div class="col wide">${card(title, waiting(probe, hint))}</div>`;
 }
 
 /** The last action's result as a coloured dot plus its detail — replaces the
@@ -208,13 +225,22 @@ export function filters(key: string, options: FilterOption[], fallback: string):
   return (
     `<div class="chips filters">` +
     options
-      .map(
-        (o) =>
-          `<button class="chip pick${o.value === current ? " sel" : ""}" data-view-key="${esc(key)}" ` +
+      .map((o) => {
+        // `aria-pressed` is emitted unconditionally, in the same expression as
+        // the class, so the two cannot drift. The selection lives in viewstate
+        // and is painted by `.sel` — a background colour, which is the one
+        // channel a screen reader cannot see. These are the controls that decide
+        // what the table below contains, so the state has to be stated as well
+        // as drawn.
+        const sel = o.value === current;
+        return (
+          `<button class="chip pick${sel ? " sel" : ""}" aria-pressed="${sel ? "true" : "false"}" ` +
+          `data-view-key="${esc(key)}" ` +
           `data-view-value="${esc(o.value)}"${o.title ? ` title="${esc(o.title)}"` : ""}>${esc(o.label)}` +
           (o.badge ? `<span class="badge">${esc(o.badge)}</span>` : "") +
-          `</button>`,
-      )
+          `</button>`
+        );
+      })
       .join("") +
     `</div>`
   );
@@ -341,6 +367,15 @@ export function dataTable<T>(id: string, rows: readonly T[], columns: Column<T>[
       wrap: columns.flatMap((c, i) => (c.wrap ? [i] : [])),
       left: columns.flatMap((c, i) => (c.left ? [i] : [])),
       rawHeaders: true,
+      // The ▲/▼ is inside the button's accessible name, so the direction is
+      // already announced; `aria-sort` is what tells a reader WHICH column the
+      // table is ordered by without hearing every header first.
+      headerAttrs: (index) => {
+        const c = columns[index];
+        if (!c?.sort) return "";
+        if (column?.id !== c.id) return ` aria-sort="none"`;
+        return ` aria-sort="${active.dir === 1 ? "ascending" : "descending"}"`;
+      },
       rowClass: (index) => options.rowClass?.(shown[index]!) ?? "",
     },
   );
