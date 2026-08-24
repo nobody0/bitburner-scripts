@@ -9,6 +9,7 @@ import { emptyArbitration } from "../shared/strategy/arbiter.ts";
 
 function harness(attempt: (answer: unknown) => string) {
   let execs = 0;
+  const queueOnce = new Set<string>();
   const stubNs = {
     codingcontract: {
       getContractType: () => "Array Jumping Game",
@@ -59,15 +60,26 @@ function harness(attempt: (answer: unknown) => string) {
       slot: false,
       result,
     },
-    acquireDodge: () => ({ host: "home", release: () => {} }),
+    // `queueOnce` lets a test make ONE stage's lease come back queued, which is
+    // how the broker reports "no RAM yet" and the only way to exercise the
+    // pipeline resume path.
+    acquireDodge: (_gb: number, request: { id: string }) => {
+      if (queueOnce.has(request.id)) {
+        queueOnce.delete(request.id);
+        return { status: "queued" };
+      }
+      return { host: "home", release: () => {} };
+    },
   } as unknown as DriverContext;
-  return { ctx, state, execs: () => execs };
+  return { ctx, state, execs: () => execs, queueOnce };
 }
 
 describe("Side contract execution", () => {
   test("inspection, data, and attempt are separate low-RAM batch stages", async () => {
     const submitted: unknown[] = [];
-    const h = harness((answer) => { submitted.push(answer); return "$1m"; });
+    // A real reward string. The game always prefixes "Gained "; a bare "$1m" is
+    // a shape it never emits, and the parser rejects it on purpose.
+    const h = harness((answer) => { submitted.push(answer); return "Gained $1.000m"; });
     await sideModule.driver.tick(h.ctx);
 
     expect(submitted).toEqual([1]);
@@ -76,7 +88,10 @@ describe("Side contract execution", () => {
     expect(h.state.topics.side?.contracts).toEqual([]);
     expect(h.state.topics.side?.contractTotal).toBe(0);
     expect(h.state.contractQuarantine).toEqual({});
-    expect(h.state.topics.side?.lastResult?.detail).toContain("$1m");
+    expect(h.state.topics.side?.lastResult?.detail).toContain("1 solved");
+    expect(h.state.topics.side?.rewards?.network).toMatchObject({
+      attempted: 1, solved: 1, moneySolves: 1, moneyApprox: 1e6, unparsed: 0,
+    });
   });
 
   test("the first rejected answer is replayable and never retried", async () => {
@@ -107,7 +122,7 @@ describe("Side contract execution", () => {
   });
 
   test("a solved darknet contract retires exactly the observation that was attempted", async () => {
-    const h = harness(() => "$1m");
+    const h = harness(() => "Gained $1.000m");
     const observedAt = Date.now();
     h.state.contractQueue = [{
       host: "dn-1",
@@ -125,6 +140,113 @@ describe("Side contract execution", () => {
     await sideModule.driver.tick(h.ctx);
     expect(h.state.darknetContractHandledAt?.["dn-1\0jump.cct"]).toBe(observedAt);
     expect(h.state.contractQueue).toEqual([]);
+  });
+
+  test("earnings are attributed to the origin the contract came from", async () => {
+    const h = harness(() => "Gained $2.000m");
+    const observedAt = Date.now();
+    h.state.contractQueue = [{ host: "dn-1", file: "jump.cct", dnet: { identity: "10.0.0.1", observedAt } }];
+    h.state.darknetContractListings = {
+      "dn-1": { identity: "10.0.0.1", observedAt, validUntil: observedAt + 60_000, files: ["jump.cct"] },
+    };
+    await sideModule.driver.tick(h.ctx);
+
+    expect(h.state.topics.side?.rewards?.darknet).toMatchObject({
+      attempted: 1, solved: 1, moneySolves: 1, moneyApprox: 2e6,
+    });
+    // Absent, NOT a zero row: the network origin has never attempted anything,
+    // and reporting it at zero would claim we measured it.
+    expect(h.state.topics.side?.rewards?.network).toBeUndefined();
+    expect(h.state.topics.side?.recentSolves?.[0]).toMatchObject({
+      origin: "darknet", currency: "money", host: "dn-1", file: "jump.cct",
+    });
+    // The darknet identity never reaches the wire.
+    expect(JSON.stringify(h.state.topics.side)).not.toContain("10.0.0.1");
+  });
+
+  test("reputation is recorded exactly, and split awards total across factions", async () => {
+    const h = harness(() => "Gained 277 reputation for each of the following factions: CyberSec, NiteSec");
+    await sideModule.driver.tick(h.ctx);
+
+    expect(h.state.topics.side?.rewards?.network).toMatchObject({
+      solved: 1, factionRep: 554, moneyApprox: 0, moneySolves: 0, unparsed: 0,
+    });
+    expect(h.state.topics.side?.recentSolves?.[0]).toMatchObject({
+      currency: "factionRep", rep: 554, to: ["CyberSec", "NiteSec"],
+    });
+  });
+
+  test("a contract that paid nothing is counted, not treated as unreadable", async () => {
+    const h = harness(() => "No reward for this contract");
+    await sideModule.driver.tick(h.ctx);
+
+    expect(h.state.topics.side?.rewards?.network).toMatchObject({
+      solved: 1, unrewarded: 1, unparsed: 0, moneyApprox: 0, moneySolves: 0,
+    });
+  });
+
+  test("an unreadable reward is counted loudly and never as a zero", async () => {
+    // A locale whose decimal comma collides with a grouping comma.
+    const h = harness(() => "Gained $1,235m");
+    await sideModule.driver.tick(h.ctx);
+
+    expect(h.state.topics.side?.rewards?.network).toMatchObject({
+      solved: 1, unparsed: 1, moneyApprox: 0, moneySolves: 0,
+    });
+    expect(h.state.topics.side?.lastResult?.detail).toContain("1 reward(s) unreadable");
+  });
+
+  test("a rejected answer is attributed to its origin's quarantine count", async () => {
+    const h = harness(() => "");
+    await sideModule.driver.tick(h.ctx);
+
+    expect(h.state.topics.side?.rewards?.network).toMatchObject({ attempted: 1, solved: 0, quarantined: 1 });
+    expect(Object.values(h.state.contractQuarantine ?? {})[0]).toMatchObject({ origin: "network" });
+  });
+
+  test("a queued attempt lease resumes without re-attempting or double counting", async () => {
+    // The regression this guards: the attempt stage has no resume cache, so if
+    // the pipeline is not released once the attempts are submitted, the next
+    // tick re-runs them and burns a try on a one-try contract.
+    let attempts = 0;
+    const h = harness(() => { attempts++; return "Gained $1.000m"; });
+    h.queueOnce.add("action:contract:attempt");
+
+    await sideModule.driver.tick(h.ctx);
+    expect(attempts).toBe(0);
+    expect(h.state.topics.side?.rewards).toBeUndefined();
+
+    await sideModule.driver.tick(h.ctx);
+    expect(attempts).toBe(1);
+    expect(h.state.topics.side?.rewards?.network).toMatchObject({ attempted: 1, solved: 1, moneyApprox: 1e6 });
+
+    // A third tick must find nothing left to do rather than re-attempt.
+    await sideModule.driver.tick(h.ctx);
+    expect(attempts).toBe(1);
+    expect(h.state.topics.side?.rewards?.network).toMatchObject({ attempted: 1, solved: 1, moneyApprox: 1e6 });
+  });
+
+  test("totals accumulate across ticks and the ring stays bounded", async () => {
+    const h = harness(() => "Gained $1.000m");
+    await sideModule.driver.tick(h.ctx);
+    h.state.topics.side!.contracts = [{ host: "n00dles", file: "second.cct" }];
+    h.state.contractQueue = [{ host: "n00dles", file: "second.cct" }];
+    await sideModule.driver.tick(h.ctx);
+
+    expect(h.state.topics.side?.rewards?.network).toMatchObject({ solved: 2, moneyApprox: 2e6 });
+    const recent = h.state.topics.side?.recentSolves ?? [];
+    expect(recent.length).toBe(2);
+    expect(recent[recent.length - 1]?.file).toBe("second.cct");
+  });
+
+  test("prestige clears the ledger with the topic", async () => {
+    const h = harness(() => "Gained $1.000m");
+    await sideModule.driver.tick(h.ctx);
+    expect(h.state.contractLedger).toBeDefined();
+
+    sideModule.reset!(h.state, "augmentation");
+    expect(h.state.contractLedger).toBeUndefined();
+    expect(h.state.topics.side).toBeUndefined();
   });
 
 });

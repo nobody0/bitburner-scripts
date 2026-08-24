@@ -2,7 +2,7 @@ import type { ContractQueueEntry, DarknetContractListing } from "./contracts.ts"
 import { applyOverrides, type FeatureOverrides } from "../../shared/features/profile.ts";
 import { unknownCapabilities, type Capabilities } from "../../shared/features/unlock.ts";
 import type { StateKey, StateMap } from "../../shared/telemetry/state-map.ts";
-import type { ContractFailure } from "../../shared/telemetry/topics/side.ts";
+import type { ContractFailure, ContractOrigin, ContractOriginTotals, ContractSolveReport } from "../../shared/telemetry/topics/side.ts";
 import { gameGlobal } from "./globals.ts";
 
 /** The game-state copy: the script's own model of the world, and the single
@@ -60,6 +60,19 @@ export interface GameState {
   /** Coding contracts rejected once are never automatically retried. Kept
    * outside topics so the full quarantine never reaches telemetry. */
   contractQuarantine?: Record<string, ContractFailure>;
+  /** Cumulative contract earnings by origin, plus the most recent solves.
+   *
+   * Kept outside topics for the same reason as `contractQuarantine`: the topic
+   * carries a rounded projection and the store keeps the exact running sum, so
+   * repeated publishing never rounds an already-rounded total. In `GameState`
+   * rather than a module `let` because a build handoff replaces the module and
+   * not the world, and a counter that restarted at zero would republish those
+   * zeroes over money that was really earned (see `StockFlows`). */
+  contractLedger?: {
+    since?: number;
+    totals: Partial<Record<ContractOrigin, ContractOriginTotals>>;
+    recent: ContractSolveReport[];
+  };
   /** Private bounded work queue. The Side topic exposes only its front batch
    * plus totals, so this never gets serialized into telemetry. */
   contractQueue?: ContractQueueEntry[];

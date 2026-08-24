@@ -883,6 +883,73 @@ describe("tab rendering", () => {
     expect(html).not.toContain("Casino");
   });
 
+  test("Side attributes rewards by origin and marks the money approximate", () => {
+    const state = emptyState();
+    state.lastT = 5_000;
+    state.topics.progression = {
+      moneySources: {
+        sinceInstall: { codingcontract: 3_000_000 },
+        sinceStart: { codingcontract: 3_000_000 },
+      },
+    } as never;
+    state.topics.side = {
+      contracts: [{ host: "dn-1", file: "next.cct", origin: "darknet" }],
+      contractTotal: 1,
+      solvableTotal: 1,
+      rewardsSince: 1_000,
+      rewards: {
+        network: {
+          attempted: 4, solved: 3, unrewarded: 0, quarantined: 1,
+          moneyApprox: 2_000_000, moneySolves: 2,
+          factionRep: 7_500, companyRep: 0,
+          unparsed: 0,
+        },
+        darknet: {
+          attempted: 2, solved: 2, unrewarded: 0, quarantined: 0,
+          moneyApprox: 1_000_000, moneySolves: 1,
+          factionRep: 0, companyRep: 4_000,
+          unparsed: 1,
+        },
+      },
+      recentSolves: [{
+        at: 4_000, origin: "darknet", host: "dn-1", file: "a.cct", type: "Spiralize Matrix",
+        reward: "Gained $1.000m", currency: "money", moneyApprox: 1_000_000,
+      }],
+    } as never;
+
+    const html = TABS.side.render(state);
+    // Both origins are attributed separately.
+    expect(html).toContain("network");
+    expect(html).toContain("darknet");
+    // Money is never presented as exact, and the game's exact ledger is shown
+    // beside it for the combined figure.
+    expect(html).toContain("≈");
+    expect(html).toContain("game ledger, exact (no origin split)");
+    // An unreadable reward is loud, not absorbed as a zero.
+    expect(html).toContain("did not match this build's parser");
+    // The verbatim reward string reaches the recent-solves card.
+    expect(html).toContain("Gained $1.000m");
+    // The old hardcoded claim is gone.
+    expect(html).not.toContain("v3 registry complete");
+  });
+
+  test("Side renders a run that predates the reward fields, and fabricates no zero", () => {
+    const state = emptyState();
+    state.lastT = 2_000;
+    state.topics.side = {
+      contracts: [{ host: "n00dles", file: "next.cct" }],
+      contractTotal: 1,
+      solvableTotal: 1,
+      // A malformed row from some other build must not take down the frame.
+      rewards: { network: null },
+    } as never;
+
+    const html = TABS.side.render(state);
+    expect(html).toContain("no coding contract has been attempted since the last install");
+    expect(html).toContain("no contract has been solved since the last install");
+    expect(html).not.toContain("did not match this build's parser");
+  });
+
 });
 
 describe("stream projection", () => {

@@ -52,7 +52,8 @@ exposed to scripts as `difficulty` (`types/NetscriptDefinitions.d.ts:9612`).
 the amount of money gained from completing Coding Contracts"
 (`types/NetscriptDefinitions.d.ts:703-704`) — and it is the multiplier table's only
 contract field (`BitNode/BitNodeMultipliers.ts:31-32`). How difficulty and the bases
-compose into a payout is unvendored, and stays an Open question below.
+compose into a payout is unvendored but readable from the checkout — see
+[The payout formula](#the-payout-formula-and-why-money-still-has-to-be-read-as-text).
 
 **Coverage is 30 of 30.** `SOLVERS` holds 30 entries
 (`shared/strategy/side/contracts.ts:543-577`); `sim/tests/contracts-parity.test.ts:11-13`
@@ -80,9 +81,13 @@ player-time auction (`shared/strategy/arbiter.ts:24`).
 
 - **A retry is not free.** With Array Jumping Game at one try, a second guess costs
   the whole reward. The driver quarantines on first rejection — type, data, answer and
-  `triesBefore`, for offline replay — and never re-attempts (`side.ts:246`, `:78-98`);
-  quarantine lifts only when `CONTRACT_SOLVER_VERSION` changes (`:110-113`,
-  `contracts.ts:18`). An unregistered type is quarantined too — `solve` returns
+  `triesBefore`, for offline replay — and never re-attempts. Quarantine lifts in
+  exactly three places, and none of them is a solver rebuild: the `ls` sweep reaping
+  a key whose file is gone, `syncDarknetContracts` forgetting a host, and
+  `sideModule.reset` on prestige. `CONTRACT_SOLVER_VERSION` used to release it on a
+  solver change and was dropped — releasing quarantine on a rebuild only ever bought
+  a retry of contracts that had failed for unrelated reasons. An unregistered type is
+  quarantined too — `solve` returns
   `undefined`, not a guess (`contracts.ts:584-585`, `side.ts:168`).
 - **A thrown error is not a rejected answer.** `reward === ""` is quarantined as
   `answer rejected`, a caught throw carries its error text, and "Cannot find contract"
@@ -105,6 +110,79 @@ player-time auction (`shared/strategy/arbiter.ts:24`).
 Money, faction reputation, company reputation. Install and node-reset persistence is
 owned by the resource table in [`graph.md`](../graph.md), which lists none of the three
 as permanent — so `side`'s value is a rate, not a stock.
+
+### The payout formula, and why money still has to be read as text
+
+`gainCodingContractReward` composes the three base constants the same way for all of
+them: `base * difficulty * (rewardScaling / 3)`, with `CodingContractMoney` applied on
+the money branch alone — the "new standard is smaller, more frequent rewards", hence
+the third. That answers one of the Open questions below, but does **not** make the
+payout computable: `rewardScaling` is per-contract and is not exposed to scripts, and
+neither is the reward type. `attempt` returns a display string and nothing else, so a
+gain can only be read back out of a sentence written for a human.
+
+`attempt` returns exactly one of six shapes:
+
+| Returned string | Read as |
+|---|---|
+| `""` | wrong answer — quarantined as `answer rejected`, never a reward |
+| `No reward for this contract` | consumed and paid nothing (`reward` was null) |
+| `Gained ${repGain} faction reputation for ${faction}` | faction rep, **exact** |
+| `Gained ${perFaction} reputation for each of the following factions: ${names}` | faction rep, **exact**; total is `perFaction * count` |
+| `Gained ${repGain} company reputation for ${company}` | company rep, **exact** |
+| `Gained ${formatMoney(n)}` | money, **approximate** |
+
+Reputation is interpolated as a raw `${number}`, so it is lossless. Money goes through
+`formatMoney`, which carries about four significant figures and depends on five player
+display settings (`CurrencySymbol`, `CurrencySymbolAfterValue`, `Locale`,
+`fractionalDigits`, `disableSuffixes`). So money is reported as a **magnitude**, named
+`moneyApprox` on the wire so the caveat cannot be renamed away by a UI, and cross-checked
+against the exact `progression.moneySources.sinceInstall.codingcontract` — which is
+authoritative for the combined figure but carries no origin split.
+
+**A parse failure is its own outcome.** `parseContractReward`
+(`shared/strategy/side/rewards.ts`) returns an `unparsed` variant rather than folding an
+unrecognised string into a zero, and the count reaches the wire and the tab. The reason is
+concrete: a canonical `formatNumber` output can never contain a thousands separator (below
+the suffix threshold the value is under 1000, and above it the mantissa is always within
+[1, 1000)), so a separator proves the player's locale is not the one the parser reads.
+de-DE's `"$1,235m"` means 1.235e6 and reads as 1235e6 if the comma is stripped — a silent
+1000x error, which is exactly what `unparsed` exists to prevent. Upstream's own
+`parseBigNumber` strips commas and is deliberately not reused.
+
+`"Gained $0"` is a **real** zero, not a parse failure. Where a node zeroes
+`CodingContractMoney`, a money reward pays exactly nothing — and conflating that with "we
+could not read the number" would destroy the one signal that says so. It is reached by
+the fallback rather than by generation: `getRandomReward` omits `Money` from the valid
+types entirely while the multiplier is 0 (`src/CodingContract/ContractGenerator.ts:179-190`
+at the pinned commit), which also answers the old "is BN8 reputation-only?" question —
+generated contracts there are. A reputation reward with no eligible faction still falls
+back to money, so a `$0` remains reachable in exactly that case.
+
+**A parsed currency says what was PAID, not what the contract was worth.** Upstream falls
+back between currencies — a faction-reputation reward with no hacking faction joined pays
+money instead, and a company-reputation reward with no job pays faction reputation. The
+split is income attribution, never reward-type generation statistics.
+
+The parser is **total**: it never throws, for any input. That is not defensiveness. It runs
+in the driver's post-attempt block, where the controller swallows a driver throw and the
+pipeline resume vars would still be set — so the next tick would skip inspect/getData and
+re-attempt contracts the game has already answered, burning a try on a one-try contract.
+The driver releases the pipeline the moment the attempts are submitted for the same reason.
+
+### Attribution by origin
+
+Every counter is split `network` / `darknet` (`ContractOrigin`), because darknet contracts
+arrive through a resident listing and cracking those hosts has a cost worth weighing
+against what their contracts actually pay. An origin's row is **absent** until it attempts
+something — absent means "never seen", not "measured zero". Only the bare origin tag
+reaches the wire; the darknet identity never does. The window is since-install, matching
+`moneySources.sinceInstall` so the cross-check compares like with like.
+
+These figures can **undercount and never double-count**: if the attempt dodge dies after
+its body ran, some attempts may have landed while the result set was lost, and those
+contracts are gone from the next `ls` sweep. A persistent shortfall against the game's
+exact ledger is the symptom.
 
 ## BitNode modifiers
 
@@ -134,6 +212,7 @@ of the one required infiltration (`game/lib/features/factions.ts:244-248`).
 | Concern | File |
 |---|---|
 | solvers, limits, registry | `shared/strategy/side/contracts.ts` |
+| reward-string parser | `shared/strategy/side/rewards.ts` |
 | driver | `game/lib/features/side.ts` |
 | probe | `game/lib/probes/dodged.ts` (`side.contracts`, line 1858) |
 | telemetry topic | `shared/telemetry/topics/side.ts` |
@@ -146,15 +225,13 @@ of the one required infiltration (`game/lib/features/factions.ts:244-248`).
 The vendored extract carries the contract *types* only — not reward payout, generation
 or the ns implementation — so these stay questions, not prose:
 
-- How do the three base constants compose into a payout? Difficulty and a
-  `rewardScaling` factor are both involved; the arithmetic is unvendored.
 - Does a **malformed** answer consume a try, or is it rejected before the attempt is
   counted? The driver distinguishes a throw from an empty return
   (`side.ts:241-249`), but the game-side semantics are unconfirmed.
-- Is money excluded from a contract's *generated* reward type when
-  `CodingContractMoney` is 0, making [BN8](../bitnodes/bn08.md) reputation-only?
-  BN8's `0` is vendored; the generation rule is not.
 - What governs spawn rate and placement, and does the count saturate? Our only
   evidence is one BN12 save at 8 557 files.
 - Contracts pay company reputation, but [`graph.md`](../graph.md) lists that
   resource as produced by company work alone. Should the row name `side` too?
+  The `companyRep` counter is the evidence path: once a run records a non-zero
+  value, name `side` in the row and strike this question. Answer it on observed
+  evidence, not on the strength of the upstream read.

@@ -770,6 +770,13 @@ listing arrives. The ordinary network sweep rebuilds darknet work from these
 fresh listings because `ns.scan` cannot see darknet hosts; neither the listings
 nor their stamps are added to dnet telemetry.
 
+What a darknet contract DOES publish is a bare origin tag. The `side` topic
+counts solves and earnings separately for `darknet` and `network`
+(`ContractOrigin`), so the cost of cracking these hosts can be weighed against
+what their contracts actually pay. Only the tag crosses the wire — the host
+identity stays private, exactly as the listings do — and an origin that has
+never attempted anything is absent from the record rather than reported at zero.
+
 `.txt`, `.lit`, and `.msg` files are intentionally outside this path. They are
 neither copied nor opened.
 

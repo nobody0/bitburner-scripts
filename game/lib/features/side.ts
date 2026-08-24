@@ -4,12 +4,21 @@ import {
   CONTRACT_BATCH_SIZE,
   CONTRACT_QUEUE_LIMIT,
   CONTRACT_REPORT_LIMIT,
+  CONTRACT_SOLVE_RING,
   solve,
   SOLVERS,
 } from "../../../shared/strategy/side/contracts.ts";
-import type { ContractFailure } from "../../../shared/telemetry/topics/side.ts";
+import { roundSigFigs } from "../../../shared/format.ts";
+import { parseContractReward, type ContractReward } from "../../../shared/strategy/side/rewards.ts";
+import type {
+  ContractFailure,
+  ContractOrigin,
+  ContractOriginTotals,
+  ContractSolveReport,
+} from "../../../shared/telemetry/topics/side.ts";
 import {
   contractKey,
+  contractOrigin,
   darknetContractIsActionable,
   type ContractQueueEntry,
 } from "../contracts.ts";
@@ -76,6 +85,34 @@ function compactReason(reason: string): string {
     : `${reason.slice(0, CONTRACT_REASON_LIMIT)}… (${reason.length} chars)`;
 }
 
+/** Recipients named on a solve report. Capped because the all-factions award
+ * lists every membership — around 30 names late in a run — and a ring of
+ * those is a dump, not a digest. `toTotal` keeps the real count. */
+const CONTRACT_RECIPIENT_LIMIT = 4;
+
+function emptyTotals(): ContractOriginTotals {
+  return {
+    attempted: 0,
+    solved: 0,
+    unrewarded: 0,
+    quarantined: 0,
+    moneyApprox: 0,
+    moneySolves: 0,
+    factionRep: 0,
+    companyRep: 0,
+    unparsed: 0,
+  };
+}
+
+/** The exact private ledger. An origin's row is created only when that origin
+ * actually does something, so an absent row means "never seen" rather than
+ * "measured zero" — the distinction the topic doc requires. */
+function ledgerFor(ctx: DriverContext, origin: ContractOrigin): ContractOriginTotals {
+  const ledger = ctx.state.contractLedger ??= { totals: {}, recent: [] };
+  ledger.since ??= Date.now();
+  return ledger.totals[origin] ??= emptyTotals();
+}
+
 function quarantineContract(
   ctx: DriverContext,
   contract: ContractQueueEntry,
@@ -85,9 +122,12 @@ function quarantineContract(
   answer?: unknown,
   triesBefore?: number,
 ): ContractFailure {
+  const origin = contractOrigin(contract);
+  ledgerFor(ctx, origin).quarantined++;
   const failure: ContractFailure = {
     host: contract.host,
     file: contract.file,
+    origin,
     type,
     data: replayValue(data),
     answer: replayValue(answer),
@@ -97,6 +137,93 @@ function quarantineContract(
   };
   (ctx.state.contractQuarantine ??= {})[contractKey(contract)] = failure;
   return failure;
+}
+
+/** Fold one solve into the exact ledger and onto the ring.
+ *
+ * Money and reputation are kept in separate fields on purpose: they are
+ * different currencies, and summing them would invent an exchange rate the game
+ * does not have. `moneySolves` is what separates "paid a zero" from "never paid
+ * money", which a BitNode that zeroes contract money makes a real distinction.
+ *
+ * Returns the reward kind so the caller can describe its own batch. */
+function recordReward(
+  ctx: DriverContext,
+  totals: ContractOriginTotals,
+  job: ContractJob & { type: string },
+  reward: string,
+): ContractReward["kind"] {
+  const parsed = parseContractReward(reward);
+  const report: ContractSolveReport = {
+    at: Date.now(),
+    origin: contractOrigin(job),
+    host: job.host,
+    file: job.file,
+    type: job.type,
+    reward: compactReason(reward),
+    currency: parsed.kind,
+  };
+
+  switch (parsed.kind) {
+    case "none":
+      totals.unrewarded++;
+      break;
+    case "money":
+      totals.moneyApprox += parsed.money;
+      totals.moneySolves++;
+      report.moneyApprox = parsed.money;
+      break;
+    case "factionRep":
+      totals.factionRep += parsed.rep;
+      report.rep = parsed.rep;
+      report.to = parsed.to.slice(0, CONTRACT_RECIPIENT_LIMIT);
+      if (parsed.to.length > CONTRACT_RECIPIENT_LIMIT) report.toTotal = parsed.to.length;
+      break;
+    case "companyRep":
+      totals.companyRep += parsed.rep;
+      report.rep = parsed.rep;
+      report.to = parsed.to.slice(0, CONTRACT_RECIPIENT_LIMIT);
+      break;
+    case "unparsed":
+      // Counted, never absorbed: the money total is now short by an unknown
+      // amount and the viewer has to be able to say so.
+      totals.unparsed++;
+      break;
+  }
+
+  const ledger = ctx.state.contractLedger ??= { totals: {}, recent: [] };
+  ledger.recent.push(report);
+  if (ledger.recent.length > CONTRACT_SOLVE_RING) {
+    ledger.recent.splice(0, ledger.recent.length - CONTRACT_SOLVE_RING);
+  }
+  return parsed.kind;
+}
+
+/** The rounded projection of the private ledger. Rounded here and not in the
+ * ledger so a republish never rounds an already-rounded total; omitted entirely
+ * until something has been attempted, because `merge` keeps a `{}` and an empty
+ * record would assert "both origins at zero". */
+function publishedLedger(ctx: DriverContext): {
+  rewards?: Partial<Record<ContractOrigin, ContractOriginTotals>>;
+  rewardsSince?: number;
+  recentSolves?: ContractSolveReport[];
+} {
+  const ledger = ctx.state.contractLedger;
+  if (!ledger || Object.keys(ledger.totals).length === 0) return {};
+  const rewards: Partial<Record<ContractOrigin, ContractOriginTotals>> = {};
+  for (const [origin, totals] of Object.entries(ledger.totals) as [ContractOrigin, ContractOriginTotals][]) {
+    // Six significant figures: the money figure never carried more than four,
+    // and a drifting tail would rewrite this record on every tick.
+    rewards[origin] = { ...totals, moneyApprox: roundSigFigs(totals.moneyApprox, 6) };
+  }
+  return {
+    rewards,
+    ...(ledger.since !== undefined ? { rewardsSince: ledger.since } : {}),
+    // Copied, not aliased: the ledger keeps pushing onto `recent`, and a
+    // published record that mutates after its topic was marked clean would
+    // change what a reader sees without ever being republished.
+    recentSolves: ledger.recent.slice(),
+  };
 }
 
 const side: FeatureDriver = {
@@ -211,7 +338,8 @@ const side: FeatureDriver = {
     }
 
     let solved = 0;
-    const rewards: string[] = [];
+    let darknetSolved = 0;
+    let unreadable = 0;
     if (jobs.length > 0) {
       const attemptResult = await featureDodge(
         ctx,
@@ -232,9 +360,19 @@ const side: FeatureDriver = {
         merge(ctx.state, "side", { lastResult: record(false, attemptResult.reason) });
         return;
       }
+      // The attempts have been SUBMITTED, so resuming this pipeline is never
+      // correct again — release it before anything below can throw. The
+      // controller swallows a driver throw, and with the resume vars still set
+      // the next tick would skip inspect/getData and re-attempt contracts the
+      // game has already answered, burning a try on a one-try contract like
+      // Array Jumping Game. Everything from here on uses locals and ctx.state.
+      clearContractPipeline();
       const byKey = new Map(jobs.map((job) => [contractKey(job), job]));
       for (const result of attemptResult.value) {
         const job = byKey.get(result.key)!;
+        const origin = contractOrigin(job);
+        const totals = ledgerFor(ctx, origin);
+        totals.attempted++;
         finished.add(result.key);
         if ("error" in result) {
           if (!result.error.includes("Cannot find contract")) {
@@ -244,7 +382,9 @@ const side: FeatureDriver = {
           failures.push(quarantineContract(ctx, job, job.type, "answer rejected", job.data, job.answer, job.triesBefore));
         } else {
           solved++;
-          if (rewards.length < 3) rewards.push(compactReason(result.reward));
+          totals.solved++;
+          if (origin === "darknet") darknetSolved++;
+          if (recordReward(ctx, totals, job, result.reward) === "unparsed") unreadable++;
         }
       }
     }
@@ -257,21 +397,27 @@ const side: FeatureDriver = {
     }
     const remaining = queue.filter((contract) => !finished.has(contractKey(contract)));
     ctx.state.contractQueue = remaining;
-    const rewardDetail = rewards.length > 0
-      ? `; rewards: ${rewards.join("; ")}${solved > rewards.length ? `; +${solved - rewards.length} more` : ""}`
-      : "";
+    // The line describes THIS batch. Cumulative earnings are published as
+    // structured per-origin totals, so restating them here would be both a
+    // second rendering and the wrong altitude for a per-batch summary.
+    const origins = darknetSolved > 0 ? ` (${darknetSolved} darknet)` : "";
+    const unread = unreadable > 0 ? `, ${unreadable} reward(s) unreadable` : "";
     const result = record(
       failures.length === 0,
-      `${solved} solved, ${failures.length} quarantined from a batch of ${batch.length}${rewardDetail}`,
+      `${solved} solved${origins}, ${failures.length} quarantined from a batch of ${batch.length}${unread}`,
     );
     merge(ctx.state, "side", {
-      contracts: remaining.slice(0, CONTRACT_REPORT_LIMIT).map(({ host, file }) => ({ host, file })),
+      contracts: remaining
+        .slice(0, CONTRACT_REPORT_LIMIT)
+        // Origin only — never the darknet identity, which stays off the wire.
+        .map((contract) => ({ host: contract.host, file: contract.file, origin: contractOrigin(contract) })),
       contractTotal: Math.max(0, (topic.contractTotal ?? topic.contracts.length) - solved),
       solvableTotal: Math.max(0, solvableTotal - solved - failures.length),
       failures: allFailures
         .slice(0, 8)
         .map(({ data: _data, answer: _answer, ...summary }) => summary),
       quarantinedTotal: allFailures.length,
+      ...publishedLedger(ctx),
       lastResult: result,
     });
     clearContractPipeline();
@@ -284,6 +430,12 @@ export const sideModule: FeatureModule = {
     delete state.topics.side;
     state.contractQuarantine = {};
     delete state.contractQueue;
+    // Both, and in this order matters only in that neither may be skipped:
+    // dropping the topic while keeping the ledger republishes pre-prestige
+    // earnings as post-prestige, and clearing the ledger while keeping the
+    // topic leaves the old numbers on the wire until the next tick. Neither
+    // money nor reputation survives an install, so `kind` is irrelevant.
+    delete state.contractLedger;
     clearContractPipeline();
   },
   claims: (ctx) => (ctx.state.contractQueue?.length ?? ctx.state.topics.side?.contracts?.length)

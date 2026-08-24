@@ -167,11 +167,25 @@ waited, from the one component that knows whether the RAM is coming.
 
 Coding contracts split repeated state from forensic detail. The `side` topic
 carries totals, solver coverage, the front 20 rows of a private 100-contract
-work queue, compact quarantine summaries, scan freshness and the last batch
-outcome. A full rejected input/answer is emitted once as
+work queue, compact quarantine summaries, scan freshness, the last batch
+outcome, and earnings split by contract ORIGIN (`network` / `darknet`) with a
+20-deep ring of recent solves. A full rejected input/answer is emitted once as
 `contract.quarantined`; the UI retains the latest replay outside its bounded
 event feed. This keeps a failure actionable without copying up to eight large
 replays into every 30-second state record.
+
+The earnings half adds no event: the ring is bounded state, so
+`contract.quarantined` remains the topic's only one. Two rules travel with the
+numbers. Money is named `moneyApprox` because it is summed from the game's
+formatted reward text and carries about four significant figures — a UI cannot
+rename a wire field, so the caveat has to live in the name; reputation is exact
+and is not hedged. And a reward string the parser cannot read increments
+`unparsed` instead of contributing a zero, because a locale or currency-symbol
+change would otherwise present as "earned nothing" rather than "stopped
+measuring". The exact combined figure remains
+`progression.moneySources.sinceInstall.codingcontract`, which has no origin
+split; the two are published for the same window on purpose so they can be read
+against each other.
 
 Two records carry the endgame decision loop (`spec/strategy/endgame.md`).
 `endgame.route` fires only when the chosen route CHANGES — decisions, not

@@ -19,6 +19,10 @@ export type ContractSolver = (data: unknown) => unknown;
 export const CONTRACT_BATCH_SIZE = 20;
 export const CONTRACT_QUEUE_LIMIT = 100;
 export const CONTRACT_REPORT_LIMIT = CONTRACT_BATCH_SIZE;
+/** Recent solves retained as examples. Sized to one batch so the ring is never
+ * a lossy sample of a SINGLE driver tick; the per-origin totals are the
+ * census. */
+export const CONTRACT_SOLVE_RING = CONTRACT_BATCH_SIZE;
 
 /** Largest sum of any contiguous subarray. */
 function maxSubarraySum(data: unknown): number {

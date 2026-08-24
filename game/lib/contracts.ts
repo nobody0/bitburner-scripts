@@ -1,3 +1,5 @@
+import type { ContractOrigin } from "../../shared/telemetry/topics/side.ts";
+
 export interface ContractQueueEntry {
   host: string;
   file: string;
@@ -17,6 +19,12 @@ export interface DarknetContractListing {
 
 export function contractKey(contract: Pick<ContractQueueEntry, "host" | "file">): string {
   return `${contract.host}\0${contract.file}`;
+}
+
+/** Where a contract came from. One helper so the probe, the driver and the
+ * viewer cannot disagree about what counts as darknet work. */
+export function contractOrigin(contract: Pick<ContractQueueEntry, "host" | "file"> & Partial<Pick<ContractQueueEntry, "dnet">>): ContractOrigin {
+  return contract.dnet ? "darknet" : "network";
 }
 
 export function darknetContractIsActionable(
