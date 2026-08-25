@@ -646,7 +646,19 @@ export async function main(ns: NS): Promise<void> {
   };
 
   const retireLostEdgeOrders = (entry: HostEntry, vantage: string, neighbours: readonly string[]): number => {
-    const applies = (o: Order): boolean => o.from === vantage && o.host !== vantage && o.sessionOnly !== true && !neighbours.includes(o.host);
+    const lost = (host: string, sessionOnly: boolean): boolean =>
+      host !== vantage && !sessionOnly && !neighbours.includes(host);
+    // A plant carries a whole frontier, and one severed edge costs it one
+    // target rather than the order: prune in place, and only an order left
+    // with nothing to reach is retired.
+    for (const o of [...(entry.staged ?? []), entry.agent?.order].filter((o): o is Order => o?.kind === "plant")) {
+      if (o.from !== vantage) continue;
+      o.targets = (o.targets ?? []).filter((t) => !lost(t.host, t.sessionOnly === true));
+    }
+    const applies = (o: Order): boolean => o.from === vantage
+      && (o.kind === "plant"
+        ? (o.targets ?? []).length === 0
+        : lost(o.host, false));
     const staged = entry.staged ?? [];
     const retired = staged.filter(applies);
     if (retired.length > 0) {
@@ -695,7 +707,9 @@ export async function main(ns: NS): Promise<void> {
       retireLifetime(report.host, "server identity changed");
     } else if (report.targetState === "credential-rejected") {
       retireRejectedCredential(report.host);
-    } else if (report.targetState === "launch-refused" && order?.sessionOnly === true && !stasisLinked.has(report.host)) {
+    } else if (report.targetState === "launch-refused"
+      && (order?.targets ?? []).some((t) => t.host === report.host && t.sessionOnly === true)
+      && !stasisLinked.has(report.host)) {
       invalidateBackdoor(report.host);
     }
     if (report.kind === "plant" && order?.bootstrapReclaim !== true && (report.ok || report.targetState === "launch-refused")) {
@@ -1101,11 +1115,23 @@ export async function main(ns: NS): Promise<void> {
       ...(task.skipInitialBleed === true ? { skipInitialBleed: true } : {}),
       ...(task.kind === "bleed" || task.kind === "attempt" ? { knownHosts: [...hosts.keys()] } : {}),
       ...(task.kind === "plant" ? {
-        ...(task.remote ? { sessionOnly: true } : {}),
-        ...(task.bootstrapReclaim ? { bootstrapReclaim: true } : {}),
-        ...(task.bootstrapThreads !== undefined ? { bootstrapThreads: task.bootstrapThreads } : {}),
-        ...(task.omitProber ? { omitProber: true } : {}),
-        ...(stasisLinked.has(task.host) ? { targetControllerManaged: true } : {}),
+        // Every per-target fact is resolved HERE, once, so the body never
+        // reaches back into the controller for one. A target whose credential
+        // has since gone is simply not on the frontier.
+        targets: (task.targets ?? []).flatMap((target) => {
+          const credential = vault.get(target.host);
+          if (credential === undefined) return [];
+          return [{
+            host: target.host,
+            password: credential.password,
+            ...(hosts.get(target.host)?.identity !== undefined ? { identity: hosts.get(target.host)!.identity } : {}),
+            ...(stasisLinked.has(target.host) ? { controllerManaged: true } : {}),
+            ...(target.remote ? { sessionOnly: true } : {}),
+            ...(target.bootstrapReclaim ? { bootstrapReclaim: true } : {}),
+            ...(target.bootstrapThreads !== undefined ? { bootstrapThreads: target.bootstrapThreads } : {}),
+            ...(target.omitProber ? { omitProber: true } : {}),
+          }];
+        }),
         payloads,
       } : {}),
     };
@@ -1455,39 +1481,20 @@ export async function main(ns: NS): Promise<void> {
     const expiry = expiryOpts();
     const cancelled = new Set<string>();
     const assigned = new Map<string, number>();
-    const remoteExec = remoteExecSet(at);
-    // Per-plant record of which vantages reach the target remotely (vs
-    // adjacently), so the chosen vantage's route can be read back onto the
-    // task rather than blindly cleared.
-    const routeOf = new Map<string, "adjacent" | "remote">();
+    // Plants are NOT rerouted here. `candidatesFrom` already chose each
+    // target's vantage and its route with it, and `deriveTasks` groups a
+    // vantage's whole frontier into one order — moving that order elsewhere
+    // would move targets whose route was classified against the old vantage.
+    // A plant still passes through for the one thing this pass owns:
+    // preempting a lesser order to get its slot.
     for (const task of tasks) {
       if (task.kind !== "walk" && task.kind !== "plant" && task.kind !== "cache" && task.kind !== "pin" && task.kind !== "attempt" && task.kind !== "bleed") continue;
-      const targetNeighbours = fresh<string[]>(hosts.get(task.host), "neighbours", at, expiry) ?? [];
-      const remoteExecCapable = task.kind === "plant" && remoteExec.has(task.host);
       const candidates: PreemptionCandidate[] = [];
-      routeOf.clear();
-      const possible = task.kind === "plant" ? new Set<string>([task.from, ...liveEntries().map((e) => e.hostname)]) : new Set<string>(task.eligibleFrom ?? [task.from]);
-      for (const host of possible) {
-        if (task.kind === "plant" && host === task.host) continue;
+      for (const host of task.eligibleFrom ?? [task.from]) {
         const entry = hosts.get(host);
         if (entry === undefined || entry.agent === undefined) continue;
         const strategicDepth = strategicQueueDepth(entry.staged ?? []);
         if (strategicDepth + (assigned.get(host) ?? 0) >= MAX_STAGED_PER_HOST) continue;
-        if (task.kind === "plant") {
-          // Route classification decides eligibility AND how the chosen
-          // vantage authenticates: adjacent keeps the connection fallback,
-          // remote is session-only. A remote-capable target admits ANY live
-          // resident; an ordinary target only fresh neighbours.
-          const route = classifyPlantRoute({
-            target: task.host,
-            vantage: host,
-            vantageNeighbours: fresh<string[]>(hosts.get(host), "neighbours", at, expiry),
-            targetNeighbours,
-            remoteExecCapable,
-          });
-          if (route === "ineligible") continue;
-          routeOf.set(host, route);
-        }
         const active = entry.agent?.order.kind !== "idle" ? entry.agent : undefined;
         candidates.push(preemptionCandidateFromHandle(host, active, {
           usableGb: usableGb(host, at, expiry),
@@ -1498,13 +1505,6 @@ export async function main(ns: NS): Promise<void> {
       const choice = choosePreemptionVantage(task.kind, candidates, at);
       if (choice === undefined) continue;
       if (choice.vantage !== task.from) task.from = choice.vantage;
-      if (task.kind === "plant") {
-        // Derive remote from the chosen route, never delete it blindly: a
-        // vantage change onto a non-adjacent agent must KEEP sessionOnly, or
-        // the plant tries authenticate() at a distance and fails.
-        if (routeOf.get(choice.vantage) === "remote") task.remote = true;
-        else delete task.remote;
-      }
       assigned.set(choice.vantage, (assigned.get(choice.vantage) ?? 0) + 1);
       if (choice.preempt && !cancelled.has(choice.vantage)) {
         const entry = hosts.get(choice.vantage);

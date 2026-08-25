@@ -123,8 +123,8 @@ describe("a fact derives in its own turn", () => {
 
     const plant = (vantage.staged ?? []).find((order) => order.kind === "plant");
     expect(plant, "the plant was not staged in the credential's own turn").toBeDefined();
-    expect(plant!.host).toBe(TARGET);
-    expect(plant!.password).toBe("1234");
+    expect(plant!.targets?.map((t) => t.host)).toEqual([TARGET]);
+    expect(plant!.targets?.[0]?.password).toBe("1234");
   });
 
   test("a reload's restored vault stages a remote plant before it has a map", async () => {
@@ -145,9 +145,27 @@ describe("a fact derives in its own turn", () => {
 
     const plant = (handle.hosts.get(VANTAGE)?.staged ?? []).find((order) => order.kind === "plant");
     expect(plant, "the restored credential waited for a prober to rediscover its host").toBeDefined();
-    expect(plant!.host).toBe(REMOTE);
+    expect(plant!.targets?.map((t) => t.host)).toEqual([REMOTE]);
     // A stasis link is a backdoor, so the vantage never needed to be adjacent.
-    expect(plant!.sessionOnly).toBe(true);
+    expect(plant!.targets?.[0]?.sessionOnly).toBe(true);
+  });
+
+  test("a vantage's whole frontier is ONE order, not one per host", async () => {
+    const handle = await bootController();
+    const vantage = standResident(handle, VANTAGE, 11);
+    const frontier = ["a.corp", "b.corp", "c.corp", "d.corp"];
+    for (const host of frontier) net.set(host, { maxRam: 32, blockedRam: 0, depth: 1, neighbours: [VANTAGE] });
+    handle.reportProbe(VANTAGE, frontier, Date.now(), 11);
+    for (const host of frontier) {
+      handle.deps.recordCredential({ hostname: host, password: "1234", at: Date.now() });
+    }
+    await settleMicrotasks();
+
+    // Four targets behind four spawns would be four prober round trips deep.
+    // One order runs them together, and the queue cap never sees them.
+    const plants = (vantage.staged ?? []).filter((order) => order.kind === "plant");
+    expect(plants).toHaveLength(1);
+    expect(plants[0]!.targets?.map((t) => t.host).sort()).toEqual(frontier);
   });
 
   test("a resident standing on a host with dirty files stages its own `ls`", async () => {

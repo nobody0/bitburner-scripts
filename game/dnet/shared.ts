@@ -68,6 +68,25 @@ export type OrderKind = TaskKind | "idle" | "bootstrapReclaim" | "launchSidecar"
 /** Everything an order needs, carried as data. It lives in the realm rather
  * than in `ns.args` because it may carry a password, and `ns.args` is visible
  * in the game's script listing. */
+/** One host on a plant's frontier, carrying everything its launch needs so the
+ * body never reaches back into the controller for a per-target fact. */
+export interface PlantJobTarget {
+  host: string;
+  password: string;
+  /** The identity the credential was verified against, if we hold one. */
+  identity?: string;
+  /** Stasis-linked: boot the spawn-free managed resident and hand dispatch to
+   *  the controller. Never inferred from `sessionOnly`. */
+  controllerManaged?: boolean;
+  /** Reuse a global rooted session; no `authenticate` fallback at a distance. */
+  sessionOnly?: boolean;
+  /** Launch the minimal spawn-free self reclaimer, not prober+resident. */
+  bootstrapReclaim?: boolean;
+  bootstrapThreads?: number;
+  /** The pinned lab candidate never shares RAM with a prober. */
+  omitProber?: boolean;
+}
+
 export interface Order {
   id: string;
   kind: OrderKind;
@@ -102,10 +121,9 @@ export interface Order {
   resizeAtBlockedRam?: number;
   bootstrapReclaim?: boolean;
   bootstrapThreads?: number;
-  omitProber?: boolean;
-  /** The plant target is stasis-linked and must use controller handoff. */
-  targetControllerManaged?: boolean;
-  sessionOnly?: boolean;
+  /** Plants only: the whole frontier this one order opens, launched
+   *  concurrently. `host` names `targets[0]` and nothing more. */
+  targets?: readonly PlantJobTarget[];
   edge?: string;
   unpin?: boolean;
   payloads?: string[];

@@ -393,8 +393,7 @@ describe("a verified credential is bound to the server lifetime", () => {
     const result = await runOrder(plantNs("10.0.0.1"), makeOrder("plant", {
       host: "dn-1",
       from: "darkweb",
-      password: "formerly-right",
-      targetIdentity: "10.0.0.1",
+      targets: [{ host: "dn-1", password: "formerly-right", identity: "10.0.0.1" }],
     }), makeIo());
     expect(result.targetState).toBe("credential-rejected");
   });
@@ -403,8 +402,7 @@ describe("a verified credential is bound to the server lifetime", () => {
     const result = await runOrder(plantNs("10.0.0.2"), makeOrder("plant", {
       host: "dn-1",
       from: "darkweb",
-      password: "formerly-right",
-      targetIdentity: "10.0.0.1",
+      targets: [{ host: "dn-1", password: "formerly-right", identity: "10.0.0.1" }],
     }), makeIo());
     expect(result.targetState).toBe("replaced");
   });
@@ -421,8 +419,7 @@ describe("a verified credential is bound to the server lifetime", () => {
     const result = await runOrder(ns, makeOrder("plant", {
       host: "dn-1",
       from: "darkweb",
-      password: "right",
-      targetIdentity: "10.0.0.1",
+      targets: [{ host: "dn-1", password: "right", identity: "10.0.0.1" }],
       payloads: ["agent.js", "prober.js"],
     }), makeIo());
     expect(result.targetState).toBe("launch-refused");

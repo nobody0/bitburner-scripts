@@ -391,7 +391,8 @@ describe("darknet farm job cache observations", () => {
     const planting = runOrder(
       ns,
       makeOrder("plant", {
-        host: "dn-1", from: "darkweb", password: "pw",
+        host: "dn-1", from: "darkweb",
+        targets: [{ host: "dn-1", password: "pw" }],
         payloads: ["dnet/agent.js", "dnet/prober.js"],
       }),
       makeIo(),
@@ -419,7 +420,8 @@ describe("darknet farm job cache observations", () => {
     const refused = await runOrder(
       ns,
       makeOrder("plant", {
-        host: "dn-2", from: "darkweb", password: "pw",
+        host: "dn-2", from: "darkweb",
+        targets: [{ host: "dn-2", password: "pw" }],
         payloads: ["dnet/agent.js", "dnet/prober.js"],
       }),
       makeIo(),
@@ -494,10 +496,9 @@ describe("darknet farm job cache observations", () => {
     const result = await runOrder(
       ns,
       makeOrder("plant", {
-        host: "dn-1", from: "darkweb", password: "pw",
+        host: "dn-1", from: "darkweb",
+        targets: [{ host: "dn-1", password: "pw", bootstrapReclaim: true, bootstrapThreads: 3 }],
         payloads: ["dnet/agent.js", "dnet/prober.js"],
-        bootstrapReclaim: true,
-        bootstrapThreads: 3,
       }),
       makeIo(),
     );

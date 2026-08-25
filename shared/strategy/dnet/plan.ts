@@ -83,8 +83,9 @@ export interface Task {
   from: string;
   /** Every currently valid worker for late, cancellation-aware assignment. */
   eligibleFrom?: readonly string[];
-  /** A plant may reuse a global rooted session without current adjacency. */
-  remote?: boolean;
+  /** Plants only: the whole frontier this one order opens, run concurrently.
+   *  `host` is `targets[0].host` — the generic identity, not the whole job. */
+  targets?: readonly PlantTarget[];
   /** Lower is more urgent. */
   priority: number;
   /** Why this task exists, in one line, for the panel and the failure line. */
@@ -92,12 +93,6 @@ export interface Task {
   /** Threads to run it at. Omitted means one. `ramOverride` is charged PER
    *  THREAD, so this multiplies the allocation rather than sharing it. */
   threads?: number;
-  /** Plants only: launch the minimal spawn-free self reclaimer, not the normal
-   * prober+resident pair. */
-  bootstrapReclaim?: boolean;
-  bootstrapThreads?: number;
-  /** Plants only: the pinned lab candidate never shares RAM with a prober. */
-  omitProber?: boolean;
   /** The `.cache` file a `cache` task opens. Nothing else carries one, and a
    *  job never invents a filename: `openCache` THROWS on a name the host does
    *  not hold, and a throw kills the agent rather than failing the job. */
@@ -566,19 +561,40 @@ export function deriveTasks(
 
   // PLANT: whatever the spread planner already admitted. It has its own bounds
   // and its own refusals; the queue does not second-guess them.
+  //
+  // ONE task per VANTAGE, carrying that vantage's whole admitted frontier.
+  // A plant is `scp` plus two `exec`s and a wait on the new prober's first
+  // report — no Darknet delay call anywhere — so N of them from one vantage
+  // have no reason to queue behind N spawns. An agent runs one order at a
+  // time; making the order the frontier rather than a single host is what
+  // turns the spread from a serial walk into one concurrent wave per hop.
+  const frontiers = new Map<string, PlantTarget[]>();
   for (const entry of opts.plantable ?? []) {
     if (agents.has(entry.host) || busy("plant", entry.host)) continue;
-    tasks.push({
-      id: `plant:${entry.host}`,
-      kind: "plant",
+    const frontier = frontiers.get(entry.from) ?? [];
+    frontier.push({
       host: entry.host,
-      from: entry.from,
       ...(entry.remote ? { remote: true } : {}),
       ...(entry.bootstrapReclaim ? { bootstrapReclaim: true } : {}),
       ...(entry.bootstrapThreads !== undefined ? { bootstrapThreads: entry.bootstrapThreads } : {}),
       ...(entry.omitProber ? { omitProber: true } : {}),
+    });
+    frontiers.set(entry.from, frontier);
+  }
+  for (const [from, targets] of frontiers) {
+    tasks.push({
+      id: `plant:${from}`,
+      kind: "plant",
+      // The generic identity every task carries. The frontier is `targets`;
+      // this names the deepest of them, which is the one the spread planner
+      // ordered first and the scarcest vantage to lose.
+      host: targets[0]!.host,
+      from,
+      targets,
       priority: PLANT_PRIORITY,
-      reason: "a credential and room for an agent",
+      reason: targets.length === 1
+        ? "a credential and room for an agent"
+        : `${targets.length} credentials and room for an agent on each`,
     });
   }
 
@@ -717,6 +733,19 @@ export function classifyPlantRoute(input: {
   if (adjacent) return "adjacent";
   if (input.remoteExecCapable) return "remote";
   return "ineligible";
+}
+
+/** One host on a vantage's plant frontier, with the three facts that change
+ * how it is launched. */
+export interface PlantTarget {
+  host: string;
+  /** Reuse a global rooted session instead of the current adjacency. */
+  remote?: boolean;
+  /** Launch the minimal spawn-free self reclaimer, not prober+resident. */
+  bootstrapReclaim?: boolean;
+  bootstrapThreads?: number;
+  /** The pinned lab candidate never shares RAM with a prober. */
+  omitProber?: boolean;
 }
 
 export interface SpreadCandidate {

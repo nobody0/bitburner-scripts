@@ -14,6 +14,7 @@ import {
   type AgentIo,
   type ControllerDeps,
   type Order,
+  type PlantJobTarget,
   type Report,
 } from "./shared.ts";
 import { runAttempt } from "./attempt.ts";
@@ -33,6 +34,15 @@ import { cacheProfit, phishProfit, promotionProfit } from "./profit.ts";
  * `RegExp.exec` for the 1.3 GB Netscript member. */
 
 type OrderResult = Omit<Report, "id" | "kind" | "host" | "from">;
+
+/** What one target's launch reports back to the frontier that ran it. */
+interface PlantOutcome {
+  ok: boolean;
+  codes: Record<string, number>;
+  host: ReportHost;
+  detail: string;
+  targetState?: Report["targetState"];
+}
 
 const STORM_SEED_FILE = "STORM_SEED.exe";
 
@@ -155,51 +165,60 @@ async function bleedOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
 
 // --- plant -------------------------------------------------------------------
 
-async function plantOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderResult> {
+/** One target's launch. The frontier runs these CONCURRENTLY — every call here
+ * is either synchronous or a wait on the target's OWN new prober, so two
+ * targets overlap completely and a vantage opens its whole frontier at once. */
+async function plantOne(
+  jobNs: NS,
+  order: Order,
+  io: AgentIo,
+  target: PlantJobTarget,
+): Promise<PlantOutcome> {
   const deps = io.deps;
-  const jobCodes: Record<string, number> = {};
-  if (order.password === undefined) {
-    return { ok: false, codes: { [LOCAL_CODE.NoCredential]: 1 }, detail: "no credential" };
-  }
-  const diagnose = (detail: string, fallback: "credential-rejected" | "launch-refused"): OrderResult => {
-    const details = jobNs["dnet"]["getServerDetails"](order.host);
-    const identity = jobNs["dnsLookup"](order.host);
+  const codes: Record<string, number> = {};
+  const count = (code: number | string): void => { codes[String(code)] = (codes[String(code)] ?? 0) + 1; };
+  const seen = (extra?: Partial<ReportHost>): ReportHost => ({ ...describeHost(jobNs, target.host, deps), ...extra });
+  const diagnose = (detail: string, fallback: "credential-rejected" | "launch-refused"): PlantOutcome => {
+    const details = jobNs["dnet"]["getServerDetails"](target.host);
+    const identity = jobNs["dnsLookup"](target.host);
     const observed: ReportHost = details.isOnline && identity.length > 0
-      ? { hostname: order.host, identity, at: Date.now(), present: true }
-      : { hostname: order.host, at: Date.now(), present: false };
-    if (!observed.present) return { ok: false, targetState: "gone", hosts: [observed], codes: jobCodes, detail };
-    if (order.targetIdentity !== undefined && observed.identity !== undefined && order.targetIdentity !== observed.identity) {
-      return { ok: false, targetState: "replaced", hosts: [observed], codes: jobCodes, detail };
+      ? { hostname: target.host, identity, at: Date.now(), present: true }
+      : { hostname: target.host, at: Date.now(), present: false };
+    if (!observed.present) return { ok: false, codes, host: observed, detail, targetState: "gone" };
+    if (target.identity !== undefined && observed.identity !== undefined && target.identity !== observed.identity) {
+      return { ok: false, codes, host: observed, detail, targetState: "replaced" };
     }
-    return { ok: false, targetState: fallback, hosts: [observed], codes: jobCodes, detail };
+    return { ok: false, codes, host: observed, detail, targetState: fallback };
   };
-  let session = jobNs["dnet"]["connectToSession"](order.host, order.password);
+
+  let session = jobNs["dnet"]["connectToSession"](target.host, target.password);
   let filesDirty = false;
-  jobCodes[String(session.code)] = (jobCodes[String(session.code)] ?? 0) + 1;
-  if (!session.success && order.sessionOnly) {
+  count(session.code);
+  if (!session.success && target.sessionOnly === true) {
     if (session.code === 401) {
-      jobCodes[LOCAL_CODE.CredentialRejected] = 1;
+      count(LOCAL_CODE.CredentialRejected);
       return diagnose(session.message, "credential-rejected");
     }
-    return { ok: false, codes: jobCodes, ...targetStateFor(session.code), detail: session.message };
+    return { ok: false, codes, host: seen(), detail: session.message, ...targetStateFor(session.code) };
   } else if (!session.success) {
     session = await awaitDnetOperation(io, {
-      operation: "authenticate", host: order.host, from: order.from, threads: order.jobThreads ?? order.threads,
-    }, () => jobNs["dnet"]["authenticate"](order.host, order.password!));
+      operation: "authenticate", host: target.host, from: order.from, threads: 1,
+    }, () => jobNs["dnet"]["authenticate"](target.host, target.password));
     filesDirty = session.success;
-    jobCodes[String(session.code)] = (jobCodes[String(session.code)] ?? 0) + 1;
+    count(session.code);
   }
   if (!session.success) {
     if (session.code === 401) {
-      jobCodes[LOCAL_CODE.CredentialRejected] = 1;
+      count(LOCAL_CODE.CredentialRejected);
       return diagnose(session.message, "credential-rejected");
     }
-    return { ok: false, codes: jobCodes, ...targetStateFor(session.code), detail: session.message };
+    return { ok: false, codes, host: seen(), detail: session.message, ...targetStateFor(session.code) };
   }
-  if (!jobNs["scp"](order.payloads ?? [], order.host, order.from)) {
-    jobCodes[LOCAL_CODE.LaunchRefused] = 1;
+  if (!jobNs["scp"](order.payloads ?? [], target.host, order.from)) {
+    count(LOCAL_CODE.LaunchRefused);
     return diagnose("scp refused", "launch-refused");
   }
+
   // A replant RACES the RAM of the process it replaces: a managed handoff (or
   // a finished order) wakes the controller synchronously, but the engine only
   // frees the dead process's allocation on its next tick — so the first exec
@@ -223,58 +242,62 @@ async function plantOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
       await jobNs["asleep"](300);
     }
   };
-  if (order.bootstrapReclaim === true) {
-    const threads = Math.max(1, order.bootstrapThreads ?? 1);
+
+  if (target.bootstrapReclaim === true) {
+    const threads = Math.max(1, target.bootstrapThreads ?? 1);
     const pid = await execWithGrace((outcome) => handoffLaunch<DnetAgentLaunch>(
-      { kind: "dnet-agent", host: order.host, bootstrapReclaim: true },
+      { kind: "dnet-agent", host: target.host, bootstrapReclaim: true },
       (launchId) => jobNs["exec"](
         (order.payloads ?? [])[0]!,
-        order.host,
+        target.host,
         temporaryRunOptions({ threads, ramOverride: priceCalls(jobNs, KIND_CALLS.bootstrapReclaim) }),
         launchId,
       ),
       outcome,
     ));
     if (pid === 0) {
-      jobCodes[LOCAL_CODE.LaunchRefused] = 1;
+      count(LOCAL_CODE.LaunchRefused);
       return diagnose("exec refused while launching local reclaim", "launch-refused");
     }
-    live()?.registerBootstrap(order.host, pid);
+    live()?.registerBootstrap(target.host, pid);
     return {
       ok: true,
-      codes: jobCodes,
-      hosts: [{ ...describeHost(jobNs, order.host, deps), ...(filesDirty ? { invalidates: ["files" as const] } : {}) }],
-      detail: `local reclaim pid ${pid}, ${threads} thread${threads === 1 ? "" : "s"}`,
+      codes,
+      host: seen(filesDirty ? { invalidates: ["files"] } : undefined),
+      detail: `${target.host}: local reclaim pid ${pid}, ${threads} thread${threads === 1 ? "" : "s"}`,
     };
   }
+
   const proberFile = (order.payloads ?? [])[1];
   const controller = live();
   // Claim the queued successor before sizing the exec. Stasis-linked targets
   // are remotely recoverable, and may already own the ordinary constant probe.
-  const prepared = controller?.preparePlant(order.host) ?? {
-    controllerManaged: order.targetControllerManaged === true,
+  const prepared = controller?.preparePlant(target.host) ?? {
+    controllerManaged: target.controllerManaged === true,
     reuseProber: false,
   };
-  const omitProber = order.omitProber === true || prepared.reuseProber;
-  const claim = omitProber ? undefined : controller?.beginProbeRefresh(order.host);
+  const omitProber = target.omitProber === true || prepared.reuseProber;
+  const claim = omitProber ? undefined : controller?.beginProbeRefresh(target.host);
   const proberPid = omitProber
     ? -1
     : proberFile === undefined || controller === undefined || claim === undefined
       ? 0
       : claim.launch
         ? await execWithGrace((outcome) => handoffLaunch<DnetProberLaunch>(
-          { kind: "dnet-prober", host: order.host, refresh: claim.refresh },
-          (launchId) => jobNs["exec"](proberFile, order.host, temporaryRunOptions({ threads: 1, ramOverride: proberReserveGb(jobNs) }), launchId),
+          { kind: "dnet-prober", host: target.host, refresh: claim.refresh },
+          (launchId) => jobNs["exec"](proberFile, target.host, temporaryRunOptions({ threads: 1, ramOverride: proberReserveGb(jobNs) }), launchId),
           outcome,
         ))
         : -1;
   if (proberPid === 0) {
-    if (claim !== undefined) controller?.cancelProbeRefresh(order.host, claim.refresh);
-    jobCodes[LOCAL_CODE.LaunchRefused] = 1;
+    if (claim !== undefined) controller?.cancelProbeRefresh(target.host, claim.refresh);
+    count(LOCAL_CODE.LaunchRefused);
     return diagnose("exec refused while launching the reserved prober", "launch-refused");
   }
+  // The ONE wait in this body, and the reason the agent below reads its own
+  // adjacency the instant it boots. Nothing waits on the agent itself.
   if (claim !== undefined && await claim.refresh.refreshed === undefined) {
-    jobCodes[LOCAL_CODE.LaunchRefused] = 1;
+    count(LOCAL_CODE.LaunchRefused);
     return diagnose("reserved prober refresh was cancelled", "launch-refused");
   }
   const next = prepared.next;
@@ -284,12 +307,12 @@ async function plantOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
   const pid = await execWithGrace((outcome) => handoffLaunch<DnetAgentLaunch>(
     {
       kind: "dnet-agent",
-      host: order.host,
+      host: target.host,
       ...(prepared.controllerManaged ? { controllerManaged: true } : {}),
     },
     (launchId) => jobNs["exec"](
       (order.payloads ?? [])[0]!,
-      order.host,
+      target.host,
       temporaryRunOptions({ threads: agentThreads, ramOverride: agentRam }),
       launchId,
     ),
@@ -297,18 +320,51 @@ async function plantOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
   ));
   if (pid === 0) {
     if (proberPid > 0) jobNs["kill"](proberPid);
-    jobCodes[LOCAL_CODE.LaunchRefused] = 1;
+    count(LOCAL_CODE.LaunchRefused);
     return diagnose("exec refused while launching the resident", "launch-refused");
   }
   return {
     ok: true,
-    codes: jobCodes,
-    hosts: [{ ...describeHost(jobNs, order.host, deps), ...(filesDirty ? { invalidates: ["files" as const] } : {}) }],
-    detail: order.omitProber === true
-      ? `resident pid ${pid}, prober reserved for lab walk`
+    codes,
+    host: seen(filesDirty ? { invalidates: ["files"] } : undefined),
+    detail: target.omitProber === true
+      ? `${target.host}: resident pid ${pid}, prober reserved for lab walk`
       : prepared.reuseProber
-        ? `resident pid ${pid}, surviving prober reused`
-        : `resident pid ${pid}, prober pid ${proberPid}`,
+        ? `${target.host}: resident pid ${pid}, surviving prober reused`
+        : `${target.host}: resident pid ${pid}, prober pid ${proberPid}`,
+  };
+}
+
+/** The vantage's whole admitted frontier, opened at once.
+ *
+ * Serialising these was what made the spread a walk rather than a wave: each
+ * target costs a wait on its own new prober, and N of them behind N spawns is
+ * N round trips deep. Together they cost one, and the agent each launch leaves
+ * behind repeats this on arrival — so the net opens hop by hop, not host by
+ * host. `order.host` names `targets[0]` so the per-order machinery (the plant
+ * cooldown stamp, the panel line, retirement) still has a target to point at;
+ * every target's observation rides home in `hosts`. */
+async function plantOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderResult> {
+  const targets = order.targets ?? [];
+  if (targets.length === 0) {
+    return { ok: false, codes: { [LOCAL_CODE.NoCredential]: 1 }, detail: "no credential" };
+  }
+  const planted = await Promise.all(targets.map((target) => plantOne(jobNs, order, io, target)));
+
+  const codes: Record<string, number> = {};
+  for (const result of planted) {
+    for (const [code, n] of Object.entries(result.codes)) codes[code] = (codes[code] ?? 0) + n;
+  }
+  // `targetState` speaks for `order.host` alone — the one target the
+  // controller's per-order lifecycle handling can act on.
+  const primary = planted[0]!;
+  const opened = planted.filter((result) => result.ok).length;
+  return {
+    ok: opened > 0,
+    codes,
+    hosts: planted.map((result) => result.host),
+    ...(primary.targetState !== undefined ? { targetState: primary.targetState } : {}),
+    detail: `${opened}/${planted.length} opened — ${planted.map((result) => result.detail).join("; ")}`.slice(0, 200),
   };
 }
 
