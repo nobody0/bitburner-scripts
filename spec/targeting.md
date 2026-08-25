@@ -364,10 +364,13 @@ reproduces the selection order of the scan it replaced (descending threads,
 then ascending `workerId`), which is what keeps the emitted action stream
 unchanged. Resident RAM is summed per host and per role at spawn and exit
 (`gbByHost`, `gbByRole`) — a worker owns its block for its whole process life,
-so nothing moves on a job boundary. Pooling self-gates on live-op pressure (`POOL_PRESSURE_OPS`, just
-before HGW's threshold) AND on the batch launch period fitting the idle window
-(`POOL_REUSE_WINDOW_MS` — early-game depth-1 pipelines would strand every
-worker). `stats.execs` (fresh processes) against `launched` (ops) is the churn
+so nothing moves on a job boundary. Pooling is admitted on live-process pressure
+(`POOL_PRESSURE_OPS`, just before HGW's threshold) AND on the batch launch
+period fitting the idle window (`POOL_REUSE_WINDOW_MS` — early-game depth-1
+pipelines would strand every worker). Once admitted it stays enabled for that
+target generation while reuse remains fast enough: otherwise pooling's own
+success lowers the pressure reading and creates an on/off expiry cycle.
+`stats.execs` (fresh processes) against `launched` (ops) is the churn
 figure. Pinned by `tests/worker-pool.test.ts` (index against the old scan), the
 pool-ledger test in `sim/tests/dispatch.test.ts`, and the real serve-loop tests
 in `sim/tests/worker-serve.test.ts`.

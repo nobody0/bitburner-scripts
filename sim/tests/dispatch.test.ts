@@ -1703,6 +1703,49 @@ describe("worker pooling", () => {
     expect(takenBy(otherRole)).not.toContain(idle);
   });
 
+  test("pooling stays enabled after it relieves the pressure that enabled it", () => {
+    const world = new SimWorld({ seed: 3, network: DEFAULT_NETWORK, homeRam: 4_096, startingMoney: 1e9 });
+    world.person.skills.hacking = 500;
+    for (const server of world.servers.values()) {
+      if (server.hostname === "home") continue;
+      server.hasAdminRights = true;
+      server.hackDifficulty = server.minDifficulty;
+      server.moneyAvailable = server.moneyMax;
+    }
+    const memory = initFarm();
+    const pressureIds: number[] = [];
+    for (let i = 0; i < 1_100; i++) {
+      const opId = 1_100_000 + i;
+      pressureIds.push(opId);
+      trackOp(memory.dispatch, opId, {
+        hostname: "ghost",
+        target: "",
+        kind: "weaken",
+        segment: "share",
+        gb: 0,
+        wave: false,
+      } as never);
+    }
+
+    const first = planFarm(world.view(), memory, [], { pooling: true, jit: true });
+    const target = first.directive.farm?.host;
+    expect(target).toBeDefined();
+    expect(memory.dispatch.jitRuntimeByTarget.get(target!)?.pooling).toBe(true);
+
+    const pressureDone: CompletionEvent[] = pressureIds.map((opId) => ({
+      kind: "weaken",
+      opId,
+      target: "",
+      threads: 1,
+      result: {},
+    }));
+    planFarm(world.view(), memory, pressureDone, { pooling: true, jit: true });
+
+    expect(memory.dispatch.tracked.size).toBeLessThan(1_000);
+    expect(memory.dispatch.jitRuntimeByTarget.get(target!)?.pooling).toBe(true);
+    expect(memory.dispatch.pooling).toBe(true);
+  });
+
   test("repeat batches reuse workers; workerExit frees the reservation", () => {
     // Pure-ledger test: completions are synthesized rather than executed, so
     // it exercises exactly the pool accounting (the game path runs the real

@@ -2142,7 +2142,13 @@ export function dispatch(
           borrow === undefined &&
           memory.mode !== "shotgun" &&
           options.pooling === true &&
-          memory.tracked.size > POOL_PRESSURE_OPS &&
+          // Pooling is a generation decision. Once it has relieved process
+          // pressure, using the smaller tracked-job count to reconsider it
+          // turns it straight back off: every resident worker idles out, the
+          // one-shot population crosses the threshold again, and the farm
+          // oscillates forever. Keep the incumbent choice while reuse remains
+          // fast enough; a target/kind generation change gets a fresh runtime.
+          (currentRuntime?.pooling === true || liveProcessCount(memory) > POOL_PRESSURE_OPS) &&
           weakenMs / depth <= POOL_REUSE_WINDOW_MS;
         memory.pooling ||= pooling;
         launchBatches(
