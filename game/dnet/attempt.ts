@@ -208,14 +208,18 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
     }
     if (answer.success) {
       // Migration outranks harvesting a ring whose credential is already won.
-      // Write through before the next await so completion can synchronously
-      // queue the plant consumed by this process's atExit.
+      // Write through BEFORE the next await: the controller's derive rides a
+      // microtask, and this success path takes none, so the plant is staged on
+      // this vantage before the exit chain below reaches `stageSuccessor` and
+      // spawns into it. The `.d` hint file waiting on the opened host names a
+      // neighbour as of THIS instant and stops being readable as one the moment
+      // a mutation lands, so a tick of slack here is a lost credential.
       deps.recordCredential({
         hostname: state.host,
         password,
         ...(state.targetIdentity !== undefined ? { identity: state.targetIdentity } : {}),
         at: Date.now(),
-      }, state.from);
+      });
     }
     // A model id our transcription does not know is either a game update or a
     // hole in `shared/strategy/dnet/models.ts`.

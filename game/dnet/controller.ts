@@ -32,7 +32,6 @@ import {
   deriveTasks,
   planSpread,
   planStorm,
-  PLANT_PRIORITY,
   type StormContext,
   type Task,
   type TaskKind,
@@ -256,26 +255,35 @@ export async function main(ns: NS): Promise<void> {
   let labCandidateHost: string | undefined;
 
   // --- derive wake ----------------------------------------------------------
-  let derivePending = false;
-  let deriveWake: (() => void) | undefined;
+  /** Derivation is FACT-driven, not tick-driven.
+   *
+   * Every write-through — a verified credential, a probe report, an adopted
+   * agent, a settled order, a mutation — files its consequences on a microtask,
+   * in the same engine turn as the fact. That is what lets a winning
+   * `authenticate` reach the vantage's staged queue BEFORE the same process's
+   * exit chain reads it (`agent.ts` `stageSuccessor`), so the plant runs on the
+   * spawn the attempt itself performs rather than a tick later. The migration
+   * has to be that prompt: a `.d` hint file names a neighbour as of the
+   * authenticate INSTANT, and `exactNeighbourClueEpoch` discards it the moment
+   * a mutation lands between the crack and the new host's first `ls`.
+   *
+   * A microtask rather than an inline call: the dozens of write-throughs one
+   * order performs collapse into ONE pass, and the derive can never re-enter
+   * the stack that asked for it.
+   *
+   * The loop's `TICK_MS` pass remains, as the watchdog it always was: it owns
+   * the strictly TIME-driven work (dead-process and beat sweeps, watchdog
+   * cancellation, `hardCancelSweep`, the telemetry beat) and re-derives on a
+   * bounded interval if a fact were ever missed. */
+  let deriveQueued = false;
   const signalDerive = (): void => {
-    const wake = deriveWake;
-    if (wake) wake();
-    else derivePending = true;
+    if (deriveQueued) return;
+    deriveQueued = true;
+    void Promise.resolve().then(() => {
+      deriveQueued = false;
+      if (!standDown) fileWork(Date.now());
+    });
   };
-  const waitForDerive = (): Promise<void> => new Promise((resolve) => {
-    if (derivePending) { derivePending = false; resolve(); return; }
-    let done = false;
-    const finish = (): void => {
-      if (done) return;
-      done = true;
-      if (deriveWake === finish) deriveWake = undefined;
-      clearTimeout(timer);
-      resolve();
-    };
-    const timer = setTimeout(finish, TICK_MS);
-    deriveWake = finish;
-  });
 
   // --- helpers --------------------------------------------------------------
   const ensureEntry = (host: string): HostEntry => {
@@ -432,9 +440,7 @@ export async function main(ns: NS): Promise<void> {
   };
 
   // --- write-through deps ---------------------------------------------------
-  let queueAuthenticatedPlant!: (hostname: string, from: string) => void;
-  let queueNeighbourGuess!: (hostname: string, password: string, from: string, at: number) => void;
-  const recordCredential = (entry: VaultEntry, from: string): void => {
+  const recordCredential = (entry: VaultEntry): void => {
     if (entry.hostname.length === 0) return;
     const host = hosts.get(entry.hostname);
     if (host?.goneAt !== undefined) return;
@@ -447,11 +453,16 @@ export async function main(ns: NS): Promise<void> {
     retireCracking(entry.hostname, "credential verified; cracking retired");
     pendingCredentials.push(verified);
     authenticationEpoch.set(entry.hostname, rendezvous.mutationEpoch);
-    queueAuthenticatedPlant(entry.hostname, from);
+    // No plant is filed here. The credential IS the fact; the derive this wakes
+    // reaches the same conclusion through the ordinary spread planner, which
+    // unlike a hand-filed shortcut knows about remote-exec routes, can reroute
+    // onto a roomier vantage, and may preempt a lesser order to get there.
+    signalDerive();
   };
   const recordLoose = (password: string): void => {
     if (loosePool.includes(password)) return;
     loosePool.push(password);
+    signalDerive();
     if (loosePool.length > MAX_LOOSE_PASSWORDS) loosePool.shift();
   };
   const recordProvisional = (entry: ProvisionalCredential): void => {
@@ -463,6 +474,7 @@ export async function main(ns: NS): Promise<void> {
     const existing = provisionalPool.findIndex((h) => h.hostname === candidate.hostname && h.password === candidate.password && h.identity === candidate.identity);
     if (existing >= 0) provisionalPool.splice(existing, 1);
     provisionalPool.push(candidate);
+    signalDerive();
     if (provisionalPool.length > MAX_PROVISIONAL_CREDENTIALS) provisionalPool.shift();
   };
   const projectLooseTarget = (hostname: string, at: number, expiry: ExpiryOpts): LooseTarget => {
@@ -484,7 +496,6 @@ export async function main(ns: NS): Promise<void> {
     const targets = probe.neighbours.map((h) => projectLooseTarget(h, at, expiryOpts()));
     for (const candidate of looseCandidates([password], targets)) {
       recordProvisional({ hostname: candidate.hostname, password, via: "neighbour-file", at });
-      queueNeighbourGuess(candidate.hostname, password, source, at);
     }
   };
   const recordFileEvidence = (hostname: string, evidence: PasswordEvidence): void => {
@@ -670,7 +681,6 @@ export async function main(ns: NS): Promise<void> {
     const filesInvalidated = report.hosts?.some((host) => host.invalidates?.includes("files")) === true;
     if (filesInvalidated && report.kind !== "inventory") {
       for (const host of report.hosts ?? []) if (host.invalidates?.includes("files")) needsInventory.add(host.hostname);
-      fileListJobs();
       signalDerive();
     }
     if (report.targetState === "edge-lost" || report.targetState === "replaced") lastMutationAt = Date.now();
@@ -1132,11 +1142,20 @@ export async function main(ns: NS): Promise<void> {
     try { return describeHostLocal(host, neighbours, seenAt); } catch { return { hostname: host, at: seenAt, present: false }; }
   };
 
-  let lastProbeDrainAt = 0;
-  let lastDetailSweepAt = 0;
+  /** Probe records already folded. Identity, never a wall-clock watermark: a
+   * derive now runs on the turn a fact lands, so two of them share a
+   * millisecond routinely, and a `<= lastDrainAt` watermark silently swallowed
+   * a probe reported inside the same one — permanently, since the stamp only
+   * moves forward. Each `reportProbe` writes a fresh record, so the record IS
+   * the identity, and a weak set means a retired host's entry still collects. */
+  const foldedProbes = new WeakSet<NonNullable<HostEntry["prober"]>>();
+  /** The mutation generation whose full detail sweep has already run. The
+   * EPOCH, for the same reason `foldedProbes` is a set: "once per mutation" is
+   * a statement about generations, and a wall-clock watermark loses a sweep
+   * whenever a derive and the mutation that should have triggered it share a
+   * millisecond. */
+  let sweptEpoch: number | undefined;
   const drainProbes = (at: number): void => {
-    const foldFrom = lastProbeDrainAt;
-    lastProbeDrainAt = Date.now();
     const observed: ReportHost[] = [];
     const newlySeen = new Set<string>();
     const covered = new Set<string>();
@@ -1149,12 +1168,13 @@ export async function main(ns: NS): Promise<void> {
     };
     for (const entry of hosts.values()) {
       const probe = entry.prober;
-      if (probe === undefined || probe.at <= foldFrom) continue;
+      if (probe === undefined || foldedProbes.has(probe)) continue;
+      foldedProbes.add(probe);
       cover(tryDescribe(entry.hostname, probe.neighbours, probe.at));
       for (const neighbour of probe.neighbours) if (hosts.get(neighbour) === undefined) cover(tryDescribe(neighbour, undefined, at));
     }
-    if (lastDetailSweepAt < (lastMutationAt ?? 0) || lastDetailSweepAt === 0) {
-      lastDetailSweepAt = Date.now();
+    if (sweptEpoch !== rendezvous.mutationEpoch) {
+      sweptEpoch = rendezvous.mutationEpoch;
       for (const entry of [...hosts.values()]) {
         if (entry.goneAt !== undefined || entry.hostname === selfHost || covered.has(entry.hostname)) continue;
         cover(tryDescribe(entry.hostname, undefined, at));
@@ -1211,42 +1231,6 @@ export async function main(ns: NS): Promise<void> {
     }
   };
 
-  queueAuthenticatedPlant = (hostname: string, from: string): void => {
-    const at = Date.now();
-    const report = tryDescribe(hostname, undefined, at);
-    foldReports(knowledge, [report], at, expiryOpts());
-    pendingHosts.push(report);
-    if (!report.present) return;
-    const candidate = candidatesFrom(knowledge, at, {
-      standing: new Set([selfHost, ...liveEntries().map((e) => e.hostname), ...bootstrapHosts()]),
-      vault: new Set(vault.keys()),
-      lastPlantAt: lastPlantMap(),
-      stasisLinked,
-      expiry: expiryOpts(),
-    }).find((c) => c.host === hostname);
-    if (!candidate) return;
-    const planned = planSpread([{ ...candidate, from }], spreadLimits(), at).plant[0];
-    if (!planned) { signalDerive(); return; }
-    fileTask({
-      id: `plant:${planned.host}`,
-      kind: "plant",
-      host: planned.host,
-      from,
-      priority: PLANT_PRIORITY,
-      reason: "authentication completed; migrate immediately",
-      ...(planned.bootstrapReclaim ? { bootstrapReclaim: true } : {}),
-      ...(planned.bootstrapThreads !== undefined ? { bootstrapThreads: planned.bootstrapThreads } : {}),
-      ...(planned.omitProber ? { omitProber: true } : {}),
-    });
-  };
-  queueNeighbourGuess = (hostname: string, password: string, from: string, at: number): void => {
-    if (hosts.get(from)?.agent === undefined || vault.has(hostname) || hosts.get(hostname)?.goneAt !== undefined) return;
-    const id = looseId(password);
-    guessFor.set(id, password);
-    const depth = fresh<number>(hosts.get(hostname), "depth", at, expiryOpts());
-    fileTask({ id: `guess:${hostname}:${id}`, kind: "attempt", host: hostname, from, priority: DNET_PRIORITY["attempt"] + (depth === undefined ? 1 : -depth) - 5, reason: `same-epoch first-auth file from ${from}`, guessId: id });
-  };
-
   const bootstrapHosts = (): string[] => [...hosts.values()].filter((e) => e.bootstrap !== undefined).map((e) => e.hostname);
   const lastPlantMap = (): Map<string, number> => {
     const map = new Map<string, number>();
@@ -1277,6 +1261,30 @@ export async function main(ns: NS): Promise<void> {
     return set;
   };
 
+  /** `planSpread` refuses `unknown-ram` with "survey it before planting". This
+   * is that survey, and it belongs to the derive rather than to whatever wrote
+   * the credential.
+   *
+   * A host we hold a password for and are not standing on is one `exec` away
+   * from being a vantage, so it is worth one local `getServerDetails` the
+   * moment its RAM facts stop being believable — or the moment it has no map
+   * entry at all, which is every restored credential after a reload. The
+   * controller can describe any NAMED darknet host directly, so the vault a
+   * cold boot reads back seeds its own candidates here rather than waiting for
+   * a prober to happen past each one. */
+  const surveyPlantTargets = (at: number): void => {
+    const expiry = expiryOpts();
+    const surveyed: ReportHost[] = [];
+    for (const hostname of vault.keys()) {
+      const entry = hosts.get(hostname);
+      if (entry?.goneAt !== undefined || entry?.agent !== undefined) continue;
+      if (entry !== undefined && fresh<number>(entry, "maxRam", at, expiry) !== undefined) continue;
+      surveyed.push(tryDescribe(hostname, undefined, at));
+    }
+    if (surveyed.length === 0) return;
+    absorb({ id: "plant-survey", kind: "inventory", host: selfHost, from: selfHost, ok: true, hosts: surveyed });
+  };
+
   // --- the whole derive pass ------------------------------------------------
   const fileWork = (at: number): Task[] => {
     drainBootstrapDone(at);
@@ -1288,6 +1296,7 @@ export async function main(ns: NS): Promise<void> {
       storm = { admitted: 0, refused: { "storm-in-flight": 1 }, examples: [{ host: "(net)", why: "storm-in-flight", detail: `the storm we fired is rerolling the net; deriving nothing for ${quietLeft}s more` }], firedAt: lastStormFiredAt };
       return [];
     }
+    surveyPlantTargets(at);
     const remoteExec = remoteExecSet(at);
     const spreadCandidates = candidatesFrom(knowledge, at, {
       standing: new Set([selfHost, ...liveEntries().map((e) => e.hostname), ...bootstrapHosts()]),
@@ -1855,6 +1864,11 @@ export async function main(ns: NS): Promise<void> {
           vault.set(entry.hostname, entry);
           markCredentialKnown(host);
         }
+        // A cold boot restores the passwords before it knows a single host.
+        // The derive's own survey turns each into a describable candidate, so
+        // the reload's spread wave starts on this turn rather than waiting for
+        // probers to rediscover a net we already hold the keys to.
+        signalDerive();
       }
       if (orders.openLabCache !== undefined) openLabCache = orders.openLabCache;
       if (orders.promoteSymbols !== undefined) promoteSymbols = [...orders.promoteSymbols];
@@ -1878,17 +1892,10 @@ export async function main(ns: NS): Promise<void> {
         stasisLinked.clear();
         for (const hostname of orders.stasisSnapshot.hosts) stasisLinked.add(hostname);
         // A restored link is a durable asset the spread wave must not have to
-        // re-DISCOVER: a cold boot restores the NAME here, but with no map
-        // entry the host is invisible to `candidatesFrom` until a prober
-        // happens back past it — a mid-net stasis host sat empty for whole
-        // minutes after every reload. The controller can describe any named
-        // darknet host directly, so seed the entry now and let the remote
-        // replant fire on the first derive.
-        const seeded = [...stasisLinked].filter((name) => !hosts.has(name)).map((name) => tryDescribe(name));
-        if (seeded.length > 0) {
-          foldReports(knowledge, seeded, Date.now(), expiryOpts());
-          signalDerive();
-        }
+        // re-DISCOVER, and it needs no seeding of its own: a stasis host worth
+        // replanting is one we hold a password for, so the derive's survey
+        // describes it along with every other restored credential.
+        signalDerive();
       }
       if (orders.lastPhishCacheAt !== undefined) lastPhishCacheAt = Math.max(lastPhishCacheAt ?? 0, orders.lastPhishCacheAt);
       if (orders.lastStormAt !== undefined && orders.lastStormAt > (lastStormFiredAt ?? 0)) {
@@ -1990,6 +1997,10 @@ export async function main(ns: NS): Promise<void> {
     }
     residentsSeenEver = Math.max(residentsSeenEver, liveEntries().length);
 
+    // The watchdog pass: the bounded re-derive over whatever the sweeps above
+    // just changed, and the only place `hardCancelSweep` may fire — it is
+    // gated on `derivePass`, and killing from a write-through's stack could
+    // take the caller.
     const tasks = fileWork(at);
     hardCancelSweep();
 
@@ -2015,7 +2026,7 @@ export async function main(ns: NS): Promise<void> {
       }
     }
 
-    await waitForDerive();
+    await realmSleep(TICK_MS);
   }
 
   if (realm.dnet_controller === rendezvous) delete realm.dnet_controller;

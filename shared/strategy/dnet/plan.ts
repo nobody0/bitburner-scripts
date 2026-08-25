@@ -219,7 +219,7 @@ const HOLD_PRIORITY: Readonly<Record<"pin" | "induce" | "walk" | "storm", number
 /** Placing a process is the scarcest blocking work we do — it is the only
  * action that grows the set of places we can act FROM — so it outranks every
  * other blocking kind. Zero-delay housekeeping is a separate queue lane. */
-export const PLANT_PRIORITY = DNET_PRIORITY["plant"];
+const PLANT_PRIORITY = DNET_PRIORITY["plant"];
 
 /** The per-host offsets, all applied to `rank` (the negated depth). These are
  * BANDS rather than fine gradations: no host's bleed can reach into another

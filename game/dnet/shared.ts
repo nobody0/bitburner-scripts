@@ -320,7 +320,7 @@ export interface ControllerDeps {
   ringFor(host: string): DnetHost["ring"];
   recordAttempt(host: string, outcome: AttemptOutcome): void;
   recordLogDrain(host: string, outcome: LogDrainOutcome): void;
-  recordCredential(entry: VaultEntry, from: string): void;
+  recordCredential(entry: VaultEntry): void;
   recordLoose(password: string): void;
   recordProvisional(entry: import("../../shared/strategy/dnet/courier.ts").ProvisionalCredential): void;
   recordNeighbourPassword(source: string, password: string, at: number): void;
