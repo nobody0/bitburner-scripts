@@ -2228,6 +2228,12 @@ export function dispatch(
   const shareEnabled =
     (directive.share?.reputationSecondsPerBonus ?? 0) > 0 ||
     options.shareValue?.currentWorkEarnsRep === true;
+  // Active faction work may use whatever residual the farm leaves because its
+  // benefit is immediate and measured. Route-priced share instead has an
+  // explicit economic allotment which must be obeyed in both directions.
+  const shareTargetGb = options.shareValue?.currentWorkEarnsRep === true
+    ? undefined
+    : directive.segments.find((segment) => segment.kind === "share")?.gb ?? 0;
   // Hacking has first refusal, triggered by REAL contention only: a pending
   // jit/prep op whose placement actually failed. The previous trigger —
   // unused-allotment deficit — was phantom demand: the JIT farm is designed
@@ -2312,12 +2318,20 @@ export function dispatch(
   }
   if (!shareEnabled) {
     requestShareStops(memory, actions, Infinity);
-  } else if (farmPlacementBlocked && memory.shareWorkers.size > 0) {
-    requestShareStops(
-      memory,
-      actions,
-      Math.max(WORKER_RAM.share, nonShareDeficitGb - memory.heap.freeTotal()),
-    );
+  } else {
+    // The marginal-value crossing is a target, not merely permission to start
+    // share. Live telemetry caught a 0 GB allotment with 106,208 GB still
+    // resident while farm placements failed. Retire the whole excess in one
+    // pass instead of waiting for one allocation failure per worker.
+    const excessGb = shareTargetGb === undefined ? 0 : memory.segmentGb.share - shareTargetGb;
+    if (excessGb > 1e-9) requestShareStops(memory, actions, excessGb);
+    if (farmPlacementBlocked && memory.shareWorkers.size > 0) {
+      requestShareStops(
+        memory,
+        actions,
+        Math.max(WORKER_RAM.share, nonShareDeficitGb - memory.heap.freeTotal()),
+      );
+    }
   }
 
   // Re-send stops that have gone unanswered past the retry window. Without
@@ -2365,7 +2379,10 @@ export function dispatch(
     // Stanek is deliberately absent: charge strength favors one occasional
     // LARGE contiguous call (highestCharge under a log, repetitions^0.07), the
     // opposite of a freely preemptible fragment consumer.
-    launchShare(memory, actions, view.player.intelligence, surplusGb);
+    const shareDeficitGb = shareTargetGb === undefined
+      ? surplusGb
+      : Math.max(0, shareTargetGb - memory.segmentGb.share);
+    launchShare(memory, actions, view.player.intelligence, Math.min(surplusGb, shareDeficitGb));
   }
 
 
@@ -2663,6 +2680,13 @@ function signature(roles: readonly JitRole["role"][]): string {
   return roles.join("-");
 }
 
+/** Several physical workers may carry one logical JIT role when no single
+ * host can fit all of its threads. Adjacent copies therefore describe one
+ * landing, while a copy separated by another role is a real ordering fault. */
+function logicalLandings(roles: readonly JitRole["role"][]): JitRole["role"][] {
+  return roles.filter((role, index) => index === 0 || role !== roles[index - 1]);
+}
+
 /** Record one landing against its batch, settling the batch once its last op
  * has arrived. */
 function noteBatchLanding(
@@ -2719,7 +2743,7 @@ function settleBatch(memory: DispatchMemory, batch: OpenBatch, at: number): void
       memory.stats.landingOrderIncomplete++;
     } else {
       planned = signature([...intendedRoles].sort((a, b) => LANDING_RANK[a] - LANDING_RANK[b]));
-      observed = signature(batch.observed);
+      observed = signature(logicalLandings(batch.observed));
       memory.stats.landingOrderBatches++;
       const key = planned + "\u0000" + observed;
       const order = memory.stats.landingOrders.get(key);
