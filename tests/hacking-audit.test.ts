@@ -17,6 +17,7 @@ import {
   type HackContext,
 } from "../shared/formulas.ts";
 import { WORKER_RAM } from "../shared/world.ts";
+import { THREAD_GROW_UPSCALE, THREAD_WEAKEN_UPSCALE } from "../shared/strategy/jit.ts";
 
 function statics(over: Partial<TargetStatics> = {}): TargetStatics {
   return {
@@ -51,10 +52,11 @@ function exhaustiveOracle(ctx: HackContext, target: TargetStatics, cores: number
   let best: { score: number; hackThreads: number } | undefined;
   for (let h = 1; h <= maxHack; h++) {
     const steal = Math.min(1, h * percent);
-    const grow = growThreads(growth, target.moneyMax, target.moneyMax * (1 - steal), target.moneyMax);
-    if (!Number.isFinite(grow)) continue;
-    const w1 = Math.ceil((0.002 * h) / weaken);
-    const w2 = Math.ceil((0.004 * grow) / weaken);
+    const requiredGrow = growThreads(growth, target.moneyMax, target.moneyMax * (1 - steal), target.moneyMax);
+    if (!Number.isFinite(requiredGrow)) continue;
+    const grow = Math.ceil(requiredGrow * THREAD_GROW_UPSCALE);
+    const w1 = Math.ceil(((0.002 * h) / weaken) * THREAD_WEAKEN_UPSCALE);
+    const w2 = Math.ceil(((0.004 * grow) / weaken) * THREAD_WEAKEN_UPSCALE);
     const hackGb = WORKER_RAM.hack * h;
     const batchGb = hackGb + WORKER_RAM.grow * grow + WORKER_RAM.weaken * (w1 + w2);
     if (hackGb > caps.hackBlockGb || batchGb > caps.batchGb) continue;
@@ -115,14 +117,13 @@ describe("audit Q3 — honest exhaustive oracle", () => {
     expect(solved.score).toBeCloseTo(oracle.best!.score, 12);
   });
 
-  test("regression: 11 threads beats the old grid result of 14", () => {
+  test("the exact search includes recovery headroom in its optimum", () => {
     const ctx = context(200);
     const target = statics();
     const oracle = exhaustiveOracle(ctx, target, 1, UNLIMITED_RAM);
     const solved = solveCycle(ctx, target)!;
-    expect(oracle.best!.hackThreads).toBe(11);
-    expect(solved.hackThreads).toBe(11);
-    expect(solved.score).toBeCloseTo(19.0776, 3);
+    expect(solved.hackThreads).toBe(oracle.best!.hackThreads);
+    expect(solved.score).toBeCloseTo(oracle.best!.score, 12);
     expect(solved.exact).toBe(true);
   });
 

@@ -99,8 +99,8 @@ export interface HgwAction {
    * Separating size from strength is what lets a resident worker be re-tasked
    * below its spawn size without moving any GB figure: `chooseJitSchedule`
    * quantizes role RAM through `ceil(holdMs / interval)`, so a thread count
-   * that reaches it is never a rounding detail (see targeting.ts
-   * weakenThreadsFor). Strength never reaches it.
+   * that reaches it is never a rounding detail (see targeting.ts batch sizing).
+   * Strength never reaches it.
    * Source (opts.threads accepts positive non-integer values): types/NetscriptDefinitions.d.ts BasicHGWOptions */
   strengthThreads?: number;
   /** Dispatcher-assigned id, echoed back in the CompletionEvent. */

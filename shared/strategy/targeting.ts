@@ -11,7 +11,12 @@ import {
   type HackContext,
 } from "../formulas.ts";
 import { WORKER_RAM } from "../world.ts";
-import { HGW_MIN_INTERVAL_MS, HWGW_MIN_INTERVAL_MS, THREAD_WEAKEN_UPSCALE } from "./jit.ts";
+import {
+  HGW_MIN_INTERVAL_MS,
+  HWGW_MIN_INTERVAL_MS,
+  THREAD_GROW_UPSCALE,
+  THREAD_WEAKEN_UPSCALE,
+} from "./jit.ts";
 
 /** Per-target strategy solve — the inner half of "find the optimal target".
  * Pure math on shared/formulas.ts. Small domains are exhaustively searched;
@@ -168,20 +173,14 @@ interface CycleEval {
   ram: number;
 }
 
-/** Weaken threads for an exact requirement, plus ordering insurance
- * (THREAD_WEAKEN_UPSCALE).
- *
- * The insurance is added, not multiplied, and the distinction is load-bearing.
- * The reference carries fractional thread counts, so `x * 1.001` really is
- * +0.1%; ours are integers behind a ceil, where `ceil(x * 1.001)` becomes a
- * whole extra thread whenever x is near-integral — +20% on a five-thread
- * weaken. Because role RAM reaches chooseJitSchedule through
- * `ceil(holdMs / interval)`, that is not a rounding detail: measured on a
- * 256 GB fleet, one extra thread crossed a quantization boundary and doubled
- * the batch interval. `ceil` alone already covers the sub-thread residue at
- * small counts; the proportional term engages once 0.1% is a real thread. */
-function weakenThreadsFor(exact: number): number {
-  return Math.ceil(exact) + Math.floor(exact * (THREAD_WEAKEN_UPSCALE - 1));
+/** Apply recovery margins before feasibility and profitability are evaluated.
+ * The returned integers are the physical process sizes the score pays for. */
+export function batchGrowThreads(required: number): number {
+  return Math.ceil(required * THREAD_GROW_UPSCALE);
+}
+
+export function batchWeakenThreads(required: number): number {
+  return Math.ceil(required * THREAD_WEAKEN_UPSCALE);
 }
 
 /** Memo for the joint-packing scan, keyed on the (hackNeed, growNeed) pair it
@@ -303,13 +302,14 @@ export function solveCycle(
     // single weaken covers both fortifies.
     const growK = kind === "hgw" ? growthLogPerThread(ctx, minDifficulty + HACK_FORTIFY * hackThreads, serverGrowth, cores) : k;
     if (growK === -Infinity) return undefined;
-    const growThreadCount = growThreads(growK, moneyMax, postHack, moneyMax);
-    if (!Number.isFinite(growThreadCount)) return undefined;
-    const weaken1 = kind === "hgw" ? 0 : weakenThreadsFor((HACK_FORTIFY * hackThreads) / weakenPerThread);
+    const requiredGrow = growThreads(growK, moneyMax, postHack, moneyMax);
+    if (!Number.isFinite(requiredGrow)) return undefined;
+    const growThreadCount = batchGrowThreads(requiredGrow);
+    const weaken1 = kind === "hgw" ? 0 : batchWeakenThreads((HACK_FORTIFY * hackThreads) / weakenPerThread);
     const weaken2 =
       kind === "hgw"
-        ? weakenThreadsFor((HACK_FORTIFY * hackThreads + GROW_FORTIFY * growThreadCount) / weakenPerThread)
-        : weakenThreadsFor((GROW_FORTIFY * growThreadCount) / weakenPerThread);
+        ? batchWeakenThreads((HACK_FORTIFY * hackThreads + GROW_FORTIFY * growThreadCount) / weakenPerThread)
+        : batchWeakenThreads((GROW_FORTIFY * growThreadCount) / weakenPerThread);
     // ScriptHackMoneyGain, NOT ScriptHackMoney: the latter is already folded
     // into `percent` (and therefore `steal`, which sizes the grow). This is the
     // player's cut of what was drained, and it is 0 in BN8 — where the farm
@@ -572,7 +572,7 @@ export function solveCycle(
   // point gets a bounded integer neighborhood rather than a one-step snap.
   promising.add(best.hackThreads);
   for (const center of promising) {
-    for (let candidateThreads = Math.max(1, center - 8); candidateThreads <= Math.min(maxThreads, center + 8); candidateThreads++) {
+    for (let candidateThreads = Math.max(1, center - 16); candidateThreads <= Math.min(maxThreads, center + 16); candidateThreads++) {
       const candidate = evalThreads(candidateThreads);
       if (better(candidate, best)) best = candidate;
     }
@@ -615,10 +615,7 @@ export function solvePrep(
   const k = growthLogPerThread(ctx, statics.minDifficulty, statics.serverGrowth, cores);
   const grow = statics.moneyMax > 0 ? growThreads(k, statics.moneyMax, current.moneyAvailable, statics.moneyMax) : 0;
   const growCount = Number.isFinite(grow) ? grow : 0;
-  // Same ordering insurance as the cycle solve: this weaken is paired with a
-  // grow and must still cover it if the two land out of order. W1 needs no
-  // upscale — it is sized from an exact observed security excess.
-  const weaken2Threads = weakenThreadsFor((GROW_FORTIFY * growCount) / weakenPerThread);
+  const weaken2Threads = Math.ceil((GROW_FORTIFY * growCount) / weakenPerThread);
 
   const hackTimeAtMin = hackTimeSeconds(ctx, statics.minDifficulty, statics.requiredHackingSkill);
   const weaken1RamSec = weakenTimeS * WORKER_RAM.weaken * weaken1Threads;

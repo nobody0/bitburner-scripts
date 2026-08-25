@@ -1,6 +1,23 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { growThreads, growthLogPerThread, hackExpGain, makeHackContext, type HackContext } from "../../shared/formulas.ts";
-import { prepTimeSeconds, prepWaveRamGb, solveCycle, solvePrep, type TargetStatics } from "../../shared/strategy/targeting.ts";
+import {
+  GROW_FORTIFY,
+  growThreads,
+  growthLogPerThread,
+  HACK_FORTIFY,
+  hackExpGain,
+  makeHackContext,
+  weakenEffect,
+  type HackContext,
+} from "../../shared/formulas.ts";
+import {
+  batchGrowThreads,
+  batchWeakenThreads,
+  prepTimeSeconds,
+  prepWaveRamGb,
+  solveCycle,
+  solvePrep,
+  type TargetStatics,
+} from "../../shared/strategy/targeting.ts";
 import { applyGrow, applyHack, applyWeaken, serverFromSpec, type SimServer } from "../core/effects.ts";
 import { mockPerson, mockServer } from "../core/mocks.ts";
 import { mulberry32 } from "../core/rng.ts";
@@ -182,15 +199,29 @@ describe("solveCycle", () => {
     expect(server.hackDifficulty).toBe(server.minDifficulty); // W2 covers grow fortify
   });
 
-  test("grow threads are tight: one less would under-restore", () => {
+  test("grow and weaken recovery margins are paid for by the solved batch", () => {
     const skill = 300;
     const { ctx, person, server } = makeScenario(skill);
     const solution = solveCycle(ctx, JOESGUNS)!;
     applyHack(server, person, solution.hackThreads, 0);
+    const requiredGrow = growThreads(
+      growthLogPerThread(ctx, server.minDifficulty, JOESGUNS.serverGrowth, 1),
+      server.moneyMax,
+      server.moneyAvailable,
+      server.moneyMax,
+    );
+    expect(solution.growThreads).toBe(batchGrowThreads(requiredGrow));
+    const weakenPerThread = weakenEffect(ctx, 1, 1);
+    expect(solution.weaken1Threads).toBe(
+      batchWeakenThreads((HACK_FORTIFY * solution.hackThreads) / weakenPerThread),
+    );
+    expect(solution.weaken2Threads).toBe(
+      batchWeakenThreads((GROW_FORTIFY * solution.growThreads) / weakenPerThread),
+    );
     resetPerson(person, skill);
     applyWeaken(server, person, solution.weaken1Threads, 1);
     resetPerson(person, skill);
-    applyGrow(server, person, solution.growThreads - 1, 1);
+    applyGrow(server, person, requiredGrow - 1, 1);
     expect(server.moneyAvailable).toBeLessThan(server.moneyMax);
   });
 

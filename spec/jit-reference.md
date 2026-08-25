@@ -101,7 +101,7 @@ also spelled `SPACER_MS` while meaning "a launch budget", and each broke as soon
 as the spacer stopped being generous. When auditing a timing constant here, the
 question is always which of the two independent budgets it belongs to.
 
-### Why 3 ms is survivable: oversized weaken as ordering insurance
+### Why a tight grid is survivable: priced recovery headroom
 
 Landing 3 ms apart means occasional misordering under a GC pause. The reference
 does not try to prevent this; it makes it self-correcting
@@ -122,16 +122,14 @@ spiral. Hack is downscaled by a matching hair so it can never overdraw.
 Its own TODO notes the upscale should become dynamic in the number of in-flight
 jobs, which is the obvious refinement.
 
-**Porting the upscale needs one adjustment, and getting it wrong is expensive.**
-The reference's thread counts are fractional, so `x * 1.001` really is +0.1%.
-Ours are integers behind a `ceil`, and `ceil(x * 1.001)` turns that margin into
-a WHOLE extra thread whenever `x` is near-integral — on a five-thread weaken,
-+20%. Measured: on a 256 GB fleet that single extra thread pushed the JIT role
-envelope past a `chooseJitSchedule` quantization boundary and **doubled the
-batch interval, 7.6s → 15.1s**, halving hack throughput. The insurance is
-therefore added, not multiplied: `ceil(exact) + floor(exact * 0.001)`, so it is
-inert at small counts (where `ceil`'s own residue already covers a mis-order)
-and a true 0.1% at scale (`shared/strategy/targeting.ts`, `weakenThreadsFor`).
+The shipped solve deliberately uses more visible margins than the reference:
+`ceil(1.01·requiredGrow)` and `ceil(1.02·requiredWeaken)`. Grow headroom repairs
+small money deficits before the arrival-money brake has to suppress hacks;
+weaken headroom absorbs fortify residue before it can ratchet. Both multipliers
+are applied while evaluating each candidate, before feasibility, cadence and
+`$/GB/s` are chosen. The extra integer thread at small sizes is therefore an
+explicitly priced recovery cost rather than hidden execution slack
+(`batchGrowThreads`, `batchWeakenThreads`).
 
 The general lesson: because role RAM enters `chooseJitSchedule` through
 `ceil(holdMs / interval)`, small thread-count changes are not small — they can
@@ -325,10 +323,10 @@ semantic gap. **MISSING** — no equivalent.
 | Horizon-integrated target choice net of prep | `batchPlanner.ts:1241-1336` | `shared/strategy/economics.ts` | **HAVE** — better: closed-form, continuous reinvestment |
 | Horizon shrinks as install approaches | `batchRunner.ts:667-672` | `game/lib/features/hacking.ts` `installSec` -> `horizonMs` | **HAVE** |
 | Retiring batch drains rather than dies (`phaseOutBatch`) | `batchRunner.ts:617-620` | `cancelUnstartedJitTarget` + `RetiringJitRuntime` | **HAVE** — generational handoff: never-started batches cancelled, started batches drain at their own generation's quotas (`abandonJitPending` remains only for a true all-target desync rebuild) |
-| Re-shape only past a material drift threshold | — | `JIT_RESHAPE_RATIO = 1.25` (kind change or per-batch RAM drift); small shrinks retain, complete cap-safe upsizes may replace in place | **HAVE here, MISSING in reference** — the solver is bistable near grid boundaries, so a thresholdless re-shape oscillates |
+| Same-kind running shape remains stable | `updateRunningBatchStrategy` late-binds inside reserved pools | H/G strength late-bound; shrink retains the physical generation, complete cap-safe upsizes may replace in place | **HAVE** — material skill-drift handoffs caused periodic deadline/drain waves |
 | New generation sized against RAM the old one still holds | `targetUnsafeUntil` | schedule solved against `segmentCap − retiringCommitted`, re-fit as the old generation drains | **HAVE** — the fragmentation approximation |
 | Quotas never shrink under launched ops | `poolsRequiredPerMaxParallel` (§4) | `retainOrExpandJitSchedule`: adopt only a complete, cap-safe dominating schedule | **HAVE** — component-wise unions are forbidden because two valid schedules can have an over-cap union |
-| Second batch shape solved for cadence | `batchPlanner.ts:908-1004` (three shapes) | `leanCadenceAlternative` + `leanLocked` — a leaner shape adopted only on a decisive (>1.25×) realized-rate win, locked until a material reshape | **PARTIAL** — one alternative, solved only when the fat shape packs a slow grid; see §9 |
+| Second batch shape solved for cadence | `batchPlanner.ts:908-1004` (three shapes) | `leanCadenceAlternative` + `leanLocked` — a leaner shape adopted only on a decisive (>1.25×) realized-rate win, locked for that target/mode | **PARTIAL** — one alternative, solved only when the fat shape packs a slow grid; see §9 |
 | Missed successor aborts its pending suffix | `batchRunner.ts` downstream abortion counters | fixed operation deadlines in `launchDueJit`; current and later launch-order ops are released | **HAVE** — no late support launch and no successor re-anchoring |
 | Observed-security drain guard | — | `SECURITY_RECOVERY_DRIFT = 3·PREPPED_SEC_TOLERANCE` stops admission and weakens back | **HAVE here, MISSING in reference** |
 | Engine-capacity rails (process ceiling, per-pass launch cap) | `HIGHEST_MAX_PARALLEL`, `batchPlanner.ts:16-19` | `MAX_LIVE_WORKERS`, `MAX_LAUNCH_ACTIONS_PER_PASS` via `stats.capped` | **HAVE** — see §9 "Closed" |
@@ -490,8 +488,8 @@ something, and the asymmetry decides the clamp:
   arrival-money brake sizes itself down to match.
 
 So `growThreadsAtLanding` (`shared/strategy/prediction.ts`) re-derives the
-requirement from the predicted arrival money and clamps it to the committed
-weaken cover, never above it, even when the money says a larger grow would pay.
+requirement from the predicted arrival money, reapplies the planned 1% recovery
+headroom, and clamps it to the committed weaken cover, never above it.
 
 **Weaken is exempt, permanently.** It always runs at its full spawned strength:
 the RAM is committed by the time it launches, over-weakening clamps harmlessly

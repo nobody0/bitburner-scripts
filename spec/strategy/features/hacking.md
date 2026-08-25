@@ -122,6 +122,7 @@ elapsed worker time is sunk and killing it loses the investment. The fleet’s r
 
 - **Timing is the product.** The HWGW shape lands H, W1, G, W2 at 0, 1, 2 and 3 × `SPACER_MS = 10` (`MINIMUM_LANDING_GAP_MS`, `shared/strategy/jit.ts`); the HGW shape lands H, G, W2 at 0, 1, 2.
 - **Score is RAM-bound, not thread-bound.** `WORKER_RAM` is hack 1.7 GB, grow 1.75, weaken 1.75 (`shared/world.ts:202`), so money-per-thread and $/GB/sec differ by more than a constant.
+- **Recovery is priced.** Candidate batches include 1% grow and 2% weaken headroom before feasibility, cadence and $/GB/sec are evaluated; arrival-time resizing preserves those margins inside the committed cover.
 - **Switching is an opportunity cost.** `evaluatePrep` scores a candidate as the income gained after the switch minus the income the current farm loses while prep borrows its RAM, both over one horizon (`shared/strategy/economics.ts:104-165`).
 - **Zero income is not zero value.** With `bestIncomeRate` at 0 the ranking key collapses to the experience term (`shared/strategy/evaluator.ts:583-586,654-661`), and the farm pick then takes a cold target (`:736-745`).
 

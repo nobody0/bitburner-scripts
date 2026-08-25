@@ -37,8 +37,9 @@ clock, is outstanding.
 ## Per-target solve (`shared/strategy/targeting.ts`)
 
 At the prepped state (minSec, moneyMax M), for steal fraction s:
-`H = round(s/hackPercent)`, `G = growThreads(k, M, M(1−s), M)`,
-`W1 = ceil(0.002·H/weakenEffect)`, `W2 = ceil(0.004·G/weakenEffect)`.
+`H = round(s/hackPercent)`, `G = ceil(1.01·growThreads(k, M, M(1−s), M))`,
+`W1 = ceil(1.02·0.002·H/weakenEffect)`,
+`W2 = ceil(1.02·0.004·G/weakenEffect)`.
 Income `E = c·s·M`; RAM-seconds `R = t_h·(1.7H + 1.75·3.2·G + 1.75·4·W)`.
 **Score = E/R in $/GB/sec** — the RAM-bound unit. The insight came from an
 earlier rewrite's `analyze-profit.js` (`nobody0/bitburner`, no longer checked
@@ -276,23 +277,25 @@ drains — no new leading weakens are admitted, started batches cash in, and the
 prep path weakens the drift back — because per-batch skips alone let a spiral
 feed itself.
 
-**Re-solves are generations, not edits.** A re-solve whose batch kind changes
-or whose per-batch RAM drifts more than `JIT_RESHAPE_RATIO = 1.25` (either
-direction; `JIT_LEAN_LOCK_RATIO = 3` while a cadence-lean shape is locked)
-retires the incumbent shape instead of resizing it: never-started batches are
-cancelled, started batches drain at their own generation's recorded role
-quotas (`RetiringJitRuntime`, one retiring generation at a time), and the new
-generation plans immediately against `segmentCap − retiringCommitted`,
-re-fitting as the old generation shrinks. Below the reshape threshold a shrink
-keeps the generation's role shape; an upsize may replace it only when the
-complete candidate schedule dominates the incumbent and still fits the cap;
-component-wise quota unions are forbidden because their sum can exceed the
-capacity that validated either input.
+**A running same-kind solve is a stable physical envelope.** Skill growth
+continuously changes the fresh optimum, but H/G launch strength is already
+late-bound to the landing context. Retiring the physical shape on those
+re-solves created periodic deadline waves and a weaken-time drain/rebuild
+sawtooth, so a shrink now keeps the generation. A pure upsize may replace it
+only when the complete candidate schedule dominates the incumbent and still
+fits the cap; component-wise quota unions are forbidden because their sum can
+exceed the capacity that validated either input.
+
+Only a batch-kind change requires a generation handoff: never-started batches
+are cancelled, started batches drain at their own recorded role quotas
+(`RetiringJitRuntime`, one retiring generation at a time), and the new
+generation plans against `segmentCap − retiringCommitted`, re-fitting as the
+old generation shrinks.
 At runtime creation the dispatcher also evaluates a cadence-LEAN alternative
 shape (`leanCadenceAlternative`): when the score-optimal shape packs a slow
 grid and a leaner shape's faster cadence decisively wins
-(`> 1.25×` realized rate), the lean shape is locked (`leanLocked`) until a
-material reshape. Target switches use the same drain-not-flush semantics.
+(`> 1.25×` realized rate), the lean shape remains locked for that target/mode.
+Target switches use the same drain-not-flush semantics.
 
 **A pass costs pool count, not process count.** The in-flight ledger holds one
 entry per op — tens of thousands at depth — so `DispatchMemory` carries

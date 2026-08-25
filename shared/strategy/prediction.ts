@@ -8,7 +8,14 @@ import {
   skillFromExp,
   type HackContext,
 } from "../formulas.ts";
-import { PREPPED_SEC_TOLERANCE, type CycleSolution, type TargetStatics } from "./targeting.ts";
+import {
+  batchGrowThreads,
+  batchWeakenThreads,
+  PREPPED_SEC_TOLERANCE,
+  type CycleSolution,
+  type TargetStatics,
+} from "./targeting.ts";
+import { THREAD_GROW_UPSCALE } from "./jit.ts";
 
 /** Landing-state prediction — pure. The Q1 answer.
  *
@@ -261,7 +268,7 @@ export function growThreadsAtLanding(
   // Unrounded, for the same reason hackThreadsAtLanding is: this is a
   // fractional strength, and rounding it up would spend a whole thread of
   // fortify the cover was not sized for.
-  return Math.max(0, Math.min(required, plannedThreads, coverThreads));
+  return Math.max(0, Math.min(required * THREAD_GROW_UPSCALE, plannedThreads, coverThreads));
 }
 
 /** Resize the cached solution for the state the batch will actually land on.
@@ -287,18 +294,18 @@ export function sizeBatchAtLanding(
   // executes at the full predicted security plus the hack's fortify.
   const weaken1 = base.kind === "hgw"
     ? 0
-    : Math.ceil((securityExcess + hackFortify) / weakenPerThread);
+    : batchWeakenThreads((securityExcess + hackFortify) / weakenPerThread);
   const growSec = base.kind === "hgw"
     ? predicted.hackDifficulty + hackFortify
     : statics.minDifficulty;
   const k = growthLogPerThread(ctx, growSec, statics.serverGrowth, 1);
   const grow =
     statics.moneyMax > 0 && k !== -Infinity ? growThreads(k, statics.moneyMax, postHack, statics.moneyMax) : 0;
-  const growCount = Number.isFinite(grow) ? grow : base.growThreads;
+  const growCount = Number.isFinite(grow) ? batchGrowThreads(grow) : base.growThreads;
   const weaken2Cover = base.kind === "hgw"
     ? securityExcess + hackFortify + GROW_FORTIFY * growCount
     : GROW_FORTIFY * growCount;
-  const weaken2 = Math.ceil(weaken2Cover / weakenPerThread);
+  const weaken2 = batchWeakenThreads(weaken2Cover / weakenPerThread);
   return {
     hackThreads: base.hackThreads,
     weaken1Threads: weaken1,

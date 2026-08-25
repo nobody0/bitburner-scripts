@@ -96,14 +96,6 @@ export const OVERDUE_RETRY_MS = TIMING_WORKER_STARTUP_GUARD_MS;
 export const JIT_LAUNCH_WINDOW_MS = TIMING_JIT_LAUNCH_GUARD_MS - TIMING_WORKER_STARTUP_GUARD_MS;
 /** Cap launches per pass so one scheduler call stays inside the tick budget. */
 export const MAX_BATCHES_PER_PASS = 8;
-/** Batch-RAM drift (either direction) beyond which a re-solve hands the
- * pipeline to a new shape generation. Inside the band the current generation
- * keeps its role sizes and late-bound strength absorbs the drift. */
-export const JIT_RESHAPE_RATIO = 1.25;
-/** Reshape band for a generation whose shape is the deliberate cadence-lean
- * pick — it sits ~2x below the fat optimum by design, so the normal band
- * would immediately bounce it back. */
-export const JIT_LEAN_LOCK_RATIO = 3;
 /** Observed security drift beyond which the farm stops admitting batches and
  * recovers the target first (weakens only). Above the prepped tolerance so a
  * single slightly-late weaken never triggers it; low enough that a mis-order
@@ -400,9 +392,7 @@ interface CachedJitRuntime {
   /** Shape generation this runtime plans under (see PendingJitBatch). */
   generation: number;
   /** This generation's shape is the deliberate cadence-lean pick (see
-   * leanCadenceAlternative): retained in both drift directions and reshaped
-   * only past JIT_LEAN_LOCK_RATIO — the normal band would bounce it back to
-   * the fat optimum on the very next pass. */
+   * leanCadenceAlternative), so later fat solves must not replace it in place. */
   leanLocked?: true;
 }
 
@@ -2021,16 +2011,14 @@ export function dispatch(
             memory.retiringJitByTarget.delete(server.hostname);
           }
         }
-        // Upsizing was once adopted in place and any downsizing flushed the
-        // pipeline. Neither survives contact with an exp surge (the solve
-        // shrinks a few percent per skill generation; measured live: plan
-        // h12→h9 flushed 2.7 TB of in-flight work back to 222 GB minutes
-        // after a restart, ~50% duty forever). Reference semantics instead
-        // (spec/jit-reference.md §5-6): the RESERVED shape is stable — batch
-        // strengths rescale inside it per launch — and only a drift past
-        // JIT_RESHAPE_RATIO (or a kind change) triggers a genuine re-shape:
-        // a generational handoff, never a flush. At most one generation
-        // retires at a time; further drift waits for the handoff to finish.
+        // The RESERVED shape is stable for this target and mode. Skill growth
+        // changes the fresh optimum continuously; retiring the live generation
+        // at each material step produced the measured sawtooth: a block of old
+        // deadlines expired, the pooled envelope drained, then it rebuilt one
+        // weaken-time later. Fractional launch strength already adapts H/G to
+        // the new context, so same-kind shrink is neither needed nor useful.
+        // A kind change is different because its landing order changes; that
+        // still uses the generational handoff below.
         const kindChanged = currentRuntime !== undefined && currentRuntime.solution.kind !== solution.kind;
         const nextRoleGb = emptyJitRoleCounts();
         for (const role of jitRoles(solution, server, launchCtx)) nextRoleGb[role.role] = role.gb;
@@ -2038,25 +2026,8 @@ export function dispatch(
           (["h", "w1", "g", "w2"] as const).some(
             (role) => nextRoleGb[role] + 1e-9 < currentRuntime.roleGb[role],
           );
-        // Material drift in EITHER direction hands off: the solver is bistable
-        // near grid boundaries (measured on the speed-step lane: h96->h46->h93
-        // oscillation), and adopting a doubled hack in place launched blocks
-        // that could not place in the standing grid — 2.2 s late landings and
-        // a target drained to 6% money. Small shrinks retain the generation's
-        // shape; a pure upsize is adopted only as one cap-safe envelope below.
-        const driftRatio = currentRuntime === undefined || solution.ramPerBatch <= 1e-9
-          ? 1
-          : Math.max(
-              solution.ramPerBatch / currentRuntime.solution.ramPerBatch,
-              currentRuntime.solution.ramPerBatch / Math.max(1e-9, solution.ramPerBatch),
-            );
-        // A lean-locked generation reshapes only past the wider ratio: its
-        // shape deliberately sits ~2x below the fat optimum, and the normal
-        // band would bounce it back the very next pass.
-        const materialChange = kindChanged ||
-          driftRatio > (currentRuntime?.leanLocked ? JIT_LEAN_LOCK_RATIO : JIT_RESHAPE_RATIO);
         const reshape = currentRuntime !== undefined &&
-          materialChange &&
+          kindChanged &&
           !memory.retiringJitByTarget.has(server.hostname);
         if (reshape) {
           // phaseOut: never-started batches are cancelled, started ones cash
@@ -2113,7 +2084,7 @@ export function dispatch(
         const completeUpsizeFits = currentRuntime !== undefined && upsizedSchedule !== undefined &&
           retainOrExpandJitSchedule(currentRuntime.schedule, upsizedSchedule, segmentCap) === upsizedSchedule;
         const retainedSolution = !reshape && currentRuntime !== undefined &&
-          (anyShrink || materialChange || !completeUpsizeFits)
+          (currentRuntime.leanLocked || anyShrink || kindChanged || !completeUpsizeFits)
           ? currentRuntime.solution
           : undefined;
         // Everything below plans under this shape; deriving interval/depth/

@@ -49,16 +49,11 @@ export const JIT_LAUNCH_GUARD_MS = WORKER_STARTUP_GUARD_MS + LAUNCH_SLACK_MS;
 export const HWGW_MIN_INTERVAL_MS = 4 * MINIMUM_LANDING_GAP_MS;
 export const HGW_MIN_INTERVAL_MS = 3 * MINIMUM_LANDING_GAP_MS;
 
-/** Ordering insurance. At a few milliseconds of separation a GC pause can
- * reorder two effects; rather than prevent that, oversize weaken by 0.1% so the
- * next already-queued weaken absorbs the residue instead of security ratcheting
- * up (imports/batchPlanner.ts:21-27). Apply it ADDITIVELY — see
- * targeting.ts weakenThreadsFor.
- *
- * The reference's paired THREAD_HACK_DOWNSCALE has no analogue here: it guards
- * fractional hack counts against rounding up into an overdraw, and our hack
- * count is the integer search variable itself. */
-export const THREAD_WEAKEN_UPSCALE = 1.001;
+/** Recovery headroom is part of the solved batch, so target ranking and
+ * $/GB/s pay for it. Grow smooths small money deficits; weaken gets the larger
+ * margin because uncovered fortify can ratchet across queued batches. */
+export const THREAD_GROW_UPSCALE = 1.01;
+export const THREAD_WEAKEN_UPSCALE = 1.02;
 
 export interface JitTopology {
   /** Placeable GB per host. Standing reservations are already subtracted. */

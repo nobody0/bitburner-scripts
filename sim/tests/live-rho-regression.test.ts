@@ -59,6 +59,37 @@ function rhoWorld(): SimWorld {
 }
 
 describe("live rho-construction regressions", () => {
+  test("same-kind skill drift keeps the running JIT generation", () => {
+    const world = rhoWorld();
+    world.person.skills.hacking = 758;
+    const target = world.servers.get("rho-construction")!;
+    target.hackDifficulty = target.minDifficulty;
+    const memory = initFarm();
+    memory.dispatch.evaluator.farmReadyHost = "rho-construction";
+    memory.dispatch.evaluator.farmReadySince = -1_000_000;
+
+    const first = planFarm(world.view(), memory, [], { pooling: true });
+    expect(first.directive.farm?.host).toBe("rho-construction");
+    const firstSolve = first.directive.farm!.solution;
+    const runtime = memory.dispatch.jitRuntimeByTarget.get("rho-construction");
+    expect(runtime).toBeDefined();
+    const generation = runtime!.generation;
+    const kind = runtime!.solution.kind;
+
+    // The captured live run climbed through this range while max-hardware
+    // remained selected. Re-solving the same target changes the economical
+    // thread shape substantially, but fractional launch strength can absorb
+    // that drift without retiring a healthy physical worker envelope.
+    world.person.skills.hacking = 1_000;
+    const second = planFarm(world.view(), memory, [], { pooling: true });
+
+    expect(second.directive.farm?.host).toBe("rho-construction");
+    expect(second.directive.farm!.solution.ramPerBatch).toBeLessThan(0.8 * firstSolve.ramPerBatch);
+    expect(memory.dispatch.jitRuntimeByTarget.get("rho-construction")?.solution.kind).toBe(kind);
+    expect(memory.dispatch.jitGenerationByTarget.get("rho-construction") ?? 0).toBe(generation);
+    expect(memory.dispatch.retiringJitByTarget.has("rho-construction")).toBe(false);
+  });
+
   test("a zero share allotment reclaims the captured 106,208 GB in one pass", () => {
     const world = rhoWorld();
     const memory = initFarm();
