@@ -686,6 +686,8 @@ function decideFactions(
   // Irreversible transaction boundary: after the first final-sweep purchase
   // was authorized, only finish that sweep and install. No graft, join,
   // travel, or renewed work may reopen the package under escalated prices.
+  // `installRequested` is not this boundary: it can stay set through minutes
+  // of committed work, when safe memberships should already earn passive rep.
   const drainLatched = memory.drainCeiling !== undefined;
 
   // --- 1) join --------------------------------------------------------------
@@ -720,11 +722,6 @@ function decideFactions(
   const invitations: FactionStanding[] = [];
   if (!drainLatched) {
     for (const candidate of inviteOrder) {
-      // An UNPLANNED invitation is pure upside only while there is still a run
-      // to spend it in. During an install request it must not preempt the
-      // transaction — the guard the old free-join step carried, and the reason
-      // it existed. A planned faction still joins: the package may need it.
-      if (!protectedFactions.has(candidate.name) && view.installRequested) continue;
       if (view.factions.some((member) => member.joined && conflictsWith(candidate, member))) continue;
       if (
         !protectedFactions.has(candidate.name) &&

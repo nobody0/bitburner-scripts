@@ -881,7 +881,7 @@ describe("faction breakpoint package planner", () => {
     return { firstA, firstB, catalog, first };
   }
 
-  test("batches planned and compatible unplanned invitations into one action", () => {
+  test("batches compatible invitations even while an install is requested", () => {
     const planned = packageStanding("Planned", { joined: false, invited: true });
     const safe = packageStanding("Safe", { joined: false, invited: true });
     const safeEnemy = packageStanding("SafeEnemy", {
@@ -908,6 +908,7 @@ describe("faction breakpoint package planner", () => {
       factionsView({
         factions: [planned, safe, safeEnemy, blocker, irrelevant],
         catalog,
+        installRequested: true,
         horizonSec: 100_000,
         moneyAvailable: 1e15,
       }),
@@ -2098,7 +2099,7 @@ describe("the last-chance drain", () => {
   const nfg = aug(NEUROFLUX, { baseCost: 750_000, baseRepRequirement: 0, factions: ["CyberSec"] });
   const owned = aug("Owned Thing", { factions: ["CyberSec"] });
 
-  function drained(over: Partial<FactionsView> = {}) {
+  function drainStep(over: Partial<FactionsView> = {}, memory = initFactionMemory()) {
     return stepFactions(
       factionsView({
         factions: [standing("CyberSec", { hacking: true, field: true, security: true })],
@@ -2110,8 +2111,12 @@ describe("the last-chance drain", () => {
         moneyAvailable: 1e9,
         ...over,
       }),
-      initFactionMemory(),
-    ).decision;
+      memory,
+    );
+  }
+
+  function drained(over: Partial<FactionsView> = {}) {
+    return drainStep(over).decision;
   }
 
   test("publishes what it would buy even when nothing has been granted yet", () => {
@@ -2127,6 +2132,25 @@ describe("the last-chance drain", () => {
     const decision = drained();
     const expected = augCost(nfg, priceCtx()).moneyCost;
     expect(decision.nextBuy!.price).toBeCloseTo(expected, 6);
+  });
+
+  test("a latched drain finishes before accepting another safe invitation", () => {
+    const started = drainStep({ moneyGranted: 1e9 });
+    const safe = {
+      ...standing("Safe", { hacking: true, field: false, security: false }),
+      joined: false,
+      invited: true,
+    };
+    const resumed = drainStep({
+      factions: [
+        standing("CyberSec", { hacking: true, field: true, security: true }),
+        safe,
+      ],
+      moneyGranted: 1e9,
+    }, started.memory);
+
+    expect(resumed.decision.action.type).toBe("purchaseAugmentation");
+    expect(resumed.decision.drainCeiling).toBe(started.decision.drainCeiling);
   });
 
   test("drops favor-only work once the route is locked into its final count batch", () => {

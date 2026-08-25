@@ -41,7 +41,11 @@ returns, so one interpreter reads live and vendored data (`sim/vendor/bitburner/
 | `numAugmentations` | Covenant 20 · Illuminati 30 · Daedalus 30 (`DaedalusAugsRequirement`) · Church of the Machine God **exactly 0**, plus BN13/SF13 and the location |
 
 Daedalus's is the one OR: hacking 2500 **or** all four combat at 1500. City factions carry mutual `enemies` bans, so
-joining one forecloses others for the cycle (`packages.ts:55`).
+joining one forecloses others for the cycle (`packages.ts:47`).
+
+**Join invitations immediately.** Each decision batches every pending invitation compatible with joined factions
+and the committed portfolio, planned factions first. An install request does not delay safe joins; only a final sweep
+whose first purchase has frozen its budget and order runs to completion before accepting another invitation.
 
 **Reputation, favor, donations** (`Faction/formulas/favor.ts`, `.../Donation.ts`; transcribed in
 `shared/strategy/factions/rep.ts`):
