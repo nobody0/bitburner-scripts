@@ -18,31 +18,34 @@ export type FarmMode = "hwgw" | "hgw" | "shotgun";
 export const SHOTGUN_HACK_MS = 100;
 /** Economic shotgun trigger: which resource binds. RAM can hold
  * `farmGb / ramPerBatch` concurrent batches; the landing grid at minimum
- * spacing holds `weakenMs / intervalMs`. When RAM holds MORE than the grid,
- * the spacing floor is the binding cap while RAM idles — same-deadline
- * shotgun volleys need no inter-batch spacing and convert the surplus into
- * throughput (post-install: a weak target farmed with ~1% of a huge fleet).
- * When RAM binds, JIT's worker reuse and precise slots win. The hysteresis
- * keeps the boundary from flapping as the fleet compounds past the envelope. */
+ * spacing holds `weakenMs / intervalMs`. When RAM holds MORE batches than the
+ * grid can space, the interval floor is the binding cap while RAM idles —
+ * same-deadline shotgun volleys need no inter-batch spacing and convert the
+ * surplus into throughput. When RAM binds, JIT's worker reuse and precise
+ * slots win. The hysteresis keeps the boundary from flapping as a compounding
+ * fleet crosses the envelope. */
 export const SHOTGUN_BOUND_HYSTERESIS = 1.2;
 /** Live in-flight ops above which HWGW's process count starts to threaten the
  * browser's limits and HGW's −25 % ops/batch pays for its worse score. Enter
  * above the threshold, exit below the release; the gap is the hysteresis. */
-export const HGW_LIVE_OPS_PRESSURE = 1_500;
-export const HGW_LIVE_OPS_RELEASE = 1_000;
+export const HGW_PROJECTED_OPS_PRESSURE = 1_500;
+export const HGW_PROJECTED_OPS_RELEASE = 1_000;
 /** Minimum time in a mode before switching again (flap guard). */
 export const MODE_DWELL_MS = 30_000;
 
 export interface ModeInputs {
   /** Hack time for the farm target at its prepped security, ms. */
   hackMs: number;
-  /** In-flight op count (the dispatcher's tracked ledger size). */
-  liveOps: number;
-  /** Concurrent batches the farm segment's RAM can hold (farmGb/ramPerBatch).
-   * Absent = no economic shotgun consideration. */
+  /** Stable HWGW worker demand at the current target/capacity. Unlike the live
+   * process count, this does not collapse as a mode transition phases out. */
+  projectedHwgwOps: number;
+  /** Concurrent batches the farm segment's RAM can hold
+   * (farmGb / ramPerBatch of the target's solve, which is steal-capped on
+   * weak targets — the fattest USEFUL batch). Absent = no economic shotgun
+   * consideration. */
   ramBoundedBatches?: number;
   /** Concurrent batches the landing grid holds at minimum spacing
-   * (weakenMs/intervalMs). */
+   * (prepped weakenMs / minimum intervalMs). */
   timeBoundedBatches?: number;
   lastMode: FarmMode;
   lastModeSince: number;
@@ -59,18 +62,18 @@ export function decideMode(inputs: ModeInputs): FarmMode {
   if (correctnessShotgun || timeBound) {
     desired = "shotgun";
   } else if (
-    inputs.liveOps > HGW_LIVE_OPS_PRESSURE
+    inputs.projectedHwgwOps > HGW_PROJECTED_OPS_PRESSURE
     // Hysteresis: once in hgw, stay until pressure falls below the release line.
-    || (inputs.lastMode === "hgw" && inputs.liveOps > HGW_LIVE_OPS_RELEASE)
+    || (inputs.lastMode === "hgw" && inputs.projectedHwgwOps > HGW_PROJECTED_OPS_RELEASE)
   ) {
     desired = "hgw";
   } else {
     desired = "hwgw";
   }
   // Enter the correctness-preserving short-timer mode immediately. Dwell
-  // suppresses performance-driven switches — including entering (and leaving)
-  // the ECONOMIC shotgun, whose boundary moves with the fleet — and leaving a
-  // still-safe correctness shotgun.
+  // suppresses every performance-driven switch: entering or leaving the
+  // ECONOMIC shotgun (its boundary moves with the fleet), the hgw pressure
+  // valve, and leaving a still-safe correctness shotgun.
   const immediate = desired === "shotgun" && correctnessShotgun;
   if (!immediate && desired !== inputs.lastMode && inputs.now - inputs.lastModeSince < MODE_DWELL_MS) {
     return inputs.lastMode;

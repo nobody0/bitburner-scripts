@@ -56,7 +56,7 @@ Difficulty clamps to `[max(minDifficulty, 1), 100]`, `minDifficulty = round(base
 `HackingSpeedMultiplier` is 0.3 in [BN14](../bitnodes/bn14.md), 0.6 in [BN15](../bitnodes/bn15.md), 1
 everywhere else (`BitNodeMults.ts:487,530`). At 0.3 every op takes 3.33× as long: the same batch earns the
 same dollars over triple the wall clock, and the depth cap
-`max(1, floor(weakenTimeS/BATCH_INTERVAL_S))·ramPerBatch` (`shared/strategy/economics.ts:37-40`) scales with
+`max(1, floor(weakenTimeS/BATCH_INTERVAL_S))·ramPerBatch` (`depthCapGb`, `shared/strategy/economics.ts`) scales with
 it. It retimes every batch; it does not scale income.
 
 ### Access: openers and backdoors
@@ -120,7 +120,7 @@ elapsed worker time is sunk and killing it loses the investment. The fleet’s r
 
 ## Challenges
 
-- **Timing is the product.** The HWGW shape lands H, W1, G, W2 at 0, 1, 2 and 3 × `SPACER_MS = 5` (`shared/strategy/timing.ts:10`, `shared/strategy/dispatch.ts:3111-3121`); the HGW shape lands H, G, W2 at 0, 1, 2.
+- **Timing is the product.** The HWGW shape lands H, W1, G, W2 at 0, 1, 2 and 3 × `SPACER_MS = 10` (`MINIMUM_LANDING_GAP_MS`, `shared/strategy/jit.ts`); the HGW shape lands H, G, W2 at 0, 1, 2.
 - **Score is RAM-bound, not thread-bound.** `WORKER_RAM` is hack 1.7 GB, grow 1.75, weaken 1.75 (`shared/world.ts:202`), so money-per-thread and $/GB/sec differ by more than a constant.
 - **Switching is an opportunity cost.** `evaluatePrep` scores a candidate as the income gained after the switch minus the income the current farm loses while prep borrows its RAM, both over one horizon (`shared/strategy/economics.ts:104-165`).
 - **Zero income is not zero value.** With `bestIncomeRate` at 0 the ranking key collapses to the experience term (`shared/strategy/evaluator.ts:583-586,654-661`), and the farm pick then takes a cold target (`:736-745`).

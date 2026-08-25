@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
-  HGW_LIVE_OPS_PRESSURE,
+  HGW_PROJECTED_OPS_PRESSURE,
   MODE_DWELL_MS,
   SHOTGUN_HACK_MS,
   decideMode,
@@ -31,7 +31,7 @@ import {
 
 const base = {
   hackMs: 30_000,
-  liveOps: 100,
+  projectedHwgwOps: 100,
   lastMode: "hwgw" as FarmMode,
   lastModeSince: 0,
   now: 1_000_000,
@@ -94,13 +94,13 @@ describe("entering shotgun", () => {
     }
   });
 
-  test("outranks live-op pressure, which would otherwise ask for hgw", () => {
+  test("outranks projected HWGW pressure, which would otherwise ask for hgw", () => {
     // Both conditions true at once: process pressure wants hgw, hack time
     // demands shotgun. Correctness wins.
     expect(decideMode({
       ...base,
       hackMs: SHOTGUN_HACK_MS - 1,
-      liveOps: HGW_LIVE_OPS_PRESSURE + 500,
+      projectedHwgwOps: HGW_PROJECTED_OPS_PRESSURE + 500,
     })).toBe("shotgun");
   });
 });
@@ -129,7 +129,7 @@ describe("leaving shotgun", () => {
     expect(decideMode({
       ...base,
       hackMs: 30_000,
-      liveOps: HGW_LIVE_OPS_PRESSURE + 1,
+      projectedHwgwOps: HGW_PROJECTED_OPS_PRESSURE + 1,
       lastMode: "shotgun",
       lastModeSince: base.now - MODE_DWELL_MS,
     })).toBe("hgw");
@@ -140,7 +140,7 @@ describe("the jit -> shotgun -> jit round trip", () => {
   /** Drive decideMode the way the dispatcher does: feed back the mode it chose
    * and the instant it last changed. */
   function driveModes(
-    steps: readonly { atMs: number; hackMs: number; liveOps?: number }[],
+    steps: readonly { atMs: number; hackMs: number; projectedOps?: number }[],
   ): { atMs: number; mode: FarmMode }[] {
     let mode: FarmMode = "hwgw";
     let since = 0;
@@ -148,7 +148,7 @@ describe("the jit -> shotgun -> jit round trip", () => {
     for (const step of steps) {
       const decision = decideMode({
         hackMs: step.hackMs,
-        liveOps: step.liveOps ?? 100,
+        projectedHwgwOps: step.projectedOps ?? 100,
         lastMode: mode,
         lastModeSince: since,
         now: step.atMs,

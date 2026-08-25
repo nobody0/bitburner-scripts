@@ -119,6 +119,20 @@ export interface JitSchedule {
   quotaGb: Record<JitRole["role"], number>;
 }
 
+/** Preserve an immutable generation envelope, allowing only a complete,
+ * cap-safe expansion. Role-wise merging is forbidden: the union of two valid
+ * schedules need not itself fit the capacity that validated either one. */
+export function retainOrExpandJitSchedule(
+  incumbent: JitSchedule,
+  candidate: JitSchedule,
+  capacityGb: number,
+): JitSchedule {
+  const dominates = (["h", "w1", "g", "w2"] as const).every(
+    (role) => candidate.quotaGb[role] + 1e-9 >= incumbent.quotaGb[role],
+  );
+  return dominates && candidate.totalGb <= capacityGb + 1e-9 ? candidate : incumbent;
+}
+
 /** A future landing which changes the duration of operations invoked after it.
  * `deltaDifficulty` is positive for hack/grow and negative for weaken. */
 export interface JitSecurityEvent {

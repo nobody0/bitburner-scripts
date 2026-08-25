@@ -585,12 +585,10 @@ describe("HWGW dispatcher", () => {
     expect(guarded.memory.dispatch.stats.missedWindow["arrival-security"]).toBe(before + 1);
   });
 
-  test("a hack too late to land before its own grow is dropped, not launched", () => {
-    // The old policy launched a started batch's hack however late ("paid
-    // support must earn"), but a hack landing after its own grow steals money
-    // nothing restores — chained across batches it husked a live target to
-    // 0.13% of max money. Support still launches late (over-cover is safe);
-    // the hack drops and the batch settles as support-only.
+  test("a missed successor aborts its pending suffix instead of moving it late", () => {
+    // The predecessor chain has fixed deadlines. A missed successor and all
+    // remaining dependants are removed; late support never pushes H/G behind
+    // an already-launched W2.
     const world = new SimWorld({ seed: 2, network: JIT_TEST_NETWORK, homeRam: 4_096, startingMoney: 1e9 });
     prepareJitTestWorld(world);
     const initial = planFarm(world.view(), initFarm(), [], { jit: true });
@@ -607,6 +605,10 @@ describe("HWGW dispatcher", () => {
     )).toBe(false);
     expect(late.memory.dispatch.stats.missedWindow.deadline).toBe(missed + 1);
     expect(late.memory.dispatch.stats.batchesSkippedBy.deadline).toBe(skipped + 1);
+    // Fixed predecessor deadlines: the missed op's pending suffix was removed,
+    // rather than retained and shifted behind the already-launched support.
+    const pending = late.memory.dispatch.jitByTarget.get(target.hostname) ?? [];
+    expect(pending.flatMap((batch) => batch.ops).some((op) => op.startAt < world.clock.now())).toBe(false);
   });
 
   test("down-strengths a pending hack when money falls after planning, without re-placing it", () => {

@@ -13,6 +13,7 @@ import {
   noteJobStart,
   noteSpawn,
   planTake,
+  poolGbByRole,
   poolCounts,
   type OpKind,
   type PoolRole,
@@ -294,5 +295,27 @@ describe("worker pool idle index", () => {
     expect(noteExit(pool, 1)?.workerId).toBe(1);
     expect(auditPool(pool)).toEqual([]);
     expect(planTake(pool, "grow", 5, new Set(), "g").missThreads).toBe(5);
+  });
+
+  test("JIT workers are isolated by target and shape generation", () => {
+    const pool = initPool();
+    noteSpawn(pool, {
+      workerId: 1, hostname: "home", kind: "grow", role: "g",
+      target: "alpha", generation: 3, threads: 5, effectThreads: 5, gb: 8.75,
+    }, 0);
+    noteJobDone(pool, 1, 0);
+    expect(ids(planTake(pool, "grow", 5, new Set(), "g", {
+      target: "alpha", generation: 3,
+    }))).toEqual([1]);
+    expect(ids(planTake(pool, "grow", 5, new Set(), "g", {
+      target: "alpha", generation: 4,
+    }))).toEqual([]);
+    expect(ids(planTake(pool, "grow", 5, new Set(), "g", {
+      target: "beta", generation: 3,
+    }))).toEqual([]);
+    expect(poolGbByRole(pool, "alpha", 3).g).toBe(8.75);
+    expect(poolGbByRole(pool, "alpha", 4).g).toBe(0);
+    noteExit(pool, 1);
+    expect(poolGbByRole(pool, "alpha", 3).g).toBe(0);
   });
 });

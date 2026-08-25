@@ -90,8 +90,11 @@ worker immediately before the call (`game/lib/worker-shared.ts:18-22`,
 `game/worker/worker.ts:63-65`) rather than computing it at dispatch. Since
 `depthCapGb = floor(weakenMs / interval) × ramPerBatch`
 (`shared/strategy/dispatch.ts`) scales inversely with the interval, that cost a
-factor of forty in pipeline depth. The gap is now one handoff quantum, 5 ms,
-and the HWGW interval 20 ms.
+factor of forty in pipeline depth. The gap is now two precision quanta, 10 ms,
+and the HWGW interval 40 ms: at one quantum (5 ms) live engine lateness of
+5-10 ms flipped adjacent landings — "landed in order" sank to 72% as the
+pipeline deepened — and the widened gap halves a cadence ceiling nothing
+currently reaches (`shared/strategy/jit.ts:32-40`).
 
 The conflation had propagated: two anchors and the overdue-retry backoff were
 also spelled `SPACER_MS` while meaning "a launch budget", and each broke as soon
@@ -321,7 +324,14 @@ semantic gap. **MISSING** — no equivalent.
 | Running batch re-derived from smallest reserved pool | `batchPlanner.ts:1011-1072` | `sizeBatchAtLanding`, reserve-before-emit | **HAVE** — different shape: we never emit a partially-filled batch, so there is nothing to re-derive |
 | Horizon-integrated target choice net of prep | `batchPlanner.ts:1241-1336` | `shared/strategy/economics.ts` | **HAVE** — better: closed-form, continuous reinvestment |
 | Horizon shrinks as install approaches | `batchRunner.ts:667-672` | `game/lib/features/hacking.ts` `installSec` -> `horizonMs` | **HAVE** |
-| Retiring batch drains rather than dies | `batchRunner.ts:617-620` | `abandonJitPending` | **HAVE** — it releases only UNLAUNCHED reservations; in-flight ops complete |
+| Retiring batch drains rather than dies (`phaseOutBatch`) | `batchRunner.ts:617-620` | `cancelUnstartedJitTarget` + `RetiringJitRuntime` | **HAVE** — generational handoff: never-started batches cancelled, started batches drain at their own generation's quotas (`abandonJitPending` remains only for a true all-target desync rebuild) |
+| Re-shape only past a material drift threshold | — | `JIT_RESHAPE_RATIO = 1.25` (kind change or per-batch RAM drift); small shrinks retain, complete cap-safe upsizes may replace in place | **HAVE here, MISSING in reference** — the solver is bistable near grid boundaries, so a thresholdless re-shape oscillates |
+| New generation sized against RAM the old one still holds | `targetUnsafeUntil` | schedule solved against `segmentCap − retiringCommitted`, re-fit as the old generation drains | **HAVE** — the fragmentation approximation |
+| Quotas never shrink under launched ops | `poolsRequiredPerMaxParallel` (§4) | `retainOrExpandJitSchedule`: adopt only a complete, cap-safe dominating schedule | **HAVE** — component-wise unions are forbidden because two valid schedules can have an over-cap union |
+| Second batch shape solved for cadence | `batchPlanner.ts:908-1004` (three shapes) | `leanCadenceAlternative` + `leanLocked` — a leaner shape adopted only on a decisive (>1.25×) realized-rate win, locked until a material reshape | **PARTIAL** — one alternative, solved only when the fat shape packs a slow grid; see §9 |
+| Missed successor aborts its pending suffix | `batchRunner.ts` downstream abortion counters | fixed operation deadlines in `launchDueJit`; current and later launch-order ops are released | **HAVE** — no late support launch and no successor re-anchoring |
+| Observed-security drain guard | — | `SECURITY_RECOVERY_DRIFT = 3·PREPPED_SEC_TOLERANCE` stops admission and weakens back | **HAVE here, MISSING in reference** |
+| Engine-capacity rails (process ceiling, per-pass launch cap) | `HIGHEST_MAX_PARALLEL`, `batchPlanner.ts:16-19` | `MAX_LIVE_WORKERS`, `MAX_LAUNCH_ACTIONS_PER_PASS` via `stats.capped` | **HAVE** — see §9 "Closed" |
 | Old target backfills leftover RAM during new-target prep | `batchRunner.ts:586-599` | farm and prep are concurrent segments | **N/A** — see §9 |
 | Measured landing error per op | `batchRunner.ts:177-193` | `DispatchStats.landingError` | **HAVE** |
 | Multi-target concurrent farming | — | — | **MISSING in both** — open opportunity |
@@ -436,8 +446,8 @@ measurement has to come from the live game.
 
 ### Closed: the two engine-capacity rails
 
-Neither predecessor row covered these and neither did the table, but the
-reference had both and we had neither.
+The reference had both and we had neither; the §7 table now carries a row for
+them.
 
 **A live-process ceiling.** RAM accounting bounds GB, not process COUNT. A fleet
 with free GB and a short hack time plans more depth than the browser's
@@ -532,7 +542,12 @@ Three rows were listed as gaps and are not:
   claim, was the open question. **Measured and closed:** the heuristic stays
   within 0.15% of the exhaustive oracle, because the score surface is flat
   across that region, so another anchor lands on the same plateau. Numbers and
-  method in audit Q5, `tests/hacking-audit.test.ts`.
+  method in audit Q5, `tests/hacking-audit.test.ts`. One caveat has since
+  emerged: subsumption holds for SCORE, not for CADENCE — the score-optimal
+  shape can pack a slower landing grid than a leaner shape whose faster
+  interval realizes more income. `leanCadenceAlternative` (§7) solves that
+  second candidate for exactly this case; it is a grid-packing question the
+  reference's `moneyPerMs` comparison answered implicitly.
 - **Chaining off measured end times.** `openEndTimes` is a capacity handoff
   FIFO: a follow-up launches when a slot from its predecessor is free. Our
   per-role `jitCapacity` reserves `ceil(holdMs / interval)` slots up front, which
@@ -542,9 +557,13 @@ Three rows were listed as gaps and are not:
   cycle batch on the old target is the workaround. We do not have that problem:
   farm and prep are concurrent segments with separate RAM, so the old target
   keeps farming for the whole of the new one's prep (pinned by the
-  `farmAndPrep` assertion in `sim/tests/scenario-jit.test.ts`). The drain half is
-  present too — `abandonJitPending` releases only UNLAUNCHED reservations and
-  lets in-flight ops complete.
+  `farmAndPrep` assertion in `sim/tests/scenario-jit.test.ts`). The drain half
+  is now PORTED, not skipped: `cancelUnstartedJitTarget` + `RetiringJitRuntime`
+  are a true `phaseOutBatch` analogue (see §7) — a switch retires the old
+  target in place and its started batches cash in. The old global
+  `abandonJitPending` flush was measured husking a live target to 0.13% of max
+  money at +12.7 security; it survives only for a true all-target desync
+  rebuild.
 
 ### Still open
 

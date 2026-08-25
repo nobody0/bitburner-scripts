@@ -43,6 +43,7 @@ import {
   noteJobStart,
   noteSpawn,
   planTake,
+  poolGbByRole,
   poolCounts,
   type WorkerPoolMemory,
 } from "./worker-pool.ts";
@@ -57,6 +58,7 @@ import {
   latestJitStart,
   MINIMUM_LANDING_GAP_MS,
   MINIMUM_WORKER_PRECISION_MS,
+  retainOrExpandJitSchedule,
   WORKER_STARTUP_GUARD_MS as TIMING_WORKER_STARTUP_GUARD_MS,
   type JitRole,
   type JitSchedule,
@@ -95,22 +97,13 @@ export const JIT_LAUNCH_WINDOW_MS = TIMING_JIT_LAUNCH_GUARD_MS - TIMING_WORKER_S
 /** Cap launches per pass so one scheduler call stays inside the tick budget. */
 export const MAX_BATCHES_PER_PASS = 8;
 /** Batch-RAM drift (either direction) beyond which a re-solve hands the
- * pipeline to a new shape generation instead of adjusting in place. Inside the
- * band, a shrink keeps the reserved shape and an upsize adopts directly. */
+ * pipeline to a new shape generation. Inside the band the current generation
+ * keeps its role sizes and late-bound strength absorbs the drift. */
 export const JIT_RESHAPE_RATIO = 1.25;
-/** Launch-gate tolerance over the schedule's HACK-role quota. Quotas are
- * recomputed from CURRENT durations while in-flight ops hold RAM at the
- * longer durations they launched with, so under continuous skill growth the
- * quota sits persistently a few slots under reality; the hack — launched last
- * and carrying the money — then lands seconds late or not at all (measured on
- * the speed-step lane: 26k hack launch-skips, "w1 landed where h was due",
- * income half of what the same code earns with the slack). Hack ONLY: h is
- * the smallest role RAM so the overfill cannot crowd the heap; the same slack
- * on grow or the weakens measurably destroys the share-churn lane
- * ($9.7e7 -> $1.1e7/s) — their overfill crowds the RAM share/dodge traffic
- * needs.
- * Scheduling stays honest; the heap remains the hard capacity bound. */
-export const JIT_QUOTA_SLACK = 1.5;
+/** Reshape band for a generation whose shape is the deliberate cadence-lean
+ * pick — it sits ~2x below the fat optimum by design, so the normal band
+ * would immediately bounce it back. */
+export const JIT_LEAN_LOCK_RATIO = 3;
 /** Observed security drift beyond which the farm stops admitting batches and
  * recovers the target first (weakens only). Above the prepped tolerance so a
  * single slightly-late weaken never triggers it; low enough that a mis-order
@@ -406,6 +399,11 @@ interface CachedJitRuntime {
   roleGb: Record<JitRole["role"], number>;
   /** Shape generation this runtime plans under (see PendingJitBatch). */
   generation: number;
+  /** This generation's shape is the deliberate cadence-lean pick (see
+   * leanCadenceAlternative): retained in both drift directions and reshaped
+   * only past JIT_LEAN_LOCK_RATIO — the normal band would bounce it back to
+   * the fat optimum on the very next pass. */
+  leanLocked?: true;
 }
 
 /** The outgoing shape of a generational handoff (spec/jit-reference.md §6,
@@ -609,6 +607,9 @@ interface OpenBatch {
   /** Roles in the order they were LAUNCHED; sorted by landing rank to form
    * the intended order. Empty for a batch with no landing grid. */
   planned: JitRole["role"][];
+  /** Full role signature committed when the batch was opened. This remains
+   * intact when a missed predecessor aborts an unlaunched suffix. */
+  intended?: JitRole["role"][];
   observed: JitRole["role"][];
   ops: number;
   landed: number;
@@ -882,6 +883,11 @@ export interface DispatchMemory {
    * share-churn lane: whole envelope 0.007 idle / $1.89e7/s, one pass (this)
    * 0.058 / $2.65e7/s, one batch 0.049 / $1.45e7/s. */
   farmPassDemandGb?: number;
+  /** Cadence-lean alternative solve for the farm target, keyed by
+   * (host, generation, segment band, optimum batch RAM): in steady state the
+   * comparison costs a map lookup, not a solve. `solution` absent = solved
+   * and found nothing that beats the optimum's achievable rate. */
+  leanSolve?: { key: string; solution?: CycleSolution };
   /** `stats.allocFails` as of the last FULL pass's share-eviction gate. The
    * gate compares against this rather than a same-pass snapshot so allocation
    * failures on target-wake hot passes (which return before the gate) still
@@ -1320,6 +1326,12 @@ function release(memory: DispatchMemory, opId: number): void {
 function releaseWorker(memory: DispatchMemory, workerId: number): void {
   const worker = noteExit(memory.pool, workerId);
   if (!worker) return;
+  if (worker.role && worker.target !== undefined && worker.generation !== undefined) {
+    const retiring = memory.retiringJitByTarget.get(worker.target);
+    if (retiring?.generation === worker.generation) {
+      retiring.heldGbByRole[worker.role] = drainGb(retiring.heldGbByRole[worker.role], worker.gb);
+    }
+  }
   memory.heap.free(worker.hostname, worker.gb);
   memory.segmentGb.farm -= worker.gb;
 }
@@ -1932,20 +1944,48 @@ export function dispatch(
         // a transient fortify between batch landings.
         const hackMs = hackTimeSeconds(launchCtx, server.minDifficulty, server.requiredHackingSkill) * 1_000;
         const weakenMs = weakenTimeSeconds(launchCtx, server.hackDifficulty, server.requiredHackingSkill) * 1_000;
+        // Economic shotgun bound. Same steady-state basis as hackMs above: a
+        // transient fortify inflates the live weaken 5x and would overstate
+        // the grid's capacity by exactly that factor. The pre-mode directive
+        // solve supplies ramPerBatch — steal-capped on weak targets, i.e. the
+        // fattest batch that is actually USEFUL, which is the honest "can the
+        // grid carry the fleet at all" denominator.
+        const boundSolution = directive.farm.solution;
+        const preppedWeakenMs =
+          weakenTimeSeconds(launchCtx, server.minDifficulty, server.requiredHackingSkill) * 1_000;
+        const boundIntervalMs = boundSolution.kind === "hgw" ? HGW_MIN_INTERVAL_MS : INTERVAL_MS;
+        const projectedHwgwRoles = jitRoles(boundSolution, server, launchCtx);
+        const projectedHwgwSchedule = chooseJitSchedule(
+          projectedHwgwRoles,
+          segmentCap,
+          boundSolution.kind === "hgw" ? HGW_MIN_INTERVAL_MS : INTERVAL_MS,
+          capacity.hostBlocksGb
+            ? { hostBlocksGb: capacity.hostBlocksGb, divisibleBlockGb: WORKER_RAM.weaken }
+            : undefined,
+        );
+        const projectedHwgwOps = projectedHwgwSchedule === undefined
+          ? 0
+          : projectedHwgwRoles.reduce(
+              (sum, role) => sum + projectedHwgwSchedule.quotaGb[role.role] / Math.max(1e-9, role.gb),
+              0,
+            );
         const mode = options.modeOverride
           ?? decideMode({
             hackMs,
-            liveOps: memory.tracked.size,
+            projectedHwgwOps,
+            ...(boundSolution.ramPerBatch > 0 ? {
+              ramBoundedBatches: segmentCap / boundSolution.ramPerBatch,
+              timeBoundedBatches: Math.max(1, preppedWeakenMs / boundIntervalMs),
+            } : {}),
             lastMode: memory.mode,
             lastModeSince: memory.modeSince,
             now,
           });
         if (mode !== memory.mode) {
-          // Pending plans have the old mode's role shape and quotas. Hacks are
-          // emitted only after every support op in their batch, so abandoning
-          // this unlaunched suffix is safe; already-running support is benign.
-          abandonJitPending(memory, now);
-          memory.lastAnchor = -Infinity;
+          // Phase out through the ordinary shape-generation handoff below.
+          // The previous implementation flushed every pending suffix here;
+          // that made the live-op input collapse, flipped the mode back, and
+          // repeatedly paid for W2 without ever reaching H/G.
           memory.jitDecisionId++;
           memory.mode = mode;
           memory.modeSince = now;
@@ -1992,9 +2032,6 @@ export function dispatch(
         // a generational handoff, never a flush. At most one generation
         // retires at a time; further drift waits for the handoff to finish.
         const kindChanged = currentRuntime !== undefined && currentRuntime.solution.kind !== solution.kind;
-        // A pure upsize (no role smaller) adopts in place exactly as before:
-        // the new envelope dominates the old batches. Only a SHRINK retains or
-        // hands off.
         const nextRoleGb = emptyJitRoleCounts();
         for (const role of jitRoles(solution, server, launchCtx)) nextRoleGb[role.role] = role.gb;
         const anyShrink = currentRuntime !== undefined &&
@@ -2005,16 +2042,19 @@ export function dispatch(
         // near grid boundaries (measured on the speed-step lane: h96->h46->h93
         // oscillation), and adopting a doubled hack in place launched blocks
         // that could not place in the standing grid — 2.2 s late landings and
-        // a target drained to 6% money. Small drift stays in place: a shrink
-        // retains the reserved shape, a small upsize adopts (its envelope
-        // dominates the old batches).
+        // a target drained to 6% money. Small shrinks retain the generation's
+        // shape; a pure upsize is adopted only as one cap-safe envelope below.
         const driftRatio = currentRuntime === undefined || solution.ramPerBatch <= 1e-9
           ? 1
           : Math.max(
               solution.ramPerBatch / currentRuntime.solution.ramPerBatch,
               currentRuntime.solution.ramPerBatch / Math.max(1e-9, solution.ramPerBatch),
             );
-        const materialChange = kindChanged || driftRatio > JIT_RESHAPE_RATIO;
+        // A lean-locked generation reshapes only past the wider ratio: its
+        // shape deliberately sits ~2x below the fat optimum, and the normal
+        // band would bounce it back the very next pass.
+        const materialChange = kindChanged ||
+          driftRatio > (currentRuntime?.leanLocked ? JIT_LEAN_LOCK_RATIO : JIT_RESHAPE_RATIO);
         const reshape = currentRuntime !== undefined &&
           materialChange &&
           !memory.retiringJitByTarget.has(server.hostname);
@@ -2040,6 +2080,10 @@ export function dispatch(
               retiringHeldGbByRole[tracked.jitRole] += tracked.gb;
             }
           }
+          const pooled = poolGbByRole(memory.pool, server.hostname, currentRuntime!.generation);
+          for (const role of ["h", "w1", "g", "w2"] as const) {
+            retiringHeldGbByRole[role] += pooled[role];
+          }
           memory.retiringJitByTarget.set(server.hostname, {
             solution: currentRuntime!.solution,
             schedule: currentRuntime!.schedule,
@@ -2056,11 +2100,20 @@ export function dispatch(
           // pipeline-depth gap per handoff (measured: share-churn income
           // $9.8e7 -> $4.0e7/s).
         }
-        // A shrink inside the drift band — or ANY material change while a
-        // handoff is still in flight — keeps the reserved shape as the
-        // planning shape: never a mix of shapes mid-pipeline. Small pure
-        // upsizes fall through with `undefined` and adopt in place.
-        const retainedSolution = !reshape && currentRuntime !== undefined && (anyShrink || materialChange)
+        const upsizedSchedule = currentRuntime !== undefined && !anyShrink && !kindChanged
+          ? chooseJitSchedule(
+              jitRoles(solution, server, launchCtx),
+              segmentCap,
+              solution.kind === "hgw" ? HGW_MIN_INTERVAL_MS : INTERVAL_MS,
+              capacity.hostBlocksGb
+                ? { hostBlocksGb: capacity.hostBlocksGb, divisibleBlockGb: WORKER_RAM.weaken }
+                : undefined,
+            )
+          : undefined;
+        const completeUpsizeFits = currentRuntime !== undefined && upsizedSchedule !== undefined &&
+          retainOrExpandJitSchedule(currentRuntime.schedule, upsizedSchedule, segmentCap) === upsizedSchedule;
+        const retainedSolution = !reshape && currentRuntime !== undefined &&
+          (anyShrink || materialChange || !completeUpsizeFits)
           ? currentRuntime.solution
           : undefined;
         // Everything below plans under this shape; deriving interval/depth/
@@ -2354,6 +2407,88 @@ export function dispatch(
   return { actions, directive, switched: stepped.switched };
 }
 
+/** Cadence-aware shape choice for the CHOSEN farm target only (target
+ * selection is untouched). The fluid $/RAM-sec score can pick a shape whose
+ * integer slot envelope only packs a slower grid — measured on the one-server
+ * lane as h=61 forcing an 80 ms interval (12 batches/s) where a leaner shape
+ * packs 40 ms at a higher realized $/s. When the optimum cannot hold the
+ * minimum interval, solve a leaner candidate sized for it and present
+ * whichever earns more per second; the generational handoff makes the
+ * resulting shape change safe (no in-place mixing). */
+function leanCadenceAlternative(
+  memory: DispatchMemory,
+  server: ServerView,
+  solution: CycleSolution,
+  segmentCapGb: number,
+  hostBlocksGb: readonly number[] | undefined,
+  ctx: HackContext,
+  influence: StockInfluence | undefined,
+): CycleSolution | undefined {
+  const intervalMs = solution.kind === "hgw" ? HGW_MIN_INTERVAL_MS : INTERVAL_MS;
+  const topology = hostBlocksGb
+    ? { hostBlocksGb, divisibleBlockGb: WORKER_RAM.weaken }
+    : undefined;
+  const roles = jitRoles(solution, server, ctx);
+  const schedule = chooseJitSchedule(roles, segmentCapGb, intervalMs, topology);
+  // Already at the floor (or unschedulable — the launch path's own fallbacks
+  // handle that case): nothing to trade.
+  if (!schedule || schedule.intervalMs < 2 * intervalMs - 1e-9) return undefined;
+  // FRESH pipelines only, and never while any drain is in flight. The trade
+  // is settled once, when the target's first shape is chosen: correcting it
+  // later means a handoff — firing one on an already-deep pipeline deadlocked
+  // the one-server lane to $0 (incoming schedule starved by the retiring
+  // commitment), and firing one during a retarget's cross-target drain
+  // collapsed switch income retention 1.02 -> 0.18. Mid-generation drift is
+  // instead settled at the next natural reshape, which starts fresh and
+  // consults this comparison again.
+  // Same-target retiring is fine — a reshape just cleared the runtime and
+  // this IS the incoming generation's shape decision. Cross-target drains
+  // (a retarget cashing in the old host) are not: re-shaping the incoming
+  // target mid-switch collapsed income retention 1.02 -> 0.18.
+  for (const target of memory.retiringJitByTarget.keys()) {
+    if (target !== server.hostname) return undefined;
+  }
+  for (const target of memory.jitByTarget.keys()) {
+    if (target !== server.hostname) return undefined;
+  }
+  // ONE decision per generation: a fleet-band-sensitive key re-solved and
+  // flip-flopped the presented shape as dynamic fleets crossed bands, and the
+  // resulting handoff churn halved the churn/skill-jump/switch lanes.
+  const key = `${server.hostname}:${memory.jitGenerationByTarget.get(server.hostname) ?? 0}`;
+  if (memory.leanSolve?.key !== key) {
+    const manipulation = influence && influence.valuePerOp > 0
+      ? { valuePerOp: influence.valuePerOp, side: influence.side }
+      : undefined;
+    const envelopeAtMinGb = jitCapacity(roles, intervalMs).totalGb;
+    let shrink = Math.max(1, envelopeAtMinGb / Math.max(1e-9, segmentCapGb));
+    let found: CycleSolution | undefined;
+    for (let attempt = 0; attempt < 3 && !found; attempt++, shrink *= 1.1) {
+      const lean = solveCycle(ctx, staticsOf(server), 1, {
+        batchGb: Math.max(WORKER_RAM_FLOOR, solution.ramPerBatch / shrink),
+        hackBlockGb: Math.max(WORKER_RAM_FLOOR, hostBlocksGb?.[0] ?? segmentCapGb),
+        growBlockGb: Math.max(WORKER_RAM_FLOOR, hostBlocksGb?.[0] ?? segmentCapGb),
+        ...(hostBlocksGb ? { hostBlocksGb: [...hostBlocksGb] } : {}),
+        farmGb: Math.max(WORKER_RAM_FLOOR, segmentCapGb),
+      }, manipulation, solution.kind);
+      if (!lean) break;
+      const leanSchedule = chooseJitSchedule(
+        jitRoles(lean, server, ctx),
+        segmentCapGb,
+        intervalMs,
+        topology,
+      );
+      if (!leanSchedule || leanSchedule.intervalMs > intervalMs + 1e-9) continue;
+      const leanRate = (lean.incomePerBatch + lean.stockIncomePerBatch) / leanSchedule.intervalMs;
+      const fatRate = (solution.incomePerBatch + solution.stockIncomePerBatch) / schedule.intervalMs;
+      // Decisive wins only: a marginal rate edge is not worth a handoff, and
+      // the fluid-score error this corrects is a ~2x cadence step, not noise.
+      if (leanRate > 1.25 * fatRate) found = lean;
+    }
+    memory.leanSolve = { key, ...(found ? { solution: found } : {}) };
+  }
+  return memory.leanSolve.solution;
+}
+
 /** The HGW twin of the directive's cached HWGW solution, solved lazily for
  * the chosen farm target only and cached per context generation. */
 function hgwSolutionFor(
@@ -2466,6 +2601,7 @@ function openBatch(
   target: string,
   segment: SegmentKind,
   at: number,
+  intended?: readonly JitRole["role"][],
 ): number {
   const id = memory.nextBatchId++;
   memory.batches.set(id, {
@@ -2475,6 +2611,7 @@ function openBatch(
     segment,
     startedAt: at,
     planned: [],
+    ...(intended ? { intended: [...intended] } : {}),
     observed: [],
     ops: 0,
     landed: 0,
@@ -2568,11 +2705,12 @@ function settleBatch(memory: DispatchMemory, batch: OpenBatch, at: number): void
   // No loss check here: `noteBatchLanding` only reaches this function once
   // `landed >= ops`, so an incomplete batch never arrives. Loss is counted on
   // the abandon path in `openBatch` instead.
-  if (batch.planned.length > 0) aggregate.graded++;
+  const intendedRoles = batch.intended ?? batch.planned;
+  if (intendedRoles.length > 0) aggregate.graded++;
 
   let observed: string | undefined;
   let planned: string | undefined;
-  if (batch.planned.length > 0) {
+  if (intendedRoles.length > 0) {
     if (!batch.planned.includes("h")) {
       // Support that lands with no steal to protect is a different failure
       // from support arriving out of order, and the costlier of the two: it is
@@ -2580,7 +2718,7 @@ function settleBatch(memory: DispatchMemory, batch: OpenBatch, at: number): void
       aggregate.noHack++;
       memory.stats.landingOrderIncomplete++;
     } else {
-      planned = signature([...batch.planned].sort((a, b) => LANDING_RANK[a] - LANDING_RANK[b]));
+      planned = signature([...intendedRoles].sort((a, b) => LANDING_RANK[a] - LANDING_RANK[b]));
       observed = signature(batch.observed);
       memory.stats.landingOrderBatches++;
       const key = planned + "\u0000" + observed;
@@ -3560,12 +3698,24 @@ function launchDueJit(
   }
   // A pooled job does not own RAM; its resident worker is counted exactly once
   // by the pool ledger, whether the worker is busy or idle.
-  const heldByRole: Record<JitRole["role"], number> = {
-    h: memory.heldGbByRole.h + memory.pool.gbByRole.h,
-    w1: memory.heldGbByRole.w1 + memory.pool.gbByRole.w1,
-    g: memory.heldGbByRole.g + memory.pool.gbByRole.g,
-    w2: memory.heldGbByRole.w2 + memory.pool.gbByRole.w2,
-  };
+  const retiring = memory.retiringJitByTarget.get(server.hostname);
+  const heldByRole = emptyJitRoleCounts();
+  for (const tracked of memory.byTarget.get(server.hostname)?.values() ?? []) {
+    if (
+      tracked.workerId === undefined && tracked.segment === "farm" && tracked.jitRole
+    ) heldByRole[tracked.jitRole] += tracked.gb;
+  }
+  const activePooled = poolGbByRole(
+    memory.pool,
+    server.hostname,
+    memory.jitGenerationByTarget.get(server.hostname) ?? 0,
+  );
+  const retiringPooled = retiring
+    ? poolGbByRole(memory.pool, server.hostname, retiring.generation)
+    : emptyJitRoleCounts();
+  for (const role of ["h", "w1", "g", "w2"] as const) {
+    heldByRole[role] += activePooled[role] + retiringPooled[role];
+  }
   const pendingHeld = pendingReservedByRole(memory, server.hostname);
   if (!hotWake && pendingHeld.h + pendingHeld.w1 + pendingHeld.g + pendingHeld.w2 === 0) {
     for (const batch of pipeline) {
@@ -3577,7 +3727,13 @@ function launchDueJit(
   // under their own recorded caps, and the incoming shape's held RAM excludes
   // what the retiring generation still holds. Approximate by design (see
   // RetiringJitRuntime) — the heap and the arrival brakes stay the safety.
-  const retiring = memory.retiringJitByTarget.get(server.hostname);
+  const retiringPending = emptyJitRoleCounts();
+  if (retiring) {
+    for (const batch of pipeline) {
+      if ((batch.generation ?? 0) !== retiring.generation) continue;
+      for (const op of batch.ops) retiringPending[op.role] += op.reservation?.gb ?? 0;
+    }
+  }
   const quotaGbFor = (batch: PendingJitBatch, role: JitRole["role"]): number =>
     retiring !== undefined && (batch.generation ?? 0) === retiring.generation
       ? retiring.schedule.quotaGb[role]
@@ -3586,8 +3742,8 @@ function launchDueJit(
     retiring === undefined
       ? heldByRole[role]
       : (batch.generation ?? 0) === retiring.generation
-        ? retiring.heldGbByRole[role]
-        : Math.max(0, heldByRole[role] - retiring.heldGbByRole[role]);
+        ? retiring.heldGbByRole[role] + retiringPending[role]
+        : Math.max(0, heldByRole[role] - retiring.heldGbByRole[role] - retiringPending[role]);
 
   // Commit due blocks before emitting any work. Pool workers are themselves
   // physical role reservations, so the early heap commitment is needed only
@@ -3603,14 +3759,10 @@ function launchDueJit(
         if (op.reservation || jitReserveAt(op) > now) continue;
         const requestedGb = op.threads * WORKER_RAM[op.kind];
         if (jitLaunchAt(op) > now && reservationMode === "launch") continue;
-        const roleCapGb = Math.max(
-          quotaGbFor(batch, op.role) * (op.role === "h" ? JIT_QUOTA_SLACK : 1),
-          requestedGb,
-        );
-        if (
-          heldGbFor(batch, op.role) + requestedGb > roleCapGb + 1e-9 ||
-          memory.segmentGb.farm + requestedGb > segmentCapGb + 1e-9
-        ) {
+        const roleCapGb = Math.max(quotaGbFor(batch, op.role), requestedGb);
+        const roleBlocked = heldGbFor(batch, op.role) + requestedGb > roleCapGb + 1e-9;
+        const segmentBlocked = memory.segmentGb.farm + requestedGb > segmentCapGb + 1e-9;
+        if (roleBlocked || segmentBlocked) {
           // Skip THIS batch, not every remaining one. Within a batch the
           // dependency rule holds — stop once a required op cannot be
           // committed — but batches are independent, and a labeled break meant
@@ -3619,8 +3771,9 @@ function launchDueJit(
           // passes, so hacks were never reserved and therefore never launched,
           // while the pending set grew unboundedly and nothing registered as a
           // miss (an unreserved op is skipped before the deadline check).
-          memory.stats.jitQuotaSkips[`reserve:${op.role}`] =
-            (memory.stats.jitQuotaSkips[`reserve:${op.role}`] ?? 0) + 1;
+          const cause = roleBlocked ? "role" : "segment";
+          memory.stats.jitQuotaSkips[`reserve:${op.role}:${cause}`] =
+            (memory.stats.jitQuotaSkips[`reserve:${op.role}:${cause}`] ?? 0) + 1;
           continue reservePending;
         }
         const allocation = memory.heap.allocate(allocFor(op.kind, op.threads));
@@ -3966,59 +4119,27 @@ function launchDueJit(
       if (padding < WORKER_STARTUP_GUARD_MS - 1e-9) {
         const reason = op.placementBlocked ? "placement" : "deadline";
         const firstMiss = noteBatchMissedWindow(memory, batch, reason);
-        if (batch.started) {
-          // Late SUPPORT still launches: a weaken or grow landing outside its
-          // spacer only over-covers, and discarding it wastes the batch's
-          // already-flying siblings. A late HACK is bounded instead: it may
-          // slip within its pre-grow window (one spacer of margin — landing
-          // after its own w1 is cosmetic, w1 covers the fortify either way),
-          // but a hack that would land past its own GROW must never launch:
-          // it steals money nothing will restore — chained across batches
-          // this husked a live target to 0.13% of max money at +12.7
-          // security. Its support flies as over-cover ("support landed,
-          // nothing stolen"), the only safe outcome.
-          // The pre-grow window is shape-dependent: HWGW lands g two spacers
-          // after h (h, w1, g, w2), HGW only one (h, g, w2). A quota for w1
-          // exists exactly when the shape has a w1 leg.
-          const preGrowMs = quotaGbFor(batch, "w1") > 0 ? 2 * SPACER_MS : SPACER_MS;
-          if (op.kind === "hack" && padding < WORKER_STARTUP_GUARD_MS - preGrowMs - 1e-9) {
-            heldByRole[op.role] -= op.reservation?.gb ?? 0;
-            releasePendingReservation(memory, op, now);
-            removePendingJitOp(memory, batch, op);
-            if (firstMiss) noteBatchSkipped(memory, reason);
-            continue;
-          }
-        } else {
-          if (firstMiss) noteBatchSkipped(memory, reason);
-        // A miss costs exactly THIS batch: its unlaunched suffix is dropped
-        // and every other batch keeps its own schedule. Dropping the suffix is
-        // always security-safe — ops launch in W → G → H order, so whatever is
-        // still pending can only leave already-flying support over-covered
-        // (extra weaken, or a clamped over-grow), never a hack uncovered. The
-        // previous behaviour abandoned the ENTIRE pending pipeline for one
-        // late op; combined with a systematically late op (role quota
-        // saturation) that turned into a plan → launch-weakens → wipe loop
-        // that farmed $0/s at 1% RAM for hours while the deduped counter
-        // reported a single miss. Later batches were sized with this batch's
-        // effects in the predicted ledger, but every divergence is on the safe
-        // side: a dropped hack leaves MORE money than predicted (validation
-        // only ever shrinks, so later hacks under-steal), a dropped grow
-        // leaves less (the arrival-money brake shrinks the affected hacks),
-        // and a wholesale desync still trips the hackZeroStreak rebuild.
-        for (const pending of batch.ops) {
+        if (firstMiss) noteBatchSkipped(memory, reason);
+        // Fixed predecessor chain: a missed operation invalidates its pending
+        // suffix. Nothing is launched late and no successor deadline moves.
+        const suffixAt = ordered.indexOf(op);
+        for (const pending of ordered.slice(Math.max(0, suffixAt))) {
+          if (!batch.ops.includes(pending)) continue;
           if (pending.reservation) heldByRole[pending.role] -= pending.reservation.gb;
           releasePendingReservation(memory, pending, now);
+          removePendingJitOp(memory, batch, pending);
         }
-        clearPendingJitBatch(memory, batch);
         continue batches;
-        }
       }
 
       const requestedGb = op.threads * WORKER_RAM[op.kind];
       const poolPlan = op.reservation
         ? { take: [], missThreads: 0 }
         : pooling
-        ? planTake(memory.pool, op.kind, op.threads, new Set(), op.role)
+        ? planTake(memory.pool, op.kind, op.threads, new Set(), op.role, {
+            target: batch.target,
+            generation: batch.generation ?? 0,
+          })
         : { take: [], missThreads: op.threads };
       const missRequestedGb = poolPlan.missThreads * WORKER_RAM[op.kind];
       // `isPrepped` intentionally admits a small residual security/money
@@ -4029,10 +4150,7 @@ function launchDueJit(
       // wait for it to clear. Applying the steady-state quota literally here
       // deadlocks a perfectly usable target forever (no RAM is allocated, so
       // nothing can change the state that made the role larger).
-      const roleCapGb = Math.max(
-        quotaGbFor(batch, op.role) * (op.role === "h" ? JIT_QUOTA_SLACK : 1),
-        requestedGb,
-      );
+      const roleCapGb = Math.max(quotaGbFor(batch, op.role), requestedGb);
       // Quotas gate NEW commitments, never RAM this op already holds.
       //
       // An op with a reservation contributes `missRequestedGb === 0`, so the
@@ -4043,12 +4161,9 @@ function launchDueJit(
       // up until the role was permanently full, no hack ever launched, and
       // nothing registered as a miss because an unlaunched op is skipped
       // before the deadline check.
-      if (
-        missRequestedGb > 1e-9 && (
-          heldGbFor(batch, op.role) + missRequestedGb > roleCapGb + 1e-9 ||
-          memory.segmentGb.farm + missRequestedGb > segmentCapGb + 1e-9
-        )
-      ) {
+      const roleBlocked = heldGbFor(batch, op.role) + missRequestedGb > roleCapGb + 1e-9;
+      const segmentBlocked = memory.segmentGb.farm + missRequestedGb > segmentCapGb + 1e-9;
+      if (missRequestedGb > 1e-9 && (roleBlocked || segmentBlocked)) {
         // Skip THIS batch, not the whole pass.
         //
         // Within a batch the rule stands: never emit a dependent hack once a
@@ -4062,8 +4177,9 @@ function launchDueJit(
         // hundreds of TB free. Landing order is carried by each op's own
         // `landing` plus additionalMsec, not by launch order, so letting a
         // later batch launch first is safe.
-        memory.stats.jitQuotaSkips[`launch:${op.role}`] =
-          (memory.stats.jitQuotaSkips[`launch:${op.role}`] ?? 0) + 1;
+        const cause = roleBlocked ? "role" : "segment";
+        memory.stats.jitQuotaSkips[`launch:${op.role}:${cause}`] =
+          (memory.stats.jitQuotaSkips[`launch:${op.role}:${cause}`] ?? 0) + 1;
         continue batches;
       }
       let reservation: Reservation | undefined = op.reservation;
@@ -4192,6 +4308,8 @@ function launchDueJit(
             hostname: block.hostname,
             kind: op.kind,
             role: op.role,
+            target: batch.target,
+            generation: batch.generation ?? 0,
             threads: block.threads,
             effectThreads,
             gb,
@@ -4217,21 +4335,6 @@ function launchDueJit(
         memory.segmentGb.farm += reservation?.gb ?? 0;
       }
       removePendingJitOp(memory, batch, op);
-      if (batch.ops.length > 0) {
-        const next = batch.ops.reduce((best, candidate) =>
-          candidate.startAt < best.startAt ? candidate : best
-        );
-        const actualLanding = now + liveDuration + Math.max(0, padding);
-        const relativeLanding = next.landing - op.landing;
-        next.landing = actualLanding + relativeLanding;
-        next.startAt = next.landing - opDurationMs(
-          next.kind,
-          ctx,
-          server.hackDifficulty,
-          required,
-        ) - JIT_LAUNCH_GUARD_MS;
-        next.reserveAt = next.startAt - (JIT_LAUNCH_GUARD_MS - WORKER_STARTUP_GUARD_MS);
-      }
       emitted += poolPlan.take.length + (reservation?.blocks.length ?? 0);
     }
   }
@@ -4450,7 +4553,14 @@ function planJitBatches(
     enqueueJitBatch(memory, {
       target: server.hostname,
       ops: retained,
-      batchId: openBatch(memory, solution.kind === "hgw" ? "hgw" : "hwgw", server.hostname, "farm", now),
+      batchId: openBatch(
+        memory,
+        solution.kind === "hgw" ? "hgw" : "hwgw",
+        server.hostname,
+        "farm",
+        now,
+        retained.map((op) => op.role),
+      ),
       decisionId: memory.jitDecisionId,
       generation: memory.jitGenerationByTarget.get(server.hostname) ?? 0,
     });
@@ -4541,9 +4651,9 @@ function launchBatches(
     // large to place.
     if (!drainingRuntime && (!schedule || schedule.intervalMs >= worstWeakenMs)) {
       const cached = memory.jitRuntimeByTarget.get(host);
-      // The cache belongs to this target and mode and is consulted only after
-      // the current optimum failed. Retargets/mode changes clear it, while a
-      // later topology expansion retries the optimum before this branch, so a
+      // The cache belongs to this target and shape and is consulted only after
+      // the current optimum failed. Retargets and generational handoffs replace
+      // it; a later topology expansion retries the optimum before this branch, so a
       // substantially smaller executable solve is continuity, not pinning.
       if (cached && cached.solution.kind === solution.kind) {
         const fallbackRoles = jitRoles(cached.solution, server, ctx, pooling);
@@ -4606,7 +4716,56 @@ function launchBatches(
         }
       }
     }
+    // The generation's shape decision: at runtime creation only (fresh target
+    // or the pass right after a reshape), consult the cadence-lean
+    // alternative and lock it in for the generation if it wins decisively.
+    let leanLocked = false;
+    if (
+      !drainingRuntime && schedule && schedule.intervalMs < worstWeakenMs &&
+      !memory.jitRuntimeByTarget.has(host)
+    ) {
+      // The lock decision is for the generation's whole life: size it against
+      // the FULL segment, not the transiently reduced cap while a retiring
+      // generation drains — locking a shape to that window starved the
+      // speed-step lane at 100% idle. The runtime's actual schedule still
+      // re-fits each pass at the reduced cap and grows into place.
+      const lean = leanCadenceAlternative(
+        memory, server, jitSolution, segmentCapGb, hostBlocksGb, ctx, influence,
+      );
+      if (lean) {
+        const leanRoles = jitRoles(lean, server, ctx, pooling);
+        const leanSchedule = chooseJitSchedule(
+          leanRoles,
+          segmentCapGb,
+          lean.kind === "hgw" ? HGW_MIN_INTERVAL_MS : INTERVAL_MS,
+          hostBlocksGb ? { hostBlocksGb, divisibleBlockGb: WORKER_RAM.weaken } : undefined,
+        );
+        const leanWorstWeakenMs = opDurationMs("weaken", ctx, jitWorstDifficulty(lean, server), required);
+        if (leanSchedule && leanSchedule.intervalMs < leanWorstWeakenMs) {
+          jitSolution = lean;
+          roles = leanRoles;
+          schedule = leanSchedule;
+          worstWeakenMs = leanWorstWeakenMs;
+          leanLocked = true;
+        }
+      }
+    }
     if (schedule && schedule.intervalMs < worstWeakenMs) {
+      const incumbent = memory.jitRuntimeByTarget.get(host);
+      // Monotone quotas exist for DURATION drift; a shrunken segment is a
+      // genuine capacity reduction and the fresh (smaller) schedule stands.
+      if (incumbent && !drainingRuntime && incumbent.schedule.totalGb <= scheduleCapGb + 1e-9) {
+        // Quotas are MONOTONE within a generation. Durations shrink as skill
+        // grows, so a freshly quantized quota can drop below the RAM that
+        // already-launched ops still hold at their longer launch-era
+        // durations — measured as chronic grow-quota starvation (334k grow
+        // launch-skips; grows landing +489 ms late, past their w2, ratcheting
+        // security into the recovery guard). Never let a re-fit shrink a
+        // role's quota mid-generation; the drift settles at the next
+        // generational handoff, which starts from fresh quotas. The heap
+        // remains the hard capacity bound.
+        schedule = retainOrExpandJitSchedule(incumbent.schedule, schedule, scheduleCapGb);
+      }
       const roleGb = emptyJitRoleCounts();
       for (const role of roles) roleGb[role.role] = role.gb;
       if (drainingRuntime) {
@@ -4624,6 +4783,11 @@ function launchBatches(
           reservationMode,
           roleGb,
           generation: memory.jitGenerationByTarget.get(host) ?? 0,
+          ...(leanLocked ||
+            (incumbent?.generation === (memory.jitGenerationByTarget.get(host) ?? 0) &&
+              incumbent.leanLocked)
+            ? { leanLocked: true as const }
+            : {}),
         });
       }
       // Saturation is the minimum-interval role envelope, not the envelope of

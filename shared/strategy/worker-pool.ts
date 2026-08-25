@@ -34,6 +34,12 @@ export type OpKind = "hack" | "grow" | "weaken";
  * process from being double-counted as reusable W2 capacity (and vice versa). */
 export type PoolRole = "h" | "w1" | "g" | "w2";
 
+/** A resident JIT worker belongs to one immutable execution generation. */
+export interface PoolOwner {
+  target: string;
+  generation: number;
+}
+
 export interface PoolWorker {
   workerId: number;
   hostname: string;
@@ -41,6 +47,10 @@ export interface PoolWorker {
   /** Present for workers owned by the proper JIT pipeline. Eager batches have
    * no role and continue to share workers by operation kind alone. */
   role?: PoolRole;
+  /** Present together for JIT workers. Workers from an outgoing shape may
+   * finish its suffix, but can never be borrowed by the incoming shape. */
+  target?: string;
+  generation?: number;
   threads: number;
   /** Core-adjusted one-core-equivalent threads (what the block was worth when
    * allocated; hack equals `threads`). */
@@ -84,6 +94,9 @@ export interface WorkerPoolMemory {
   gbByHost: Map<string, number>;
   /** JIT role -> GB held by resident workers carrying that role. */
   gbByRole: Record<PoolRole, number>;
+  /** target/generation -> per-role resident GB. This is the authoritative
+   * ledger during a generational handoff; gbByRole remains the global rollup. */
+  gbByOwnerRole: Map<string, Record<PoolRole, number>>;
 }
 
 export function initPool(): WorkerPoolMemory {
@@ -92,12 +105,26 @@ export function initPool(): WorkerPoolMemory {
     idle: new Map(),
     gbByHost: new Map(),
     gbByRole: { h: 0, w1: 0, g: 0, w2: 0 },
+    gbByOwnerRole: new Map(),
   };
 }
 
 /** Kind and role are drawn from disjoint closed vocabularies, so a single
  * separator is unambiguous. */
-const idleKey = (kind: OpKind, role: PoolRole | undefined): string => `${kind}:${role ?? ""}`;
+const ownerKey = (target: string, generation: number): string => `${target}\u0000${generation}`;
+const workerOwnerKey = (worker: Pick<PoolWorker, "target" | "generation">): string =>
+  worker.target !== undefined && worker.generation !== undefined
+    ? ownerKey(worker.target, worker.generation)
+    : "";
+const workerOwner = (worker: Pick<PoolWorker, "target" | "generation">): PoolOwner | undefined =>
+  worker.target !== undefined && worker.generation !== undefined
+    ? { target: worker.target, generation: worker.generation }
+    : undefined;
+const idleKey = (
+  kind: OpKind,
+  role: PoolRole | undefined,
+  owner?: PoolOwner,
+): string => `${kind}:${role ?? ""}${owner ? `:${ownerKey(owner.target, owner.generation)}` : ""}`;
 
 /** Insert into a DESCENDING array, keeping it sorted. */
 function insertSizeDesc(sizes: number[], size: number): void {
@@ -129,7 +156,7 @@ function seek(list: readonly PoolWorker[], workerId: number): number {
  * Preserving that order is what keeps `planTake`'s choice — and therefore the
  * emitted action stream — unchanged by the introduction of this index. */
 function addIdle(pool: WorkerPoolMemory, worker: PoolWorker): void {
-  const key = idleKey(worker.kind, worker.role);
+  const key = idleKey(worker.kind, worker.role, workerOwner(worker));
   let bucket = pool.idle.get(key);
   if (!bucket) {
     bucket = { bySize: new Map(), sizes: [] };
@@ -145,7 +172,11 @@ function addIdle(pool: WorkerPoolMemory, worker: PoolWorker): void {
 }
 
 function removeIdle(pool: WorkerPoolMemory, worker: PoolWorker): void {
-  const bucket = pool.idle.get(idleKey(worker.kind, worker.role));
+  const bucket = pool.idle.get(idleKey(
+    worker.kind,
+    worker.role,
+    workerOwner(worker),
+  ));
   const list = bucket?.bySize.get(worker.threads);
   if (!bucket || !list) return;
   const at = seek(list, worker.workerId);
@@ -228,8 +259,10 @@ export function planTake(
   reserved: ReadonlySet<number> = new Set(),
   /** When supplied, only resident workers from this JIT role are reusable. */
   role?: PoolRole,
+  /** When supplied, only workers owned by this target generation are reusable. */
+  owner?: PoolOwner,
 ): { take: PoolTake[]; missThreads: number } {
-  const bucket = pool.idle.get(idleKey(kind, role));
+  const bucket = pool.idle.get(idleKey(kind, role, owner));
   /** Effect this worker delivers per REAL thread. Composition below counts in
    * real threads, so a partial take converts back through the same ratio. */
   const ratio = (worker: PoolWorker): number =>
@@ -283,6 +316,14 @@ export function poolCounts(pool: WorkerPoolMemory): { workers: number; busy: num
   return { workers: pool.workers.size, busy: pool.workers.size - idle };
 }
 
+export function poolGbByRole(
+  pool: WorkerPoolMemory,
+  target: string,
+  generation: number,
+): Readonly<Record<PoolRole, number>> {
+  return pool.gbByOwnerRole.get(ownerKey(target, generation)) ?? { h: 0, w1: 0, g: 0, w2: 0 };
+}
+
 export function noteSpawn(
   pool: WorkerPoolMemory,
   worker: Omit<PoolWorker, "busy" | "idleSince">,
@@ -291,7 +332,18 @@ export function noteSpawn(
   const entry: PoolWorker = { ...worker, busy: true, idleSince: now };
   pool.workers.set(entry.workerId, entry);
   addGb(pool.gbByHost, entry.hostname, entry.gb);
-  if (entry.role) pool.gbByRole[entry.role] += entry.gb;
+  if (entry.role) {
+    pool.gbByRole[entry.role] += entry.gb;
+    const key = workerOwnerKey(entry);
+    if (key) {
+      let byRole = pool.gbByOwnerRole.get(key);
+      if (!byRole) {
+        byRole = { h: 0, w1: 0, g: 0, w2: 0 };
+        pool.gbByOwnerRole.set(key, byRole);
+      }
+      byRole[entry.role] += entry.gb;
+    }
+  }
   return entry;
 }
 
@@ -320,6 +372,14 @@ export function noteExit(pool: WorkerPoolMemory, workerId: number): PoolWorker |
   if (!worker.busy) removeIdle(pool, worker);
   pool.workers.delete(workerId);
   subGb(pool.gbByHost, worker.hostname, worker.gb);
-  if (worker.role) pool.gbByRole[worker.role] = drainGb(pool.gbByRole[worker.role], worker.gb);
+  if (worker.role) {
+    pool.gbByRole[worker.role] = drainGb(pool.gbByRole[worker.role], worker.gb);
+    const key = workerOwnerKey(worker);
+    const byRole = key ? pool.gbByOwnerRole.get(key) : undefined;
+    if (byRole) {
+      byRole[worker.role] = drainGb(byRole[worker.role], worker.gb);
+      if (byRole.h + byRole.w1 + byRole.g + byRole.w2 <= 1e-9) pool.gbByOwnerRole.delete(key);
+    }
+  }
   return worker;
 }

@@ -5,6 +5,7 @@ import {
   jitCapacity,
   jitTopologyFits,
   latestJitStart,
+  retainOrExpandJitSchedule,
   type JitRole,
 } from "../shared/strategy/jit.ts";
 
@@ -16,6 +17,16 @@ const roles: JitRole[] = [
 ];
 
 describe("JIT pipeline capacity", () => {
+  test("never forms an over-cap union from two valid generation schedules", () => {
+    const incumbent = { intervalMs: 40, quotaGb: { h: 30, w1: 10, g: 20, w2: 40 }, totalGb: 100 };
+    const mixed = { intervalMs: 40, quotaGb: { h: 20, w1: 20, g: 40, w2: 20 }, totalGb: 100 };
+    // Component-wise maxima would total 130 GB even though both inputs fit 100.
+    expect(retainOrExpandJitSchedule(incumbent, mixed, 100)).toBe(incumbent);
+    const expansion = { intervalMs: 40, quotaGb: { h: 30, w1: 15, g: 25, w2: 40 }, totalGb: 110 };
+    expect(retainOrExpandJitSchedule(incumbent, expansion, 110)).toBe(expansion);
+    expect(retainOrExpandJitSchedule(incumbent, expansion, 105)).toBe(incumbent);
+  });
+
   test("short operations reuse their role RAM while weakens remain in flight", () => {
     const schedule = jitCapacity(roles, 1_000);
     expect(schedule.quotaGb).toEqual({ h: 10, w1: 20, g: 80, w2: 20 });

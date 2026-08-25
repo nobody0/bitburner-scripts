@@ -168,8 +168,9 @@ nearer than 30 min.
 legacy scripts' 15-minute rule generalized): `net = gain − lost` where
 `gain = (rateNew − rateCur)·max(0, T − prepTime)` and
 `lost = [rateCur(fleet) − rateCur(fleet·(1−share))]·prepTime`, with rates
-saturating at the farm's **depth cap** (`ceil(weakenTime/INTERVAL)·ramPerBatch`
-GB) — so a depth-capped farm preps for free, and a 3-hour prep on a 30-minute
+saturating at the farm's **depth cap** (the topology-aware `jitSaturationGb`
+when the model carries one, else `max(1, floor(weakenTime/INTERVAL))·ramPerBatch`
+GB, `shared/strategy/economics.ts`) — so a depth-capped farm preps for free, and a 3-hour prep on a 30-minute
 horizon is visibly worthless. Highest positive `net` wins, over a 2%-of-horizon
 churn epsilon. `prepTime` uses the real prep segment share (25%), not a guess.
 Measured: −14% median time to earn:1e9 vs the old 5%-margin
@@ -196,8 +197,10 @@ but the dispatcher's per-pass prep op cap means prep cannot actually use it.
 
 ## HWGW dispatcher (`shared/strategy/dispatch.ts`)
 
-Four ops land H → W1 → G → W2, `SPACER_MS = 5 ms` apart; each batch is anchored
-at least `INTERVAL_MS = 4·SPACER_MS = 20 ms` after the previous one (collision
+Four ops land H → W1 → G → W2, `SPACER_MS = 10 ms` apart (two worker-precision
+quanta — live engine lateness oscillates 5-10 ms, and a one-quantum gap flipped
+adjacent landings; see `shared/strategy/jit.ts`); each batch is anchored at
+least `INTERVAL_MS = 4·SPACER_MS = 40 ms` after the previous one (collision
 guard, pure bookkeeping — no ns reads). `additionalMsec = landing − now −
 duration`.
 
@@ -221,9 +224,17 @@ it, per pass, with a 30 s dwell against flapping.
   context generation); target RANKING stays on the HWGW score — the orderings
   track. Effects round-trip pinned in `sim/tests/targeting.test.ts`, landing
   order + bands in `sim/tests/dispatch.test.ts` (`modeOverride: "hgw"`).
-- **shotgun**: when `weakenTime` holds fewer than 2 interleaved batches
-  (`intervalFactor < 1`, Q4 — the extreme-late-game regime where hack times
-  collapse below the spacer grid). Thread math is HGW's taken to the limit:
+- **shotgun**: two independent triggers. The CORRECTNESS trigger —
+  `hackMs < SHOTGUN_HACK_MS (100 ms)`, the extreme-late-game regime where hack
+  times collapse below the spacer grid — enters immediately, bypassing the
+  dwell. The ECONOMIC trigger fires when RAM out-holds the landing grid:
+  `ramBoundedBatches (farmGb/ramPerBatch)` exceeds
+  `timeBoundedBatches (weakenMs at PREPPED security / minInterval)` by the
+  `SHOTGUN_BOUND_HYSTERESIS = 1.2` margin — JIT's worker reuse pays when RAM
+  binds, but a time-bound fleet idles RAM the minimum spacing can never
+  schedule, and shotgun's same-deadline volleys need no spacing at all. The
+  economic arm respects the 30 s dwell in both directions. Thread math is
+  HGW's taken to the limit:
   every op of every batch in a wave lands the SAME engine tick
   (`additionalMsec = weakenTime − ownDuration`; the weakens land naturally),
   and the engine's same-tick rule — equal-deadline timers fire in
@@ -232,14 +243,16 @@ it, per pass, with a 30 s dwell against flapping.
   weaken-first landings): after batch N's weaken the server is back at
   (minSec, moneyMax), so batch N+1's sizing is exact at its own arrival, and
   the landing-state fold reproduces the same sequencing pure-side (equal
-  landings sort by opId = launch order). No anchor, no depth cap — one wave is
-  everything the farm budget holds, up to 256 batches per pass — and always
+  landings sort by opId = launch order). No anchor and no landing-grid depth
+  cap — one wave is everything the farm budget holds, up to 256 batches per
+  pass, bounded only by the engine-capacity rail (`MAX_LIVE_WORKERS`, reported
+  via `stats.capped.processes`) — and always
   one-shot workers (nothing repeats inside a pool window at that structure).
   The tie-break proof (per-batch H → G+ → W+ effect order inside one tick,
   bands held across waves) is pinned in `sim/tests/dispatch.test.ts`.
 
 `DispatchOptions.modeOverride` forces a mode (the sim's A/B lever); the rollup
-reports `mode` + `modeWhy`.
+reports `mode`.
 
 **Durations are computed at launch from live state**, never from the cached
 solution: security drift or a level-up between solve and launch would otherwise
@@ -256,12 +269,36 @@ tolerance skips the batch (counted in `batchesSkipped`); otherwise the hack
 keeps its solved fraction and the grow/W2 cover is re-solved from the
 predicted post-hack money, so a target admitted at 90 % money no longer
 under-grows into a downward drift. Fold parity with the vendored effects is
-pinned in `sim/tests/prediction.test.ts`.
+pinned in `sim/tests/prediction.test.ts`. A second, coarser gate acts on
+OBSERVED security: when the target's live `hackDifficulty` has drifted more
+than `SECURITY_RECOVERY_DRIFT = 3·PREPPED_SEC_TOLERANCE` above min, the target
+drains — no new leading weakens are admitted, started batches cash in, and the
+prep path weakens the drift back — because per-batch skips alone let a spiral
+feed itself.
+
+**Re-solves are generations, not edits.** A re-solve whose batch kind changes
+or whose per-batch RAM drifts more than `JIT_RESHAPE_RATIO = 1.25` (either
+direction; `JIT_LEAN_LOCK_RATIO = 3` while a cadence-lean shape is locked)
+retires the incumbent shape instead of resizing it: never-started batches are
+cancelled, started batches drain at their own generation's recorded role
+quotas (`RetiringJitRuntime`, one retiring generation at a time), and the new
+generation plans immediately against `segmentCap − retiringCommitted`,
+re-fitting as the old generation shrinks. Below the reshape threshold a shrink
+keeps the generation's role shape; an upsize may replace it only when the
+complete candidate schedule dominates the incumbent and still fits the cap;
+component-wise quota unions are forbidden because their sum can exceed the
+capacity that validated either input.
+At runtime creation the dispatcher also evaluates a cadence-LEAN alternative
+shape (`leanCadenceAlternative`): when the score-optimal shape packs a slow
+grid and a leaner shape's faster cadence decisively wins
+(`> 1.25×` realized rate), the lean shape is locked (`leanLocked`) until a
+material reshape. Target switches use the same drain-not-flush semantics.
 
 **A pass costs pool count, not process count.** The in-flight ledger holds one
-entry per op — tens of thousands at depth — so `DispatchMemory` carries four
-indices over it (`byTarget`, `ourGbByHost`, `weakenPending`, `heldGbByRole`)
-written only by `trackOp`/`untrackOp`. A `Tracked` is immutable once
+entry per op — tens of thousands at depth — so `DispatchMemory` carries
+indices over it (`byTarget`, `ourGbByHost`, `weakenPending`, `heldGbByRole`,
+plus per-target landing/pending aggregates such as `landingByTarget` and
+`pendingReservedGbByTarget`) written only by `trackOp`/`untrackOp`. A `Tracked` is immutable once
 registered, which is what makes them safe; `tests/dispatch-index.test.ts` holds
 each against a full recompute after every mutation. They replaced eight full
 ledger walks per pass — one of them inside the per-batch loop, so
@@ -428,7 +465,10 @@ follow that exposure.
 
 One 1 Hz `farm` rollup (`shared/telemetry/state-map.ts`): target, prep target,
 segment order, in-flight and landed counts, alloc/exec failures, pump time,
-cumulative totals. Transition events only: `farm.targetSwitch`,
+cumulative totals, batch/landing-order diagnostics, and the launch-health
+counters `launchLate` (per-role lateness behind a reorder) and `quotaSkips`
+(launches deferred by a full role or segment quota, keyed
+`phase:role:cause`). Transition events only: `farm.targetSwitch`,
 `dispatch.slow` (>5 ms), `heap.resync`. **Per-op events are never emitted** —
 at scale that would be ~3 events per 16 ms.
 
