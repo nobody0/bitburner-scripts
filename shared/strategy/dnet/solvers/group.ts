@@ -1,9 +1,12 @@
-/** `DeepGreen` and `RateMyPix.Auth`: two models, one attack.
+/** `DeepGreen` and `RateMyPix.Auth`: two related count attacks.
  *
  * Both answer with a COUNT of how many characters we placed exactly right, and
  * nothing about which ones. `DeepGreen` dresses it up as Mastermind and adds a
  * misplaced-character count; `RateMyPix.Auth` renders it as a row of chillies.
- * Neither says where.
+ * Neither says where. RateMyPix therefore uses the exact-count positional group
+ * test below. DeepGreen's extra count is stronger: exact plus misplaced is the
+ * multiset overlap, so it first packs several repeated symbols into one
+ * 100-character probe and bisects only the groups that occur.
  *
  * The naive reading is that a count is nearly useless — and it would be, if we
  * had to send plausible passwords. We do not. **The attempt is unconstrained**:
@@ -14,10 +17,8 @@
  *     "5~~~~~"  ->  "is position 0 a 5?"
  *     "55~~~~"  ->  "how many of positions 0 and 1 are 5?"
  *
- * That turns an opaque scalar into a binary search, and the whole password falls
- * out in roughly `alphabet + L*log2(L)` exchanges rather than the `10^L` a
- * Mastermind solver over plausible candidates would face. `DeepGreen` reaches
- * length 10, where that difference is 43 exchanges against ten billion.
+ * That turns an opaque scalar into a binary search rather than the `10^L` a
+ * Mastermind solver over plausible candidates would face.
  *
  * The first phase is free of ambiguity for a reason worth stating: against an
  * all-`s` attempt the misplaced count is provably 0, because upstream computes
@@ -28,9 +29,9 @@
  *   src/DarkNet/effects/authentication.ts:34-42 (Mastermind), 58-66 (spice)
  *   src/DarkNet/utils/darknetAuthUtils.ts:21-51 (the counting) */
 
-import type { ModelId, PasswordFacts } from "../models.ts";
+import type { ModelId } from "../models.ts";
 import { LETTERS, NUMBERS } from "../codecs.ts";
-import { fixedPositionsFromEvidence } from "../evidence.ts";
+import { fixedPositionsFromEvidence, prioritizeAlphabet } from "../evidence.ts";
 import { alphabetFor } from "./search.ts";
 import {
   SOLVER_CODES,
@@ -65,23 +66,16 @@ interface Task {
 /** How many characters we placed exactly right, out of one model's rendering. */
 type ReadCount = (seen: SolverObservation) => number | undefined;
 
-/** `DeepGreen`: `data` is `"<exact>,<misplaced>"`. Only the first half is used —
- * the misplaced count is real information, but the group test does not need it
- * and mixing the two would make the arithmetic harder to check. */
-const readMastermindCount: ReadCount = (seen) => {
+/** `DeepGreen` reports exact and misplaced matches; their sum is multiset overlap. */
+function readMastermindCounts(seen: SolverObservation): { exact: number; total: number } | undefined {
   const raw = (seen.oracle?.data ?? "").trim();
-  // `Number("")` is 0 and `Number.isInteger(0)` is true, so an absent or empty
-  // payload would otherwise read as a CONFIDENT count of zero — every group
-  // would record "no matches", the search would exhaust, and it would blame the
-  // reported format for a payload that was never there. `readSpiceCount` below
-  // guards the same case.
-  if (raw.length === 0) return undefined;
-  const comma = raw.indexOf(",");
-  const head = comma === -1 ? raw : raw.slice(0, comma).trim();
-  if (head.length === 0) return undefined;
-  const value = Number(head);
-  return Number.isInteger(value) && value >= 0 ? value : undefined;
-};
+  const parts = raw.split(",");
+  if (parts.length !== 2) return undefined;
+  const exact = Number(parts[0]);
+  const misplaced = Number(parts[1]);
+  if (!Number.isInteger(exact) || exact < 0 || !Number.isInteger(misplaced) || misplaced < 0) return undefined;
+  return { exact, total: exact + misplaced };
+}
 
 /** `RateMyPix.Auth`: `data` is `"<chillies>/<length>"`, one chilli per
  * exactly-correct character — or the literal `"0"` when there are none, because
@@ -125,7 +119,7 @@ function groupTestSolver(model: ModelId, readCount: ReadCount): Solver {
       if (length === undefined || length < 1) {
         return { kind: "give-up", code: SOLVER_CODES.OracleUnparsed, reason: `${model}: needs passwordLength` };
       }
-      const alphabet = alphabetFor(facts);
+      const alphabet = prioritizeAlphabet(alphabetFor(facts), facts.evidence);
       const state = freshState(model, facts, "counts");
       state.scratch["symbolIndex"] = 0;
       state.scratch["alphabet"] = alphabet;
@@ -169,6 +163,135 @@ function groupTestSolver(model: ModelId, readCount: ReadCount): Solver {
       return afterSplit(model, state, observed, length);
     },
   };
+}
+
+interface SymbolTask { symbols: string; count: number }
+
+/** DeepGreen exposes misplaced matches as well as exact ones. Repeating every
+ * symbol in a tested group `length` times makes exact+misplaced equal the total
+ * number of password characters drawn from that group. At the engine's
+ * 100-character attempt ceiling this tests several alphabet symbols at once,
+ * then bisects only groups that actually occur. */
+const mastermindSolver: Solver = {
+  needsOracle: true,
+  budget: (facts) => {
+    const length = facts.passwordLength ?? 10;
+    const alphabet = alphabetFor(facts).length;
+    return alphabet + length * Math.ceil(Math.log2(Math.max(2, length))) + length + 8;
+  },
+
+  first(facts): SolverStep {
+    const length = facts.passwordLength;
+    if (length === undefined || length < 1) {
+      return { kind: "give-up", code: SOLVER_CODES.OracleUnparsed, reason: "DeepGreen: needs passwordLength" };
+    }
+    const alphabet = prioritizeAlphabet(alphabetFor(facts), facts.evidence);
+    const solved = fixedPositionsFromEvidence(length, facts.evidence).map((char) => char ?? null);
+    if (solved.every((char) => char !== null)) {
+      return { kind: "answer", password: solved.join(""), note: "DeepGreen: every position came from harvested hints" };
+    }
+    const width = Math.max(1, Math.floor(100 / length));
+    const groups: string[] = [];
+    for (let at = 0; at < alphabet.length; at += width) groups.push(alphabet.slice(at, at + width));
+    const state = freshState("DeepGreen", facts, "symbol-groups");
+    state.scratch["alphabet"] = alphabet;
+    state.scratch["solved"] = solved;
+    state.scratch["groups"] = groups;
+    state.scratch["groupIndex"] = 0;
+    state.scratch["accounted"] = 0;
+    state.scratch["symbolTasks"] = [];
+    return symbolGroupProbe(state, groups[0]!, length, `alphabet group 1/${groups.length}`);
+  },
+
+  next(facts, state, seen): SolverStep {
+    if (seen.success) return { kind: "answer", password: seen.attempted, note: "DeepGreen: opened" };
+    if (!seen.oracle) {
+      return { kind: "give-up", code: SOLVER_CODES.OracleUnavailable, reason: "DeepGreen: needs the log ring", state };
+    }
+    const observed = readMastermindCounts(seen);
+    if (!observed) {
+      return {
+        kind: "give-up", code: SOLVER_CODES.OracleUnparsed,
+        reason: `DeepGreen: response ${JSON.stringify(seen.oracle.data ?? "")} carries no exact/misplaced counts`,
+      };
+    }
+    const length = (state.scratch["solved"] as (string | null)[]).length;
+    if (state.phase === "symbol-groups") return afterSymbolGroup(state, observed.total, length);
+    if (state.phase === "symbol-split") return afterSymbolSplit(state, observed.total, length);
+    if (state.phase === "locate") return afterSplit("DeepGreen", state, observed.exact, length);
+    return {
+      kind: "give-up", code: SOLVER_CODES.SolverStalled,
+      reason: `DeepGreen: unexpected phase ${JSON.stringify(state.phase)}`,
+      state,
+    };
+  },
+};
+
+function symbolGroupProbe(state: SolverState, symbols: string, length: number, note: string): SolverStep {
+  return {
+    kind: "attempt",
+    password: [...symbols].map((symbol) => symbol.repeat(length)).join(""),
+    state,
+    needsOracle: true,
+    note,
+  };
+}
+
+function afterSymbolGroup(state: SolverState, observed: number, length: number): SolverStep {
+  const groups = state.scratch["groups"] as string[];
+  const groupIndex = Number(state.scratch["groupIndex"] ?? 0);
+  const tasks = [...(state.scratch["symbolTasks"] as SymbolTask[])];
+  const symbols = groups[groupIndex]!;
+  if (observed > 0) tasks.push({ symbols, count: observed });
+  const accounted = Number(state.scratch["accounted"] ?? 0) + observed;
+  const next = groupIndex + 1;
+  if (accounted >= length || next >= groups.length - 1) {
+    if (accounted < length && next < groups.length) tasks.push({ symbols: groups[next]!, count: length - accounted });
+    return advanceSymbolTasks(state, tasks, {}, length);
+  }
+  return symbolGroupProbe({
+    ...state,
+    spent: state.spent + 1,
+    scratch: { ...state.scratch, groupIndex: next, accounted, symbolTasks: tasks },
+  }, groups[next]!, length, `alphabet group ${next + 1}/${groups.length}`);
+}
+
+function afterSymbolSplit(state: SolverState, observed: number, length: number): SolverStep {
+  const pending = state.scratch["symbolSplit"] as SymbolTask | undefined;
+  if (!pending || observed > pending.count) {
+    return { kind: "give-up", code: SOLVER_CODES.OracleUnparsed, reason: "DeepGreen: invalid alphabet split response" };
+  }
+  const half = Math.ceil(pending.symbols.length / 2);
+  const tasks = [...(state.scratch["symbolTasks"] as SymbolTask[])];
+  tasks.push({ symbols: pending.symbols.slice(0, half), count: observed });
+  tasks.push({ symbols: pending.symbols.slice(half), count: pending.count - observed });
+  return advanceSymbolTasks(state, tasks, { ...(state.scratch["counts"] as Record<string, number>) }, length);
+}
+
+function advanceSymbolTasks(
+  state: SolverState,
+  tasks: SymbolTask[],
+  counts: Record<string, number>,
+  length: number,
+): SolverStep {
+  const pending = [...tasks];
+  while (pending.length > 0) {
+    const task = pending.shift()!;
+    if (task.count === 0) continue;
+    if (task.symbols.length === 1) {
+      counts[task.symbols] = task.count;
+      continue;
+    }
+    const half = Math.ceil(task.symbols.length / 2);
+    const left = task.symbols.slice(0, half);
+    return symbolGroupProbe({
+      ...state,
+      phase: "symbol-split",
+      spent: state.spent + 1,
+      scratch: { ...state.scratch, symbolTasks: pending, counts, symbolSplit: task },
+    }, left, length, `splitting ${task.symbols.length} possible symbols`);
+  }
+  return beginLocating("DeepGreen", { ...state, scratch: { ...state.scratch, counts } }, counts, length);
 }
 
 /** Phase one: how many of each symbol the password holds. */
@@ -345,6 +468,6 @@ export function blankIsSafe(): boolean {
 }
 
 export const GROUP_SOLVERS = {
-  mastermind: groupTestSolver("DeepGreen", readMastermindCount),
+  mastermind: mastermindSolver,
   spiceLevel: groupTestSolver("RateMyPix.Auth", readSpiceCount),
 } as const;

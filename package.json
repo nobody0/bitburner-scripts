@@ -19,6 +19,7 @@
     "bench:sim:dnet-lab": "bun run tools/dnet-lab-benchmark.ts",
     "bench:sim:dnet-spread": "bun run tools/dnet-spread-benchmark.ts",
     "bench:sim:dnet-farm": "bun run tools/dnet-farm-benchmark.ts",
+    "bench:sim:dnet-auth": "bun run tools/dnet-auth-benchmark.ts",
     "bench:cct": "bun run sim/contract-benchmark.ts",
     "sync": "bun run tools/rfa-server.ts --sync",
     "types": "bun run tools/rfa-server.ts --types-only",

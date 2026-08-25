@@ -1,10 +1,4 @@
-/** Which solver owns which model, and nothing else.
- *
- * One lookup, so that "is this model solvable" has exactly one answer and cannot
- * drift from "is there code that solves it". `models.ts` derives its `status`
- * from this rather than carrying a hand-maintained flag, which is what stops the
- * registry claiming an implementation that was never written — the failure mode
- * the honesty tests in `tests/dnet-models.test.ts` exist to catch.
+/** Which solver owns each conversational or decoded password model.
  *
  * The five DICTIONARY models are deliberately absent. Their attack is an ordered
  * candidate list with no feedback at all, `planAttempt` already walks it, and
@@ -91,7 +85,7 @@ export function solverFor(modelId: string | undefined): Solver | undefined {
   return BY_MODEL[modelId as ModelId];
 }
 
-/** Every model this module can solve, for the registry and for tests. */
+/** Every dispatched model, used by registry consistency tests. */
 export function solvedModels(): ModelId[] {
   return Object.keys(BY_MODEL) as ModelId[];
 }

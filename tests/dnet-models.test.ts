@@ -48,14 +48,12 @@ describe("the model registry covers the game's taxonomy", () => {
 
 describe("the registry says what is really implemented", () => {
   test("nothing claims to be implemented without something that implements it", () => {
-    // The honesty rule, now mechanical: a model is implemented if and only if it
-    // has a dictionary to walk or a solver to run.
+    // A model is implemented if and only if it has a dictionary or dispatcher.
     for (const id of MODEL_IDS) {
       const entry = describeModel(id);
       const backed = entry.candidates !== undefined || solverFor(id) !== undefined;
       expect(entry.status === "implemented", `${id} status disagrees with its backing`).toBe(backed);
-      // And a solved model must not still carry the note explaining why it was
-      // not written, or the panel reports a reason that stopped being true.
+      // Solved models must not retain a stale blocker in the panel.
       if (entry.status === "implemented") expect(entry.blocked, `${id} still claims to be blocked`).toBeUndefined();
     }
   });

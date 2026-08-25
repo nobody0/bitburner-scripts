@@ -595,11 +595,7 @@ describe("the panel at the scale the game actually reaches", () => {
     // The map is there, with both hosts on it...
     expect(html).toContain("<svg");
     expect(html.split('data-key="node:').length - 1).toBe(2);
-    // ...the detail card describes the model from the registry, looked up by id
-    // rather than shipped per host. DeepGreen now HAS a solver, so the column
-    // that used to explain why it was untouched reports that instead — the
-    // status is derived from the solver registry, so it cannot go on claiming a
-    // reason that stopped being true.
+    // ...the detail card describes the current registry entry, looked up by id.
     expect(html).toContain("implemented");
     expect(html).toContain("MastermindHint");
     // The oracle grammar is still described, because that is what a reader needs

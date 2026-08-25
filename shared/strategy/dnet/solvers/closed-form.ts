@@ -30,7 +30,7 @@ import {
   NUMBERS,
   SMALL_PRIMES,
   parseBaseNNumberString,
-  parseSimpleArithmeticExpression,
+  parseSimpleArithmeticExpressionFast,
   romanNumeralDecoder,
 } from "../codecs.ts";
 import { SOLVER_CODES, freshState, type Solver, type SolverState, type SolverStep } from "./types.ts";
@@ -191,7 +191,7 @@ export function decodeBaseN(facts: PasswordFacts): Decoded {
 export function decodeArithmetic(facts: PasswordFacts): Decoded {
   const data = (facts.data ?? "").trim();
   if (data.length === 0) return missing("data");
-  const value = parseSimpleArithmeticExpression(data);
+  const value = parseSimpleArithmeticExpressionFast(data);
   if (!Number.isFinite(value)) return unparsed(`${JSON.stringify(data)} did not evaluate`);
   return { ok: true, password: String(value) };
 }

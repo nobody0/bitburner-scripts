@@ -40,4 +40,17 @@ describe("harvested password evidence", () => {
       expect(timing.state.scratch["known"]).toBe("12");
     }
   });
+
+  test("the timing solver places a non-contiguous fixed suffix in every probe", () => {
+    const timing = DEEP_SOLVERS.timingAttack.first({
+      passwordLength: 4,
+      passwordFormat: "numeric",
+      evidence: [{ kind: "placement", attempted: "!!!7", placed: ["7"], at: 1 }],
+    });
+    expect(timing.kind).toBe("attempt");
+    if (timing.kind === "attempt") {
+      expect(timing.password[3]).toBe("7");
+      expect(timing.state.scratch["fixed"]).toEqual([null, null, null, "7"]);
+    }
+  });
 });

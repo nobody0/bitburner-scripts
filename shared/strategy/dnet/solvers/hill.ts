@@ -1,5 +1,6 @@
 import { whrng } from "../../../rng/whrng.ts";
 import type { PasswordFacts } from "../models.ts";
+import { candidateMatchesEvidence } from "../evidence.ts";
 import { SOLVER_CODES, freshState, type Solver, type SolverObservation, type SolverState, type SolverStep } from "./types.ts";
 
 interface HillSample { x: number; altitude: number }
@@ -57,24 +58,26 @@ function closeEnough(actual: number, predicted: number): boolean {
   return Math.abs(actual - predicted) <= Math.max(1e-300, Math.abs(actual) * 1e-10);
 }
 
-function candidatesFrom(samples: readonly HillSample[], facts: PasswordFacts): number[] {
+function candidatesFrom(sample: HillSample, previous: readonly number[], samples: readonly HillSample[], facts: PasswordFacts): number[] {
   const length = facts.passwordLength ?? 0;
   const width = widthFor(length);
-  const possible = new Set<number>();
-  for (const sample of samples) {
-    if (!(sample.altitude > 0 && sample.altitude < SUMMIT)) continue;
+  const possible = new Set<number>(previous);
+  if (sample.altitude > 0 && sample.altitude < SUMMIT) {
     const distance = width * Math.sqrt(Math.log(SUMMIT / sample.altitude));
-    if (!Number.isFinite(distance)) continue;
-    for (const raw of [sample.x - distance, sample.x + distance]) {
-      for (const candidate of [Math.floor(raw), Math.round(raw), Math.ceil(raw)]) {
-        if (legal(candidate, length)) possible.add(candidate);
+    if (Number.isFinite(distance)) {
+      for (const raw of [sample.x - distance, sample.x + distance]) {
+        for (const candidate of [Math.floor(raw), Math.round(raw), Math.ceil(raw)]) {
+          if (legal(candidate, length)) possible.add(candidate);
+        }
       }
     }
   }
   const difficulty = facts.difficulty;
-  if (difficulty === undefined) return [...possible];
+  if (difficulty === undefined) return [...possible]
+    .filter((candidate) => candidateMatchesEvidence(String(candidate), facts.evidence));
   return [...possible].filter((candidate) => samples.every((sample) =>
-    closeEnough(sample.altitude, predictedHillAltitude(candidate, sample.x, length, difficulty))));
+    closeEnough(sample.altitude, predictedHillAltitude(candidate, sample.x, length, difficulty))))
+    .filter((candidate) => candidateMatchesEvidence(String(candidate), facts.evidence));
 }
 
 function tryCandidate(state: SolverState, candidates: readonly number[], at: number): SolverStep {
@@ -105,6 +108,7 @@ const kingOfTheHillSolver: Solver = {
     state.scratch["cover"] = cover;
     state.scratch["coverIndex"] = 0;
     state.scratch["samples"] = [];
+    state.scratch["possible"] = [];
     return { kind: "attempt", password: String(cover[0]), state, needsOracle: true, note: `3% cover 1/${cover.length}` };
   },
 
@@ -121,8 +125,10 @@ const kingOfTheHillSolver: Solver = {
     if (altitude === undefined) {
       return { kind: "give-up", code: SOLVER_CODES.OracleUnparsed, reason: "KingOfTheHill: response is not an altitude" };
     }
-    const samples = [...(state.scratch["samples"] as HillSample[]), { x: Number(seen.attempted), altitude }];
-    const candidates = candidatesFrom(samples, facts);
+    const sample = { x: Number(seen.attempted), altitude };
+    const samples = [...(state.scratch["samples"] as HillSample[]), sample];
+    const previous = (state.scratch["possible"] as number[] | undefined) ?? [];
+    const candidates = candidatesFrom(sample, previous, samples, facts);
     if (candidates.length === 1) {
       return { kind: "answer", password: String(candidates[0]), note: `WHRNG prediction from ${samples.length} samples` };
     }
@@ -132,7 +138,11 @@ const kingOfTheHillSolver: Solver = {
     return {
       kind: "attempt",
       password: String(cover[next]),
-      state: { ...state, spent: state.spent + 1, scratch: { ...state.scratch, coverIndex: next, samples } },
+      state: {
+        ...state,
+        spent: state.spent + 1,
+        scratch: { ...state.scratch, coverIndex: next, samples, possible: candidates },
+      },
       needsOracle: true,
       note: `3% cover ${next + 1}/${cover.length}`,
     };

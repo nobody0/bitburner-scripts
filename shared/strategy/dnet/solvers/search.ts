@@ -487,41 +487,31 @@ const sortedEchoSolver: Solver = {
       };
     }
 
-    // At every length v3.0.1 can mint this is at most 7! candidates. Keep a
-    // defensive length ceiling so synthetic callers do not first materialize
-    // hundreds of thousands of permutations merely to discover the fallback.
-    if (length <= RMS_CANDIDATE_MAX_LENGTH) {
-      const candidates = distinctPermutations(sorted)
-        .filter((candidate) => !isLeadingZero(candidate, facts))
-        .filter((candidate) => candidateMatchesEvidence(candidate, facts.evidence));
-      if (candidates.length === 0) {
-        return {
-          kind: "give-up",
-          code: SOLVER_CODES.SolverExhausted,
-          reason: "PHP 5.4: harvested evidence eliminates every ordering",
-        };
-      }
-      const state = freshState("PHP 5.4", facts, "rms-candidates");
-      state.scratch["candidates"] = candidates;
-      const password = chooseRmsProbe(candidates);
+    const state = freshState("PHP 5.4", facts, "rmsd");
+    const containsEvidence = facts.evidence?.filter((item) => item.kind === "contains");
+    if (!candidateMatchesEvidence(sorted, containsEvidence)) {
       return {
-        kind: "attempt",
-        password,
-        state,
-        needsOracle: true,
-        note: `RMS partition over ${candidates.length} candidate orderings`,
+        kind: "give-up",
+        code: SOLVER_CODES.SolverExhausted,
+        reason: "PHP 5.4: harvested character hints contradict the published multiset",
       };
     }
-
-    const state = freshState("PHP 5.4", facts, "rmsd");
-    state.scratch["position"] = 0;
-    state.scratch["digits"] = new Array<number | null>(length).fill(null);
+    const fixed = fixedPositionsFromEvidence(length, facts.evidence);
+    const digits = fixed.map((char) => {
+      if (char === undefined) return null;
+      return /^\d$/.test(char) ? Number(char) : Number.NaN;
+    });
+    const completed = finishRmsPassword(sorted, digits, facts);
+    if (completed) return completed;
+    const position = digits.findIndex((digit) => digit === null);
+    state.scratch["position"] = position;
+    state.scratch["digits"] = digits;
     return {
       kind: "attempt",
-      password: probeAt(0, length),
+      password: probeAt(position, length),
       state,
       needsOracle: true,
-      note: "rms probe for position 1",
+      note: `rms probe for position ${position + 1}`,
     };
   },
 
@@ -554,34 +544,6 @@ const sortedEchoSolver: Solver = {
       return unparsed(`PHP 5.4: response ${JSON.stringify(seen.oracle.data ?? "")} carries no RMS deviation`);
     }
 
-    if (state.phase === "rms-candidates") {
-      const key = rmsd.toFixed(3);
-      const candidates = (state.scratch["candidates"] as string[])
-        .filter((candidate) => candidate !== seen.attempted && rmsBucket(candidate, seen.attempted) === key);
-      if (candidates.length === 0) {
-        return {
-          kind: "give-up",
-          code: SOLVER_CODES.SolverExhausted,
-          reason: `PHP 5.4: RMS ${key} eliminated every remaining ordering`,
-        };
-      }
-      if (candidates.length === 1) {
-        return { kind: "answer", password: candidates[0]!, note: "PHP 5.4: one ordering survived the failure hint" };
-      }
-      const password = chooseRmsProbe(candidates);
-      return {
-        kind: "attempt",
-        password,
-        state: {
-          ...state,
-          spent: state.spent + 1,
-          scratch: { ...state.scratch, candidates },
-        },
-        needsOracle: true,
-        note: `RMS partition over ${candidates.length} remaining orderings`,
-      };
-    }
-
     const digits = [...(state.scratch["digits"] as (number | null)[])];
     const length = digits.length;
     const position = Number(state.scratch["position"] ?? 0);
@@ -593,29 +555,9 @@ const sortedEchoSolver: Solver = {
       return stalled(`PHP 5.4: position ${position + 1} solved to ${digit}, which is not a digit`, state);
     }
     digits[position] = digit;
-
-    // The last position is free: whatever the multiset still has left.
-    const resolved = digits.filter((d) => d !== null).length;
-    if (resolved === length - 1) {
-      const remaining = [...sorted];
-      for (const d of digits) {
-        if (d === null) continue;
-        const at = remaining.indexOf(String(d));
-        if (at !== -1) remaining.splice(at, 1);
-      }
-      if (remaining.length === 1) {
-        const filled = digits.map((d) => (d === null ? remaining[0]! : String(d))).join("");
-        return { kind: "answer", password: filled, note: "PHP 5.4: last digit from the multiset" };
-      }
-    }
-    if (resolved === length) {
-      return { kind: "answer", password: digits.join(""), note: "PHP 5.4: every position solved" };
-    }
-
-    const nextPosition = position + 1;
-    if (nextPosition >= length) {
-      return stalled("PHP 5.4: ran out of positions before the password was complete", state);
-    }
+    const completed = finishRmsPassword(sorted, digits, facts);
+    if (completed) return completed;
+    const nextPosition = digits.findIndex((held) => held === null);
     return {
       kind: "attempt",
       password: probeAt(nextPosition, length),
@@ -634,53 +576,64 @@ function positionProbe(known: readonly (string | null)[], symbol: string): strin
   return known.map((char) => char ?? symbol).join("");
 }
 
-const RMS_CANDIDATE_MAX_LENGTH = 7;
-const RMS_PROBE_SAMPLE = 96;
+/** Validate resolved positions against the published multiset. Once only one
+ * position remains, its digit is free; once all are resolved, every generic
+ * placement constraint is checked before asserting the password. */
+function finishRmsPassword(
+  sorted: string,
+  digits: (number | null)[],
+  facts: PasswordFacts,
+): SolverStep | undefined {
+  const remaining = [...sorted];
+  for (const digit of digits) {
+    if (digit === null) continue;
+    if (!Number.isInteger(digit) || digit < 0 || digit > 9) {
+      return {
+        kind: "give-up",
+        code: SOLVER_CODES.SolverExhausted,
+        reason: `PHP 5.4: placement evidence fixed an invalid digit ${digit}`,
+      };
+    }
+    const at = remaining.indexOf(String(digit));
+    if (at === -1) {
+      return {
+        kind: "give-up",
+        code: SOLVER_CODES.SolverExhausted,
+        reason: `PHP 5.4: resolved digit ${digit} is absent from the published multiset`,
+      };
+    }
+    remaining.splice(at, 1);
+  }
 
-/** The exact three-decimal response bucket upstream writes for this pair. */
-function rmsBucket(candidate: string, attempted: string): string {
-  let squared = 0;
-  for (let index = 0; index < candidate.length; index++) {
-    squared += (Number(attempted[index]) - Number(candidate[index])) ** 2;
-  }
-  return Math.sqrt(squared / candidate.length).toFixed(3);
-}
-
-/** Pick the authentication whose FAILURE response has the smallest worst
- * surviving partition. Candidate probes retain the chance of opening directly;
- * a wrong one returns a patterned RMS bucket that eliminates the rest. */
-function chooseRmsProbe(candidates: readonly string[]): string {
-  if (candidates.length === 1) return candidates[0]!;
-  const probes: string[] = [];
-  const count = Math.min(RMS_PROBE_SAMPLE, candidates.length);
-  for (let index = 0; index < count; index++) {
-    const at = Math.floor((index * candidates.length) / count);
-    const probe = candidates[at]!;
-    probes.push(probe);
-  }
-  let best = probes[0]!;
-  let bestWorst = Number.POSITIVE_INFINITY;
-  let bestSquares = Number.POSITIVE_INFINITY;
-  for (const probe of probes) {
-    const buckets = new Map<string, number>();
-    for (const candidate of candidates) {
-      if (candidate === probe) continue; // success is its own size-one bucket
-      const key = rmsBucket(candidate, probe);
-      buckets.set(key, (buckets.get(key) ?? 0) + 1);
+  const unknown = digits.flatMap((digit, index) => digit === null ? [index] : []);
+  if (unknown.length > 1) return undefined;
+  if (unknown.length === 1) {
+    if (remaining.length !== 1) {
+      return {
+        kind: "give-up",
+        code: SOLVER_CODES.SolverExhausted,
+        reason: "PHP 5.4: the final position has no unique multiset completion",
+      };
     }
-    let worst = 1;
-    let squares = 1;
-    for (const size of buckets.values()) {
-      worst = Math.max(worst, size);
-      squares += size * size;
-    }
-    if (worst < bestWorst || (worst === bestWorst && squares < bestSquares)) {
-      best = probe;
-      bestWorst = worst;
-      bestSquares = squares;
-    }
+    digits[unknown[0]!] = Number(remaining[0]);
+    remaining.length = 0;
   }
-  return best;
+  if (remaining.length !== 0) {
+    return {
+      kind: "give-up",
+      code: SOLVER_CODES.SolverExhausted,
+      reason: "PHP 5.4: resolved positions did not consume the published multiset",
+    };
+  }
+  const password = digits.join("");
+  if (!candidateMatchesEvidence(password, facts.evidence)) {
+    return {
+      kind: "give-up",
+      code: SOLVER_CODES.SolverExhausted,
+      reason: "PHP 5.4: the RMS solution contradicts harvested placement evidence",
+    };
+  }
+  return { kind: "answer", password, note: "PHP 5.4: positions solved by RMS and the published multiset" };
 }
 
 /** `"0…090…0"` — a 9 at `position`, zeros elsewhere. The attempt must be the

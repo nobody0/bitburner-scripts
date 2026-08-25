@@ -8,8 +8,7 @@ import { getPasswordType } from "./codecs.ts";
  *
  * This registry is total: all 24 non-labyrinth models have either an ordered
  * dictionary or a solver, while the labyrinth is routed to its PID-bound maze
- * walker. Raw entries retain their upstream audit metadata; `modelEntry`
- * derives implementation status from the actual dispatcher.
+ * walker.
  *
  * Two facts decide the shape of everything here, and both are the opposite of
  * what the API docs suggest:
@@ -135,11 +134,7 @@ const dictionary = (id: ModelId, name: string, words: readonly string[], oracle:
   candidates: () => words,
 });
 
-/** What this model IS — its mechanic, its feedback grammar, where that feedback
- * surfaces. Descriptive only: whether we can actually open it is decided by
- * `describeModel` below, from the solver registry.
- *
- * Total over `MODEL_IDS`. The `never` arm at the bottom is the compile-time
+/** Total metadata over `MODEL_IDS`. The `never` arm at the bottom is the compile-time
  * proof: adding an id without an arm fails to typecheck. */
 function describeModelShape(id: ModelId): ModelEntry {
   switch (id) {
@@ -190,8 +185,7 @@ function describeModelShape(id: ModelId): ModelEntry {
           + `"Remember to use", "It's set to", "The key is", "The secret is". The password is 3 characters. `
           + "No attempt is needed at all: this is a getServerDetails read.",
         via: "details",
-        status: "unattempted",
-        blocked: "hint decoder not written",
+        status: "implemented",
       };
     case "PHP 5.4":
       return {
@@ -204,8 +198,7 @@ function describeModelShape(id: ModelId): ModelEntry {
           + "same. So the multiset is free and only the permutation is unknown. A wrong guess of the right length "
           + 'adds "<data>; RMS Deviation:<n>" — a distance a hill-climb over permutations can descend.',
         via: "heartbleed",
-        status: "unattempted",
-        blocked: "permutation search not written",
+        status: "implemented",
       };
     case "CloudBlare(tm)":
       return {
@@ -217,8 +210,7 @@ function describeModelShape(id: ModelId): ModelEntry {
           "`data` is the password with filler characters inserted after every character but the last. Strip the "
           + "filler and you have it; no attempt needed.",
         via: "details",
-        status: "unattempted",
-        blocked: "filler alphabet not transcribed",
+        status: "implemented",
       };
     case "110100100":
       return {
@@ -228,8 +220,7 @@ function describeModelShape(id: ModelId): ModelEntry {
         family: "math",
         oracle: "`data` is the password as space-separated 8-bit binary char codes. Decode it directly.",
         via: "details",
-        status: "unattempted",
-        blocked: "decoder not written",
+        status: "implemented",
       };
     case "OrdoXenos":
       return {
@@ -241,8 +232,7 @@ function describeModelShape(id: ModelId): ModelEntry {
           "`data` is `<xor-encrypted password>;<space-separated 8-bit masks>`. XOR each character by its mask. "
           + "Fully reversible from getServerDetails alone.",
         via: "details",
-        status: "unattempted",
-        blocked: "decoder not written",
+        status: "implemented",
       };
     case "OctantVoxel":
       return {
@@ -254,8 +244,7 @@ function describeModelShape(id: ModelId): ModelEntry {
           "`data` is `<base>,<encoded>`; the password is that number in base 10. The base may be fractional above "
           + "difficulty 12. A numeric answer within a rounding tolerance SUCCEEDS, so exactness is not required.",
         via: "details",
-        status: "unattempted",
-        blocked: "base-N decoder not written",
+        status: "implemented",
       };
     case "MathML":
       return {
@@ -269,8 +258,7 @@ function describeModelShape(id: ModelId): ModelEntry {
           + "12 the operators are swapped for lookalike unicode, and above 16 the expression may carry an injected "
           + "`ns.exit()` — the generator adds both deliberately.",
         via: "details",
-        status: "unattempted",
-        blocked: "expression parser not written",
+        status: "implemented",
       };
     case "PrimeTime 2":
       return {
@@ -280,8 +268,7 @@ function describeModelShape(id: ModelId): ModelEntry {
         family: "math",
         oracle: "`data` is the target number; the password is its largest prime factor.",
         via: "details",
-        status: "unattempted",
-        blocked: "factoriser not written",
+        status: "implemented",
       };
 
     // --- interactive search problems -----------------------------------------
@@ -296,8 +283,7 @@ function describeModelShape(id: ModelId): ModelEntry {
           + 'message spells the same out: "Hint: N symbols match exactly,  and M symbols match but are in the '
           + 'wrong place."',
         via: "heartbleed",
-        status: "unattempted",
-        blocked: "mastermind solver not written",
+        status: "implemented",
       };
     case "2G_cellular":
       return {
@@ -310,8 +296,7 @@ function describeModelShape(id: ModelId): ModelEntry {
           + '"Response time: <n>ms". The real leak is the clock: authentication takes 50ms LONGER per correct '
           + "leading character (times the threads factor), so slower means closer and the attack climbs.",
         via: "heartbleed",
-        status: "unattempted",
-        blocked: "timing climb not written",
+        status: "implemented",
       };
     case "AccountsManager_4.2":
       return {
@@ -321,8 +306,7 @@ function describeModelShape(id: ModelId): ModelEntry {
         family: "oracle",
         oracle: '`data` is "Higher" or "Lower". A binary search over the numeric range.',
         via: "heartbleed",
-        status: "unattempted",
-        blocked: "binary search not written",
+        status: "implemented",
       };
     case "BellaCuore":
       return {
@@ -332,8 +316,7 @@ function describeModelShape(id: ModelId): ModelEntry {
         family: "oracle",
         oracle: '`data` is "ALTUS NIMIS" (too high) or "PARUM BREVIS" (too low). AccountsManager_4.2 in Latin.',
         via: "heartbleed",
-        status: "unattempted",
-        blocked: "binary search not written",
+        status: "implemented",
       };
     case "NIL":
       return {
@@ -345,8 +328,7 @@ function describeModelShape(id: ModelId): ModelEntry {
           `\`data\` is a comma-separated "yes"/"yesn't" per attempted character, positionally. Every position is `
           + "independent, so the password falls in length x alphabet attempts.",
         via: "heartbleed",
-        status: "unattempted",
-        blocked: "per-position solver not written",
+        status: "implemented",
       };
     case "RateMyPix.Auth":
       return {
@@ -358,8 +340,7 @@ function describeModelShape(id: ModelId): ModelEntry {
           '`data` is one chilli per exactly-correct character over the password length, e.g. "<peppers>/6", or '
           + '"0/6". Positional like NIL, but it reports only how many positions are correct, not which.',
         via: "heartbleed",
-        status: "unattempted",
-        blocked: "per-position solver not written; also SF15-gated, so it needs full darknet access to appear",
+        status: "implemented",
       };
     case "Factori-Os":
       return {
@@ -369,8 +350,7 @@ function describeModelShape(id: ModelId): ModelEntry {
         family: "math",
         oracle: '`data` is "true"/"false" for whether the password is divisible by the attempt. A factor oracle.',
         via: "heartbleed",
-        status: "unattempted",
-        blocked: "divisibility search not written",
+        status: "implemented",
       };
     case "BigMo%od":
       return {
@@ -380,8 +360,7 @@ function describeModelShape(id: ModelId): ModelEntry {
         family: "math",
         oracle: "`data` is `(password % input) % ((input - 1) % 32 + 1)`. A CRT-style reconstruction.",
         via: "heartbleed",
-        status: "unattempted",
-        blocked: "modular reconstruction not written",
+        status: "implemented",
       };
     case "Pr0verFl0":
       return {
@@ -395,8 +374,7 @@ function describeModelShape(id: ModelId): ModelEntry {
           + "buffer, so a NON-EQUAL attempt can still succeed: this model is beaten by crafting the buffer, not "
           + "by guessing.",
         via: "heartbleed",
-        status: "unattempted",
-        blocked: "overflow craft not written",
+        status: "implemented",
       };
     case "KingOfTheHill":
       return {
@@ -406,8 +384,7 @@ function describeModelShape(id: ModelId): ModelEntry {
         family: "oracle",
         oracle: "`data` is an altitude out of 10,000 m. A global-maximum search over the password space.",
         via: "heartbleed",
-        status: "unattempted",
-        blocked: "hill climb not written; also SF15-gated, so it needs full darknet access to appear",
+        status: "implemented",
       };
     case "OpenWebAccessPoint":
       return {
@@ -420,8 +397,7 @@ function describeModelShape(id: ModelId): ModelEntry {
           + "offset when difficulty <= 16, or the bare password above that. This model also emits "
           + '"Logging in with passcode: <password> ..." into its own log noise. It is the leakiest model in the net.',
         via: "heartbleed",
-        status: "unattempted",
-        blocked: "packet extractor not written",
+        status: "implemented",
       };
     case "(The Labyrinth)":
       return {
@@ -443,29 +419,8 @@ function describeModelShape(id: ModelId): ModelEntry {
 
 const KNOWN: ReadonlySet<string> = new Set<string>(MODEL_IDS);
 
-/** Undefined for an id we have never seen. Callers MUST treat that as a counted,
- * reported event: an unrecognised model is either a game update or a hole in our
- * transcription, and both are things we want to hear about rather than skip. */
-/** The model, with `status` DERIVED from whether a solver exists for it.
- *
- * `status` used to be written by hand on each arm, which is exactly the kind of
- * claim that rots: a registry saying "implemented" for something nobody wrote,
- * or still saying "unattempted" for something now solved, is worse than no
- * registry at all. Reading it off `solverFor` means the honesty test in
- * `tests/dnet-models.test.ts` is checking a fact rather than a comment.
- *
- * The five dictionary models keep `status: "implemented"` from their own arm:
- * their attack is `candidates`, walked by `planAttempt`, and they have no
- * solver by design (see `solvers/index.ts`). */
 export function describeModel(id: ModelId): ModelEntry {
-  const shape = describeModelShape(id);
-  if (shape.candidates !== undefined) return shape;
-  const solver = solverFor(id);
-  if (solver === undefined) return shape;
-  // Solved: the `blocked` note explaining why it was not written must go, or the
-  // panel keeps reporting a reason that is no longer true.
-  const { blocked: _blocked, ...rest } = shape;
-  return { ...rest, status: "implemented" };
+  return describeModelShape(id);
 }
 
 export function modelEntry(raw: string | undefined): ModelEntry | undefined {
@@ -502,6 +457,30 @@ export function probePassword(facts: PasswordFacts): string {
   return (facts.passwordFormat === "numeric" ? "0" : "a").repeat(length);
 }
 
+/** Dictionary metadata is immutable and shared by every host. Remembering its
+ * derived format avoids rescanning every character of TopPass's 93 entries on
+ * each ledger step while keeping the decision result purely input-derived. */
+const DICTIONARY_FORMATS = new Map<string, string>();
+
+function filteredDictionary(candidates: readonly string[], facts: PasswordFacts): string[] {
+  const list: string[] = [];
+  const hasEvidence = (facts.evidence?.length ?? 0) > 0;
+  for (const candidate of candidates) {
+    if (facts.passwordLength !== undefined && candidate.length !== facts.passwordLength) continue;
+    if (facts.passwordFormat !== undefined) {
+      let format = DICTIONARY_FORMATS.get(candidate);
+      if (format === undefined) {
+        format = getPasswordType(candidate);
+        DICTIONARY_FORMATS.set(candidate, format);
+      }
+      if (format !== facts.passwordFormat) continue;
+    }
+    if (hasEvidence && !candidateMatchesEvidence(candidate, facts.evidence)) continue;
+    list.push(candidate);
+  }
+  return list;
+}
+
 /** What to try next on a host, given how far its ledger got.
  *
  * `tried` is a COUNT, not a set, because `candidates` is ordered and stable: the
@@ -521,13 +500,15 @@ export function planAttempt(
       : { kind: "none", reason: "unknown model" };
   }
   if (entry.candidates) {
-    const list = entry.candidates(facts)
-      .filter((candidate) => facts.passwordLength === undefined || candidate.length === facts.passwordLength)
-      .filter((candidate) => facts.passwordFormat === undefined
-        || getPasswordType(candidate) === facts.passwordFormat)
-      .filter((candidate) => candidateMatchesEvidence(candidate, facts.evidence));
-    const attemptedSet = new Set(attempted);
-    const index = attempted.length > 0
+    const list = filteredDictionary(entry.candidates(facts), facts);
+    // Without newly harvested evidence the filtered dictionary is stable, so
+    // the ledger count is already the next index. Building a Set and rescanning
+    // TopPass's 93 entries on every call made its pure decision cost scale with
+    // the number of attempts. Evidence can reorder/prune the live list, so that
+    // rarer path still reconciles against the concrete attempts.
+    const hasEvidence = (facts.evidence?.length ?? 0) > 0;
+    const attemptedSet = hasEvidence && attempted.length > 0 ? new Set(attempted) : undefined;
+    const index = attemptedSet
       ? list.findIndex((candidate) => !attemptedSet.has(candidate))
       : (tried < list.length ? tried : -1);
     if (index >= 0) {

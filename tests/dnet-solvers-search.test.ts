@@ -330,6 +330,19 @@ describe("PHP 5.4 — the sorted echo, in both regimes", () => {
     for (const candidate of tried) expect(candidate.startsWith("0"), `${candidate} starts with 0`).toBe(false);
   });
 
+  test("placement evidence skips RMS probes for already fixed positions", () => {
+    const plain = host("57312");
+    const hinted = host("57312");
+    hinted.facts.evidence = [
+      { kind: "placement", attempted: "5!!!2", placed: ["5", "2"], at: 1 },
+    ];
+    const withoutHints = crack(SEARCH_SOLVERS.sortedEcho, plain);
+    const withHints = crack(SEARCH_SOLVERS.sortedEcho, hinted);
+    expect(withoutHints.password).toBe("57312");
+    expect(withHints.password).toBe("57312");
+    expect(withHints.calls).toBeLessThan(withoutHints.calls);
+  });
+
   test("contradictory harvested evidence does not fall back to an evidence-blind search", () => {
     const step = SEARCH_SOLVERS.sortedEcho.first({
       passwordLength: 5,

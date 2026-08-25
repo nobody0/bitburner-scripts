@@ -16,8 +16,8 @@
  *   src/DarkNet/controllers/ServerGenerator.ts:204-218, 384-391, 685-707 */
 
 import type { PasswordFacts } from "../models.ts";
-import { LARGE_PRIMES, SMALL_PRIMES } from "../codecs.ts";
-import { fixedPositionsFromEvidence } from "../evidence.ts";
+import { LARGE_PRIMES, NUMBERS, SMALL_PRIMES } from "../codecs.ts";
+import { candidateMatchesEvidence, fixedPositionsFromEvidence } from "../evidence.ts";
 import { alphabetFor } from "./search.ts";
 import {
   SOLVER_CODES,
@@ -67,7 +67,9 @@ export function correctCharsFromTiming(elapsedMs: number, baselineMs: number, st
  * so every position before it agrees with what we sent — including the padding
  * we were not really guessing at. Whenever the index runs past the frontier we
  * therefore adopt the whole prefix, and a lucky pad can resolve several
- * positions in one exchange. */
+ * positions in one exchange. Alternating the unhinted alphabet forward and
+ * backward also prevents late symbols paying the same bad rank at every
+ * position, while harvested symbols remain first. */
 const timingAttackSolver: Solver = {
   needsOracle: false,
   budget: (facts) => alphabetFor(facts).length * (facts.passwordLength ?? 8) + 2,
@@ -80,20 +82,24 @@ const timingAttackSolver: Solver = {
     const alphabet = alphabetFor(facts);
     const state = freshState("2G_cellular", facts, "prefix");
     const fixed = fixedPositionsFromEvidence(length, facts.evidence);
-    let known = "";
-    while (known.length < fixed.length && fixed[known.length] !== undefined) known += fixed[known.length];
+    const preferred = hintedPrefix(alphabet, facts.evidence);
+    const storedFixed = fixed.map((char) => char ?? null);
+    const known = advanceFixedPrefix("", storedFixed);
     if (known.length === length) {
       return { kind: "answer", password: known, note: "2G_cellular: whole prefix came from harvested placement hints" };
     }
     state.scratch["known"] = known;
     state.scratch["symbol"] = 0;
     state.scratch["alphabet"] = alphabet;
+    state.scratch["preferred"] = preferred;
+    state.scratch["fixed"] = storedFixed;
+    const order = positionAlphabet(alphabet, preferred, known.length);
     return {
       kind: "attempt",
-      password: padTo(known, alphabet[0]!, length, alphabet),
+      password: timingProbe(known, order[0]!, length, alphabet, preferred, storedFixed, 0),
       state,
       needsOracle: false,
-      note: "prefix walk, position 1",
+      note: `prefix walk, position ${known.length + 1}`,
     };
   },
 
@@ -116,6 +122,10 @@ const timingAttackSolver: Solver = {
 
     let known = String(state.scratch["known"] ?? "");
     let symbol = Number(state.scratch["symbol"] ?? 0);
+    const preferred = String(state.scratch["preferred"] ?? "");
+    const fixed = (state.scratch["fixed"] as (string | null)[] | undefined)
+      ?? new Array<string | null>(length).fill(null);
+    let order = positionAlphabet(alphabet, preferred, known.length);
 
     if (index === -1) {
       // Nothing disagreed, so the password is our attempt cut to its length.
@@ -125,11 +135,12 @@ const timingAttackSolver: Solver = {
       // Everything before the mismatch is confirmed — including any padding that
       // happened to be right.
       known = seen.attempted.slice(0, index);
+      known = advanceFixedPrefix(known, fixed);
       symbol = 0;
     } else {
       // The frontier character was wrong; move to the next symbol.
       symbol += 1;
-      if (symbol >= alphabet.length) {
+      if (symbol >= order.length) {
         return {
           kind: "give-up",
           code: SOLVER_CODES.SolverExhausted,
@@ -141,23 +152,69 @@ const timingAttackSolver: Solver = {
     if (known.length >= length) {
       return { kind: "answer", password: known.slice(0, length), note: "2G_cellular: every position resolved" };
     }
+    order = positionAlphabet(alphabet, preferred, known.length);
     return {
       kind: "attempt",
-      password: padTo(known, alphabet[symbol]!, length, alphabet),
-      state: { ...state, spent: state.spent + 1, scratch: { ...state.scratch, known, symbol } },
+      password: timingProbe(known, order[symbol]!, length, alphabet, preferred, fixed, symbol),
+      state: {
+        ...state,
+        spent: state.spent + 1,
+        scratch: { ...state.scratch, known, symbol, preferred, fixed },
+      },
       needsOracle: false,
       note: `prefix walk, position ${known.length + 1}`,
     };
   },
 };
 
-/** `known` + the frontier guess + filler out to the password's length. The
- * filler is a DIFFERENT symbol from the guess so that a matching pad is
- * informative rather than a coincidence we cannot attribute. */
-function padTo(known: string, guess: string, length: number, alphabet: string): string {
-  const filler = alphabet[0] === guess ? (alphabet[1] ?? alphabet[0]!) : alphabet[0]!;
-  const head = known + guess;
-  return head.length >= length ? head.slice(0, length) : head + filler.repeat(length - head.length);
+/** Hint characters stay first; only the unhinted tail is mirrored. */
+function positionAlphabet(alphabet: string, preferred: string, position: number): string {
+  const rest = [...alphabet].filter((char) => !preferred.includes(char));
+  // Numeric passwords longer than one character have passed through Number()
+  // and therefore cannot begin with zero. Keep it in the exhaustive tail for
+  // Keep zero in the exhaustive tail for unusual one-character numeric facts.
+  // before the nine symbols the generator can actually leave at position 0.
+  if (position === 0 && alphabet === NUMBERS && !preferred.includes("0")) {
+    const zero = rest.indexOf("0");
+    if (zero >= 0) rest.push(...rest.splice(zero, 1));
+  }
+  if (position % 2 === 1) rest.reverse();
+  return preferred + rest.join("");
+}
+
+function hintedPrefix(alphabet: string, evidence: PasswordFacts["evidence"]): string {
+  let preferred = "";
+  for (const item of evidence ?? []) {
+    const chars = item.kind === "contains" ? item.chars : item.placed;
+    for (const char of chars) {
+      if (alphabet.includes(char) && !preferred.includes(char)) preferred += char;
+    }
+  }
+  return preferred;
+}
+
+function advanceFixedPrefix(known: string, fixed: readonly (string | null)[]): string {
+  let next = known;
+  while (next.length < fixed.length && fixed[next.length] !== null) next += fixed[next.length];
+  return next;
+}
+
+function timingProbe(
+  known: string,
+  guess: string,
+  length: number,
+  alphabet: string,
+  preferred: string,
+  fixed: readonly (string | null)[],
+  cycle: number,
+): string {
+  let attempt = known + guess;
+  while (attempt.length < length) {
+    const position = attempt.length;
+    const order = positionAlphabet(alphabet, preferred, position);
+    attempt += fixed[position] ?? order[(cycle + position - known.length - 1) % order.length]!;
+  }
+  return attempt.slice(0, length);
 }
 
 // --- Factori-Os: one bit per exchange, aimed carefully ----------------------
@@ -287,9 +344,10 @@ const divisibilitySolver: Solver = {
           reason: `Factori-Os: response ${JSON.stringify(raw)} is not a divisibility verdict`,
         };
       }
-      const largeIndex = Number(state.scratch["largeIndex"] ?? 0);
+      const largePrime = Number(state.scratch["largePrime"]);
+      const excluded = ((state.scratch["excludedLarge"] as number[] | undefined) ?? []);
       if (raw === "true") {
-        const candidates = pairCandidates(facts, known, LARGE_PRIMES[largeIndex]!);
+        const candidates = pairCandidates(facts, known, largePrime, excluded);
         if (candidates.length === 0) {
           return {
             kind: "give-up",
@@ -310,16 +368,23 @@ const divisibilitySolver: Solver = {
           note: `two-large-factor candidate 1/${candidates.length}`,
         };
       }
-      const nextLarge = largeIndex + 1;
-      if (nextLarge >= LARGE_PRIMES.length) {
+      const nextExcluded = [...excluded, largePrime];
+      const ranked = state.scratch["largeOrder"] as number[];
+      const nextAt = Number(state.scratch["largeAt"]) + 1;
+      const nextPrime = ranked[nextAt];
+      if (nextPrime === undefined) {
         return { kind: "give-up", code: SOLVER_CODES.SolverExhausted, reason: "Factori-Os: no large factor divides the password" };
       }
       return {
         kind: "attempt",
-        password: String(LARGE_PRIMES[nextLarge]),
-        state: { ...state, spent: state.spent + 1, scratch: { ...state.scratch, largeIndex: nextLarge } },
+        password: String(nextPrime),
+        state: {
+          ...state,
+          spent: state.spent + 1,
+          scratch: { ...state.scratch, largePrime: nextPrime, excludedLarge: nextExcluded, largeAt: nextAt },
+        },
         needsOracle: true,
-        note: `locating large factor ${nextLarge + 1}/${LARGE_PRIMES.length}`,
+        note: `posterior-ranked large factor ${nextAt + 1}/${ranked.length}`,
       };
     }
     // --- the large-prime residue ---
@@ -358,17 +423,28 @@ const divisibilitySolver: Solver = {
  * ascending order — which is usually a handful rather than all 83. */
 function enterLargePhase(facts: PasswordFacts, state: SolverState, small: bigint): SolverStep {
   if ((facts.difficulty ?? 0) > 24) {
+    const ranked = rankLargeFactors(facts, small, []);
+    if (ranked.length === 0) {
+      return { kind: "give-up", code: SOLVER_CODES.SolverExhausted, reason: "Factori-Os: no admissible large-prime pair" };
+    }
     return {
       kind: "attempt",
-      password: String(LARGE_PRIMES[0]),
+      password: String(ranked[0]),
       state: {
         ...state,
         phase: "large-pair",
         spent: state.spent + 1,
-        scratch: { ...state.scratch, known: small.toString(), largeIndex: 0 },
+        scratch: {
+          ...state.scratch,
+          known: small.toString(),
+          largePrime: ranked[0],
+          excludedLarge: [],
+          largeOrder: ranked,
+          largeAt: 0,
+        },
       },
       needsOracle: true,
-      note: `locating first of two large factors 1/${LARGE_PRIMES.length}`,
+      note: `posterior-ranked first large factor; ${ranked.length} admissible`,
     };
   }
   const length = facts.passwordLength;
@@ -376,7 +452,8 @@ function enterLargePhase(facts: PasswordFacts, state: SolverState, small: bigint
 
   // The small part alone is a real possibility below difficulty 12, where no
   // large prime is multiplied in at all — so it is the first candidate.
-  if (length === undefined || small.toString().length === length) candidates.push(small.toString());
+  if ((length === undefined || small.toString().length === length)
+    && candidateMatchesEvidence(small.toString(), facts.evidence)) candidates.push(small.toString());
 
   if (length !== undefined && length >= 1) {
     const low = 10n ** BigInt(length - 1);
@@ -386,10 +463,15 @@ function enterLargePhase(facts: PasswordFacts, state: SolverState, small: bigint
       // The reported length is what makes this a handful of candidates rather
       // than all 83: only a residue that lands the product on the right number
       // of digits can possibly be the one.
-      if (product >= low && product < high) candidates.push(product.toString());
+      if (product >= low && product < high && candidateMatchesEvidence(product.toString(), facts.evidence)) {
+        candidates.push(product.toString());
+      }
     }
   } else {
-    for (const prime of LARGE_PRIMES) candidates.push((small * BigInt(prime)).toString());
+    for (const prime of LARGE_PRIMES) {
+      const candidate = (small * BigInt(prime)).toString();
+      if (candidateMatchesEvidence(candidate, facts.evidence)) candidates.push(candidate);
+    }
   }
 
   if (candidates.length === 0) {
@@ -413,19 +495,75 @@ function enterLargePhase(facts: PasswordFacts, state: SolverState, small: bigint
   };
 }
 
-function pairCandidates(facts: PasswordFacts, small: bigint, first: number): string[] {
+function pairCandidates(facts: PasswordFacts, small: bigint, first: number, excluded: readonly number[] = []): string[] {
   const length = facts.passwordLength;
   const low = length === undefined ? undefined : 10n ** BigInt(Math.max(0, length - 1));
   const high = length === undefined ? undefined : 10n ** BigInt(length);
   const candidates: string[] = [];
   for (const partner of LARGE_PRIMES) {
+    if (excluded.includes(partner)) continue;
     const product = small * BigInt(first) * BigInt(partner);
     if (low !== undefined && high !== undefined && (product < low || product >= high)) continue;
     if (BigInt(Number(product)) !== product) continue;
     const value = product.toString();
-    if (!candidates.includes(value)) candidates.push(value);
+    if (candidateMatchesEvidence(value, facts.evidence) && !candidates.includes(value)) candidates.push(value);
   }
   return candidates;
+}
+
+/** Rank a factor ask by how many still-admissible ordered generator draws it
+ * covers. Password length, exact Number representability, harvested evidence,
+ * and earlier negative divisibility answers all condition that posterior. */
+function rankLargeFactors(facts: PasswordFacts, small: bigint, excluded: readonly number[]): number[] {
+  const banned = new Set(excluded);
+  const length = facts.passwordLength;
+  const scores = new Map<number, number>();
+  const hasEvidence = (facts.evidence?.length ?? 0) > 0;
+  const smallNumber = Number(small);
+  for (const first of LARGE_PRIMES) {
+    if (banned.has(first)) continue;
+    if (!hasEvidence && length !== undefined && Number.isFinite(smallNumber)) {
+      const scale = smallNumber * first;
+      const lowPartner = 10 ** (length - 1) / scale;
+      const highPartner = 10 ** length / scale;
+      const from = lowerBound(LARGE_PRIMES, lowPartner);
+      const to = lowerBound(LARGE_PRIMES, highPartner);
+      let count = 0;
+      let includesSelf = false;
+      for (let index = from; index < to; index++) {
+        const partner = LARGE_PRIMES[index]!;
+        if (banned.has(partner)) continue;
+        count++;
+        if (partner === first) includesSelf = true;
+      }
+      const score = count * 2 - (includesSelf ? 1 : 0);
+      if (score > 0) scores.set(first, score);
+      continue;
+    }
+    let score = 0;
+    for (const partner of LARGE_PRIMES) {
+      if (banned.has(partner)) continue;
+      const product = small * BigInt(first) * BigInt(partner);
+      if (length !== undefined && product.toString().length !== length) continue;
+      if (BigInt(Number(product)) !== product) continue;
+      if (!candidateMatchesEvidence(product.toString(), facts.evidence)) continue;
+      // The two independent draws can put distinct factors in either order.
+      score += first === partner ? 1 : 2;
+    }
+    if (score > 0) scores.set(first, score);
+  }
+  return [...scores.keys()].sort((left, right) => scores.get(right)! - scores.get(left)! || left - right);
+}
+
+function lowerBound(values: readonly number[], target: number): number {
+  let low = 0;
+  let high = values.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (values[middle]! < target) low = middle + 1;
+    else high = middle;
+  }
+  return low;
 }
 
 // --- OpenWebAccessPoint: read the password out of the noise ----------------

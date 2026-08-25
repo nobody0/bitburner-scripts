@@ -246,6 +246,73 @@ export function parseSimpleArithmeticExpression(expression: string): number {
   return parseFloat(leftover);
 }
 
+/** A linear-time evaluator for the same generated arithmetic grammar.
+ *
+ * The function above deliberately remains the pinned upstream transcription.
+ * Solvers do not need its allocation-heavy rewrite machinery, however: host
+ * expressions contain only numbers, the four binary operators and balanced
+ * parentheses after cleaning. Recursive descent preserves the upstream
+ * left-to-right evaluation within each precedence level, including its
+ * stringify round-trip after tiny multiply/divide results. Keeping this as a
+ * separate decoder lets parity tests compare the fast path with the reference
+ * instead of letting the simulator and solver agree through shared code. */
+export function parseSimpleArithmeticExpressionFast(expression: string): number {
+  const source = cleanArithmeticExpression(expression);
+  let at = 0;
+
+  const whitespace = (): void => {
+    while (source.charCodeAt(at) === 32) at++;
+  };
+  const number = (): number => {
+    whitespace();
+    const start = at;
+    if (source[at] === "-") at++;
+    while (at < source.length) {
+      const code = source.charCodeAt(at);
+      if ((code >= 48 && code <= 57) || code === 46) at++;
+      else break;
+    }
+    return Number(source.slice(start, at));
+  };
+  const factor = (): number => {
+    whitespace();
+    if (source[at] !== "(") return number();
+    at++;
+    const value = expressionValue();
+    whitespace();
+    if (source[at] !== ")") return Number.NaN;
+    at++;
+    return value;
+  };
+  const term = (): number => {
+    let value = factor();
+    while (true) {
+      whitespace();
+      const operator = source[at];
+      if (operator !== "*" && operator !== "/") return value;
+      at++;
+      const right = factor();
+      value = operator === "*" ? value * right : value / right;
+      if (Math.abs(value) < 0.000001) value = Number(value.toFixed(20));
+    }
+  };
+  const expressionValue = (): number => {
+    let value = term();
+    while (true) {
+      whitespace();
+      const operator = source[at];
+      if (operator !== "+" && operator !== "-") return value;
+      at++;
+      const right = term();
+      value = operator === "+" ? value + right : value - right;
+    }
+  };
+
+  const value = expressionValue();
+  whitespace();
+  return at === source.length ? value : Number.NaN;
+}
+
 /** `ServerGenerator.ts:564-579`. The shape of every generated password, and the
  * source of three properties every length-seeded solver depends on:
  *

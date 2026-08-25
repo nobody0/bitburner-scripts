@@ -6,6 +6,7 @@ import {
   getPasswordType,
   parseBaseNNumberString,
   parseSimpleArithmeticExpression,
+  parseSimpleArithmeticExpressionFast,
   romanNumeralDecoder,
   romanNumeralEncoder,
 } from "../shared/strategy/dnet/codecs.ts";
@@ -102,12 +103,14 @@ describe("the arithmetic parser agrees with arithmetic", () => {
       // never do this to a string a darknet host handed us.
       const expected = Function(`"use strict"; return (${expression});`)() as number;
       const actual = parseSimpleArithmeticExpression(expression);
+      const fast = parseSimpleArithmeticExpressionFast(expression);
       expect(Number.isFinite(actual), `${expression} did not evaluate`).toBe(true);
       // Upstream's evaluator rewrites through decimal strings, so it loses a
       // little precision on division chains. Relative tolerance, not exact.
       const scale = Math.max(1, Math.abs(expected));
       expect(Math.abs(actual - expected) / scale, `${expression}: got ${actual}, want ${expected}`)
         .toBeLessThan(1e-6);
+      expect(fast, `${expression}: fast evaluator drifted from the pinned evaluator`).toBe(actual);
     }
   });
 
