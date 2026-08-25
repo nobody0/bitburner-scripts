@@ -118,6 +118,7 @@ import type { ProgressionPlan, RouteEtaDigest } from "../../../shared/telemetry/
 import { isScriptDeath } from "../errors.ts";
 import { goNeuralWorkerRuntime, resetGoNeuralWorkerRuntime, type GoNeuralRuntime } from "../go-neural-worker.ts";
 import { runGoNeuralSeedDispatch } from "../go-neural.ts";
+import { resetGateSignal, signalGateRecheck } from "../gate-signal.ts";
 import { resetInstallSignal, takeInstallSignal } from "../install-signal.ts";
 import { armSleeveCompletion, consumeSleeveCompletion, pendingSleeveCompletions, resetSleeveCompletions } from "../sleeve-completion.ts";
 import { merge, set, type GameState } from "../state.ts";
@@ -3551,6 +3552,9 @@ const progression: FeatureDriver = {
         // sweep — without this the next few passes would re-attempt a purchase
         // that has already happened.
         darkscapeGrantedAt = progressionMemory.cycleResetAt;
+        // The gate probe is what flips caps.unlocked.dnet; without this the
+        // beachhead waits out the 30 s sweep (game/lib/gate-signal.ts).
+        signalGateRecheck();
         record("progression", "unlock:darkscape", true, `bought for ${DARKSCAPE_TOTAL_COST}`);
       } else if (outcome.ok) {
         record("progression", "unlock:darkscape", false, "purchase refused; retrying next pass");
@@ -3994,6 +3998,9 @@ export const progressionModule: FeatureModule = {
     // be free to buy it again.
     darkscapeGrantedAt = undefined;
     resetInstallSignal();
+    // A recheck raised for the dead node is moot; the post-reset path forces
+    // its own sweep.
+    resetGateSignal();
     // Field-level, not the whole topic: the gate batch has ALREADY written
     // the new node's bitNode/sourceFiles/ownedAugs into it by the time the
     // reset walk runs. The plan (route, ETA, phase) and the multiplier latch

@@ -23,6 +23,7 @@ import { driverEnabled, featureModule, grantsFor, resetAllFeatures, selectDueMod
 import type { ClaimContext, NeedContext } from "./features/index.ts";
 import { isRamClaim, type FeatureClaim } from "./features/claims.ts";
 import { sweepFleet } from "./fleet.ts";
+import { takeGateSignal } from "./gate-signal.ts";
 import { gameGlobal } from "./globals.ts";
 import { initProbeRunner, runGateProbe, runProbes } from "./probe-runner.ts";
 import { ALL_PROBES, probeCadenceMs } from "./probes/index.ts";
@@ -170,7 +171,10 @@ export async function runController(
       state.playerDirty = false;
     }
 
-    if (tick % SWEEP_EVERY_TICKS === 0) {
+    // Taken unconditionally so a recheck coinciding with a sweep tick still
+    // clears the signal. The modulo keying keeps the 30 s cadence unshifted.
+    const gateWake = takeGateSignal();
+    if (gateWake || tick % SWEEP_EVERY_TICKS === 0) {
       await sweepFleet(ns, state, tel, coldSweep);
       coldSweep = false;
 

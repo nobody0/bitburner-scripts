@@ -27,6 +27,7 @@ import { only } from "../../shared/features/profile.ts";
 lane({ feature: "dnet", bn: 1 }).describe("buying darknet access", () => {
   test("a BN1 run with no SF15 buys the program and then sees a darknet", async () => {
     const mapped: number[] = [];
+    let seedAt: number | undefined;
     const result = await runGame({
       // Unreachable on purpose: with only progression and dnet active there is
       // no income, so the run goes to its horizon instead of exiting the moment
@@ -45,10 +46,16 @@ lane({ feature: "dnet", bn: 1 }).describe("buying darknet access", () => {
       onRecord: (line) => {
         const record = JSON.parse(line) as {
           key?: string;
-          data?: { knowledge?: { hosts?: unknown[] } };
+          t?: number;
+          data?: {
+            knowledge?: { hosts?: unknown[] };
+            plan?: { lastResult?: { action: string; ok: boolean } };
+          };
         };
         if (record.key !== "dnet") return;
         if (Array.isArray(record.data?.knowledge?.hosts)) mapped.push(record.data.knowledge.hosts.length);
+        const last = record.data?.plan?.lastResult;
+        if (seedAt === undefined && last?.action === "seed" && last.ok) seedAt = record.t;
       },
     });
 
@@ -61,6 +68,13 @@ lane({ feature: "dnet", bn: 1 }).describe("buying darknet access", () => {
     // unconditional darkweb host; the retired `data.probed` telemetry field is
     // not part of the current topic schema.
     expect(Math.max(...mapped, 0)).toBeGreaterThan(1);
+    // The purchase raises the gate signal (game/lib/gate-signal.ts), so the
+    // capability flips on the next controller pass rather than the next 30 s
+    // sweep. The tick-0 sweep runs before the money can be spent, so without
+    // the signal the seed structurally cannot land before ~30 s — landing
+    // well inside that window is the proof the signal fired.
+    expect(seedAt, "the seed never succeeded").toBeDefined();
+    expect(seedAt!).toBeLessThan(25_000);
   }, 120_000);
 
   test("the controller plants a resident on darkweb and the net gets MAPPED", async () => {

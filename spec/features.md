@@ -239,7 +239,10 @@ properties matter.
   unprobed feature spends a stub launch discovering an API that throws.
 - **An unlock is not a wait.** When the gate batch reports a feature moving to
   `yes`, the controller deletes its `featureLastRun` entry so it ticks on the
-  next pass instead of serving out a cadence it was never eligible for.
+  next pass instead of serving out a cadence it was never eligible for. A
+  feature that changes what the gate reads (the darkscape purchase) raises the
+  gate signal (`game/lib/gate-signal.ts`) so the sweep — and therefore the
+  unlock — happens on the next pass instead of the 30-second cadence.
 
 `hacking` is the only driver with a 200 ms fallback heartbeat; JIT deadline and
 completion wakes service exact HWGW landing windows without waiting another tick.
