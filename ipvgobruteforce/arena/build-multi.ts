@@ -1,5 +1,5 @@
 import { mkdtemp, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { deflateSync } from "node:zlib";
 

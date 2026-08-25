@@ -362,6 +362,86 @@ describe("stasis is spent on what cannot be rebuilt", () => {
   });
 });
 
+describe("the charge-wave budget", () => {
+  // migrationChargePerCall(5, 1000, 1) = (1500/2000)*0.01 = 0.0075/thread, so
+  // an uncharged target needs ceil(1/0.0075) = 134 threads for one wave and a
+  // 90%-charged one needs ceil(0.1/0.0075) = 14.
+  const wavePushers = Array.from({ length: 6 }, (_, i) =>
+    host({ hostname: `p${i}`, agentAlive: true, depth: 2, freeGb: 200, neighbours: ["giant"] }));
+  const giant = host({ hostname: "giant", depth: 3, difficulty: 5, maxRam: 128, hasCredential: true });
+
+  test("the wave decides how many pushers engage; the engaged one then OVERSCALES", () => {
+    const plan = planInduce(view([...wavePushers, giant], {
+      netDepth: 7,
+      induceGbPerThread: 5,
+      migrationCharge: new Map([["giant", 0.9]]),
+    }));
+    // The wave needs 14 threads = ONE 40-thread pusher, and the other five
+    // stay free for later purposes. The engaged pusher's 26 leftover threads
+    // then overscale its own push — overshoot past 100% is thrown away by the
+    // reset, but every thread still pays charisma exp, which beats idle RAM.
+    const pushes = plan.pushes.filter((p) => p.host === "giant");
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]!.threads).toBe(40);
+  });
+
+  test("an uncharged target draws several pushers, the wave capping how many", () => {
+    const plan = planInduce(view([...wavePushers, giant], {
+      netDepth: 7,
+      induceGbPerThread: 5,
+    }));
+    const pushes = plan.pushes.filter((p) => p.host === "giant");
+    // 40 threads a pusher: the 134-thread wave engages FOUR of the six
+    // (three full plus a 14-thread remainder), and the fourth's 26 leftover
+    // threads overscale its own push (14 + 26 = 40).
+    expect(pushes).toHaveLength(4);
+    expect(pushes.reduce((a, p) => a + p.threads, 0)).toBe(160);
+    expect(pushes[pushes.length - 1]!.threads).toBe(40);
+  });
+});
+
+describe("the pre-charge pipeline", () => {
+  // An uncracked carrier one in-flight authenticate from its credential:
+  // netDepth 12 (gap at 8, band [9-11] unconquered), difficulty 6 bands it
+  // across. perThread at cha 1000, diff 6 = (1500/2200)*0.01 ≈ 0.006818, so a
+  // full wave is ceil(1/0.006818) = 147 threads.
+  const carrier = host({ hostname: "carrier", depth: 5, difficulty: 6, maxRam: 128, hasCredential: false });
+  const pusher = host({ hostname: "pusher", agentAlive: true, depth: 3, freeGb: 2000, neighbours: ["carrier"] });
+
+  test("an about-to-crack carrier charges early, one landing short while the auth flies", () => {
+    const plan = planInduce(view([pusher, carrier], {
+      netDepth: 12,
+      needLabVantage: false,
+      induceGbPerThread: 5,
+      aboutToCrack: new Map([["carrier", 30_000]]),
+    }));
+    expect(plan.pushes[0]?.host).toBe("carrier");
+    expect(plan.pushes[0]?.purpose).toBe("ferry");
+    // Full wave 147, held one landing short of the close.
+    expect(plan.pushes.reduce((a, p) => a + p.threads, 0)).toBe(146);
+  });
+
+  test("once the auth's remainder fits a charge call's flight, the wave closes", () => {
+    const plan = planInduce(view([pusher, carrier], {
+      netDepth: 12,
+      needLabVantage: false,
+      induceGbPerThread: 5,
+      aboutToCrack: new Map([["carrier", 3_000]]),
+    }));
+    // No longer held, so the pusher's whole 400-thread pool lands: the
+    // 147-thread wave closes the charge and the 253 leftover overscale the
+    // same push for the exp. Contrast the held case above, where overscale is
+    // SKIPPED — extra threads there could close the wave under the auth.
+    expect(plan.pushes.reduce((a, p) => a + p.threads, 0)).toBe(400);
+  });
+
+  test("an uncracked host NOT one candidate from done still refuses not-ours", () => {
+    const plan = planInduce(view([pusher, carrier], { netDepth: 12, needLabVantage: false }));
+    expect(plan.pushes).toEqual([]);
+    expect(plan.refused.find((r) => r.hostname === "carrier")?.why).toBe("not-ours");
+  });
+});
+
 describe("induced migration is anchored on difficulty, not depth", () => {
   test("the band is [difficulty - 2, difficulty + 4], so a shallow host can NEVER reach the bottom", () => {
     // This is the fact that kills the naive "charge it until it sinks" plan.
@@ -395,9 +475,12 @@ describe("induced migration is anchored on difficulty, not depth", () => {
     expect(planInduce(snapshot).pushes[0]?.host).toBe("edge");
   });
 
-  test("...but a host already below its band's centre is left alone: the roll would likely lift it", () => {
+  test("...but a host whose band cannot reach past our coverage is left alone", () => {
+    // The frontier's PROGRESS criterion: difficulty 1 bands "sunk" to row 5 at
+    // best, and with an agent already standing at row 6 a re-roll only
+    // shuffles rows we reach — the retired random-walk pump.
     const plan = planInduce(view([
-      host({ hostname: "pusher", agentAlive: true, neighbours: ["sunk"] }),
+      host({ hostname: "pusher", agentAlive: true, depth: 6, neighbours: ["sunk"] }),
       host({ hostname: "sunk", depth: 4, difficulty: 1, maxRam: 16, hasCredential: true }),
     ], { netDepth: 12 }));
     expect(plan.pushes).toEqual([]);
@@ -505,13 +588,25 @@ describe("induced migration is anchored on difficulty, not depth", () => {
     expect(ferry.pushes[0]?.purpose).toBe("ferry");
 
     // With a resident already standing across the gap, the band is conquered
-    // and the same carrier is just frontier movement.
+    // and the same carrier is just frontier movement — admitted only while
+    // its band still reaches past our deepest agent (outpost at 9; the
+    // carrier's band tops at 10).
     const conquered = planInduce(view([
+      host({ hostname: "pusher", agentAlive: true, depth: 3, neighbours: ["carrier"] }),
+      host({ hostname: "outpost", agentAlive: true, depth: 9 }),
+      carrier,
+    ], { netDepth: 12, needLabVantage: false }));
+    expect(conquered.pushes[0]?.purpose).toBe("frontier");
+
+    // And once coverage stands at the band's own deepest reach, the same
+    // carrier admits nothing: a re-roll cannot extend the conquest.
+    const covered = planInduce(view([
       host({ hostname: "pusher", agentAlive: true, depth: 3, neighbours: ["carrier"] }),
       host({ hostname: "outpost", agentAlive: true, depth: 10 }),
       carrier,
     ], { netDepth: 12, needLabVantage: false }));
-    expect(conquered.pushes[0]?.purpose).toBe("frontier");
+    expect(covered.pushes).toEqual([]);
+    expect(covered.refused.find((r) => r.hostname === "carrier")?.why).toBe("no-gain");
 
     // And a seat outranks a ferry: the same band also covers an open stasis
     // window, and a slot that survives the storm beats a foothold.

@@ -233,7 +233,7 @@ describe("the attempt order runs the whole conversation in one process", () => {
     });
     const recovered: VaultEntry[] = [];
     const candidates: ProvisionalCredential[] = [];
-    const result = await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }), makeIo(undefined, {
+    await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }), makeIo(undefined, {
       recordCredential: (entry) => recovered.push(entry),
       recordProvisional: (entry) => candidates.push(entry),
     }));

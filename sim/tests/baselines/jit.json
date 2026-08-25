@@ -1,155 +1,158 @@
 {
-  "note": [
-    "THE PROOF-OF-PROGRESS LEDGER for the JIT scenarios.",
-    "",
-    "Each entry is the BEST result we have actually achieved on that fixture, not",
-    "a target and not a guess. The workflow it exists for: make a change, re-run",
-    "the lane, and either beat a number (record the improvement here, deliberately)",
-    "or regress one (the run fails and names it). That is what makes each step",
-    "along the way provable rather than asserted.",
-    "",
-    "RULES.",
-    "  1. Only ever move a number in the improving direction, and only from a run",
-    "     you actually observed. Never relax a baseline to make a red lane green --",
-    "     that converts the ledger from evidence into decoration.",
-    "  2. `medianIdleShare` improves DOWNWARD (less idle RAM is better).",
-    "     `windowCompletion` and `moneyPerSec` improve UPWARD.",
-    "  3. `provenance` pins the simulator semantics these numbers were measured",
-    "     under. Bumping SIMULATOR_MODEL_VERSION or the vendored commit changes",
-    "     what the simulator DOES, so old numbers stop being comparable; the",
-    "     driver fails loudly rather than silently comparing across the change.",
-    "     Re-measure every scenario, then update provenance in the same commit.",
-    "",
-    "To re-record after an improvement, run the lane with BB_RECORD_BASELINES=1",
-    "and paste the printed lines. Without that flag the driver only prints them,",
-    "so a baseline can never move as a side effect of a run."
-  ],
-  "provenance": {
-    "simulatorModelVersion": 9,
-    "vendorCommit": "3162fd2590e221eadd0c0fbd46151913f7c4c41c",
-    "recordedAt": "2026-08-21",
-    "recordedFrom": "the six scenario-jit-*.test.ts files these rows were merged from; jit-one-server, jit-share-churn and jit-fragmentation re-measured 2026-08-21 at HEAD, each on its own recorded seed, with a six-seed sweep behind the decision (see their history lines)",
-    "modelVersionBumps": "5 -> 7 (darknet: population, getters, mutation, the labyrinth ladder and the .cache reward table; DarkscapeNavigator.exe becoming purchasable). Verified behaviour-neutral for these rows rather than re-measured: the same nine cases were run before and after and reported identical metrics (e.g. jit-one-server moneyPerSec 1.30122e+10 in both). None of these profiles has `dnet` active, which is what the purchase is gated on. Four rows were ALREADY failing before this work - jit-one-server and jit-share-churn say so themselves, having been measured on an uncommitted tree - and were left alone rather than re-recorded. 7 -> 8 (darknet again: passwords, per-PID sessions, authenticate with the transcribed timing formula, heartbleed over a log ring, nextMutation, and session gates on scp/exec). Behaviour-neutral for these rows by CONSTRUCTION, and re-run to confirm: every one of those paths is reached only through a populated darknet, and populate() is gated on dnet access, which none of these profiles has. The scp/exec gate short-circuits to allowed for any server that is not a DarknetServer, before it can consume a draw or touch state; the log-noise stream is a third mulberry32 that never touches the shared gameplay stream; and darknetProcess() still returns before drawing when access is absent. The rows below are unchanged."
+ "note": [
+  "THE PROOF-OF-PROGRESS LEDGER for the JIT scenarios.",
+  "",
+  "Each entry is the BEST result we have actually achieved on that fixture, not",
+  "a target and not a guess. The workflow it exists for: make a change, re-run",
+  "the lane, and either beat a number (record the improvement here, deliberately)",
+  "or regress one (the run fails and names it). That is what makes each step",
+  "along the way provable rather than asserted.",
+  "",
+  "RULES.",
+  "  1. Only ever move a number in the improving direction, and only from a run",
+  "     you actually observed. Never relax a baseline to make a red lane green --",
+  "     that converts the ledger from evidence into decoration.",
+  "  2. `medianIdleShare` improves DOWNWARD (less idle RAM is better).",
+  "     `windowCompletion` and `moneyPerSec` improve UPWARD.",
+  "  3. `provenance` pins the simulator semantics these numbers were measured",
+  "     under. Bumping SIMULATOR_MODEL_VERSION or the vendored commit changes",
+  "     what the simulator DOES, so old numbers stop being comparable; the",
+  "     driver fails loudly rather than silently comparing across the change.",
+  "     Re-measure every scenario, then update provenance in the same commit.",
+  "",
+  "To re-record after an improvement, run the lane with BB_RECORD_BASELINES=1",
+  "and paste the printed lines. Without that flag the driver only prints them,",
+  "so a baseline can never move as a side effect of a run."
+ ],
+ "provenance": {
+  "simulatorModelVersion": 9,
+  "vendorCommit": "3162fd2590e221eadd0c0fbd46151913f7c4c41c",
+  "recordedAt": "2026-08-21",
+  "recordedFrom": "the six scenario-jit-*.test.ts files these rows were merged from; jit-one-server, jit-share-churn and jit-fragmentation re-measured 2026-08-21 at HEAD, each on its own recorded seed, with a six-seed sweep behind the decision (see their history lines)",
+  "modelVersionBumps": "5 -> 7 (darknet: population, getters, mutation, the labyrinth ladder and the .cache reward table; DarkscapeNavigator.exe becoming purchasable). Verified behaviour-neutral for these rows rather than re-measured: the same nine cases were run before and after and reported identical metrics (e.g. jit-one-server moneyPerSec 1.30122e+10 in both). None of these profiles has `dnet` active, which is what the purchase is gated on. Four rows were ALREADY failing before this work - jit-one-server and jit-share-churn say so themselves, having been measured on an uncommitted tree - and were left alone rather than re-recorded. 7 -> 8 (darknet again: passwords, per-PID sessions, authenticate with the transcribed timing formula, heartbleed over a log ring, nextMutation, and session gates on scp/exec). Behaviour-neutral for these rows by CONSTRUCTION, and re-run to confirm: every one of those paths is reached only through a populated darknet, and populate() is gated on dnet access, which none of these profiles has. The scp/exec gate short-circuits to allowed for any server that is not a DarknetServer, before it can consume a draw or touch state; the log-noise stream is a third mulberry32 that never touches the shared gameplay stream; and darknetProcess() still returns before drawing when access is absent. The rows below are unchanged."
+ },
+ "tolerances": {
+  "note": "Default slack below a recorded best before a run counts as a regression. Absolute for the shares, fractional for money. A scenario may override any of these in its own `tolerances`.",
+  "idleShare": 0.03,
+  "windowCompletion": 0.04,
+  "moneyFraction": 0.05
+ },
+ "scenarios": {
+  "jit-small-fleet": {
+   "medianIdleShare": 0.533959,
+   "windowCompletion": 0.962406,
+   "moneyPerSec": 265161.5,
+   "note": "With unconditional commit-time reservation this fixture recorded 0.704102 / 0.993569 / $1.166606e5 and 633 allocation failures. The higher completion was bought by losing 56% of income while prep held first priority.",
+   "what": "Early BN1 scheduling: one atomic farm block is a material fraction of the 32 GB home, infrastructure grows through small rungs, and prep plus the dodge arena contend for the same executable slabs.",
+   "history": [
+    "FAILING AS OF 2026-08-21, and left failing ON PURPOSE -- the recorded row is reachable, this tree cannot reach it, and lowering the number would make the lane green and this fixture worthless. HEAD produces $1.308602e4/s against the recorded $2.651615e5, and it is not seed luck: six seeds (1, 3, 7, 11, 23, 41) give $1.059e4 to $1.393e4, so every one of them is 19-25x under. The row fails its own STRUCTURAL premise before it ever reaches the ledger -- peakFleetGb 116 against an assertion of > 128 -- so the fleet simply never grows.",
+    "ROOT CAUSE, from the DIAG line this fixture now prints. The farm solves a 98-thread hack op, ~167 GB, and a hack must land as ONE exec inside ONE host's contiguous RAM. The largest block in the fleet is home at 64 GB. Income is spent on 2 GB servers (infra=buyServer:16,buyServer:2,upgradeHomeRam:64,buyServer:2), which can host a one-thread weaken and never the op that carries the money, so hack throughput cannot move and the fleet never reaches a rung that would move it. The evidence that placement binds rather than back-pressure: allocFailsByPhase is {jit: 0, prep: 18, eager: 477} -- the farm never fails to place, and every failure is eager work. marginalRamIncome prices RAM as $/GB times addedGb, so a block that can execute nothing scores exactly as well per dollar as one that can.",
+    "TWO FIXES TRIED AND REVERTED, both measured WORSE -- do not repeat them. A block-aware valuation (price a purchase by the change in achievable rate, reusing solveCycle's own contiguous-packing model) does correct the price -- 64 GB then returns 7.48e-3 $/s per dollar against 2 GB's 5.04e-3, where they had been exactly equal -- but it is BEHAVIOUR-NEUTRAL on every fixture in this ladder, because pricing the right rung does not let anything buy it. Acting on that price then failed twice: declining the grant at execution time, and claiming the better rung so the arbiter would reserve toward it. Both produced infrastructure=0, no home upgrade at all, and $8.57e3/s -- worse than doing nothing.",
+    "WHAT IT ACTUALLY NEEDS. Both attempts fail for one reason, which the claim site in game/lib/features/hacking.ts already states: the water-filled grant is a per-pass slice of the pool and it does not accumulate. Asking for a rung today's cash cannot cover means the money falls through to other features, so waiting to buy the usable block is not an expressible option. The cost <= availableMoney filter in stepInfrastructure is a workaround for the same gap. Fixing this row means adding money reservation across passes for an indivisible purchase -- an arbiter change touching the allocator every feature depends on -- not more tuning inside hacking.",
+    "With unconditional commit-time reservation this fixture recorded 0.704102 / 0.993569 / $1.166606e5 and 633 allocation failures. The higher completion was bought by losing 56% of income while prep held first priority."
+   ]
   },
-  "tolerances": {
-    "note": "Default slack below a recorded best before a run counts as a regression. Absolute for the shares, fractional for money. A scenario may override any of these in its own `tolerances`.",
-    "idleShare": 0.03,
-    "windowCompletion": 0.04,
-    "moneyFraction": 0.05
+  "jit-stress": {
+   "medianIdleShare": 0.31986750413302184,
+   "windowCompletion": 0.977169,
+   "moneyPerSec": 282682292.04306227,
+   "what": "Target ranking crosses as skill rises, share competes for RAM because faction reputation is genuinely on the goal path, and cloud/home purchases replace and enlarge heap slabs while batches remain in flight.",
+   "history": [
+    "FIXTURE CHANGED, numbers reset rather than ratcheted. The wide rival was worth 0.90x the compact server at the fixture's starting skill and the farm never migrated, so this row measured a single-target run wearing a three-target fixture. The rival is now gated above the starting skill and genuinely richer; the run opens on the compact server and migrates to the twin at 90.5 s. Previous rows (0.00113 / 1.0 / $2.724694e6) were measured on the non-migrating world and are not comparable.",
+    "The migrated target's demand (7.1 PB) is two orders over the 95 TB fleet, so the idle share is the remainder left by atomic placement of TB-scale batches, not slack: allocation failures stayed at zero.",
+    "Contiguity healthy at the recorded run: allocFails=0, placement misses=0, batchesSkipped=2.",
+    "Earlier combined-stress numbers were measured against an unpressured two-target fixture whose demand could not absorb its 43 TB fleet. Not comparable.",
+    "2026-08-24: share-eviction reliability (stop race, bulk envelope eviction), generational shape handoff (no flush on re-solves), monotone within-generation quotas, late-hack pre-grow drop (no post-grow steals), retire-on-switch, cadence-lean shape lock. Recorded from single observed runs on the session's final tree."
+   ]
   },
-  "scenarios": {
-    "jit-small-fleet": {
-      "medianIdleShare": 0.533959,
-      "windowCompletion": 0.962406,
-      "moneyPerSec": 265161.5,
-      "note": "With unconditional commit-time reservation this fixture recorded 0.704102 / 0.993569 / $1.166606e5 and 633 allocation failures. The higher completion was bought by losing 56% of income while prep held first priority.",
-      "what": "Early BN1 scheduling: one atomic farm block is a material fraction of the 32 GB home, infrastructure grows through small rungs, and prep plus the dodge arena contend for the same executable slabs.",
-      "history": [
-        "FAILING AS OF 2026-08-21, and left failing ON PURPOSE -- the recorded row is reachable, this tree cannot reach it, and lowering the number would make the lane green and this fixture worthless. HEAD produces $1.308602e4/s against the recorded $2.651615e5, and it is not seed luck: six seeds (1, 3, 7, 11, 23, 41) give $1.059e4 to $1.393e4, so every one of them is 19-25x under. The row fails its own STRUCTURAL premise before it ever reaches the ledger -- peakFleetGb 116 against an assertion of > 128 -- so the fleet simply never grows.",
-        "ROOT CAUSE, from the DIAG line this fixture now prints. The farm solves a 98-thread hack op, ~167 GB, and a hack must land as ONE exec inside ONE host's contiguous RAM. The largest block in the fleet is home at 64 GB. Income is spent on 2 GB servers (infra=buyServer:16,buyServer:2,upgradeHomeRam:64,buyServer:2), which can host a one-thread weaken and never the op that carries the money, so hack throughput cannot move and the fleet never reaches a rung that would move it. The evidence that placement binds rather than back-pressure: allocFailsByPhase is {jit: 0, prep: 18, eager: 477} -- the farm never fails to place, and every failure is eager work. marginalRamIncome prices RAM as $/GB times addedGb, so a block that can execute nothing scores exactly as well per dollar as one that can.",
-        "TWO FIXES TRIED AND REVERTED, both measured WORSE -- do not repeat them. A block-aware valuation (price a purchase by the change in achievable rate, reusing solveCycle's own contiguous-packing model) does correct the price -- 64 GB then returns 7.48e-3 $/s per dollar against 2 GB's 5.04e-3, where they had been exactly equal -- but it is BEHAVIOUR-NEUTRAL on every fixture in this ladder, because pricing the right rung does not let anything buy it. Acting on that price then failed twice: declining the grant at execution time, and claiming the better rung so the arbiter would reserve toward it. Both produced infrastructure=0, no home upgrade at all, and $8.57e3/s -- worse than doing nothing.",
-        "WHAT IT ACTUALLY NEEDS. Both attempts fail for one reason, which the claim site in game/lib/features/hacking.ts already states: the water-filled grant is a per-pass slice of the pool and it does not accumulate. Asking for a rung today's cash cannot cover means the money falls through to other features, so waiting to buy the usable block is not an expressible option. The cost <= availableMoney filter in stepInfrastructure is a workaround for the same gap. Fixing this row means adding money reservation across passes for an indivisible purchase -- an arbiter change touching the allocator every feature depends on -- not more tuning inside hacking.",
-        "With unconditional commit-time reservation this fixture recorded 0.704102 / 0.993569 / $1.166606e5 and 633 allocation failures. The higher completion was bought by losing 56% of income while prep held first priority."
-      ]
-    },
-    "jit-stress": {
-      "medianIdleShare": 0.335253,
-      "windowCompletion": 0.977169,
-      "moneyPerSec": 282682292.04306227,
-      "what": "Target ranking crosses as skill rises, share competes for RAM because faction reputation is genuinely on the goal path, and cloud/home purchases replace and enlarge heap slabs while batches remain in flight.",
-      "history": [
-        "FIXTURE CHANGED, numbers reset rather than ratcheted. The wide rival was worth 0.90x the compact server at the fixture's starting skill and the farm never migrated, so this row measured a single-target run wearing a three-target fixture. The rival is now gated above the starting skill and genuinely richer; the run opens on the compact server and migrates to the twin at 90.5 s. Previous rows (0.00113 / 1.0 / $2.724694e6) were measured on the non-migrating world and are not comparable.",
-        "The migrated target's demand (7.1 PB) is two orders over the 95 TB fleet, so the idle share is the remainder left by atomic placement of TB-scale batches, not slack: allocation failures stayed at zero.",
-        "Contiguity healthy at the recorded run: allocFails=0, placement misses=0, batchesSkipped=2.",
-        "Earlier combined-stress numbers were measured against an unpressured two-target fixture whose demand could not absorb its 43 TB fleet. Not comparable."
-      ]
-    },
-    "jit-fragmentation": {
-      "medianIdleShare": 0.11674832109031838,
-      "windowCompletion": 0.9877420936504046,
-      "moneyPerSec": 55037525.40018192,
-      "what": "Two prepared targets with materially different atomic worker shapes. Their score curves cross as real hacking experience raises skill, forcing a switch from an 81.3 GB solved batch to a 1,127.3 GB batch while purchases keep changing heap slabs.",
-      "history": [
-        "RATCHETED UP 2026-08-21: idle 0.539266 -> 0.116748, completion 0.959134 -> 0.987742, money $4.432132e7 -> $5.503753e7, and batchesSkipped 12803 -> 1462, which was the number this row existed to beat. EARNED BY 4eca037 (\"Make a cold BN1 install augmentations at all\"), pinned by bisect: 831e2505 and 2bcf9f7 both still reproduce the old row EXACTLY, while 4eca037 and every commit after it produce the new one. The mechanism is visible in the fixture's own diagnostic -- home 4096 -> 8192 GB and fleet 27136 -> 58112 GB -- so working augmentation installs doubled the fleet, and the post-migration re-shape that used to thrash against slabs bought for the old worker shape now has room to place them. allocFails stays 0 on both sides, so this is placement improving, not back-pressure being traded away.",
-        "FIXTURE CHANGED, numbers reset rather than ratcheted. The rival used to be 0.90x the compact server's score at the fixture's starting skill and only 1.66x by the end, so the composite runtime rate never cleared the switch margin and this scenario measured a farm that never migrated at all. The rival is now gated above the starting skill and genuinely richer, so the run opens on the compact server, unlocks the rival from its own experience and migrates at 10.5 min. Previous rows (0.441078 / 1.0 / $4.465055e6) were measured on the non-migrating world and are not comparable.",
-        "The migration re-shapes 81 GB workers into 2.6 TB ones against slabs bought for the old shape: 12,803 skipped batches, zero allocation failures, window completion 0.959. That skip count is the number to beat.",
-        "Recorded 2026-08-13. Contiguity healthy: allocFails=0, batchesSkipped=2 (both deadline).",
-        "Previous values 0.606 / 0.943 / $3.52e6 came from an unpressured single-target fixture. Not comparable."
-      ],
-      "batchesSkipped": 1462
-    },
-    "jit-skill-jump": {
-      "medianIdleShare": 0.655907,
-      "windowCompletion": 1.0,
-      "moneyPerSec": 16263900.0,
-      "what": "The disturbance case. No mid-run person mutation hook exists, so the fixture uses a real unpredictable duration change: a modelled Go win raises hacking_speed while a healthy pipeline has calls in flight. A locked skill-1000 target creates the hacking-speed demand that makes Go choose that reward. No state is edited.",
-      "history": [
-        "At the recorded run the multiplier jumped 1.0 -> 1.069013 at 48.95s with 66 calls in flight. Raw skills.hacking stayed 250: this is a duration-multiplier jump, not a fabricated experience award.",
-        "Recovery diagnostic: post-jump completion 1.000, post-jump income $3.905e6/s, final security exactly minimum, final money exactly maximum, batchesSkipped=1."
-      ]
-    },
-    "jit-target-switch": {
-      "medianIdleShare": 0.017429588082745355,
-      "windowCompletion": 1.0,
-      "moneyPerSec": 4183.302133410436,
-      "switchIncomeRetention": 0.6539528921721002,
-      "tolerances": {
-        "windowCompletion": 0.03,
-        "switchIncomeRetention": 0.08
-      },
-      "note": "Six-minute horizon truncates ~2 in-flight hacks, so windowCompletion runs a tighter 0.03. switchIncomeRetention gets 0.08 because each side of the switch is only 30s and holds few payouts.",
-      "what": "The rival starts just below the prep threshold, then becomes the better prepped target after the primary has built a pipeline. A 3,072 GB fixed slab keeps the target set under active pressure: measured minimum demands sum to more than the whole fleet.",
-      "history": [
-        "IMPROVED slightly: money $4.183092e3 -> $4.183302e3. Earned by the fractional-thread-strength work (2024 batcher re-audit, spec/jit-reference.md section 9): an arrival-money hack shrink now re-tasks the committed worker at a reduced opts.threads instead of releasing and re-placing a smaller block, and the shrink itself is exact rather than ceil'd. Same cadence, same role sizes -- only the wasted reservation churn is gone.",
-        "IMPROVED sharply: idle 0.514731 -> 0.017430, money $1.108422e3 -> $4.183092e3, switch retention 0.433885 -> 0.653953. Measured 2026-08-19 on a working tree carrying uncommitted dispatcher work (missed-window and failed-exec scoping, role-quota idle linger, share reserving the farm's per-pass launch demand). Re-confirm once that work lands.",
-        "Recorded 2026-08-13. Switch diagnostic: at 64.5s, 13 old-target calls were still in flight and the 30s income window after the switch retained 0.433885 of the 30s window before it.",
-        "Previous values 0.636 / 0.956 / $1.04e3 used a 4,096 GB unpressured slab. Not comparable.",
-        "Why completion is tracked separately from utilisation: JIT launches longest-first (weaken, grow, hack) and each landing opens the next launch window. A hack that launches but never lands loses the whole batch profit while its grow and weaken were already paid for, so free-looking RAM may belong to an old-target window that has not opened yet."
-      ]
-    },
-    "jit-share-churn": {
-      "medianIdleShare": 0.04271548436308167,
-      "windowCompletion": 0.969754,
-      "moneyPerSec": 14236406.25,
-      "tolerances": {
-        "windowCompletion": 0.03
-      },
-      "what": "Faction reputation and money are both on the critical path, so shareCutover has genuine demand to compare against a measured farm marginal, and share repeatedly yields and reclaims RAM.",
-      "history": [
-        "RE-RECORDED DOWNWARD 2026-08-21, on the multi-seed evidence entry [4] below asked for. $9.388081e7 was measured on an uncommitted working tree and is not reproducible at 831e2505 (the commit that wrote it here) or since; HEAD returns $1.423641e7 on this fixture's own seed 7. The sweep (seeds 1, 3, 7, 11, 23, 41) shows the chaos that entry predicted IS real and large: $1.419e7, $1.424e7, $1.640e7, $1.805e7, $1.929e7, $5.646e7 -- a 4.0x spread tracking final fleet size almost exactly (5,876 GB to 61,472 GB), because income compounds the fleet and the fleet compounds income. So both things are true: the fixture is genuinely seed-chaotic, AND the old record still exceeds the BEST of six seeds by 1.66x, so it was never a number this tree produces. medianIdleShare and windowCompletion are deliberately left where they are: 0.070366 is worse than the recorded 0.042715 (inside tolerance, so not a regression, and a worse number is never recorded), and 0.992051 beats the recorded 0.969754 but was measured on a failing run, so it is not banked as an improvement.",
-        "IMPROVED to idle 0.042715 / $9.388081e7 (windowCompletion held at 0.966760, inside tolerance of the recorded 0.969754). Measured 2026-08-19 on a working tree carrying uncommitted dispatcher work (missed-window and failed-exec scoping, role-quota idle linger, share reserving the farm's per-pass launch demand). Re-confirm once that work lands.",
-        "Measured on the 2026-08-18 tree after four dispatcher fixes: a missed window drops only its own batch instead of the whole JIT pipeline; a failed exec likewise drops only the batch that lost an op; role quotas count the one-shot worker's post-landing idle linger, so a due op is not quota-blocked past its own deadline; and share reserves the farm's per-pass launch demand rather than a phantom unused-allotment deficit.",
-        "This lane FAILED on the pre-change tree at $7.680701e5 with 59 launched hacks and a 558 GB fleet, against a then-recorded $1.105482e6 that had become unreachable. Treat $1.105482e6 as history, not a target.",
-        "KNOWN HIGHER WATER MARK, unexplained: $2.651021e7 / idle 0.058435 / completion 0.979679 on this same seed with everything above EXCEPT the failed-exec scoping. That fix is not optional -- live it fired 576 times in one install, each discarding a whole pipeline whose weakens had already launched -- and it IMPROVED both quality metrics (completion 0.9797 -> 0.9877, batchesSkipped 47 -> 38) while compounding a smaller fleet (18.4 TB -> 12.9 TB) and therefore less money on this one seed. At single-seed resolution compounding chaos and a real regression are indistinguishable; settle it with a multi-seed comparison before trusting either figure.",
-        "Idle is not a number to drive to zero by giving share more. Income compounds the fleet faster than one target's pipeline can absorb, and the residual is the per-pass batch reservation share must stay clear of. Shrinking that reservation to a single batch measured WORSE here ($1.45e7/s, 6.2 TB fleet): RAM that looks free is RAM the growing pipeline claims next pass.",
-        "Share can safely lend RAM because it stops inside its current 10-second slice. A separate target prep cannot: cancelling its long grow/weaken loses progress, so the same free-looking pipeline RAM is unsafe for prep."
-      ]
-    },
-    "jit-migrate": {
-      "what": "One server starts ALREADY PREPPED and earning; a fatter one starts cold and must be prepped out of that income. Farm and prep therefore run in parallel, and the farm then has to migrate to collect the investment.",
-      "note": "NOT YET RECORDED. Merged from scenario-farm.test.ts, which built this world to prove prep never switches the farm off but never pinned metrics or asserted the migration. The first lane run prints the numbers to record here.",
-      "history": [
-        "COUNTER-EVIDENCE for the obvious fix, measured 2026-08-21 at HEAD. The skip reason below names frozen prep sizing as the cause, and the natural repair is to stop reading the wave size back out of the previous pass's prep segment (evaluator.ts, the sticky-prep branch) and re-derive it as a fresh candidate would: min(prepGbFor(plan), secondaryPrepGbLimit). DO NOT. A/B on this fixture, everything else identical: frozen $2.088800e7/s with a 420,096 GB fleet and $3.465e9 earned by minute 40; re-derived $1.201985e5/s with a 298 GB fleet and $1.809e8 earned -- 174x worse income and a fleet three orders of magnitude smaller. Prep sized to its own demand starves the farm, the farm stops earning, and nothing compounds. The freeze is load-bearing back-pressure, not an oversight.",
-        "The migration still does not happen either way (switch=none in both arms), so the gap this row documents is real -- but it is NOT caused by the wave size, and the fix is not to unfreeze it. Whatever earns this row has to keep the farm funded while prep advances, which is a sequencing question rather than a sizing one."
-      ]
-    },
-    "jit-one-server": {
-      "what": "The base case: a single target with RAM to spare. Measures realized $/sec against the steady-state rate solveCycle predicts -- bounded by the landing interval as well as by RAM, because an unbounded RAM-seconds rate prices a cadence the game forbids -- so a wrong batch model shows up here rather than silently corrupting every ranking built on it.",
-      "medianIdleShare": 0.184702,
-      "windowCompletion": 0.996992,
-      "moneyPerSec": 13012186458.333334,
-      "realizedShare": 1.2752618299121063,
-      "history": [
-        "PREDICTION CORRECTED 2026-08-21, and with it the whole reading of this row. The prediction used to be `score * fleetGb`, but `solved()` solves UNCAPPED (UNLIMITED_RAM: no farmGb, no hostBlocksGb), so solveCycle never runs its period branch and `score` is income per RAM-SECOND with no landing interval in it. Multiplying that by the fleet asserted 115.5 batches/sec -- a batch every 8.7 ms against HWGW_MIN_INTERVAL_MS of 20 ms (4 * 5 ms), i.e. 2.3x faster than the game permits. realizedShare 0.6925, then 0.5522, was measured against a cadence that cannot exist, and it invited exactly the wrong conclusion: an earlier draft of this line claimed the dispatcher ran 2.5x slow. It does not. The prediction is now bounded by BOTH constraints the way solveCycle bounds it (period = max(ramSec/farmGb, jointPeriod, interval), a max of periods being a min of rates).",
-        "WHAT THE ROW MEASURES NOW, decomposed by the fixture every run (DECOMPOSE). Cadence: 45.631 batches/sec against a legal ceiling of 50.000 -- 0.9126, so the landing grid is at 91% of the fastest cadence that exists and there is little left to win there. Money: $2.8516e8 realized per batch against $2.0407e8 predicted -- 1.3974, so the batch model UNDERSTATES what a batch earns by 40%. That understatement is the real defect this row exists to catch, because `score` is the ranking key and a bias that varies by target misranks targets. It is NOT a reason to relax anything: chance is 0.9894 and 20 hack threads land almost every time, so the error is in the income terms, not in the landing.",
-        "RE-RECORDED DOWNWARD 2026-08-21, because the previous number was never reproducible -- not relaxed to make a red lane green. $1.632033e10 was measured on an uncommitted working tree; 831e2505, which is the commit that WROTE it into this ledger, produces $1.301219e10, as do eeccb608 and HEAD. A six-seed sweep (1, 3, 7, 11, 23, 41) settles that this is not seed luck either: the fixture returns $1.30081e10 to $1.30238e10, a total spread of 0.12%, with windowCompletion (0.997021), launched hacks (47667) and fleet (53884 GB) IDENTICAL on every seed. The old figure sits 25.4% above the maximum any seed produces, so no seed reaches it and the tree that did no longer exists. Realized share falls with it, 0.6925 -> 0.5522, against an unchanged solver prediction of $2.356619e10/s -- the model did not move, the realized rate did.",
-        "First recording, 2026-08-19. Realized $1.632033e10/s against a solver prediction of $2.356619e10/s on a 53.9 TB fleet -- a realized share of 0.6925, i.e. the batch model is optimistic by about a third at this scale. That gap is the number worth driving toward 1.0; it is well inside the 0.5-2.0 band the test enforces, which is deliberately wide because hack chance is a coin flip per op and a finite window scatters.",
-        "Measured 2026-08-19 on a working tree carrying uncommitted dispatcher work (missed-window and failed-exec scoping, role-quota idle linger, share reserving the farm's per-pass launch demand). Re-confirm once that work lands."
-      ]
-    },
-    "jit-farm-both": {
-      "what": "Two comparable rich targets and RAM far past one target's depth cap -- the shape where a two-target farm would earn close to double. Measures the headroom the one-target design leaves on the table.",
-      "note": "SKIPPED BY DESIGN, and not baselined: it measures the ceiling of a deliberate choice, not a defect. tests/share.test.ts records the counter-evidence for the obvious fix (a measured bn1 regression, $18.05q -> $12.23q, when RAM past the depth cap was treated as free). Run it by name when revisiting multi-target farming."
-    }
+  "jit-fragmentation": {
+   "medianIdleShare": 0.11674832109031838,
+   "windowCompletion": 0.9877420936504046,
+   "moneyPerSec": 55037525.40018192,
+   "what": "Two prepared targets with materially different atomic worker shapes. Their score curves cross as real hacking experience raises skill, forcing a switch from an 81.3 GB solved batch to a 1,127.3 GB batch while purchases keep changing heap slabs.",
+   "history": [
+    "RATCHETED UP 2026-08-21: idle 0.539266 -> 0.116748, completion 0.959134 -> 0.987742, money $4.432132e7 -> $5.503753e7, and batchesSkipped 12803 -> 1462, which was the number this row existed to beat. EARNED BY 4eca037 (\"Make a cold BN1 install augmentations at all\"), pinned by bisect: 831e2505 and 2bcf9f7 both still reproduce the old row EXACTLY, while 4eca037 and every commit after it produce the new one. The mechanism is visible in the fixture's own diagnostic -- home 4096 -> 8192 GB and fleet 27136 -> 58112 GB -- so working augmentation installs doubled the fleet, and the post-migration re-shape that used to thrash against slabs bought for the old worker shape now has room to place them. allocFails stays 0 on both sides, so this is placement improving, not back-pressure being traded away.",
+    "FIXTURE CHANGED, numbers reset rather than ratcheted. The rival used to be 0.90x the compact server's score at the fixture's starting skill and only 1.66x by the end, so the composite runtime rate never cleared the switch margin and this scenario measured a farm that never migrated at all. The rival is now gated above the starting skill and genuinely richer, so the run opens on the compact server, unlocks the rival from its own experience and migrates at 10.5 min. Previous rows (0.441078 / 1.0 / $4.465055e6) were measured on the non-migrating world and are not comparable.",
+    "The migration re-shapes 81 GB workers into 2.6 TB ones against slabs bought for the old shape: 12,803 skipped batches, zero allocation failures, window completion 0.959. That skip count is the number to beat.",
+    "Recorded 2026-08-13. Contiguity healthy: allocFails=0, batchesSkipped=2 (both deadline).",
+    "Previous values 0.606 / 0.943 / $3.52e6 came from an unpressured single-target fixture. Not comparable."
+   ],
+   "batchesSkipped": 1462
+  },
+  "jit-skill-jump": {
+   "medianIdleShare": 0.655907,
+   "windowCompletion": 1.0,
+   "moneyPerSec": 16263900.0,
+   "what": "The disturbance case. No mid-run person mutation hook exists, so the fixture uses a real unpredictable duration change: a modelled Go win raises hacking_speed while a healthy pipeline has calls in flight. A locked skill-1000 target creates the hacking-speed demand that makes Go choose that reward. No state is edited.",
+   "history": [
+    "At the recorded run the multiplier jumped 1.0 -> 1.069013 at 48.95s with 66 calls in flight. Raw skills.hacking stayed 250: this is a duration-multiplier jump, not a fabricated experience award.",
+    "Recovery diagnostic: post-jump completion 1.000, post-jump income $3.905e6/s, final security exactly minimum, final money exactly maximum, batchesSkipped=1."
+   ]
+  },
+  "jit-target-switch": {
+   "medianIdleShare": 0.01742958808274533,
+   "windowCompletion": 1.0,
+   "moneyPerSec": 4359.008359557079,
+   "switchIncomeRetention": 1.0171809033838737,
+   "tolerances": {
+    "windowCompletion": 0.03,
+    "switchIncomeRetention": 0.08
+   },
+   "note": "Six-minute horizon truncates ~2 in-flight hacks, so windowCompletion runs a tighter 0.03. switchIncomeRetention gets 0.08 because each side of the switch is only 30s and holds few payouts.",
+   "what": "The rival starts just below the prep threshold, then becomes the better prepped target after the primary has built a pipeline. A 3,072 GB fixed slab keeps the target set under active pressure: measured minimum demands sum to more than the whole fleet.",
+   "history": [
+    "IMPROVED slightly: money $4.183092e3 -> $4.183302e3. Earned by the fractional-thread-strength work (2024 batcher re-audit, spec/jit-reference.md section 9): an arrival-money hack shrink now re-tasks the committed worker at a reduced opts.threads instead of releasing and re-placing a smaller block, and the shrink itself is exact rather than ceil'd. Same cadence, same role sizes -- only the wasted reservation churn is gone.",
+    "IMPROVED sharply: idle 0.514731 -> 0.017430, money $1.108422e3 -> $4.183092e3, switch retention 0.433885 -> 0.653953. Measured 2026-08-19 on a working tree carrying uncommitted dispatcher work (missed-window and failed-exec scoping, role-quota idle linger, share reserving the farm's per-pass launch demand). Re-confirm once that work lands.",
+    "Recorded 2026-08-13. Switch diagnostic: at 64.5s, 13 old-target calls were still in flight and the 30s income window after the switch retained 0.433885 of the 30s window before it.",
+    "Previous values 0.636 / 0.956 / $1.04e3 used a 4,096 GB unpressured slab. Not comparable.",
+    "Why completion is tracked separately from utilisation: JIT launches longest-first (weaken, grow, hack) and each landing opens the next launch window. A hack that launches but never lands loses the whole batch profit while its grow and weaken were already paid for, so free-looking RAM may belong to an old-target window that has not opened yet.",
+    "2026-08-24: share-eviction reliability (stop race, bulk envelope eviction), generational shape handoff (no flush on re-solves), monotone within-generation quotas, late-hack pre-grow drop (no post-grow steals), retire-on-switch, cadence-lean shape lock. Recorded from single observed runs on the session's final tree."
+   ]
+  },
+  "jit-share-churn": {
+   "medianIdleShare": 0.04271548436308167,
+   "windowCompletion": 0.9785591766723842,
+   "moneyPerSec": 85329233.25520833,
+   "tolerances": {
+    "windowCompletion": 0.03
+   },
+   "what": "Faction reputation and money are both on the critical path, so shareCutover has genuine demand to compare against a measured farm marginal, and share repeatedly yields and reclaims RAM.",
+   "history": [
+    "RE-RECORDED DOWNWARD 2026-08-21, on the multi-seed evidence entry [4] below asked for. $9.388081e7 was measured on an uncommitted working tree and is not reproducible at 831e2505 (the commit that wrote it here) or since; HEAD returns $1.423641e7 on this fixture's own seed 7. The sweep (seeds 1, 3, 7, 11, 23, 41) shows the chaos that entry predicted IS real and large: $1.419e7, $1.424e7, $1.640e7, $1.805e7, $1.929e7, $5.646e7 -- a 4.0x spread tracking final fleet size almost exactly (5,876 GB to 61,472 GB), because income compounds the fleet and the fleet compounds income. So both things are true: the fixture is genuinely seed-chaotic, AND the old record still exceeds the BEST of six seeds by 1.66x, so it was never a number this tree produces. medianIdleShare and windowCompletion are deliberately left where they are: 0.070366 is worse than the recorded 0.042715 (inside tolerance, so not a regression, and a worse number is never recorded), and 0.992051 beats the recorded 0.969754 but was measured on a failing run, so it is not banked as an improvement.",
+    "IMPROVED to idle 0.042715 / $9.388081e7 (windowCompletion held at 0.966760, inside tolerance of the recorded 0.969754). Measured 2026-08-19 on a working tree carrying uncommitted dispatcher work (missed-window and failed-exec scoping, role-quota idle linger, share reserving the farm's per-pass launch demand). Re-confirm once that work lands.",
+    "Measured on the 2026-08-18 tree after four dispatcher fixes: a missed window drops only its own batch instead of the whole JIT pipeline; a failed exec likewise drops only the batch that lost an op; role quotas count the one-shot worker's post-landing idle linger, so a due op is not quota-blocked past its own deadline; and share reserves the farm's per-pass launch demand rather than a phantom unused-allotment deficit.",
+    "This lane FAILED on the pre-change tree at $7.680701e5 with 59 launched hacks and a 558 GB fleet, against a then-recorded $1.105482e6 that had become unreachable. Treat $1.105482e6 as history, not a target.",
+    "KNOWN HIGHER WATER MARK, unexplained: $2.651021e7 / idle 0.058435 / completion 0.979679 on this same seed with everything above EXCEPT the failed-exec scoping. That fix is not optional -- live it fired 576 times in one install, each discarding a whole pipeline whose weakens had already launched -- and it IMPROVED both quality metrics (completion 0.9797 -> 0.9877, batchesSkipped 47 -> 38) while compounding a smaller fleet (18.4 TB -> 12.9 TB) and therefore less money on this one seed. At single-seed resolution compounding chaos and a real regression are indistinguishable; settle it with a multi-seed comparison before trusting either figure.",
+    "Idle is not a number to drive to zero by giving share more. Income compounds the fleet faster than one target's pipeline can absorb, and the residual is the per-pass batch reservation share must stay clear of. Shrinking that reservation to a single batch measured WORSE here ($1.45e7/s, 6.2 TB fleet): RAM that looks free is RAM the growing pipeline claims next pass.",
+    "Share can safely lend RAM because it stops inside its current 10-second slice. A separate target prep cannot: cancelling its long grow/weaken loses progress, so the same free-looking pipeline RAM is unsafe for prep.",
+    "2026-08-24: share-eviction reliability (stop race, bulk envelope eviction), generational shape handoff (no flush on re-solves), monotone within-generation quotas, late-hack pre-grow drop (no post-grow steals), retire-on-switch, cadence-lean shape lock. Recorded from single observed runs on the session's final tree."
+   ]
+  },
+  "jit-migrate": {
+   "what": "One server starts ALREADY PREPPED and earning; a fatter one starts cold and must be prepped out of that income. Farm and prep therefore run in parallel, and the farm then has to migrate to collect the investment.",
+   "note": "NOT YET RECORDED. Merged from scenario-farm.test.ts, which built this world to prove prep never switches the farm off but never pinned metrics or asserted the migration. The first lane run prints the numbers to record here.",
+   "history": [
+    "COUNTER-EVIDENCE for the obvious fix, measured 2026-08-21 at HEAD. The skip reason below names frozen prep sizing as the cause, and the natural repair is to stop reading the wave size back out of the previous pass's prep segment (evaluator.ts, the sticky-prep branch) and re-derive it as a fresh candidate would: min(prepGbFor(plan), secondaryPrepGbLimit). DO NOT. A/B on this fixture, everything else identical: frozen $2.088800e7/s with a 420,096 GB fleet and $3.465e9 earned by minute 40; re-derived $1.201985e5/s with a 298 GB fleet and $1.809e8 earned -- 174x worse income and a fleet three orders of magnitude smaller. Prep sized to its own demand starves the farm, the farm stops earning, and nothing compounds. The freeze is load-bearing back-pressure, not an oversight.",
+    "The migration still does not happen either way (switch=none in both arms), so the gap this row documents is real -- but it is NOT caused by the wave size, and the fix is not to unfreeze it. Whatever earns this row has to keep the farm funded while prep advances, which is a sequencing question rather than a sizing one."
+   ]
+  },
+  "jit-one-server": {
+   "what": "The base case: a single target with RAM to spare. Measures realized $/sec against the steady-state rate solveCycle predicts -- bounded by the landing interval as well as by RAM, because an unbounded RAM-seconds rate prices a cadence the game forbids -- so a wrong batch model shows up here rather than silently corrupting every ranking built on it.",
+   "medianIdleShare": 0.184702,
+   "windowCompletion": 0.996992,
+   "moneyPerSec": 13012186458.333334,
+   "realizedShare": 1.2752618299121063,
+   "history": [
+    "PREDICTION CORRECTED 2026-08-21, and with it the whole reading of this row. The prediction used to be `score * fleetGb`, but `solved()` solves UNCAPPED (UNLIMITED_RAM: no farmGb, no hostBlocksGb), so solveCycle never runs its period branch and `score` is income per RAM-SECOND with no landing interval in it. Multiplying that by the fleet asserted 115.5 batches/sec -- a batch every 8.7 ms against HWGW_MIN_INTERVAL_MS of 20 ms (4 * 5 ms), i.e. 2.3x faster than the game permits. realizedShare 0.6925, then 0.5522, was measured against a cadence that cannot exist, and it invited exactly the wrong conclusion: an earlier draft of this line claimed the dispatcher ran 2.5x slow. It does not. The prediction is now bounded by BOTH constraints the way solveCycle bounds it (period = max(ramSec/farmGb, jointPeriod, interval), a max of periods being a min of rates).",
+    "WHAT THE ROW MEASURES NOW, decomposed by the fixture every run (DECOMPOSE). Cadence: 45.631 batches/sec against a legal ceiling of 50.000 -- 0.9126, so the landing grid is at 91% of the fastest cadence that exists and there is little left to win there. Money: $2.8516e8 realized per batch against $2.0407e8 predicted -- 1.3974, so the batch model UNDERSTATES what a batch earns by 40%. That understatement is the real defect this row exists to catch, because `score` is the ranking key and a bias that varies by target misranks targets. It is NOT a reason to relax anything: chance is 0.9894 and 20 hack threads land almost every time, so the error is in the income terms, not in the landing.",
+    "RE-RECORDED DOWNWARD 2026-08-21, because the previous number was never reproducible -- not relaxed to make a red lane green. $1.632033e10 was measured on an uncommitted working tree; 831e2505, which is the commit that WROTE it into this ledger, produces $1.301219e10, as do eeccb608 and HEAD. A six-seed sweep (1, 3, 7, 11, 23, 41) settles that this is not seed luck either: the fixture returns $1.30081e10 to $1.30238e10, a total spread of 0.12%, with windowCompletion (0.997021), launched hacks (47667) and fleet (53884 GB) IDENTICAL on every seed. The old figure sits 25.4% above the maximum any seed produces, so no seed reaches it and the tree that did no longer exists. Realized share falls with it, 0.6925 -> 0.5522, against an unchanged solver prediction of $2.356619e10/s -- the model did not move, the realized rate did.",
+    "First recording, 2026-08-19. Realized $1.632033e10/s against a solver prediction of $2.356619e10/s on a 53.9 TB fleet -- a realized share of 0.6925, i.e. the batch model is optimistic by about a third at this scale. That gap is the number worth driving toward 1.0; it is well inside the 0.5-2.0 band the test enforces, which is deliberately wide because hack chance is a coin flip per op and a finite window scatters.",
+    "Measured 2026-08-19 on a working tree carrying uncommitted dispatcher work (missed-window and failed-exec scoping, role-quota idle linger, share reserving the farm's per-pass launch demand). Re-confirm once that work lands."
+   ]
+  },
+  "jit-farm-both": {
+   "what": "Two comparable rich targets and RAM far past one target's depth cap -- the shape where a two-target farm would earn close to double. Measures the headroom the one-target design leaves on the table.",
+   "note": "SKIPPED BY DESIGN, and not baselined: it measures the ceiling of a deliberate choice, not a defect. tests/share.test.ts records the counter-evidence for the obvious fix (a measured bn1 regression, $18.05q -> $12.23q, when RAM past the depth cap was treated as free). Run it by name when revisiting multi-target farming."
   }
+ }
 }

@@ -55,7 +55,7 @@
 import { reclaimForecast } from "./farm.ts";
 import { fresh, type DnetHost, type ExpiryOpts } from "./host.ts";
 import type { LabRouteBias } from "./maze.ts";
-import { isLabyrinth, isOnAirGap, labStage, NET_WIDTH } from "./rates.ts";
+import { INDUCE_WAIT_MS, isLabyrinth, isOnAirGap, labStage, NET_WIDTH } from "./rates.ts";
 
 /** What every policy here needs to know about one host. All of it is already in
  * the knowledge fold; none of it is a credential. */
@@ -108,6 +108,51 @@ export interface HoldView {
    *  divide the calls-to-move directly — the difference between a hopeless
    *  project and an afternoon. Omitted, pushes are priced at one thread. */
   induceGbPerThread?: number;
+  /** How many rows off a spare target a host may sit and still claim it.
+   *  Absent: `STASIS_TARGET_SLACK`. A wider slack trades placement precision
+   *  for candidate quality — the fix for a tiny on-target host beating a
+   *  giant one row outside the window. */
+  spareSlack?: number;
+  /** How a spare target's window is won: `"ram"` (biggest maxRam — shipped)
+   *  or `"ramPerDistance"` (maxRam halved per row off target, so a 4x bigger
+   *  host wins from up to two rows further away). */
+  spareScoring?: "ram" | "ramPerDistance";
+  /** Our per-target estimate of `DarknetState.migrationInductionServers` —
+   *  the engine's accumulated charge, which no ns member reads back but whose
+   *  every `induceServerMigration` response REPORTS ("Migration prep is now
+   *  at X.XX%"). With it, `assign` sizes each target's pushers to reach 100%
+   *  in ONE wave and no further: the charge is additive and calls resolve one
+   *  at a time, so threads past the remainder are pure overshoot. Absent, a
+   *  target is assumed uncharged and gets one full wave's worth. */
+  migrationCharge?: ReadonlyMap<string, number>;
+  /** Hard override on pushers per target, ON TOP of the charge budget.
+   *  Normally unnecessary — the charge budget is the cap. */
+  maxPushersPerTarget?: number;
+  /** How many lab candidates the race may staff at once. Absent: as many as
+   *  the leftover pushers can fully power, most promising first. */
+  maxLabCandidates?: number;
+  /** How many hosts may be ferried into ONE unconquered band at once. Absent:
+   *  as many as the leftover pushers can power — a landing is a uniform
+   *  re-roll, so racing several carriers multiplies the per-wave chance of
+   *  actually crossing, the same argument as the lab race. */
+  maxFerriesPerBand?: number;
+  /** Hosts whose NEXT authenticate is their last remaining candidate — the
+   *  crack is one in-flight call away — mapped to the milliseconds LEFT on
+   *  that authenticate. They are admitted to the push pools early
+   *  (`induceServerMigration` needs only a direct connection, not the
+   *  credential) and charge at full speed; the only discipline is TIMING:
+   *  while the auth's remaining time exceeds `INDUCE_WAIT_MS -
+   *  PRECHARGE_MARGIN_MS`, the wave stops one landing short of 100%, because
+   *  a landing re-rolls the host's edges and would kill the in-flight call.
+   *  Once the remainder fits inside a charge call's own 6 s flight, the
+   *  closing call fires and its landing arrives after the auth (and the
+   *  instant plant behind it) by construction. */
+  aboutToCrack?: ReadonlyMap<string, number>;
+  /** How many frontier targets a pass may push. Absent: every candidate that
+   *  passes the PROGRESS criterion (its band reaches strictly deeper than our
+   *  deepest agent) — which is what retired the old random-walk pump: a band
+   *  we already cover admits no push at all. */
+  maxFrontierTargets?: number;
   /** Whether one stasis slot must be HELD BACK for the maze walker's vantage.
    *
    *  The walker is the one thing in the feature that cannot be rebuilt — its
@@ -265,13 +310,16 @@ export interface HoldPlanInputs {
   charisma: number;
   /** The vantage the FINISHER walk is already running or staged from, if any. */
   walkerAt?: string;
-  /** The vantage a mortal scout already walks from, if any. */
-  scoutAt?: string;
-  /** Field ONE mortal scout beside the finisher when a second lab-adjacent
-   *  staffed vantage exists. The party benchmark's finding: a second PID in
+  /** The vantages mortal scouts already walk from, if any. */
+  scoutsAt?: ReadonlySet<string>;
+  /** Field mortal scouts beside the finisher when further lab-adjacent
+   *  staffed vantages exist. The party benchmark's finding: a second PID in
    *  the same maze shares the field and the charisma pool, either finishing
-   *  roots the lab, and even a short-lived scout beats solo. */
+   *  roots the lab, and even a short-lived scout beats solo (0.905x; two
+   *  scouts 0.854x). */
   scoutWalker?: boolean;
+  /** How many scouts may walk at once. Defaults to 1 when `scoutWalker`. */
+  maxScouts?: number;
   /** One walker thread's allocation; undefined refuses the walk on room. */
   walkGb?: number;
   /** One pin job's allocation. */
@@ -281,6 +329,16 @@ export interface HoldPlanInputs {
    *  lab vantage is chosen by estimated grind+walk time instead of raw RAM. */
   reclaimGb?: number;
   vantageScoring?: "maxRam" | "totalTime";
+  /** Induce dials — see `HoldView`. */
+  migrationCharge?: ReadonlyMap<string, number>;
+  maxPushersPerTarget?: number;
+  maxFrontierTargets?: number;
+  maxLabCandidates?: number;
+  maxFerriesPerBand?: number;
+  aboutToCrack?: ReadonlyMap<string, number>;
+  /** Spare-placement dials — see `HoldView`. */
+  spareSlack?: number;
+  spareScoring?: "ram" | "ramPerDistance";
 }
 
 export interface HoldPlan {
@@ -306,7 +364,7 @@ interface WalkPlan {
  * pin, fresh blocked RAM, a zero block, a resident, and room for one legal
  * walker thread. Each stops the walk and names the one thing to fix next. */
 export function planWalk(
-  inputs: Pick<HoldPlanInputs, "hosts" | "charisma" | "walkerAt" | "scoutAt" | "scoutWalker" | "walkGb" | "reclaimGb" | "vantageScoring">,
+  inputs: Pick<HoldPlanInputs, "hosts" | "charisma" | "walkerAt" | "scoutsAt" | "scoutWalker" | "maxScouts" | "walkGb" | "reclaimGb" | "vantageScoring">,
   refuse: (host: string, why: string, detail: string) => void,
 ): WalkPlan {
   const lab = inputs.hosts.find((h) => isLabyrinth(h.hostname, h.modelId) && h.gone !== true);
@@ -363,34 +421,42 @@ export function planWalk(
     tasks.push({ kind: "walk", host: lab.hostname, from: vantage, threads: Math.floor(maxRam / inputs.walkGb), reason: `walk the maze from ${vantage}` });
     walkerAt = vantage;
   }
-  // THE MORTAL SCOUT: once a finisher walks, one more lab-adjacent staffed
-  // vantage may join it — unpinned, opportunistic (its absence refuses
-  // nothing), biased to the route the unbiased finisher tends away from. It
-  // keeps its prober, so its threads come from FREE room, not the whole host.
-  if (inputs.scoutWalker === true && walkerAt !== undefined && inputs.scoutAt === undefined
-    && inputs.walkGb !== undefined) {
-    const scout = chooseLabVantage(inputs.hosts.filter((h) =>
-      h.hostname !== walkerAt
-      && h.agentAlive
-      && h.gone !== true
-      // A pinned host is never the scout's seat: `chooseLabVantage` ranks
-      // stasis-linked candidates FIRST, so without this the sacrificial
-      // walker would preferentially settle on the one link this world can
-      // least afford to spend on something whose death is priced in.
-      && h.stasisLinked !== true
-      && h.neighbours?.includes(lab.hostname) === true
-      && h.hasCredential
-      && (h.freeGb ?? 0) >= inputs.walkGb!));
-    if (scout !== undefined) {
+  // THE MORTAL SCOUTS: once a finisher walks, up to `maxScouts` more
+  // lab-adjacent staffed vantages may join it — unpinned, opportunistic
+  // (their absence refuses nothing), each biased to a route the unbiased
+  // finisher tends away from. A scout keeps its prober, so its threads come
+  // from FREE room, not the whole host.
+  if (inputs.scoutWalker === true && walkerAt !== undefined && inputs.walkGb !== undefined) {
+    const SCOUT_ROUTES: readonly LabRouteBias[] = ["southern", "eastern"];
+    const scoutsAt = inputs.scoutsAt ?? new Set<string>();
+    const taken = new Set([walkerAt, ...scoutsAt]);
+    let seat = scoutsAt.size;
+    const cap = Math.min(Math.max(0, inputs.maxScouts ?? 1), SCOUT_ROUTES.length);
+    while (seat < cap) {
+      const scout = chooseLabVantage(inputs.hosts.filter((h) =>
+        !taken.has(h.hostname)
+        && h.agentAlive
+        && h.gone !== true
+        // A pinned host is never a scout's seat: `chooseLabVantage` ranks
+        // stasis-linked candidates FIRST, so without this the sacrificial
+        // walker would preferentially settle on the one link this world can
+        // least afford to spend on something whose death is priced in.
+        && h.stasisLinked !== true
+        && h.neighbours?.includes(lab.hostname) === true
+        && h.hasCredential
+        && (h.freeGb ?? 0) >= inputs.walkGb!));
+      if (scout === undefined) break;
+      taken.add(scout.hostname);
       tasks.push({
         kind: "walk",
         host: lab.hostname,
         from: scout.hostname,
         threads: Math.max(1, Math.floor((scout.freeGb ?? 0) / inputs.walkGb)),
-        route: "southern",
+        route: SCOUT_ROUTES[seat % SCOUT_ROUTES.length]!,
         scout: true,
         reason: `mortal scout from ${scout.hostname}`,
       });
+      seat++;
     }
   }
   return { lab, ...(walkerAt !== undefined ? { candidate: walkerAt } : {}), tasks };
@@ -452,6 +518,8 @@ export function planHold(inputs: HoldPlanInputs): HoldPlan {
     ),
     charisma: inputs.charisma,
     authDurationMultiplier: 1,
+    ...(inputs.spareSlack !== undefined ? { spareSlack: inputs.spareSlack } : {}),
+    ...(inputs.spareScoring !== undefined ? { spareScoring: inputs.spareScoring } : {}),
   };
   const walk = planWalk(inputs, refuse);
   const labCandidate = inputs.hosts.find((h) => h.hostname === walk.candidate);
@@ -481,7 +549,17 @@ export function planHold(inputs: HoldPlanInputs): HoldPlan {
   if (!labNeed && spareLinks === 0 && !ferryWanted) {
     if (lab !== undefined) refuse(lab.hostname, "push-not-needed", "the labyrinth is reachable, every stasis link is spent, and every band holds a resident");
   } else {
-    const induce = planInduce({ ...view, induceGbPerThread: inputs.induceGbPerThread, needLabVantage: labNeed });
+    const induce = planInduce({
+      ...view,
+      induceGbPerThread: inputs.induceGbPerThread,
+      needLabVantage: labNeed,
+      ...(inputs.migrationCharge !== undefined ? { migrationCharge: inputs.migrationCharge } : {}),
+      ...(inputs.maxPushersPerTarget !== undefined ? { maxPushersPerTarget: inputs.maxPushersPerTarget } : {}),
+      ...(inputs.maxFrontierTargets !== undefined ? { maxFrontierTargets: inputs.maxFrontierTargets } : {}),
+      ...(inputs.maxLabCandidates !== undefined ? { maxLabCandidates: inputs.maxLabCandidates } : {}),
+      ...(inputs.maxFerriesPerBand !== undefined ? { maxFerriesPerBand: inputs.maxFerriesPerBand } : {}),
+      ...(inputs.aboutToCrack !== undefined ? { aboutToCrack: inputs.aboutToCrack } : {}),
+    });
     for (const refusal of induce.refused) refuse(refusal.hostname, refusal.why, refusal.detail);
     for (const push of induce.pushes) tasks.push({ kind: "induce", host: push.host, from: push.from, threads: push.threads, reason: push.reason });
   }
@@ -744,8 +822,8 @@ export function unconqueredBands(view: Pick<HoldView, "hosts" | "netDepth">): nu
 }
 
 /** Whether a host at this depth serves this target. */
-function nearTarget(depth: number | undefined, target: number): boolean {
-  return depth !== undefined && Math.abs(depth - target) <= STASIS_TARGET_SLACK;
+function nearTarget(depth: number | undefined, target: number, slack = STASIS_TARGET_SLACK): boolean {
+  return depth !== undefined && Math.abs(depth - target) <= slack;
 }
 
 /** The spare targets no held link serves yet, deepest first.
@@ -753,11 +831,12 @@ function nearTarget(depth: number | undefined, target: number): boolean {
  * Shared by `planStasis`, which pins toward them, and `planInduce`, which
  * pushes big hosts into their windows. A held link within slack of several
  * targets serves the DEEPEST one, matching the order pins are assigned in. */
-export function openSpareTargets(view: Pick<HoldView, "hosts" | "spareTargets">): number[] {
+export function openSpareTargets(view: Pick<HoldView, "hosts" | "spareTargets" | "spareSlack">): number[] {
+  const slack = view.spareSlack ?? STASIS_TARGET_SLACK;
   const open = [...(view.spareTargets ?? [])].sort((a, b) => b - a);
   for (const held of view.hosts) {
     if (held.gone || held.stasisLinked !== true || held.irreplaceable) continue;
-    const index = open.findIndex((target) => nearTarget(held.depth, target));
+    const index = open.findIndex((target) => nearTarget(held.depth, target, slack));
     if (index >= 0) open.splice(index, 1);
   }
   return open;
@@ -820,14 +899,19 @@ export function planStasis(view: HoldView): StasisPlan {
   // Spares claim the open targets, deepest first; per target the biggest
   // measured host within slack wins. A loser may still win a shallower
   // target, so refusals are settled only after every target has chosen.
+  const slack = view.spareSlack ?? STASIS_TARGET_SLACK;
+  const spareScore = (host: HoldHost, target: number): number =>
+    view.spareScoring === "ramPerDistance"
+      ? host.maxRam! / 2 ** Math.abs((host.depth ?? target) - target)
+      : host.maxRam!;
   const taken = new Set<string>();
   const spares: HoldHost[] = [];
   for (const target of open) {
     const winner = spareable
       .filter((host) => !taken.has(host.hostname)
-        && host.maxRam !== undefined && nearTarget(host.depth, target))
+        && host.maxRam !== undefined && nearTarget(host.depth, target, slack))
       .sort((a, b) =>
-        (b.maxRam! - a.maxRam!)
+        (spareScore(b, target) - spareScore(a, target))
         || (b.depth! - a.depth!)
         || (a.hostname < b.hostname ? -1 : 1))[0];
     if (!winner) continue;
@@ -838,7 +922,7 @@ export function planStasis(view: HoldView): StasisPlan {
     if (taken.has(host.hostname)) continue;
     if (host.depth === undefined || host.maxRam === undefined) {
       refuse(refused, host, "spare-unmeasured", "a spare is placed by depth and sized by RAM, and one of the two has not been believably observed");
-    } else if (open.some((target) => nearTarget(host.depth, target))) {
+    } else if (open.some((target) => nearTarget(host.depth, target, slack))) {
       refuse(refused, host, "spare-outranked", `a bigger host claimed the open target near depth ${host.depth}`);
     } else {
       refuse(
@@ -884,8 +968,8 @@ export function planStasis(view: HoldView): StasisPlan {
   const evictable = linked
     .filter((host) => !host.irreplaceable)
     .sort((a, b) =>
-      Number((view.spareTargets ?? []).some((target) => nearTarget(a.depth, target)))
-      - Number((view.spareTargets ?? []).some((target) => nearTarget(b.depth, target)))
+      Number((view.spareTargets ?? []).some((target) => nearTarget(a.depth, target, slack)))
+      - Number((view.spareTargets ?? []).some((target) => nearTarget(b.depth, target, slack)))
       || (a.depth ?? -1) - (b.depth ?? -1)
       || (a.maxRam ?? 0) - (b.maxRam ?? 0)
       || (a.hostname < b.hostname ? -1 : 1));
@@ -894,7 +978,7 @@ export function planStasis(view: HoldView): StasisPlan {
       release.push(evictable[0]!.hostname);
     } else if (spares.length > 0) {
       const offTarget = evictable.find((host) =>
-        !(view.spareTargets ?? []).some((target) => nearTarget(host.depth, target)));
+        !(view.spareTargets ?? []).some((target) => nearTarget(host.depth, target, slack)));
       if (offTarget) release.push(offTarget.hostname);
     }
   }
@@ -920,6 +1004,14 @@ export function migrationCalls(difficulty: number, charisma: number, threads = 1
   const per = migrationChargePerCall(difficulty, charisma, threads);
   return per > 0 ? Math.ceil(1 / per) : Infinity;
 }
+
+/** How long after the authenticate's expected completion the wave-closing
+ * landing must arrive. The landing re-rolls the host's edges, and an
+ * authenticate still in flight across one of them would die 351 — but a
+ * charge call is 6 s long, so "close after the auth" is pure scheduling: the
+ * closing call may FIRE the moment the auth's remaining time fits inside the
+ * call's own flight minus this margin. */
+export const PRECHARGE_MARGIN_MS = 200;
 
 /** Whether a host's migration band can even reach the bottom row.
  *
@@ -1051,6 +1143,25 @@ export function planInduce(view: HoldView): InducePlan {
   // As observed — knowledge may be missing seats we have never seen, so this
   // errs toward NOT evicting, which is the direction that spends nothing.
   const bottomFull = bottomCount >= NET_WIDTH;
+  // The frontier's PROGRESS criterion: our deepest standing agent, and how
+  // deep a host's migration band can actually reach (air-gap rows hold
+  // nothing). A push only counts as frontier work when the band reaches
+  // STRICTLY past the coverage — a band we already stand at the bottom of is
+  // a random walk, not progress, and pushing it was the old pump.
+  const deepestCovered = live.reduce(
+    (held, host) => (host.agentAlive && host.depth !== undefined && host.depth > held ? host.depth : held),
+    -1,
+  );
+  /** Targets whose last authenticate still has more time left than a charge
+   * call's flight — `assign` charges them flat out but holds the CLOSING
+   * landing until the remainder fits. */
+  const holdClosing = new Set<string>();
+  const bandDeepest = (difficulty: number): number => {
+    for (let row = Math.min(difficulty + 4, view.netDepth - 1); row >= Math.max(0, difficulty - 2); row--) {
+      if (!isOnAirGap(row)) return row;
+    }
+    return -1;
+  };
 
   for (const host of live) {
     if (host.isStationary) {
@@ -1078,13 +1189,21 @@ export function planInduce(view: HoldView): InducePlan {
       else refuse(refused, host, "already-there", "already on the bottom row, so already connected to the labyrinth");
       continue;
     }
-    if (!host.hasCredential) {
+    const preCracking = view.aboutToCrack?.has(host.hostname) === true && !host.hasCredential;
+    if (!host.hasCredential && !preCracking) {
       // The one refusal that fixes itself: a push moves the host wherever it
       // lands, but only a host we have AUTHENTICATED carries anything of ours
       // when it does — the session and any resident ride the move. The answer
-      // is the cracking queue, not more charge.
+      // is the cracking queue, not more charge. EXCEPT a host one candidate
+      // from cracked: `induceServerMigration` needs only the direct edge, so
+      // its wave PRE-CHARGES to the ceiling while the last authenticate is in
+      // flight, and closes the moment the credential and plant land.
       refuse(refused, host, "not-ours", "only an authenticated host is worth pushing; crack it first");
       continue;
+    }
+    if (preCracking
+      && view.aboutToCrack!.get(host.hostname)! > INDUCE_WAIT_MS - PRECHARGE_MARGIN_MS) {
+      holdClosing.add(host.hostname);
     }
     if (view.needLabVantage !== false && canReachBottomRow(host.difficulty, view.netDepth)) {
       labPool.push(host);
@@ -1092,7 +1211,7 @@ export function planInduce(view: HoldView): InducePlan {
     }
     // Standing inside an open stasis window: `planStasis` pins it where it is,
     // and a re-roll is the one thing that could move it OUT.
-    if (openTargets.some((target) => nearTarget(host.depth, target))) {
+    if (openTargets.some((target) => nearTarget(host.depth, target, view.spareSlack ?? STASIS_TARGET_SLACK))) {
       refuse(refused, host, "on-target", "already inside an open stasis target's window; pinning it beats re-rolling it");
       continue;
     }
@@ -1105,8 +1224,10 @@ export function planInduce(view: HoldView): InducePlan {
       continue;
     }
     // A ferry: the band reaches into a band no resident of ours stands in.
-    // The resident IS the payload, so only a host carrying one qualifies.
-    const ferryBand = host.agentAlive
+    // The resident IS the payload, so only a host carrying one qualifies —
+    // or one about to: a pre-charging candidate's plant lands with its crack,
+    // before the wave is allowed to close.
+    const ferryBand = host.agentAlive || preCracking
       ? unconquered.find((band) => band.some((row) =>
         host.difficulty! - 2 <= row && row <= host.difficulty! + 4))
       : undefined;
@@ -1115,9 +1236,10 @@ export function planInduce(view: HoldView): InducePlan {
       ferryBandFor.set(host.hostname, ferryBand);
       continue;
     }
-    // The band's centre is difficulty + 1: at or above it a re-roll moves the
-    // host deeper on average, below it the same roll is as likely to lift it.
-    if (host.depth !== undefined && host.depth <= host.difficulty + 1) {
+    // Frontier PROGRESS: the band must reach strictly past our deepest
+    // standing agent, or a re-roll cannot extend the conquest at all — it
+    // only shuffles rows we already reach, which is the retired pump.
+    if (host.depth !== undefined && bandDeepest(host.difficulty!) > deepestCovered) {
       frontierPool.push(host);
       continue;
     }
@@ -1125,8 +1247,8 @@ export function planInduce(view: HoldView): InducePlan {
       refused,
       host,
       "no-gain",
-      `difficulty ${host.difficulty} bands it to ${host.difficulty + 4} at best (short of row ${bottom}),`
-      + ` and at depth ${host.depth ?? "unplaced"} a re-roll around ${host.difficulty + 1} is as likely to lift it`,
+      `difficulty ${host.difficulty} bands it to row ${bandDeepest(host.difficulty!)} at best,`
+      + ` and our coverage already stands at row ${deepestCovered} — a re-roll cannot extend the conquest`,
     );
   }
 
@@ -1150,11 +1272,11 @@ export function planInduce(view: HoldView): InducePlan {
     (b.maxRam ?? 0) - (a.maxRam ?? 0)
     || (ferryBandFor.get(b.hostname)?.[0] ?? 0) - (ferryBandFor.get(a.hostname)?.[0] ?? 0)
     || (a.hostname < b.hostname ? -1 : 1));
-  // Biggest first, ties by how far below the band's centre the host sits —
-  // the expected depth gained by one landing.
+  // Deepest REACH first — the band that extends the conquest furthest is the
+  // push worth the pushers — then biggest RAM, then the name.
   frontierPool.sort((a, b) =>
-    (b.maxRam ?? 0) - (a.maxRam ?? 0)
-    || ((b.difficulty ?? 0) + 1 - (b.depth ?? 0)) - ((a.difficulty ?? 0) + 1 - (a.depth ?? 0))
+    bandDeepest(b.difficulty ?? 0) - bandDeepest(a.difficulty ?? 0)
+    || (b.maxRam ?? 0) - (a.maxRam ?? 0)
     || (a.hostname < b.hostname ? -1 : 1));
   // SMALLEST first for the seat we want EMPTIED: the worst stranger is the
   // cheapest loss and the same one seat.
@@ -1162,41 +1284,90 @@ export function planInduce(view: HoldView): InducePlan {
     (a.maxRam ?? 0) - (b.maxRam ?? 0)
     || (a.hostname < b.hostname ? -1 : 1));
 
-  // One push per PUSHER, any number per TARGET: the charge accumulates on the
-  // target, so every unused adjacent agent joins the highest-priority target
-  // it can reach. A pusher spent on one target is unavailable for the next —
-  // which is what makes the purpose order below a real priority.
+  // One push per PUSHER, any number per TARGET — up to the CHARGE BUDGET: the
+  // engine's migration charge is additive on the target and resets at 1, so
+  // the useful allocation per target is exactly the threads that take the
+  // believed remaining charge to 100% in one 6 s wave. Threads past that are
+  // overshoot the reset throws away; threads short of it just take more
+  // waves, which is fine — a pusher spent here is unavailable for the next
+  // target, and THAT is what makes the purpose order below a real priority.
   const pushes: InducePlan["pushes"] = [];
-  const usedPushers = new Set<string>();
+  /** Threads a pusher still has to give. A pusher is not binary: its RAM is a
+   * pool, and a wave that needs less than the pool leaves the rest for the
+   * NEXT target — run as a linked one-off sidecar beside the main push, both
+   * 6 s calls in lockstep. At most two targets per pusher: a host runs one
+   * main order and one sidecar. */
+  const pusherPool = new Map<string, { threads: number; targets: number }>();
+  const poolFor = (pusher: HoldHost): { threads: number; targets: number } => {
+    let held = pusherPool.get(pusher.hostname);
+    if (held === undefined) {
+      const affordable = view.induceGbPerThread !== undefined && view.induceGbPerThread > 0
+        ? Math.max(1, Math.floor((pusher.freeGb ?? 0) / view.induceGbPerThread))
+        : 1;
+      held = { threads: affordable, targets: 0 };
+      pusherPool.set(pusher.hostname, held);
+    }
+    return held;
+  };
   const assign = (
     host: HoldHost,
     purpose: InducePurpose,
     reasonFor: (host: HoldHost, calls: number) => string,
   ): boolean => {
     // Somebody adjacent has to do the pushing, and it cannot be the host
-    // itself. Roomiest first: threads come from the pusher, so its RAM is the
-    // charge rate.
+    // itself. Roomiest remaining pool first: threads come from the pusher,
+    // so its RAM is the charge rate.
     const pushers = live
       .filter((other) =>
         other.hostname !== host.hostname
         && other.agentAlive
-        && !usedPushers.has(other.hostname)
+        && poolFor(other).threads >= 1
+        && poolFor(other).targets < 2
         && (other.neighbours?.includes(host.hostname) ?? false))
-      .sort((a, b) => (b.freeGb ?? 0) - (a.freeGb ?? 0) || (a.hostname < b.hostname ? -1 : 1));
+      .sort((a, b) => poolFor(b).threads - poolFor(a).threads || (a.hostname < b.hostname ? -1 : 1));
     if (pushers.length === 0) {
       refuse(refused, host, "no-pusher", "induceServerMigration cannot target its own host, and no free neighbour of ours is standing next to it");
       return false;
     }
-    for (const pusher of pushers) {
-      usedPushers.add(pusher.hostname);
-      // Threads come from the PUSHER: the charge is linear in the calling
-      // script's threads and the 6 s wait is constant, so every thread the
-      // pusher's RAM affords divides the project's call count directly. No
-      // ceiling — the per-thread price reserves base and spawn, and RAM is the
-      // only bound.
-      const threads = view.induceGbPerThread !== undefined && view.induceGbPerThread > 0
-        ? Math.max(1, Math.floor((pusher.freeGb ?? 0) / view.induceGbPerThread))
-        : 1;
+    // The wave budget: threads needed to close the believed remaining charge.
+    // A held-closing target (its last authenticate still flying longer than a
+    // charge call's flight) charges flat out but stops ONE LANDING short of
+    // 100% — total assigned charge stays under the close however the threads
+    // split across pushers' calls — and the closing call fires on a later
+    // pass, once the auth's remainder fits inside the call's own 6 s.
+    const perThread = migrationChargePerCall(host.difficulty!, view.charisma, 1);
+    const charge = Math.min(1, Math.max(0, view.migrationCharge?.get(host.hostname) ?? 0));
+    const fullWave = perThread > 0 ? Math.ceil((1 - charge) / perThread) : 1;
+    let neededThreads = holdClosing.has(host.hostname) ? Math.max(0, fullWave - 1) : fullWave;
+    if (neededThreads <= 0) {
+      // A held-closing target whose whole wave is a single call: the one call
+      // left IS the close, and it is being held for the in-flight
+      // authenticate. Refused by name rather than dropped, or the host would
+      // vanish from both the plan and the ledger that explains it.
+      refuse(
+        refused,
+        host,
+        "charge-held",
+        "one call from a completed migration, and that closing landing is held until the in-flight authenticate lands",
+      );
+      return false;
+    }
+    const pusherCap = view.maxPushersPerTarget ?? pushers.length;
+    let admitted = false;
+    for (const pusher of pushers.slice(0, Math.max(1, pusherCap))) {
+      if (neededThreads <= 0) break;
+      // Threads come from the PUSHER's remaining pool: the charge is linear
+      // in the calling script's threads and the 6 s wait is constant. Capped
+      // at what the wave still needs, so a giant pusher does not overshoot
+      // the reset — and what it does not spend here stays in its pool for
+      // the next target's sidecar.
+      const pool = poolFor(pusher);
+      const threads = Math.min(pool.threads, neededThreads);
+      if (threads < 1) continue;
+      pool.threads -= threads;
+      pool.targets += 1;
+      neededThreads -= threads;
+      admitted = true;
       const calls = migrationCalls(host.difficulty!, view.charisma, threads);
       pushes.push({
         host: host.hostname,
@@ -1207,7 +1378,7 @@ export function planInduce(view: HoldView): InducePlan {
         purpose,
       });
     }
-    return true;
+    return admitted;
   };
 
   // Eviction only while a candidate is actually waiting for the seat — an
@@ -1220,18 +1391,23 @@ export function planInduce(view: HoldView): InducePlan {
         + ` off row ${bottom} to free a seat for a lab candidate — ~${calls} calls`)) break;
     }
   }
-  // One lab candidate: the walk needs one vantage, and racing two hosts
-  // toward the same row wastes the loser. Same rule per seat window and per
-  // ferried band below, with the also-rans refused by name.
-  let labChosen = false;
+  // RACE the lab candidates, most promising first (the pool is sorted RAM
+  // then difficulty): each `assign` consumes only the pushers its wave needs,
+  // so once the best candidate's induce is fully powered there is no reason
+  // not to spend the LEFTOVER pushers racing the next — a landing is a
+  // uniform re-roll inside the band, and at depth 36 minting that last
+  // bottom-row vantage is the dominant term of the whole conquest. Pusher
+  // depletion is the limiter; `maxLabCandidates` caps it for the benchmark's
+  // single-candidate arm.
+  let labRaced = 0;
   for (const host of labPool) {
-    if (labChosen) {
-      refuse(refused, host, "push-covered", "a bigger host is already being pushed toward the bottom row");
+    if (labRaced >= (view.maxLabCandidates ?? Infinity)) {
+      refuse(refused, host, "push-covered", "the lab race is already fully staffed");
       continue;
     }
-    labChosen = assign(host, "lab", (chosen, calls) =>
+    if (assign(host, "lab", (chosen, calls) =>
       `${(chosen.maxRam ?? 0)}GB at difficulty ${chosen.difficulty}, band reaches row ${bottom}`
-      + ` — ~${calls} calls`);
+      + ` — ~${calls} calls`)) labRaced++;
   }
   const seatCovered = new Set<number>();
   for (const host of seatPool) {
@@ -1244,28 +1420,51 @@ export function planInduce(view: HoldView): InducePlan {
       `${(chosen.maxRam ?? 0)}GB at depth ${chosen.depth ?? "unplaced"}, band covers the open`
       + ` stasis target at row ${target} — ~${calls} calls a roll`)) seatCovered.add(target);
   }
-  const ferried = new Set<number>();
+  // RACE the ferries too, biggest carrier first: a crossing is a uniform
+  // re-roll into the band, so N carriers charging at once multiply the
+  // per-wave chance of an actual landing — the same argument as the lab race,
+  // and crossing an air gap is the trickiest hop of the whole conquest.
+  const ferried = new Map<number, number>();
   for (const host of ferryPool) {
     const band = ferryBandFor.get(host.hostname)!;
     const label = `${band[0]}-${band[band.length - 1]}`;
-    if (ferried.has(band[0]!)) {
-      refuse(refused, host, "push-covered", `a bigger host is already being ferried into rows ${label}`);
+    if ((ferried.get(band[0]!) ?? 0) >= (view.maxFerriesPerBand ?? Infinity)) {
+      refuse(refused, host, "push-covered", `the ferry race into rows ${label} is already fully staffed`);
       continue;
     }
     if (assign(host, "ferry", (chosen, calls) =>
       `${(chosen.maxRam ?? 0)}GB with a resident riding, band crosses the air gap into unconquered`
-      + ` rows ${label} — ~${calls} calls a roll`)) ferried.add(band[0]!);
+      + ` rows ${label} — ~${calls} calls a roll`)) ferried.set(band[0]!, (ferried.get(band[0]!) ?? 0) + 1);
   }
+  let frontierPushed = 0;
   for (const host of frontierPool) {
-    assign(host, "frontier", (chosen, calls) =>
+    if (frontierPushed >= (view.maxFrontierTargets ?? Infinity)) {
+      refuse(refused, host, "push-covered", "the pass's frontier push budget is spent");
+      continue;
+    }
+    if (assign(host, "frontier", (chosen, calls) =>
       `${(chosen.maxRam ?? 0)}GB at depth ${chosen.depth}, expected landing ${chosen.difficulty! + 1}`
-      + ` — deeper on average; ~${calls} calls`);
+      + ` — deeper on average; ~${calls} calls`)) frontierPushed++;
   }
 
   // An evictee left standing is a bottom-row host like any other.
   for (const host of evictPool) {
     if (pushes.some((entry) => entry.host === host.hostname)) continue;
     refuse(refused, host, "already-there", "already on the bottom row, so already connected to the labyrinth");
+  }
+
+  // OVERSCALE: a pusher whose pool outlived every target's wave hands the
+  // surplus to its own push anyway. The overshoot past 100% is thrown away by
+  // the reset, but every thread still pays charisma exp (5 x threads x
+  // difficulty per call, granted before the clamp) — strictly better than
+  // idle RAM. Never onto a held-closing target: extra threads there could
+  // close the wave under the in-flight authenticate.
+  for (const push of pushes) {
+    const pool = pusherPool.get(push.from);
+    if (pool === undefined || pool.threads < 1) continue;
+    if (holdClosing.has(push.host)) continue;
+    push.threads += pool.threads;
+    pool.threads = 0;
   }
   return { pushes, refused };
 }

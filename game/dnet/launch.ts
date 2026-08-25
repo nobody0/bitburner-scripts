@@ -19,6 +19,10 @@ export interface DnetAgentLaunch extends ScriptLaunch {
   /** Minimal local worker used while owner-blocked RAM cannot yet fit the
    * ordinary prober+resident pair. */
   readonly bootstrapReclaim?: boolean;
+  /** A LINKED ONE-OFF: claim the order the `launchSidecar` hop staged into
+   * `entry.sidecarOrder`, report through the entry's sidecar slot, and exit —
+   * no resident, no spawn, no successor. */
+  readonly oneOff?: boolean;
 }
 
 /** Controller-owned readiness barrier for one exact prober launch. Object

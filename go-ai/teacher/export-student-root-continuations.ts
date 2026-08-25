@@ -9,7 +9,7 @@ import {
   GoNeuralEngine, finalizeNeuralGoDecision, prepareNeuralGoDecision,
   selectV9ProposalFinalists,
 } from "../../shared/strategy/go/neural/engine.ts";
-import { KataGoAdvisor, KATAGO_MODELS, type KataGoMove } from "../katago/advisor.ts";
+import { KataGoAdvisor, KATAGO_MODELS } from "../katago/advisor.ts";
 import {
   GO_ARENA_OPPONENTS, decideGoArenaBlack, goArenaSeedPairs,
   playGoArenaContinuationTrace, playGoArenaImmediateReply,
@@ -105,14 +105,6 @@ function decisionAction(decision: { action: { type: string; x?: number; y?: numb
   if (decision.action.type === "pass") return size * size;
   if (decision.action.type === "move") return decision.action.x! * size + decision.action.y!;
   throw new Error(`unexpected arena action ${decision.action.type}`);
-}
-function initialState(trace: GoArenaTurnTrace): GoArenaInitialState {
-  return {
-    board: { size: trace.board.length, rows: [...trace.board] },
-    previousBoards: trace.previousBoards.map((board) => [...board]),
-    consecutivePasses: trace.consecutivePasses,
-    dispatchPlaytime: trace.dispatchPlaytime,
-  };
 }
 function afterState(trace: GoArenaTurnTrace): string {
   const next = advance(trace);

@@ -156,7 +156,7 @@ function getExactCharactersHint(lastPassword: string, realPassword: string): str
   const correctCharPlacement = getExactCorrectChars(realPassword, lastPassword);
   const rightChars = realPassword
     .split("")
-    .filter((c, i) => correctCharPlacement[i])
+    .filter((_, i) => correctCharPlacement[i])
     .slice(0, 2);
   if (rightChars.length === 0) return "No characters are in the right place.";
   return `The characters ${rightChars.join(", ")} are in the right place. `;

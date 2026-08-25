@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { setGoNeuralRuntimeForTest } from "../../game/lib/features/remaining.ts";
 import { parseGoals } from "../../shared/goals/presets.ts";
 import { StubGoValueBackend } from "../../tests/support/go-value-backend.ts";

@@ -1,6 +1,5 @@
 import { execSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
-import path from "node:path";
 import { FEATURE_IDS, type FeatureId } from "../shared/features/ids.ts";
 import { only, type FeatureOverrides } from "../shared/features/profile.ts";
 import { initialContext, reduceRecord } from "../shared/goals/evaluate.ts";

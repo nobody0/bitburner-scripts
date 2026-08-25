@@ -465,6 +465,51 @@ export function phishMoneyChance(charisma: number, crimeSuccessMult = 1): number
   return 0.05 * crimeSuccessMult * ((200 + charisma) / 200);
 }
 
+function probability(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+/** Forward rates from the exact upstream branch order. A cache success owns
+ * the call, otherwise the independent money roll runs; either success pays
+ * full charisma XP and the failure path pays one quarter. */
+export function phishExpectedRates(input: {
+  depth: number;
+  threads: number;
+  charisma: number;
+  cacheWindowOpen: boolean;
+  crimeSuccessMult?: number;
+  charismaExpMult?: number;
+  crimeMoneyMult?: number;
+  dnetMoneyMult?: number;
+  nodeMoneyMult?: number;
+}): { moneyPerSec: number; charismaExpPerSec: number } {
+  const waitSec = phishWaitMs(input.charisma) / 1_000;
+  const cacheChance = input.cacheWindowOpen
+    ? probability(phishCacheChance(input.threads, input.charisma, input.crimeSuccessMult ?? 1))
+    : 0;
+  const moneyChance = probability(phishMoneyChance(input.charisma, input.crimeSuccessMult ?? 1));
+  const moneySuccess = (1 - cacheChance) * moneyChance;
+  const anySuccess = cacheChance + moneySuccess;
+  const fullXp = phishCharismaExp(input.threads) * (input.charismaExpMult ?? 1);
+  return {
+    moneyPerSec: moneySuccess * phishMoney(input.depth, input.threads, input.charisma, {
+      crimeMoney: input.crimeMoneyMult,
+      dnetMoney: input.dnetMoneyMult,
+      nodeMult: input.nodeMoneyMult,
+    }) / waitSec,
+    charismaExpPerSec: fullXp * (0.25 + 0.75 * anySuccess) / waitSec,
+  };
+}
+
+export function promoteExpectedCharismaExpPerSec(
+  threads: number,
+  charisma: number,
+  charismaExpMult = 1,
+): number {
+  const expPerCall = threads * 10 * ((200 + charisma) / 200) * charismaExpMult;
+  return expPerCall / (promoteWaitMs(charisma) / 1_000);
+}
+
 // --- the storm ---------------------------------------------------------------
 //
 // `STORM_SEED.exe` and the webstorm it fires are the whole reason these numbers

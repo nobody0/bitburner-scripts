@@ -3,7 +3,7 @@ import { LOCAL_CODE, type ReportHost } from "../../shared/strategy/dnet/courier.
 import { isDarknetDataFile, parseDarknetFileClue } from "../../shared/strategy/dnet/file-clues.ts";
 import { harvestLogs } from "../../shared/strategy/dnet/oracle.ts";
 import { grammarDrift, LOG_LINES, targetStateFor } from "./report-shared.ts";
-import { handoffLaunch, temporaryRunOptions } from "../lib/launch-shared.ts";
+import { handoffLaunch, temporaryRunOptions, type LaunchOutcome } from "../lib/launch-shared.ts";
 import type { DnetAgentLaunch, DnetProberLaunch } from "./launch.ts";
 import {
   KIND_CALLS,
@@ -37,17 +37,31 @@ type OrderResult = Omit<Report, "id" | "kind" | "host" | "from">;
 const STORM_SEED_FILE = "STORM_SEED.exe";
 
 /** Everything one `ls` teaches about a darknet host, in one call. */
-function listingOn(jobNs: NS, host: string, deps: ControllerDeps): { caches: string[]; contracts: string[]; stormSeed: boolean } {
+interface HostListing {
+  caches: string[];
+  contracts: string[];
+  stormSeed: boolean;
+  dataFilesRead: number;
+  dataFilesParsed: number;
+}
+
+function listingOn(jobNs: NS, host: string, deps: ControllerDeps): HostListing {
   const names = jobNs["ls"](host);
   const at = Date.now();
+  let dataFilesRead = 0;
+  let dataFilesParsed = 0;
   for (const name of names) {
     if (isDarknetDataFile(name)) {
+      dataFilesRead++;
       const clue = parseDarknetFileClue(jobNs["read"](name), at);
       if (clue?.kind === "named-password") {
+        dataFilesParsed++;
         deps.recordProvisional({ hostname: clue.hostname, password: clue.password, via: "data-file", at });
       } else if (clue?.kind === "neighbour-password") {
+        dataFilesParsed++;
         deps.recordNeighbourPassword(host, clue.password, at);
       } else if (clue?.kind === "evidence") {
+        dataFilesParsed++;
         deps.recordFileEvidence(clue.hostname, clue.evidence);
       }
       jobNs["rm"](name, host);
@@ -59,7 +73,13 @@ function listingOn(jobNs: NS, host: string, deps: ControllerDeps): { caches: str
     caches: names.filter((name) => name.endsWith(".cache")),
     contracts: names.filter((name) => name.endsWith(".cct")),
     stormSeed: names.includes(STORM_SEED_FILE),
+    dataFilesRead,
+    dataFilesParsed,
   };
+}
+
+function reportableListing(listing: HostListing): Pick<HostListing, "caches" | "contracts" | "stormSeed"> {
+  return { caches: listing.caches, contracts: listing.contracts, stormSeed: listing.stormSeed };
 }
 
 /** One host, as the caller can see it from where it is standing. */
@@ -83,7 +103,7 @@ function describeHost(jobNs: NS, host: string, deps: ControllerDeps, withListing
     passwordHint: details.passwordHint,
     data: details.data,
     logTrafficInterval: details.logTrafficInterval,
-    ...(withListing ? listingOn(jobNs, host, deps) : {}),
+    ...(withListing ? reportableListing(listingOn(jobNs, host, deps)) : {}),
   };
 }
 
@@ -180,9 +200,32 @@ async function plantOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
     jobCodes[LOCAL_CODE.LaunchRefused] = 1;
     return diagnose("scp refused", "launch-refused");
   }
+  // A replant RACES the RAM of the process it replaces: a managed handoff (or
+  // a finished order) wakes the controller synchronously, but the engine only
+  // frees the dead process's allocation on its next tick — so the first exec
+  // can see a "full" host that is actually empty. A refused exec gets a
+  // breath and another try before it counts as a real refusal; each failed
+  // one otherwise stamps the 60 s plant cooldown, and the observed result was
+  // a roomy stasis host spending most of its life prober-only.
+  // ONLY a refused exec is retried. `handoffLaunch` also returns 0 when the
+  // child DID start and merely failed to acknowledge its descriptor in time:
+  // that process is alive and holding its RAM (and an agent with no
+  // descriptor falls back to its `ns.args` host and becomes a resident), so a
+  // retry would stack a second and third copy on the host instead of
+  // replacing the first.
+  const execWithGrace = async (
+    launchAttempt: (outcome: LaunchOutcome) => Promise<number>,
+  ): Promise<number> => {
+    for (let attempt = 0; ; attempt++) {
+      const outcome: LaunchOutcome = {};
+      const pid = await launchAttempt(outcome);
+      if (pid !== 0 || outcome.refused !== true || attempt >= 2) return pid;
+      await jobNs["asleep"](300);
+    }
+  };
   if (order.bootstrapReclaim === true) {
     const threads = Math.max(1, order.bootstrapThreads ?? 1);
-    const pid = await handoffLaunch<DnetAgentLaunch>(
+    const pid = await execWithGrace((outcome) => handoffLaunch<DnetAgentLaunch>(
       { kind: "dnet-agent", host: order.host, bootstrapReclaim: true },
       (launchId) => jobNs["exec"](
         (order.payloads ?? [])[0]!,
@@ -190,7 +233,8 @@ async function plantOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
         temporaryRunOptions({ threads, ramOverride: priceCalls(jobNs, KIND_CALLS.bootstrapReclaim) }),
         launchId,
       ),
-    );
+      outcome,
+    ));
     if (pid === 0) {
       jobCodes[LOCAL_CODE.LaunchRefused] = 1;
       return diagnose("exec refused while launching local reclaim", "launch-refused");
@@ -218,10 +262,11 @@ async function plantOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
     : proberFile === undefined || controller === undefined || claim === undefined
       ? 0
       : claim.launch
-        ? await handoffLaunch<DnetProberLaunch>(
+        ? await execWithGrace((outcome) => handoffLaunch<DnetProberLaunch>(
           { kind: "dnet-prober", host: order.host, refresh: claim.refresh },
           (launchId) => jobNs["exec"](proberFile, order.host, temporaryRunOptions({ threads: 1, ramOverride: proberReserveGb(jobNs) }), launchId),
-        )
+          outcome,
+        ))
         : -1;
   if (proberPid === 0) {
     if (claim !== undefined) controller?.cancelProbeRefresh(order.host, claim.refresh);
@@ -236,7 +281,7 @@ async function plantOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
   const agentThreads = next?.threads ?? 1;
   const agentRam = next?.ramOverrideGb
     ?? priceCalls(jobNs, orderCalls("idle", prepared.controllerManaged));
-  const pid = await handoffLaunch<DnetAgentLaunch>(
+  const pid = await execWithGrace((outcome) => handoffLaunch<DnetAgentLaunch>(
     {
       kind: "dnet-agent",
       host: order.host,
@@ -248,7 +293,8 @@ async function plantOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
       temporaryRunOptions({ threads: agentThreads, ramOverride: agentRam }),
       launchId,
     ),
-  );
+    outcome,
+  ));
   if (pid === 0) {
     if (proberPid > 0) jobNs["kill"](proberPid);
     jobCodes[LOCAL_CODE.LaunchRefused] = 1;
@@ -326,7 +372,7 @@ async function cacheOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
     return {
       ok: false,
       codes: { "404": 1 },
-      hosts: [{ ...describeHost(jobNs, order.host, deps, false, true), ...heldListing }],
+      hosts: [{ ...describeHost(jobNs, order.host, deps, false, true), ...reportableListing(heldListing) }],
       detail: `${wanted} is no longer on ${order.host}`,
     };
   }
@@ -337,16 +383,26 @@ async function cacheOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
     return {
       ok: false,
       codes: { "404": 1 },
-      hosts: [{ ...describeHost(jobNs, order.host, deps, false, true), ...listingOn(jobNs, order.host, deps) }],
+      hosts: [{ ...describeHost(jobNs, order.host, deps, false, true), ...reportableListing(listingOn(jobNs, order.host, deps)) }],
       detail: `openCache threw on ${wanted}: ${String(error)}`.slice(0, 200),
     };
   }
+  const after = listingOn(jobNs, order.host, deps);
+  const heldContracts = new Set(heldListing.contracts);
+  const contractsCreated = after.contracts.filter((file) => !heldContracts.has(file)).length;
   return {
     ok: opened.success,
     codes: { [String(opened.success ? 200 : 404)]: 1 },
     ...(opened.success ? { karmaLoss: opened.karmaLoss } : {}),
-    ...(opened.success ? { profit: cacheProfit(opened.message) } : {}),
-    hosts: [{ ...describeHost(jobNs, order.host, deps, false, true), ...listingOn(jobNs, order.host, deps) }],
+    ...(opened.success ? {
+      profit: cacheProfit(opened.message, {
+        filename: wanted,
+        contractsCreated,
+        dataFilesRead: after.dataFilesRead,
+        dataFilesParsed: after.dataFilesParsed,
+      }),
+    } : {}),
+    hosts: [{ ...describeHost(jobNs, order.host, deps, false, true), ...reportableListing(after) }],
     detail: opened.message.slice(0, 200),
   };
 }
@@ -391,11 +447,18 @@ async function induceOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderR
   count(pushed.code);
   const after = describeHost(jobNs, order.host, deps);
   const moved = before.isOnline && after.present === true && after.depth !== before.depth;
+  // The response is the ONLY read-back of the engine's accumulated charge:
+  // "Migration prep is now at X.XX%". A completed move resets it to zero.
+  // `String.prototype.match`, never a RegExp method call named like an ns
+  // member — see the file header's RAM rule.
+  const prep = pushed.message.match(/prep is now at\s+([\d.]+)%/i);
+  const induceCharge = moved ? 0 : prep !== null ? Number(prep[1]) / 100 : undefined;
   return {
     ok: pushed.success,
     codes: jobCodes,
     ...targetStateFor(pushed.code),
     hosts: [after],
+    ...(induceCharge !== undefined && Number.isFinite(induceCharge) ? { induceCharge } : {}),
     detail: moved
       ? `${order.host} migrated from depth ${before.depth} to ${after.depth}`
       : `one migration charge against ${order.host}; ${pushed.message}`,
@@ -458,6 +521,48 @@ async function stormOrder(jobNs: NS, order: Order, io: AgentIo): Promise<OrderRe
   };
 }
 
+// --- launchSidecar -----------------------------------------------------------
+
+/** The transient exec hop for a linked one-off. Claims the `oneOff`-marked
+ * order out of the staged queue INTO `entry.sidecarOrder` before the exec, so
+ * the ordinary atExit successor chain can never spawn into it, then execs the
+ * one-off at that order's own sizing and chains onward into the main order. */
+async function launchSidecarOrder(jobNs: NS, order: Order): Promise<OrderResult> {
+  const controller = live();
+  const entry = controller?.hosts.get(order.from);
+  if (controller === undefined || entry === undefined) {
+    return { ok: false, codes: {}, detail: "controller unavailable while launching the sidecar" };
+  }
+  const scriptFile = order.filename;
+  if (scriptFile === undefined) return { ok: false, codes: {}, detail: "no agent script on the hop order" };
+  const staged = entry.staged ?? [];
+  const at = staged.findIndex((queued) => queued.oneOff === true);
+  if (at < 0) return { ok: true, codes: {}, detail: "no one-off staged; nothing to launch" };
+  if (entry.sidecar !== undefined || entry.sidecarOrder !== undefined) {
+    return { ok: true, codes: {}, detail: "sidecar slot already occupied" };
+  }
+  const side = staged.splice(at, 1)[0]!;
+  entry.sidecarOrder = side;
+  entry.sidecarOrderAt = Date.now();
+  const pid = await handoffLaunch<DnetAgentLaunch>(
+    { kind: "dnet-agent", host: order.from, oneOff: true },
+    (launchId) => jobNs["exec"](
+      scriptFile,
+      order.from,
+      temporaryRunOptions({ threads: side.threads, ramOverride: side.ramOverrideGb }),
+      launchId,
+    ),
+  );
+  if (pid === 0) {
+    // Drop the claim rather than requeue it: requeued, the resident would hop
+    // straight back here and spin against the same full host. The planner
+    // re-derives the push on its next pass anyway.
+    entry.sidecarOrder = undefined;
+    return { ok: false, codes: { [LOCAL_CODE.LaunchRefused]: 1 }, detail: `exec refused while launching the one-off ${side.kind}` };
+  }
+  return { ok: true, codes: {}, detail: `one-off ${side.kind} pid ${pid}, ${side.threads} thread${side.threads === 1 ? "" : "s"}` };
+}
+
 // --- relaunchProbe -----------------------------------------------------------
 
 async function relaunchProbeOrder(jobNs: NS, order: Order): Promise<OrderResult> {
@@ -502,6 +607,7 @@ export function runOrder(ns: NS, order: Order, io: AgentIo): Promise<OrderResult
     case "pin": return pinOrder(ns, order, io);
     case "storm": return stormOrder(ns, order, io);
     case "relaunchProbe": return relaunchProbeOrder(ns, order);
+    case "launchSidecar": return launchSidecarOrder(ns, order);
     case "idle":
     case "bootstrapReclaim":
       return Promise.resolve({ ok: false, detail: `${order.kind} is not run through the order switch` });

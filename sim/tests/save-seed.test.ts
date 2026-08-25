@@ -6,7 +6,6 @@ import { satisfies, type SatisfyContext } from "../features/requirements.ts";
 import { makeSingularity } from "../ns/singularity.ts";
 import { ProgramSystem } from "../features/programs.ts";
 import { darkwebServerSpec } from "../network.ts";
-import { resetUnmodeled } from "../realm/unmodeled.ts";
 
 describe("save-seeded faction and player state", () => {
   test("the simulated Netscript surface preserves standings, invitations, queued augs, and source files", () => {

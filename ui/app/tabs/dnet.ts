@@ -400,6 +400,7 @@ function detailCard(
       ? host.agent.alive
         ? `<p class="good">resident standing here`
           + `${host.agent.active ? ` — running ${esc(host.agent.active)}` : ""}`
+          + `${host.agent.sidecar ? ` + one-off ${esc(host.agent.sidecar)}` : ""}`
           + `${host.agent.pending ? `, ${host.agent.pending} queued` : ""}</p>`
         : `<p class="bad">resident lost — last beat ${fmtTime(now - host.agent.lastBeatAt)} ago</p>`
       : "")
@@ -1078,6 +1079,14 @@ export const dnetTab: Tab = {
               esc(farming.cacheHunter),
             ] as [Markup, Markup]]
             : []),
+          [
+            hint("expected cash", "forward phishing cash from the admitted fleet; cache rewards are excluded"),
+            `${fmtMoney(farming.expectedMoneyPerSec)}/s`,
+          ],
+          [
+            hint("expected charisma", "exact expected charisma XP from admitted phishing and promotion tasks"),
+            `${fmtNum(farming.expectedCharismaExpPerSec)}/s`,
+          ],
           ...(d.karmaLoss !== undefined
             ? [[
               hint("karma", "karma only ever moves down and survives an install, so a cache is free progress toward the gang's -54000"),
@@ -1131,11 +1140,19 @@ export const dnetTab: Tab = {
           ],
           [
             "phishing",
-            `${profit.phishSuccesses} successful / ${profit.phishAttempts} attempts · ${fmtMoney(profit.phishCash)} · ${profit.phishCaches} caches`,
+            `${profit.phishSuccesses} successful / ${profit.phishAttempts} attempts · ${fmtMoney(profit.phishCash)} · ${profit.phishCachesCreated} caches`,
           ],
           [
             "caches",
             `${profit.cachesOpened} opened · ${fmtMoney(profit.cacheCash)} · ${fmtNum(profit.cacheShares, 0)} shares`,
+          ],
+          [
+            hint("phish cache funnel", "created .d.cache files, opened .d.cache files, then exact .cct files observed after open"),
+            `${profit.phishCachesCreated} created; ${profit.phishCachesOpened} opened; ${profit.cacheContractsCreated} CCT files`,
+          ],
+          [
+            hint("data files", "post-cache files read through the general darknet clue parser and then removed"),
+            `${profit.cacheDataFilesRead} read; ${profit.cacheDataFilesParsed} parsed`,
           ],
           [
             hint("stock promotion", "successful propaganda batches and their threads; raises volatility but has no honest direct-cash attribution"),

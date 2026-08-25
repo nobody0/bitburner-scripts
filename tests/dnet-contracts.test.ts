@@ -99,4 +99,45 @@ describe("darknet contract queue", () => {
     syncDarknetContracts(state, knowledge, 1_100, { bitNode: 15, netDepth: 5 });
     expect(state.contractQueue?.map(contractKey)).toEqual(["dn-1\0alpha.cct"]);
   });
+
+  test("a dirty listing preserves attribution until fresh absence, while retirement clears it", () => {
+    const state = {
+      topics: {}, dirty: new Set(), mirrors: {}, mirrorDirty: new Set(),
+      probeFailures: {}, featureLastRun: {},
+    } as GameState;
+    let knowledge = foldKnowledgeReports(emptyKnowledge("run"), [{
+      hostname: "dn-1", identity: "10.0.0.1", at: 1_000, present: true,
+      contracts: ["alpha.cct"],
+    }], 1_000, { bitNode: 15, netDepth: 5 }).knowledge;
+    syncDarknetContracts(state, knowledge, 1_000, { bitNode: 15, netDepth: 5 });
+    state.darknetContractHandledAt = { ["dn-1\0alpha.cct"]: 1_000 };
+    state.contractQuarantine = { ["dn-1\0bad.cct"]: {
+      host: "dn-1", file: "bad.cct", origin: "darknet", type: "test",
+      data: "[]", answer: "[]", reason: "bad answer", at: 1_000,
+    } };
+
+    knowledge = foldKnowledgeReports(knowledge, [{
+      hostname: "dn-1", at: 1_100, present: true, invalidates: ["files"],
+    }], 1_100, { bitNode: 15, netDepth: 5 }).knowledge;
+    syncDarknetContracts(state, knowledge, 1_100, { bitNode: 15, netDepth: 5 });
+    expect(state.darknetContractListings).toEqual({});
+    expect(state.darknetContractHandledAt?.["dn-1\0alpha.cct"]).toBe(1_000);
+    expect(state.contractQuarantine?.["dn-1\0bad.cct"]).toBeDefined();
+
+    knowledge = foldKnowledgeReports(knowledge, [{
+      hostname: "dn-1", identity: "10.0.0.1", at: 1_200, present: true, contracts: [],
+    }], 1_200, { bitNode: 15, netDepth: 5 }).knowledge;
+    syncDarknetContracts(state, knowledge, 1_200, { bitNode: 15, netDepth: 5 });
+    expect(state.darknetContractHandledAt).toEqual({});
+    expect(state.contractQuarantine).toEqual({});
+
+    state.darknetContractHandledAt = { ["dn-1\0alpha.cct"]: 1_200 };
+    state.contractQuarantine = { ["dn-1\0bad.cct"]: {
+      host: "dn-1", file: "bad.cct", origin: "darknet", type: "test",
+      data: "[]", answer: "[]", reason: "bad answer", at: 1_200,
+    } };
+    syncDarknetContracts(state, knowledge, 1_201, { bitNode: 15, netDepth: 5 }, ["dn-1"]);
+    expect(state.darknetContractHandledAt).toEqual({});
+    expect(state.contractQuarantine).toEqual({});
+  });
 });

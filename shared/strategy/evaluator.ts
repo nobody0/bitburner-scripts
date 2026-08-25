@@ -3,7 +3,6 @@ import {
   hackTimeSeconds,
   expForSkill,
   makeHackContext,
-  skillFromExp,
   weakenTimeSeconds,
   type HackContext,
 } from "../formulas.ts";

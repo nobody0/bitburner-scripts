@@ -15,6 +15,7 @@ import type { CorpState } from "../../../shared/telemetry/topics/corp.ts";
 import type { BladeburnerState } from "../../../shared/telemetry/topics/bladeburner.ts";
 import {
   contractKey,
+  contractOrigin,
   darknetContractsFromListings,
   mergeContractQueue,
   pendingDarknetContracts,
@@ -42,7 +43,6 @@ import { fleetFrom } from "./local.ts";
  * multiplication pure (an operand could have a valueOf), so an arithmetic
  * initializer pins the whole probe object into --perf bundles instead of
  * letting it tree-shake away with the rest of the telemetry code. */
-const SEC_2 = 2_000;
 /** Stock sampling cadence. Strictly BELOW `msPerStockUpdateMin` (4 s): during
  * stored-cycle catch-up the market ticks every 4 s exactly, so a 4 s sampler has
  * zero margin — any stub latency or scheduler jitter straddles two ticks, and a
@@ -50,7 +50,6 @@ const SEC_2 = 2_000;
  * volatility inversion and the cycle clock's tick count. 3 s leaves ~1 s of
  * jitter margin; `observeMarket` is idempotent under the resulting oversampling. */
 const SEC_3 = 3_000;
-const SEC_4 = 4_000;
 const SEC_30 = 30_000;
 const MIN_1 = 60_000;
 const MIN_2 = 120_000;
@@ -1769,12 +1768,16 @@ const sideContracts: DodgedProbe = {
     // discovered file removes itself; leftovers are stale failures to reap.
     const staleQuarantine = new Set(Object.keys(state.contractQuarantine ?? {}));
     let contractTotal = 0;
+    let ordinaryCandidates = 0;
     for (const host of Object.keys(servers).sort()) {
       for (const file of stubNs["ls"](host, ".cct").sort()) {
         contractTotal++;
         const key = `${host}\0${file}`;
         staleQuarantine.delete(key);
-        if (!state.contractQuarantine?.[key] && ordinary.length < CONTRACT_QUEUE_LIMIT) ordinary.push({ host, file });
+        if (!state.contractQuarantine?.[key]) {
+          ordinaryCandidates++;
+          if (ordinary.length < CONTRACT_QUEUE_LIMIT) ordinary.push({ host, file });
+        }
       }
     }
 
@@ -1816,12 +1819,17 @@ const sideContracts: DodgedProbe = {
       .map(({ data: _data, answer: _answer, ...summary }) => summary);
     return [
       emit("side", {
-        contracts: queue.slice(0, CONTRACT_REPORT_LIMIT).map(({ host, file }) => ({ host, file })),
+        contracts: queue.slice(0, CONTRACT_REPORT_LIMIT)
+          .map((contract) => ({ host: contract.host, file: contract.file, origin: contractOrigin(contract) })),
         contractTotal,
         // Types are intentionally unknown until the bounded driver inspection.
         // This is therefore the unquarantined candidate count; unsupported
         // files move out of it as their batches are inspected.
         solvableTotal: Math.max(0, contractTotal - quarantine.length),
+        contractsByOrigin: {
+          network: { observed: contractTotal - allDarknet.length, solvable: ordinaryCandidates },
+          darknet: { observed: allDarknet.length, solvable: darknet.length },
+        },
         unsolvableByType,
         unsolvableTotal,
         registryComplete,

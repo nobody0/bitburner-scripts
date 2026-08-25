@@ -81,6 +81,34 @@ describe("the reach-the-lab arena", () => {
   });
 });
 
+describe("the deep world (air gaps, spares, ferry)", () => {
+  // 3 augs -> ub3r_l4byr1nth: depth 23, air gaps at rows 8 and 16, stasis
+  // limit 3. The world where induce, band conquest, and spare placement are
+  // load-bearing at all — rung 0 has none of them.
+  const DEEP_CAP_MS = 3 * 60 * 60 * 1000;
+  const deep = [1, 2].map((seed) =>
+    runSpreadCase(generateNet(seed, { augs: 3 }), SHIPPED_SPREAD, DEEP_CAP_MS));
+
+  test("the shipped policy conquers a two-gap world inside the cap", () => {
+    for (const run of deep) {
+      expect(run.solved, `${run.caseId}: ${run.reason ?? ""}`).toBe(true);
+      expect(run.caseId).toBe("spread:23");
+      // Every band held an agent well before the walker started.
+      expect(run.msToAllBandsReached).toBeDefined();
+      expect(run.msToAllBandsReached!).toBeLessThanOrEqual(run.msToWalkerStart!);
+    }
+  });
+
+  // A whole deep case re-runs inside the test body (~5-8 s), so it gets an
+  // explicit budget instead of bun's 5 s default.
+  test("a deep seed is deterministic", () => {
+    const again = runSpreadCase(generateNet(1, { augs: 3 }), SHIPPED_SPREAD, DEEP_CAP_MS);
+    expect(again.msToWalkerStart).toBe(deep[0]!.msToWalkerStart!);
+    expect(again.induceCalls).toBe(deep[0]!.induceCalls);
+    expect(again.crackedCount).toBe(deep[0]!.crackedCount);
+  }, 30_000);
+});
+
 describe("the instant-job priority invariant", () => {
   // Jobs with no time cost (probe, ls, exec) run ahead of their numeric
   // priority via the same-turn lane — but of the instant kinds only the plant

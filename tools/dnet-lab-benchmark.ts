@@ -33,6 +33,8 @@ const routes: LabRoute[] = [
   plannerRoute({ unknownCost: 1.5 }),
   plannerRoute({ radarDoorCover: Infinity }),
   plannerRoute({ radarMinCover: 2 }),
+  plannerRoute({ radarEconomicCost: 6 }),
+  plannerRoute({ corridorBias: 0.7 }),
 ];
 const runs = new Map(routes.map((route) => [
   route.name,

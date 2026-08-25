@@ -3,7 +3,6 @@ import { realmSleep } from "../lib/wake.ts";
 import { captureLaunch, temporaryRunOptions } from "../lib/launch-shared.ts";
 import type { DnetAgentLaunch } from "./launch.ts";
 import {
-  KIND_CALLS,
   NO_RESPAWN_KINDS,
   live,
   orderCalls,
@@ -68,6 +67,13 @@ export async function main(ns: NS): Promise<void> {
     } finally {
       finish();
     }
+    return;
+  }
+
+  // A LINKED ONE-OFF: claim the first sidecar-marked staged order, run it,
+  // report through the entry's sidecar slot, and exit. No resident, no spawn.
+  if (launch?.oneOff === true) {
+    await runAsOneOff(ns, host);
     return;
   }
 
@@ -192,20 +198,36 @@ async function runAsResident(ns: NS, host: string, residentGb: number, controlle
     }
 
     const staged = entry.staged ??= [];
-    const next = staged[0];
+
+    // A one-off riding in the queue must launch BESIDE the main order, not
+    // after it — the whole point is that their 6 s calls align. Residents never
+    // carry `exec` (1.3 GB, and PER THREAD on a sized order), so hop through a
+    // transient 1-thread `launchSidecar` process that execs the one-off and
+    // then chains into the main order like any completing order.
+    if (!controllerManaged && entry.sidecar === undefined && entry.sidecarOrder === undefined
+      && staged.some((order) => order.oneOff === true)) {
+      entry.pendingOrder = launcherOrder(ns.getScriptName(), host, priceCalls(ns, orderCalls("launchSidecar", false)));
+      entry.pendingOrderAt = Date.now();
+      state.deliberate = true;
+      respawnFromEntry(ns, host, residentGb);
+      return;
+    }
+
+    // Skip any one-off left in the queue (sidecar slot occupied, or a managed
+    // host that cannot hop): only ordinary orders enter the spawn chain.
+    const next = staged.find((order) => order.oneOff !== true);
     if (next) {
       if (controllerManaged) {
-        // The remote dispatcher claims the order only when it can exec it.
-        // Until then it remains in the durable controller-owned queue.
+        // Stasis idle resident, spawn-free: it cannot run the staged order
+        // itself (a heavier RAM size). Leave the order in the durable staged
+        // queue and wake the controller, which re-execs the host from a free
+        // neighbour (the controller itself has no `exec`).
         if (entry.agent?.pid === ns.pid) entry.agent = undefined;
-        // This is a handoff, not a failed spread attempt. Let the controller
-        // replant immediately instead of imposing the ordinary retry cooldown.
-        entry.lastPlantAt = undefined;
         state.deliberate = true;
         g.wake("stasis-dispatch-requested");
         return;
       }
-      staged.shift();
+      staged.splice(staged.indexOf(next), 1);
       entry.pendingOrder = next;
       entry.pendingOrderAt = Date.now();
       state.deliberate = true;
@@ -214,6 +236,40 @@ async function runAsResident(ns: NS, host: string, residentGb: number, controlle
     }
 
     await waitForWake(entry, RESIDENT_POLL_MS);
+  }
+}
+
+/** The `AgentIo` an order body talks to. `isCurrent` gates every write on the
+ * handle still owning its slot (agent OR sidecar): a hard-killed order whose
+ * zombie `await` resumes must not stamp the map for the process that replaced
+ * it. Shared by the main-order and one-off runners, whose only difference is
+ * which slot they check. */
+function orderIo(g: ControllerHandle, order: Order, handle: AgentHandle, isCurrent: () => boolean): AgentIo {
+  return {
+    beat: (progress) => {
+      if (!isCurrent()) return;
+      handle.beatAt = Date.now();
+      if (progress !== undefined) handle.progress = progress;
+    },
+    setExpectedDoneAt: (at) => {
+      if (!isCurrent()) return;
+      handle.beatAt = Date.now();
+      if (at === undefined) delete order.expectedDoneAt;
+      else order.expectedDoneAt = at;
+    },
+    cancelled: () => (isCurrent() ? handle.cancelReason : "orphaned"),
+    deps: g.deps,
+  };
+}
+
+/** Run one order body to a Report, tagging it with the order's identity and
+ * turning a throw into a failed report rather than a rejection. */
+async function runOrderToReport(ns: NS, order: Order, io: AgentIo): Promise<Report> {
+  const tag = { id: order.id, kind: order.kind, host: order.host, from: order.from };
+  try {
+    return { ...tag, ...(await runOrder(ns, order, io)) };
+  } catch (error) {
+    return { ...tag, ok: false, detail: `${order.kind}: ${String(error)}`.slice(0, 200) };
   }
 }
 
@@ -227,7 +283,6 @@ async function runAsOrder(ns: NS, g: ControllerHandle, entry: HostEntry, order: 
   const respawns = !controllerManaged && !NO_RESPAWN_KINDS.has(order.kind);
 
   let settled = false;
-  let result: Report | undefined;
   let settleDone!: (r: Report) => void;
   const done = new Promise<Report>((resolve) => { settleDone = resolve; });
   const settle = (r: Report): void => {
@@ -268,6 +323,11 @@ async function runAsOrder(ns: NS, g: ControllerHandle, entry: HostEntry, order: 
     } else {
       if (entry.agent === handle) entry.agent = undefined;
       entry.pendingOrder = undefined;
+      // A stasis order that DIED reported it through `settle` above, but the
+      // controller's `onReport` does not wake the derive on a death. Wake it
+      // explicitly so the host is re-staffed promptly rather than waiting for
+      // the mutation sweep.
+      if (controllerManaged) g.wake("stasis-order-died");
     }
   };
   armRespawn(ns, host_of(order), residentGb, state, onDeath, respawns);
@@ -278,30 +338,10 @@ async function runAsOrder(ns: NS, g: ControllerHandle, entry: HostEntry, order: 
   if (handle.cancelReason !== undefined) {
     settle(terminal(order, "cancelled", handle.cancelReason, false));
   } else {
-    const io: AgentIo = {
-      beat: (progress) => {
-        if (entry.agent === handle) {
-          handle.beatAt = Date.now();
-          if (progress !== undefined) handle.progress = progress;
-        }
-      },
-      setExpectedDoneAt: (at) => {
-        if (entry.agent !== handle) return;
-        handle.beatAt = Date.now();
-        if (at === undefined) delete order.expectedDoneAt;
-        else order.expectedDoneAt = at;
-      },
-      cancelled: () => (entry.agent === handle ? handle.cancelReason : "orphaned"),
-      deps: g.deps,
-    };
-    try {
-      const r = await runOrder(ns, order, io);
-      result = { id: order.id, kind: order.kind, host: order.host, from: order.from, ...r };
-    } catch (error) {
-      result = { id: order.id, kind: order.kind, host: order.host, from: order.from, ok: false, detail: `${order.kind}: ${String(error)}`.slice(0, 200) };
-    }
+    const io = orderIo(g, order, handle, () => entry.agent === handle);
+    const result = await runOrderToReport(ns, order, io);
     delete order.expectedDoneAt;
-    settle(result ?? terminal(order, "cancelled", handle.cancelReason ?? "cancelled", false));
+    settle(result);
   }
 
   // A hard kill already ran `onDeath` synchronously (staging and spawning the
@@ -313,21 +353,27 @@ async function runAsOrder(ns: NS, g: ControllerHandle, entry: HostEntry, order: 
   state.deliberate = true;
   handle.pid = 0;
   if (respawns) {
+    // Spawn-capable: poll the successor into `pendingOrder` and spawn into it.
     stageSuccessor(entry);
     respawnFromEntry(ns, order.from, residentGb);
   } else {
-    // pin/walk and stasis-managed work leave recovery to the controller. The
-    // staged queue remains intact and is the successor handoff.
+    // No spawn. The successor stays in the durable staged queue and the host
+    // is left empty for re-staffing from outside — a stasis order's successor
+    // by the controller's re-exec, pin/walk by the spread planner. Both just
+    // wake the derive.
     if (entry.agent === handle) entry.agent = undefined;
     entry.pendingOrder = undefined;
-    if (controllerManaged) entry.lastPlantAt = undefined;
-    g.wake("controller-managed-order-finished");
+    g.wake(controllerManaged ? "stasis-order-finished" : "order-finished");
   }
 }
 
-/** Move `staged[0]` into `pendingOrder` for the next spawn; absent → resident. */
+/** Move the first ORDINARY staged order into `pendingOrder` for the next
+ * spawn; absent → resident. A `oneOff` order is never a successor: only the
+ * resident's `launchSidecar` hop may claim it, at its spawn-free sizing. */
 function stageSuccessor(entry: HostEntry): void {
-  const next = (entry.staged ??= []).shift();
+  const staged = entry.staged ??= [];
+  const at = staged.findIndex((order) => order.oneOff !== true);
+  const next = at < 0 ? undefined : staged.splice(at, 1)[0];
   entry.pendingOrder = next;
   if (next !== undefined) entry.pendingOrderAt = Date.now();
   entry.agent = undefined; // the successor process adopts its own handle
@@ -354,6 +400,55 @@ function terminal(order: Order, targetState: "cancelled" | undefined, detail: st
     ...(targetState !== undefined ? { targetState } : {}),
     ...(died ? { died: true } : {}),
     detail,
+  };
+}
+
+/** One-off mode: run the order the `launchSidecar` hop staged into
+ * `entry.sidecarOrder`, reporting through the entry's SIDECAR slot beside the
+ * main agent. No resident, no spawn, no successor — death settles and clears
+ * the slot, and the controller kills this pid whenever the vantage retires. */
+async function runAsOneOff(ns: NS, host: string): Promise<void> {
+  const g = live();
+  const entry = g?.hosts.get(host);
+  const order = entry?.sidecarOrder;
+  if (g === undefined || entry === undefined || order === undefined || entry.sidecar !== undefined) return;
+  entry.sidecarOrder = undefined;
+
+  const handle = makeHandle(ns, order);
+  delete order.expectedDoneAt;
+
+  ns.atExit(() => {
+    delete order.expectedDoneAt;
+    handle.pid = 0;
+    const cancelled = handle.cancelReason !== undefined;
+    handle.settle(terminal(order, cancelled ? "cancelled" : undefined, handle.cancelReason ?? "one-off killed mid-order", !cancelled));
+    if (entry.sidecar === handle) entry.sidecar = undefined;
+  }, "dnet-oneoff");
+
+  g.adopt(host, handle, true);
+
+  const io = orderIo(g, order, handle, () => entry.sidecar === handle);
+  const result = await runOrderToReport(ns, order, io);
+  delete order.expectedDoneAt;
+  handle.settle(result);
+  // The exit right behind this return fires the atExit, which zeroes the pid
+  // and clears the slot; its terminal settle is a no-op after this one.
+}
+
+/** The transient 1-thread hop that execs a linked one-off. Synthesized by the
+ * resident (never by the controller), so it carries the script name along. */
+function launcherOrder(scriptFile: string, host: string, ramOverrideGb: number): Order {
+  return {
+    id: `launchSidecar:${host}:${Date.now()}`,
+    kind: "launchSidecar",
+    host,
+    from: host,
+    filename: scriptFile,
+    ramOverrideGb,
+    threads: 1,
+    priority: 0,
+    longLived: false,
+    label: "sidecar hop",
   };
 }
 

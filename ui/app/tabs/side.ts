@@ -3,6 +3,7 @@ import type {
   ContractOrigin,
   ContractOriginTotals,
   ContractSolveReport,
+  SideState,
 } from "../../../shared/telemetry/topics/side.ts";
 import { ago } from "../lib/clock.ts";
 import { card, collapsible, definitions, NONE, note, shownOf, table, tiles, waitingPanel } from "../lib/dom.ts";
@@ -14,22 +15,7 @@ import type { Tab } from "./index.ts";
  * state, while a full rejected input/answer is logged once as
  * `contract.quarantined`. */
 
-/** The retained replay, and the only reader of it.
- *
- * This used to fall back to scanning the event tail backwards for the newest
- * `contract.quarantined` record. That scan was dead: the projection assigns
- * `state.contractReplay` from the very record it then pushes onto `events`
- * (ui/app/project.ts), so the scan could only run when the field was already
- * empty — and in that case there was nothing in the ring to find either.
- *
- * The shape check is not dead, and is the reason this is still a function.
- * `data` and `answer` are dereferenced for `.length` below and `tab.render()`
- * (ui/app/main.ts) has no try/catch, so a stored run from an older build with a
- * differently-shaped payload would take down the whole viewer frame rather than
- * one card. The check belongs at the fold — rejecting the record there would
- * keep an earlier valid replay instead of letting a malformed newer one erase
- * it — but the fold casts every topic payload unchecked, so it sits here and
- * the card below says which of the two empty cases it is looking at. */
+/** Persisted payloads are untrusted, and render has no error boundary. */
 function latestReplay(state: ProjectedState): ContractFailure | undefined {
   const value: Partial<ContractFailure> | null = state.contractReplay;
   if (
@@ -47,10 +33,8 @@ function latestReplay(state: ProjectedState): ContractFailure | undefined {
 
 const ORIGINS: ContractOrigin[] = ["network", "darknet"];
 
-/** `render()` has no try/catch (ui/app/main.ts), and a stored run from a build
- * that predates these fields — or one written by a different build entirely —
- * must not take down the whole viewer frame. Same reasoning as `latestReplay`
- * above: check the shape here, then dereference freely. */
+/** Persisted telemetry is untrusted at the render boundary. Validate the
+ * minimum shape once, then dereference freely below. */
 function originTotals(state: ProjectedState): [ContractOrigin, ContractOriginTotals][] {
   const rewards = state.topics.side?.rewards;
   if (!rewards || typeof rewards !== "object") return [];
@@ -76,15 +60,12 @@ function num(value: unknown): string {
   return typeof value === "number" && Number.isFinite(value) ? fmtNum(value) : NONE;
 }
 
-/** Money, and the only place the approximation marker is applied — so a parsed
- * money figure cannot reach the page without it. */
+/** Keep display-precision money visibly distinct from the exact ledger. */
 function approxMoney(value: unknown): string {
   return typeof value === "number" && Number.isFinite(value) ? `≈${fmtMoney(value)}` : NONE;
 }
 
-/** One counter summed across the origins present. Guards each addend because
- * only `attempted` is shape-checked above, and a single bad field from some
- * other build must not turn a whole total into NaN. */
+/** Ignore malformed persisted addends instead of poisoning the total with NaN. */
 function across(rows: [ContractOrigin, ContractOriginTotals][], field: keyof ContractOriginTotals): number {
   let total = 0;
   for (const [, totals] of rows) {
@@ -186,6 +167,13 @@ export const sideTab: Tab = {
     if (!s) return waitingPanel("Coding contracts", "the side probe");
 
     const candidates = s.solvableTotal ?? s.contracts.length;
+    // Persisted telemetry, and `render()` has no try/catch (ui/app/main.ts): a
+    // stored run from a build that predates the per-origin census carries no
+    // `contractsByOrigin`, and dereferencing `.network` on it would take down
+    // the whole viewer frame rather than one tile.
+    const census = typeof s.contractsByOrigin === "object" && s.contractsByOrigin !== null
+      ? s.contractsByOrigin as Partial<SideState["contractsByOrigin"]>
+      : undefined;
     const quarantined = s.quarantinedTotal ?? s.failures?.length ?? 0;
     const typeTotal = s.contractTypeTotal;
     const supportedTypes = s.supportedTypeTotal;
@@ -193,11 +181,14 @@ export const sideTab: Tab = {
       ? `${supportedTypes}/${typeTotal}`
       : s.registryComplete ? "complete" : "–";
     const summary = tiles([
-      { label: "contracts on network", value: fmtNum(s.contractTotal ?? s.contracts.length) },
+      { label: "contracts observed", value: fmtNum(s.contractTotal ?? s.contracts.length) },
       {
         label: "candidate queue",
         value: fmtNum(candidates),
-        sub: `${s.contracts.length} visible in telemetry`,
+        sub: census === undefined
+          ? `${s.contracts.length} visible; per-origin census not published yet`
+          : `${s.contracts.length} visible; network ${fmtNum(census.network?.solvable)}/${fmtNum(census.network?.observed)}`
+            + ` · darknet ${fmtNum(census.darknet?.solvable)}/${fmtNum(census.darknet?.observed)} solvable/observed`,
       },
       {
         label: "quarantined",
@@ -207,8 +198,7 @@ export const sideTab: Tab = {
       {
         label: "solver coverage",
         value: coverage,
-        // Worded off what the wire actually says. The old literal claimed a
-        // complete registry even when the probe had never run.
+        // Absence means the coverage probe has not run.
         sub: s.registryComplete === false
           ? "registry has gaps"
           : s.registryComplete
@@ -217,14 +207,7 @@ export const sideTab: Tab = {
       },
     ]);
 
-    // The empty state and the truncation note used to be chosen from
-    // independent conditions, so a drained batch printed "no contract
-    // candidates waiting" directly above "0 of 8,437 — one 20-contract batch is
-    // published", and neither sentence was true: the driver runs every 5s and
-    // can empty the probe's 100-deep private queue between two network sweeps.
-    // The drained case is now one statement, worded off the scan stamp rather
-    // than off the probe's period — that period is not on the wire, so a
-    // literal "30 s" here would drift the next time it changes.
+    // A driver can drain the visible batch before the next authoritative sweep.
     const drained = s.contracts.length === 0 && candidates > 0;
     const scanned = s.contractScannedAt === undefined
       ? "no network sweep recorded yet"
@@ -240,9 +223,7 @@ export const sideTab: Tab = {
           left: [1],
         },
       )
-      // With no rows there is no visible batch to describe, so the drained
-      // sentence above stands alone. The batch size comes off the published
-      // window, not the literal 20: a short final batch is published too.
+      // Derive the batch size; the final published batch may be short.
       + (s.contracts.length === 0
         ? ""
         : candidates > s.contracts.length

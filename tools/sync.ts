@@ -103,7 +103,7 @@ async function sweepHosts(session: RfaSession, config: BitburnerConfig): Promise
 }
 
 /** Stable filenames this deployment owns. */
-function keepSet(config: BitburnerConfig, pushed: readonly string[]): Set<string> {
+function keepSet(pushed: readonly string[]): Set<string> {
   const keep = new Set(pushed);
   for (const filename of pushed) {
     if (filename.startsWith("dnet/")) keep.add(filename.slice(filename.lastIndexOf("/") + 1));
@@ -136,7 +136,7 @@ async function buildAndPush(
   const owned = ownedDirectories(config.entries.map((entry) => entry.target));
   const hosts = await sweepHosts(session, config);
   const dryRun = options.sweepDryRun === true;
-  const result = await sweepStaleFiles(session, owned, keepSet(config, pushed), hosts, {
+  const result = await sweepStaleFiles(session, owned, keepSet(pushed), hosts, {
     dryRun,
   });
 

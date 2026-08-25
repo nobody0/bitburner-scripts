@@ -9,7 +9,6 @@ import {
   type CrimePerson,
   type CrimeStats,
 } from "../shared/strategy/career/crimes.ts";
-import { expForSkill } from "../shared/formulas.ts";
 import { CAREER_KINDS, needValues, stepCareer, type CareerView } from "../shared/strategy/career/decide.ts";
 import { PORT_OPENER_PROGRAMS, programCreateTimeMs, preferProgramCreation } from "../shared/strategy/career/programs.ts";
 import { postNeeds, type Need } from "../shared/strategy/needs.ts";

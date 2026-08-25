@@ -127,14 +127,14 @@ describe("the mortal scout", () => {
     }]);
   });
 
-  test("no second scout while one already walks, and none without the flag", () => {
+  test("no extra scout past the cap, and none without the flag", () => {
     const { refuse } = refusals();
     const withScout = planWalk({
       hosts: [labHost(), vantage(), scoutHost()],
       charisma: LAB.cha,
       walkGb: WALK_GB,
       walkerAt: "dnet-6-x1",
-      scoutAt: "dnet-6-x2",
+      scoutsAt: new Set(["dnet-6-x2"]),
       scoutWalker: true,
     }, refuse);
     expect(withScout.tasks).toEqual([]);
@@ -145,6 +145,29 @@ describe("the mortal scout", () => {
       walkerAt: "dnet-6-x1",
     }, refuse);
     expect(withoutFlag.tasks).toEqual([]);
+  });
+
+  test("maxScouts 2 fields a second scout on the EASTERN route", () => {
+    const { refuse } = refusals();
+    const third = scoutHost({ hostname: "dnet-6-x3", maxRam: 24, freeGb: 20 });
+    const plan = planWalk({
+      hosts: [labHost(), vantage(), scoutHost(), third],
+      charisma: LAB.cha,
+      walkGb: WALK_GB,
+      walkerAt: "dnet-6-x1",
+      scoutsAt: new Set(["dnet-6-x2"]),
+      scoutWalker: true,
+      maxScouts: 2,
+    }, refuse);
+    expect(plan.tasks).toEqual([{
+      kind: "walk",
+      host: LAB.hostname,
+      from: "dnet-6-x3",
+      threads: Math.floor(20 / WALK_GB),
+      route: "eastern",
+      scout: true,
+      reason: "mortal scout from dnet-6-x3",
+    }]);
   });
 
   test("the scout's absence refuses nothing — it is opportunistic", () => {

@@ -679,6 +679,46 @@ export function deriveTasks(
  * plant may instead use any live resident when a stamped backdoor or stasis fact
  * says remote exec remains believable. */
 
+/** How a plant reaches its target, on the two-axis rule spec/dnet.md:633-637
+ * makes explicit — one axis, WHO may launch:
+ *
+ * - `adjacent`: the vantage and target share a still-believed edge (either
+ *   direction of symmetric adjacency). The plant may `authenticate` if the
+ *   session has lapsed, because it holds a direct connection.
+ * - `remote`: no fresh edge, but the target's backdoor or stasis fact still
+ *   makes remote `exec` believable, so ANY live resident is a vantage. The
+ *   plant is session-only — it cannot `authenticate` at a distance.
+ * - `ineligible`: neither — nothing may plant it this pass.
+ *
+ * The SECOND axis (stasis-durability → controller-managed) is deliberately
+ * NOT decided here: it is the target's own property, keyed on stasis alone by
+ * the controller, and a merely-backdoored host must keep its ordinary spawn
+ * chain (agent.ts adoption/respawn). Conflating the two would mis-size a
+ * backdoored resident and kill it at its first uncovered spawn. */
+export type PlantRoute = "adjacent" | "remote" | "ineligible";
+
+/** Classify one (vantage, target) pair. Adjacency WINS over remote: an
+ * edge-backed launch keeps its authentication fallback, which a bare session
+ * cannot, so it is strictly the safer route when both are available. */
+export function classifyPlantRoute(input: {
+  target: string;
+  vantage: string;
+  /** The vantage's own fresh neighbour list (stale groups already deleted). */
+  vantageNeighbours: readonly string[] | undefined;
+  /** The target's own fresh neighbour list — the reverse adjacency direction,
+   * the only vantage an immune host is often reachable from. */
+  targetNeighbours: readonly string[] | undefined;
+  /** Target's backdoor/stasis fact is fresh enough to believe remote exec. */
+  remoteExecCapable: boolean;
+}): PlantRoute {
+  const adjacent =
+    (input.vantageNeighbours?.includes(input.target) ?? false) ||
+    (input.targetNeighbours?.includes(input.vantage) ?? false);
+  if (adjacent) return "adjacent";
+  if (input.remoteExecCapable) return "remote";
+  return "ineligible";
+}
+
 export interface SpreadCandidate {
   host: string;
   /** Where a worker would have to be STANDING to do this. */
@@ -695,6 +735,11 @@ export interface SpreadCandidate {
    * resident. The walker subsequently takes the entire pinned host. */
   reclaimOnly?: boolean;
   omitProber?: boolean;
+  /** Stasis-linked target: its resident is CONTROLLER-MANAGED and spawn-free,
+   * so the RAM bar is `managedResidentRamGb` (+ prober), not the full
+   * `agentRamGb`. Pricing it at the unmanaged bar refused every blocked
+   * stasis host between the two forever — the observed prober-only orphan. */
+  stasisManaged?: boolean;
   bootstrapReclaim?: boolean;
   bootstrapThreads?: number;
   hasCredential: boolean;
@@ -710,6 +755,11 @@ export interface SpreadLimits {
   agentRamGb: number;
   /** Resident alone, for the pinned lab candidate. */
   residentRamGb: number;
+  /** The spawn-free controller-managed resident a stasis-linked host runs. */
+  managedResidentRamGb: number;
+  /** The constant prober, priced separately so a managed plant's bar is
+   *  managed resident + prober rather than the unmanaged `agentRamGb`. */
+  proberRamGb: number;
   /** One thread of the spawn-free local reclaim bootstrap. */
   bootstrapRamGb: number;
   /** How long after a plant a host is left alone. The one surviving limit that
@@ -726,6 +776,8 @@ export interface SpreadLimits {
 export const DEFAULT_SPREAD_LIMITS: SpreadLimits = {
   agentRamGb: 5.4,
   residentRamGb: 3.6,
+  managedResidentRamGb: 1.6,
+  proberRamGb: 1.8,
   bootstrapRamGb: 2.6,
   plantCooldownMs: 60_000,
 };
@@ -818,14 +870,37 @@ export function planSpread(
     // BEFORE the bootstrap branch below, which plants too: a bootstrap that
     // skipped the cooldown re-derived on every pass for a host whose plant
     // keeps dying, which is exactly the spawn-churn loop this guard exists for.
-    if (candidate.lastPlantAt !== undefined && now - candidate.lastPlantAt < limits.plantCooldownMs) {
+    // The cooldown is the anti-flap for a host that keeps RESTARTING — coming
+    // back empty because the game killed its scripts. A stasis-linked host is
+    // immune to restart, and its agent is recovered by remote `exec` from any
+    // live resident (not the believed edge), so it can neither flap nor spin a
+    // failing plant: the cooldown is meaningless there and only wedged it
+    // agentless (its managed dispatch re-plants once per order, each restamping
+    // the cooldown against the next) — the observed prober-only stasis orphan.
+    if (candidate.stasisManaged !== true
+      && candidate.lastPlantAt !== undefined && now - candidate.lastPlantAt < limits.plantCooldownMs) {
       // A host that keeps restarting must not absorb every worker we have.
       refuse("cooldown", "planted recently; if it is empty again it is restarting");
       continue;
     }
-    const needed = candidate.omitProber ? limits.residentRamGb : limits.agentRamGb;
+    // A stasis-linked target runs the spawn-free MANAGED resident: its bar is
+    // managed resident + prober capacity, roughly two GB under the unmanaged
+    // `agentRamGb` — the difference that left blocked stasis hosts refused
+    // (and prober-only) forever.
+    const needed = candidate.stasisManaged === true
+      ? limits.managedResidentRamGb + (candidate.omitProber ? 0 : limits.proberRamGb)
+      : candidate.omitProber
+        ? limits.residentRamGb
+        : limits.agentRamGb;
+    // The spawn-free bootstrap reclaimer plants ONLY on the lab candidate
+    // (`reclaimOnly` — the pinned host whose block gates the whole walk).
+    // It used to plant on every cramped host too; the deep-world benchmark
+    // priced that at 1.26x walker-start on the two-gap world (CI excluding
+    // zero) and a pure tie on the shallow one: an ordinary cramped host is
+    // better left to `not-enough-ram` until the net's own churn or a remote
+    // grind opens it, and the bootstrap's plant slot spent elsewhere.
     if (candidate.blockedRam !== undefined && candidate.blockedRam > 0
-      && (candidate.reclaimOnly === true || candidate.usableRam < needed)
+      && candidate.reclaimOnly === true
       && candidate.usableRam >= limits.bootstrapRamGb) {
       plant.push({
         ...candidate,
@@ -872,6 +947,8 @@ export function candidatesFrom(
     remoteExec?: ReadonlySet<string>;
     /** Live resident queues able to run a session-only remote plant. */
     remoteVantages?: readonly { host: string; freeGb?: number }[];
+    /** Stasis-LINKED hosts, whose plant boots the cheaper managed resident. */
+    stasisLinked?: ReadonlySet<string>;
     expiry?: ExpiryOpts;
   },
 ): SpreadCandidate[] {
@@ -883,34 +960,43 @@ export function candidatesFrom(
     if (opts.standing.has(host.hostname)) continue;
     let from: string | undefined;
     let remote = false;
-    // Adjacency is SYMMETRIC, so a vantage for this host is any standing host on
-    // either side of a believed edge: one whose own fresh neighbour list names
-    // the target, OR one the TARGET's own fresh neighbour list names. The second
-    // direction is what recovers a host we can no longer see from the outside —
-    // an immune (stasis) host above all, whose neighbour list never expires, so
-    // it is frequently the ONLY vantage we will ever have on it. The plant job
-    // re-probes the live edge in its preflight, so a since-severed edge refuses
-    // cleanly rather than being planted blind.
+    // Adjacency is SYMMETRIC (either side of a believed edge names the other)
+    // and WINS over remote — an edge keeps the authentication fallback a bare
+    // session lacks. The reverse direction (the target's own fresh neighbour
+    // list naming a standing host) recovers a host we can no longer see from
+    // outside — an immune (stasis) host above all, whose neighbour list never
+    // expires and is frequently the ONLY vantage we get on it. The plant job
+    // re-probes the live edge in its preflight, so a since-severed edge
+    // refuses cleanly rather than being planted blind.
+    const remoteExecCapable = opts.remoteExec?.has(host.hostname) ?? false;
     for (const where of opts.standing) {
-      if (views.get(where)?.neighbours?.includes(host.hostname)) {
+      if (classifyPlantRoute({
+        target: host.hostname,
+        vantage: where,
+        vantageNeighbours: views.get(where)?.neighbours,
+        targetNeighbours: host.neighbours,
+        remoteExecCapable: false,
+      }) === "adjacent") {
         from = where;
         break;
       }
     }
-    if (from === undefined) {
-      for (const neighbour of host.neighbours ?? []) {
-        if (opts.standing.has(neighbour)) {
-          from = neighbour;
-          break;
-        }
-      }
-    }
-    if (from === undefined && opts.remoteExec?.has(host.hostname)) {
+    // Remote fallback: no adjacent vantage, but the target's backdoor/stasis
+    // fact still makes remote exec believable, so ANY live resident serves —
+    // pick the roomiest (name tie-break) so the volley has headroom.
+    if (from === undefined && remoteExecCapable) {
       const vantage = [...(opts.remoteVantages ?? [])]
         .filter((candidate) => opts.standing.has(candidate.host))
         .sort((a, b) => (b.freeGb ?? -1) - (a.freeGb ?? -1)
           || (a.host < b.host ? -1 : a.host > b.host ? 1 : 0))[0];
-      if (vantage !== undefined) {
+      if (vantage !== undefined &&
+        classifyPlantRoute({
+          target: host.hostname,
+          vantage: vantage.host,
+          vantageNeighbours: views.get(vantage.host)?.neighbours,
+          targetNeighbours: host.neighbours,
+          remoteExecCapable,
+        }) === "remote") {
         from = vantage.host;
         remote = true;
       }
@@ -935,6 +1021,7 @@ export function candidatesFrom(
       ...(host.depth !== undefined ? { depth: host.depth } : {}),
       usableRam: viewedUsableRam(host),
       ...(host.blockedRam !== undefined ? { blockedRam: host.blockedRam } : {}),
+      ...(opts.stasisLinked?.has(host.hostname) ? { stasisManaged: true } : {}),
       hasCredential: opts.vault.has(host.hostname),
       agentAlive: false,
       ...(plantedAt !== undefined ? { lastPlantAt: plantedAt } : {}),

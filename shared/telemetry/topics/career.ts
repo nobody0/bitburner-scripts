@@ -32,6 +32,9 @@ export interface CareerPlan {
   /** Reported urgency band, and the BN-seconds the chosen option is worth —
    *  the number the work-slot auction actually ranks it by. */
   priority?: { band: "blocking" | "wanted" | "nice" | "income"; value: number };
+  /** Raw rates promised by the selected option, retained even when a channel
+   * currently has no posted need and therefore no priced contribution. */
+  produces?: Record<string, number>;
   /** Why this review ran, and when the next clock-driven one is due. */
   schedule?: {
     mode: "idle" | "continuous" | "progress";

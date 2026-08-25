@@ -47,9 +47,6 @@ describe("isUseful", () => {
 function stubNs(
   processes: Record<string, { pid: number; filename: string; args: (string | number)[] }[]>,
   pid = 1,
-  /** Where this stub is running. Since dodges can be placed on the fleet, the
-   *  reclaim may itself be executing on a client rather than on home. */
-  stubHost = "home",
 ) {
   const killed: number[] = [];
   const cleared: string[] = [];
@@ -121,7 +118,6 @@ describe("reclaimFleet", () => {
         ],
       },
       7,
-      "pserv-0",
     );
     const servers = { home: rooted("home", 4), "pserv-0": rooted("pserv-0", 40), other: rooted("other", 12) };
     const reclaimed = reclaimFleet(stub.ns, servers, 1, "pserv-0");

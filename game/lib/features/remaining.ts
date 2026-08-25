@@ -31,7 +31,7 @@ import {
   type GoWorkerPlaybookAction,
 } from "../../../shared/strategy/go/neural/worker-protocol.ts";
 import { GO_OPPONENT_MODEL } from "../../../shared/strategy/go/opponent.ts";
-import { GO_REWARD_RULES, goFavorRepCap, rankGoGames, type GoEtaDemand, type GoRewardView } from "../../../shared/strategy/go/rewards.ts";
+import { GO_REWARD_RULES, goFavorRepCap, rankGoGames, type GoRewardView } from "../../../shared/strategy/go/rewards.ts";
 import { goRamPricingCandidate, planGoSchedule } from "../../../shared/strategy/go/schedule.ts";
 import { GO_ENGINE_CYCLE_MS, goAiWaitMs } from "../../../shared/strategy/go/rng.ts";
 import {

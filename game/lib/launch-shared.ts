@@ -42,10 +42,22 @@ export function temporaryRunOptions<T extends object>(options: T): T & { tempora
  * load failure or killed child must not hold every later exec behind it. */
 export const LAUNCH_CAPTURE_TIMEOUT_MS = 1_000;
 
+/** Why a `handoffLaunch` returned 0. The two cases need OPPOSITE recovery:
+ * a refused exec started nothing and may be retried, while an uncaptured
+ * child is already running and holding its RAM — retrying that one stacks a
+ * second process on the host instead of replacing the first. */
+export interface LaunchOutcome {
+  /** `start` itself returned 0: the engine refused the exec outright. */
+  refused?: boolean;
+  /** The child started but never captured its descriptor in time. */
+  uncaptured?: boolean;
+}
+
 /** Publish, start, and wait until the child has captured this exact object. */
 export async function handoffLaunch<T extends ScriptLaunch>(
   descriptor: T,
   start: (launchId: number) => number,
+  outcome?: LaunchOutcome,
 ): Promise<number> {
   const realm = launchGlobal();
   const previous = realm.script_launch_tail ?? Promise.resolve();
@@ -63,7 +75,10 @@ export async function handoffLaunch<T extends ScriptLaunch>(
     // child PID exists; the descriptor remains the semantic identity.
     const launchId = realm.script_launch_id = (realm.script_launch_id ?? 0) + 1;
     const pid = start(launchId);
-    if (pid === 0) return 0;
+    if (pid === 0) {
+      if (outcome !== undefined) outcome.refused = true;
+      return 0;
+    }
     let captureTimer: ReturnType<typeof setTimeout> | undefined;
     const acknowledged = await Promise.race([
       captured.then(() => true),
@@ -73,7 +88,10 @@ export async function handoffLaunch<T extends ScriptLaunch>(
     ]);
     if (captureTimer !== undefined) clearTimeout(captureTimer);
     // The child may exist, but without the descriptor it can do no valid work.
-    if (!acknowledged) return 0;
+    if (!acknowledged) {
+      if (outcome !== undefined) outcome.uncaptured = true;
+      return 0;
+    }
     return pid;
   } finally {
     if (realm.spawning_script === pending) realm.spawning_script = undefined;

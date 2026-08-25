@@ -1,5 +1,6 @@
 import type { AttemptOutcome, LogDrainOutcome, ReportHost, VaultEntry } from "../../shared/strategy/dnet/courier.ts";
 import type { DnetTimingProfile } from "../../shared/strategy/dnet/rates.ts";
+import type { FarmEconomics } from "../../shared/strategy/dnet/farm.ts";
 import type { DarknetProfit } from "../../shared/telemetry/topics/dnet.ts";
 
 /** The data shapes home and the controller exchange, and the panel reads.
@@ -37,6 +38,8 @@ export interface DnetSpreadReport extends RefusalRollup {
 export interface DnetFarmReport extends RefusalRollup {
   admitted: Record<string, number>;
   cacheHunter?: string;
+  expectedMoneyPerSec: number;
+  expectedCharismaExpPerSec: number;
 }
 
 export interface DnetHoldReport extends RefusalRollup {
@@ -143,6 +146,10 @@ export interface DnetOrders {
   lastStormAt?: number;
   promoteSymbols?: { symbol: string; expectedProfit: number }[];
   crimeSuccessMult?: number;
+  farmEconomics?: FarmEconomics;
+  /** Home-side contract attempts can consume a remote `.cct`; the controller
+   * must invalidate its private listing and run `ls` again. */
+  fileInvalidations?: { host: string; at: number }[];
   stasisSnapshot?: DnetStasisSnapshot;
   backdoors?: { hostname: string; installedAt: number }[];
   labExpected?: boolean;

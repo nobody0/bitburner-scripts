@@ -41,6 +41,10 @@ function harness(attempt: (answer: unknown) => string) {
         contracts: [{ host: "n00dles", file: "jump.cct" }],
         contractTotal: 1,
         solvableTotal: 1,
+        contractsByOrigin: {
+          network: { observed: 1, solvable: 1 },
+          darknet: { observed: 0, solvable: 0 },
+        },
         unsolvableByType: {},
         unsolvableTotal: 0,
       },
@@ -87,6 +91,7 @@ describe("Side contract execution", () => {
     expect(sideModule).not.toHaveProperty('peakStepGb');
     expect(h.state.topics.side?.contracts).toEqual([]);
     expect(h.state.topics.side?.contractTotal).toBe(0);
+    expect(h.state.topics.side?.contractsByOrigin.network).toEqual({ observed: 0, solvable: 0 });
     expect(h.state.contractQuarantine).toEqual({});
     expect(h.state.topics.side?.lastResult?.detail).toContain("1 solved");
     expect(h.state.topics.side?.rewards?.network).toMatchObject({
@@ -137,8 +142,13 @@ describe("Side contract execution", () => {
         files: ["jump.cct"],
       },
     };
+    h.state.topics.side!.contractsByOrigin = {
+      network: { observed: 0, solvable: 0 },
+      darknet: { observed: 1, solvable: 1 },
+    };
     await sideModule.driver.tick(h.ctx);
     expect(h.state.darknetContractHandledAt?.["dn-1\0jump.cct"]).toBe(observedAt);
+    expect(h.state.darknetContractRefreshHosts?.["dn-1"]).toBeDefined();
     expect(h.state.contractQueue).toEqual([]);
   });
 
@@ -148,6 +158,10 @@ describe("Side contract execution", () => {
     h.state.contractQueue = [{ host: "dn-1", file: "jump.cct", dnet: { identity: "10.0.0.1", observedAt } }];
     h.state.darknetContractListings = {
       "dn-1": { identity: "10.0.0.1", observedAt, validUntil: observedAt + 60_000, files: ["jump.cct"] },
+    };
+    h.state.topics.side!.contractsByOrigin = {
+      network: { observed: 0, solvable: 0 },
+      darknet: { observed: 1, solvable: 1 },
     };
     await sideModule.driver.tick(h.ctx);
 

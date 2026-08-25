@@ -260,13 +260,78 @@ rooted, `authenticate` a direct connection), so pushing a credentialed host
 with its resident riding — a move kills nothing — is the ONLY deliberate way
 into an unconquered band. `planInduce` runs five purposes in priority order —
 `free-slot`, `lab`, `seat`, `ferry` (into a band with no resident of ours),
-`frontier` — and files EVERY admitted push, one per pusher, several per
-target: the migration charge accumulates on the TARGET
-(`DarknetState.migrationInductionServers`), so N adjacent agents charge one
-host ~N× faster, and the queue dedups induce per (target, vantage) like the
-walk. Each push then runs on the per-agent ladder (induce below survey,
-attempt and reclaim; above phish and promote) — exploration's last step, with
-money as the filler behind it.
+`frontier` — several pushers per target: the migration charge accumulates on
+the TARGET (`DarknetState.migrationInductionServers`), so N adjacent agents
+charge one host ~N× faster, and the queue dedups induce per (target, vantage)
+like the walk. Each push then runs on the per-agent ladder (induce below
+survey, attempt and reclaim; above phish and promote) — exploration's last
+step, with money as the filler behind it.
+
+Two disciplines, both benchmark-driven, keep the pushes from becoming the
+random-walk pump the first shipped shape was (priced at 1.35× walker-start on
+the shallow world, 1.13× on the two-gap deep one):
+
+- **The charge-wave budget.** Every `induceServerMigration` response reads
+  back the engine's accumulated charge ("Migration prep is now at X.XX%") —
+  the only readback `migrationInductionServers` offers — and the controller
+  keeps a per-target estimate from it (reset on a landing, cleared with the
+  identity). `planInduce` then sizes each target's pushers to close the
+  believed remaining charge to 100% in ONE 6 s wave and no further: charge is
+  additive and resets on the move, so threads past the remainder are pure
+  overshoot, and threads short of it just take more waves. This is the
+  original design intent — "multiple pushers per target is desirable as long
+  as we don't surpass the 100% chance" — made literal.
+- **The frontier progress criterion.** A frontier push is admitted only when
+  the host's band (`[difficulty-2, difficulty+4]`, air-gap rows excluded)
+  reaches STRICTLY past our deepest standing agent — a band we already cover
+  admits nothing, which is the terminal condition the old shape lacked.
+  Frontier targets are taken deepest-reach first.
+
+Two more descent disciplines ride on the wave budget (depth-36 paired
+evidence: together 0.63× walker-start against neither):
+
+- **Races.** Lab candidates and ferries are RACED, most promising first: a
+  landing is a uniform re-roll inside the band, so several carriers charging
+  toward the same gap (or several candidates toward the bottom row) multiply
+  the per-wave chance of an actual crossing. Each racer's wave is
+  charge-capped, so pusher depletion — not a count — is the limiter.
+- **The pre-charge pipeline.** A host whose in-flight authenticate is its
+  LAST dictionary candidate is pushed EARLY — `induceServerMigration` needs
+  only the direct edge — at full charge rate, with one discipline: while the
+  auth's remaining time exceeds a charge call's own 6 s flight (minus a
+  200 ms margin), the wave holds one landing short of 100%, because a landing
+  re-rolls the host's edges and would kill the call. The moment the remainder
+  fits, the closing call fires and lands after the credential and the instant
+  plant behind it — authenticate, scp/exec, move, with the whole induce wave
+  overlapped behind the crack instead of serialized after it.
+
+Two RAM disciplines squeeze the wave's vantages dry:
+
+- **The linked one-off sidecar.** A vantage's induce order rarely wants all
+  of its RAM (the wave caps its threads), and a resident runs one order at a
+  time — so a SECOND induce push filed onto a vantage already holding one
+  becomes a spawn-free one-off that runs BESIDE the main: "I have X GB and
+  six seconds, find something to do." The resident cannot carry `exec`
+  (1.3 GB, and PER THREAD on a sized order), so it spawns through a transient
+  1-thread `launchSidecar` hop that claims the one-off order out of the queue
+  (into `entry.sidecarOrder`, so the ordinary successor chain can never spawn
+  into it), execs the one-off at its own spawn-free sizing, and chains into
+  the main order — both 6 s calls aligned. The one-off reports through
+  `entry.sidecar`, dies when its body settles, and is killed by the
+  controller whenever the vantage retires (it is LINKED, never independent).
+  A second induce is preferred as the passenger because the flight times
+  match; at most one one-off per host at a time, never on stasis-managed
+  vantages (their resident hands staged work to the remote dispatcher).
+- **Overscale.** Pool threads left over after every target's wave is served
+  are added to that pusher's own push anyway (never onto a held-closing
+  target, whose early close would land under the in-flight authenticate):
+  the overshoot past 100% is discarded by the reset, but charisma exp —
+  5 × threads × difficulty per call — is granted before the clamp, and exp
+  beats idle RAM.
+
+The deep benchmark also found that widening the stasis spare slack to grab
+BIGGER link hosts (the intuitive "fix" for small servers holding links) costs
+1.2× on the lab route — the small on-target links are the measured winner.
 
 The trigger policy is `shared/strategy/dnet/plan.ts` — pure, one admitted fire
 or named refusals, in gate order: `storm-in-flight` (our own quiet window;
@@ -613,6 +678,57 @@ derived restart/delete lifetime. Stasis links are generation-bound probe results
 and do not expire while linked. Either fact admits a session-only remote plant
 from the roomiest live resident. A credential by itself never does.
 
+These are **two independent axes**, and the routing keeps them separate.
+
+- **Who may launch** (remote execution). A `plant`'s route is classified pure
+  (`classifyPlantRoute`, plan.ts): `adjacent` when either direction of the
+  symmetric edge is still believed — that plant keeps the `authenticate`
+  fallback, because it holds a direct connection; `remote` when no edge
+  survives but a fresh backdoor or stasis fact does, so ANY live resident is a
+  vantage and the plant is session-only (`Task.remote` → `Order.sessionOnly`);
+  `ineligible` otherwise. Adjacency wins over remote. This governs BOTH
+  candidate creation and urgent rerouting: a reroute onto a non-adjacent agent
+  derives `remote` from the new route instead of deleting it, or the plant
+  would try to `authenticate` at a distance and fail.
+- **Durability** (may the resident skip its defensive self-spawn chain).
+  `targetControllerManaged` is set from the target's STASIS state alone, never
+  inferred from `remote`, `sessionOnly`, or an ordinary backdoor. A merely
+  backdoored host keeps the ordinary spawn chain: a restart can kill its
+  scripts and clear its backdoor together, and the agent was sized (adoption,
+  respawn arming) for that. Only stasis's durability makes a controller-managed
+  agent safe.
+
+Durability also sets the plant's RAM bar: `planSpread` prices a stasis-linked
+target at the spawn-free managed resident plus the prober
+(`managedResidentRamGb + proberRamGb` ≈ 3.4 GB) rather than the unmanaged
+`agentRamGb` (≈ 5.4 GB). Pricing every target at the flat unmanaged bar left
+blocked stasis hosts in between refused `not-enough-ram` forever — agentless
+with a lone revived prober, the observed prober-only orphan.
+
+Durability also EXEMPTS a stasis host from the plant cooldown. The cooldown is
+the anti-flap for a host that keeps RESTARTING — coming back empty because the
+game killed its scripts, which would let one flapping machine absorb every
+worker. A stasis host is immune to restart, and its agent is recovered by
+remote `exec` from any live resident rather than across the believed edge, so
+it can neither flap nor spin a failing plant. Its managed dispatch re-plants
+once per order (the spawn-free agent cannot chain into the next itself), and
+each such plant stamps `lastPlantAt`; with the cooldown applied, a killed
+managed resident — whose death leaves the staged queue intact for the
+controller but is NOT a full retire — left the stamp standing with no agent to
+clear it, and the host sat agentless with its own queue undrained for the whole
+minute. So `planSpread` skips the cooldown for `stasisManaged` candidates
+outright; the model is "this host needs an agent, and stasis makes re-execing
+one always safe and immediate," not a stamp to be raced clear.
+
+The managed dispatch cycle also RACES its own RAM. A handoff (the resident
+exiting for the dispatcher, or a finished order) wakes the controller
+synchronously, but the engine frees the dead process's allocation one tick
+later — so a same-instant replant reads a "full" host that is actually empty.
+Two rules bridge the tick: `preparePlant`'s fit-guard judges a claim against
+durable CAPACITY (`maxRam − blockedRam − proberGb`, never `getServerUsedRam`),
+and a refused plant `exec` takes a 300 ms breath and retries twice before it
+counts as a real refusal.
+
 The automatic ordinary-backdoor policy treats those mutation branches as a
 recycler. It holds exactly two, avoiding both global authentication penalties,
 and ranks fully harvested movable hosts by generated RAM quality:
@@ -717,11 +833,9 @@ The cache branch is an `if` and the money branch its `else if`: claiming a cache
 forecloses that call's money roll, and while the cooldown is unexpired every
 call falls straight through to money.
 
-So the volume sources are cracking and the RAM grind — neither is rate-limited —
-while phishing is a trickle whose unique value is that `.d.cache` is the only
-cache that can award a coding contract. One small resident phisher at high
-charisma claims each window; threads above that are a money and charisma
-decision.
+During an open window, difficulty >3 wins the hunter election because cache
+quality scales with difficulty. Lower-difficulty residents prefer promotion,
+but fall back to phish rather than idle.
 
 `openCache(filename)` lowers karma by `difficulty + 1` (returned as a negative
 `karmaLoss`) and yields one reward drawn at random from:
@@ -732,33 +846,19 @@ decision.
 - a coding contract — **only** for `.d.cache` files, i.e. from phishing,
 - money — **only** when the node's `DarknetMoneyMultiplier` is non-zero.
 
+The post-open listing is mandatory gameplay: it discovers spawned `.cct` files
+and consumes `.data.txt` clues even in perf builds.
+
 ### Coding contracts leave the darknet immediately
 
-A resident reads `.cct` names from the same `ns.ls` listing it already pays for
-to discover caches and storm seeds. The report carries the host identity and
-the observation time; home folds `contracts` as a `resource` fact and derives
-its validity from the mutation clock. The private contract queue retains only
-the identity and observation stamp, while the authoritative private listing
-owns the expiry.
+A darknet contract is actionable only against the same fresh host identity and
+listing observation. Side invalidates that listing after an attempt, but keeps
+the terminal result until fresh absence, disappearance, or identity replacement
+proves it obsolete. Only the `network`/`darknet` origin crosses telemetry; host
+identity remains private.
 
-Fresh darknet contracts lead the ordinary coding-contract queue and use the
-same bounded inspect/data/attempt pipeline. Before every resumed pipeline stage,
-the side driver requires the listing to still be current, to name the same host
-identity, and still to contain the filename. A terminal outcome is recorded
-against that exact observation, so it is not retried until a newer resident
-listing arrives. The ordinary network sweep rebuilds darknet work from these
-fresh listings because `ns.scan` cannot see darknet hosts; neither the listings
-nor their stamps are added to dnet telemetry.
-
-What a darknet contract DOES publish is a bare origin tag. The `side` topic
-counts solves and earnings separately for `darknet` and `network`
-(`ContractOrigin`), so the cost of cracking these hosts can be weighed against
-what their contracts actually pay. Only the tag crosses the wire — the host
-identity stays private, exactly as the listings do — and an origin that has
-never attempted anything is absent from the record rather than reported at zero.
-
-`.txt`, `.lit`, and `.msg` files are intentionally outside this path. They are
-neither copied nor opened.
+Ordinary `.txt` and `.msg` files are ignored. Darknet `.data.txt` clues are
+read, parsed, and removed; `.lit` files are removed without being published.
 
 karmaLoss is difficulty + 1. Generated difficulty is below net depth, so
 a depth-36 net pays at most -36 karma and a depth-7 net at most -7. Karma
@@ -813,17 +913,10 @@ place `dnet_money` is read. Upstream attributes this to a `darknet` money source
 (`MoneySourceTracker`), which the ns `MoneySource` interface does **not**
 expose — so a script cannot see darknet income as its own line.
 
-The controller therefore measures only what its existing calls already return.
-Each settled phish contributes attempt/success/cache counts and parses the
-display-precision cash in its response; each opened cache contributes cash,
-shares, and a compact exact reward label (program, market unlock, clue,
-contract, augmentation); each promotion contributes its successful batch,
-threads, and symbol. Home folds those deltas into the since-install
-`dnet.profit` telemetry block. This costs no additional Netscript call and no
-per-operation event. Cash parsing accepts Bitburner's configurable currency
-symbol on either side of the value. Promotion is not called cash profit: it
-changes volatility, and later stock P&L cannot be causally attributed to one
-propaganda batch.
+Returns use existing call results only. Cash is display-precision; promotion is
+not attributed as income. The cache funnel separates created and opened
+`.d.cache` files because a movable host can disappear between those events;
+post-open CCT and data-file counts are exact observations.
 
 ## The labyrinth
 
@@ -883,21 +976,22 @@ door candidates at once. `sim/tests/dnet-lab-benchmark.test.ts` and
 whole ladder in ~0.65x the DFS's wall-clock (attempts land ~1.4x the omniscient
 shortest path, against the DFS's ~2.2x).
 
-### One pinned finisher, one mortal scout
+### One pinned finisher, up to two mortal scouts
 
 The maze is global (`DarknetState.labyrinth`) while position is per PID. Dnet
 runs exactly one FINISHER — the pinned, protected, full-host walker — and,
-when a second lab-adjacent staffed vantage exists, one MORTAL SCOUT beside it.
-The scout is everything the finisher is not: unpinned, opportunistic (its
-absence refuses nothing), prober kept, sized from free RAM rather than the
-whole host, and its walk is biased to the southern macro-route the unbiased
-finisher tends away from (`Order.route` → `routePrior`). The two share one
-`labFields` map and one charisma pool, and either PID reaching the endpoint
-roots the lab for both — the party benchmark's paired evidence is 0.905×
-wall-clock for an immortal scout and still under 1.0 for a scout that dies
-every five minutes, because a dead scout costs a re-plant while its map
-survives in the shared field. The scout never holds the storm: the
-`walker-unpinned` gate protects the finisher only.
+when further lab-adjacent staffed vantages exist, up to two MORTAL SCOUTS
+beside it (southern then eastern route bias). A scout is everything the
+finisher is not: unpinned, opportunistic (its absence refuses nothing),
+prober kept, sized from free RAM rather than the whole host, and its walk is
+biased to a macro-route the unbiased finisher tends away from (`Order.route` →
+`routePrior`). All walkers share one `labFields` map and one charisma pool,
+and any PID reaching the endpoint roots the lab for everyone — the party
+benchmark's paired evidence is 0.905× wall-clock for one immortal scout,
+0.854× for two, and still under 1.0 for a scout that dies every five minutes,
+because a dead scout costs a re-plant while its map survives in the shared
+field. A scout never holds the storm: the `walker-unpinned` gate protects the
+finisher only.
 
 An earlier revision of this section concluded a second walker was not worth a
 host; the paired party benchmark overturned that.
@@ -1172,6 +1266,14 @@ controller's complete updated set. The newer complete snapshot replaces the old
 one, including with empty. This removes both the old accumulating union and the
 later per-host reconciliation maps: neither can resurrect released links or
 retain stale names forever.
+
+A restored snapshot also SEEDS the map: a cold boot hands the controller the
+linked NAMES, but a name without a knowledge entry is invisible to
+`candidatesFrom`, and a mid-net stasis host then sat empty after every reload
+until the spread wave happened to probe its way back. The controller can
+describe any named darknet host directly, so on accepting a snapshot it folds a
+fresh description of every linked host it does not know, and the remote replant
+fires on the first derive instead.
 
 ## The shape that follows: a controller, probers, agents, and a spawn chain
 

@@ -344,6 +344,8 @@ describe("the controller's kill, and the agent's survival of it", () => {
 
     await r.world.clock.runAsync(() => r.processes.ps("darkweb").length === 0, 60_000);
     expect(entry.agent).toBeUndefined();
+    // The successor stays in the durable staged queue; the resident only wakes
+    // the controller to re-exec it.
     expect(entry.staged?.map((order) => order.id)).toEqual(["managed-first", "managed-second"]);
     expect(r.wakes).toContain("stasis-dispatch-requested");
 
@@ -352,7 +354,7 @@ describe("the controller's kill, and the agent's survival of it", () => {
     await r.world.clock.runAsync(() => r.reports.some((report) => report.id === first.id), 60_000);
     expect(r.processes.ps("darkweb")).toHaveLength(0);
     expect(entry.staged?.map((order) => order.id)).toEqual(["managed-second"]);
-    expect(r.wakes).toContain("controller-managed-order-finished");
+    expect(r.wakes).toContain("stasis-order-finished");
     expect(r.host.crashes).toEqual([]);
   });
 

@@ -119,6 +119,53 @@ function winningPhish(files: readonly string[]): NS {
 }
 
 describe("darknet farm job cache observations", () => {
+  test("opening a phishing cache re-lists, ingests data files, and attributes spawned contracts", async () => {
+    let files = ["mail_123.d.cache"];
+    const removed: string[] = [];
+    const provisionals: ProvisionalCredential[] = [];
+    const ns = {
+      dnet: {
+        openCache: () => {
+          files = ["spawned.cct", "password.data.txt"];
+          return { success: true, message: "New coding contracts are now available on the network!", karmaLoss: 0 };
+        },
+        getServerDetails: () => ({
+          isOnline: true, depth: 1, blockedRam: 0, requiredCharismaSkill: 0,
+          difficulty: 5, isStationary: false, modelId: "ZeroLogon",
+          passwordLength: 4, passwordFormat: "ASCII", passwordHint: "", data: "", logTrafficInterval: 30,
+        }),
+      },
+      dnsLookup: () => "10.0.0.1",
+      ls: () => [...files],
+      read: () => 'Server: dn-2 Password: "Republic of Cyprus"',
+      rm: (name: string) => {
+        removed.push(name);
+        files = files.filter((file) => file !== name);
+        return true;
+      },
+    } as unknown as NS;
+
+    const result = await runOrder(
+      ns,
+      makeOrder("cache", { host: "dn-1", from: "dn-1", filename: "mail_123.d.cache" }),
+      makeIo({ recordProvisional: (entry) => provisionals.push(entry) }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.profit).toMatchObject({
+      cachesOpened: 1,
+      phishCachesOpened: 1,
+      cacheContractsCreated: 1,
+      cacheDataFilesRead: 1,
+      cacheDataFilesParsed: 1,
+    });
+    expect(result.hosts?.[0]?.contracts).toEqual(["spawned.cct"]);
+    expect(provisionals).toEqual([{
+      hostname: "dn-2", password: "Republic of Cyprus", via: "data-file", at: expect.any(Number),
+    }]);
+    expect(removed).toEqual(["password.data.txt"]);
+  });
+
   test("a follower bleed waits for the complete authentication wave", async () => {
     let release!: () => void;
     const waveDone = new Promise<void>((resolve) => { release = resolve; });
@@ -224,7 +271,7 @@ describe("darknet farm job cache observations", () => {
     // invalidates files, and the controller files one instant inventory job.
     expect(result.hosts?.[0]?.invalidates).toEqual(["files"]);
     expect(result.hosts?.[0]?.caches).toBeUndefined();
-    expect(result.profit).toMatchObject({ phishAttempts: 1, phishSuccesses: 1, phishCaches: 1 });
+    expect(result.profit).toMatchObject({ phishAttempts: 1, phishSuccesses: 1, phishCachesCreated: 1 });
     expect(KIND_CALLS.phish).not.toContain("ls");
     // The dedicated inventory job is the one that lists.
     expect(KIND_CALLS.inventory).toContain("ls");
@@ -337,6 +384,8 @@ describe("darknet farm job cache observations", () => {
         return launches.length;
       },
       kill: (pid: number) => { killed.push(pid); return true; },
+      // The replant grace between refused exec attempts; instant in tests.
+      asleep: async () => true,
       getFunctionRamCost: (method: string) => method === "dnet.probe" ? 0.2 : method === "spawn" ? 2 : 0,
     } as unknown as NS;
     const planting = runOrder(

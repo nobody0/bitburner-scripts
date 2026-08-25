@@ -1,7 +1,7 @@
 import type { SimServer } from "./core/effects.ts";
 import { mockServer } from "./core/mocks.ts";
 import { mulberry32 } from "./core/rng.ts";
-import { attemptCharismaExp, DarknetSystem } from "./features/dnet.ts";
+import { attemptCharismaExp, DarknetSystem, LAB_AUGMENTATIONS } from "./features/dnet.ts";
 import { StockMarketSystem } from "./features/stock.ts";
 import { ProcessTable } from "./ns/process.ts";
 import { getFunctionRamCost } from "./ns/ram-costs.ts";
@@ -23,7 +23,9 @@ import {
 } from "../shared/strategy/dnet/plan.ts";
 import {
   authenticateWaitMs,
+  INDUCE_WAIT_MS,
   isLabyrinth,
+  isOnAirGap,
   mutationIntervalMs,
   reclaimWaitMs,
   stasisWaitMs,
@@ -73,6 +75,11 @@ export const RESIDENT_GB = price(KIND_CALLS.idle);
 export const CACHE_GB = price(KIND_CALLS.cache);
 export const PHISH_GB = price(KIND_CALLS.phish);
 export const PROMOTE_GB = price(KIND_CALLS.promote);
+export const INDUCE_GB = price(KIND_CALLS.induce);
+/** The linked one-off's spawn-free induce price, and the transient hop that
+ * execs it — the deployed `fileTask` sidecar fit, mirrored. */
+export const INDUCE_SIDE_GB = price(KIND_CALLS.induce.filter((call) => call !== "spawn"));
+export const HOP_GB = price(KIND_CALLS.launchSidecar);
 
 // --- the world fixture --------------------------------------------------------
 
@@ -82,10 +89,16 @@ export interface SpreadNet {
   network: Map<string, string[]>;
 }
 
-/** The same minimal recipe the sim's own dnet tests use: BN15, full access, no
- * augmentations, darkweb pinned beside home. Both lanes open caches, whose
- * reward table can draw a stock grant, so the market rides along by default. */
-export function generateNet(seed: number, opts: { stock?: boolean } = {}): SpreadNet {
+/** The same minimal recipe the sim's own dnet tests use: BN15, full access,
+ * darkweb pinned beside home. Both lanes open caches, whose reward table can
+ * draw a stock grant, so the market rides along by default.
+ *
+ * `augs` installs the first N labyrinth augmentations, which is how the world
+ * DEEPENS: the current lab advances down `LAB_LADDER` (rung 1 is depth 12 with
+ * one air gap; rung 3 is depth 23 with two) and the stasis limit grows with
+ * the limit-bearing augs. The default 0 is the rung-0 world every earlier
+ * baseline was recorded on: depth 7, no gaps, one stasis slot. */
+export function generateNet(seed: number, opts: { stock?: boolean; augs?: number; redPill?: boolean } = {}): SpreadNet {
   const world = new SimWorld({ seed, bitnode: 15, network: [] });
   const servers = world.servers;
   const darkweb = mockServer({ hostname: "darkweb", maxRam: 16, hasAdminRights: true }) as SimServer;
@@ -98,6 +111,10 @@ export function generateNet(seed: number, opts: { stock?: boolean } = {}): Sprea
       hasTixApiAccess: true,
     })
     : undefined;
+  const installed = new Set<string>(LAB_AUGMENTATIONS.slice(0, opts.augs ?? 0));
+  // BN15 hands the Red Pill over at the fifth lab, and the depth-36 rungs
+  // (f1n4l, b0nus) sit behind it — augs alone stop the ladder at depth 29.
+  if (opts.redPill === true) installed.add("The Red Pill");
   const system = new DarknetSystem({
     servers,
     network,
@@ -107,7 +124,7 @@ export function generateNet(seed: number, opts: { stock?: boolean } = {}): Sprea
     bitNode: 15,
     fullAccess: () => true,
     hasProgram: () => true,
-    installedAugmentations: () => new Set<string>(),
+    installedAugmentations: () => installed,
     allowRedPill: () => true,
     world,
     player: world.player,
@@ -138,6 +155,23 @@ export interface SpreadPolicy {
   vantageScoring?: "maxRam" | "totalTime";
   /** `DeriveOptions.labAdjacentBonus` — crack the future vantage first. */
   labAdjacentBonus?: number;
+  /** False withholds induce execution — the A/B arm that shows what directed
+   *  migration buys over waiting for natural churn. Default: run it. */
+  induce?: boolean;
+  /** `HoldPlanInputs.maxPushersPerTarget` / `maxFrontierTargets` /
+   *  `maxLabCandidates`. */
+  maxPushers?: number;
+  maxFrontier?: number;
+  maxLabCandidates?: number;
+  maxFerriesPerBand?: number;
+  /** False withholds the pre-charge pipeline (`aboutToCrack`). */
+  precharge?: boolean;
+  /** False withholds the linked one-off: a second induce filed onto a busy
+   *  induce vantage then queues serially instead of riding beside it. */
+  sidecar?: boolean;
+  /** `HoldPlanInputs.spareSlack` / `spareScoring`. */
+  spareSlack?: number;
+  spareScoring?: "ram" | "ramPerDistance";
   limits?: Partial<SpreadLimits>;
   /** Player charisma at case start. */
   charisma?: number;
@@ -153,6 +187,11 @@ export const SHIPPED_SPREAD: SpreadPolicy = {
   // benchmark as the standing losers.
   gangReclaim: true,
   vantageScoring: "totalTime",
+  // The round-3 caps (2 pushers, no frontier) were superseded by the wave
+  // budget: pushers are sized to close the target's believed remaining
+  // migration charge to 100% in one 6 s wave and no further, and the frontier
+  // admits only bands that reach strictly past our deepest agent. Both are
+  // planInduce defaults now — no policy knob needed to get them.
 };
 
 // --- run ----------------------------------------------------------------------
@@ -168,17 +207,28 @@ export interface SpreadRun {
   msToLabVantageCracked?: number;
   msToLabPinned?: number;
   msToWalkerStart?: number;
+  /** First moment every air-gapped band held an agent of ours. */
+  msToAllBandsReached?: number;
   walkerThreads?: number;
   crackedCount: number;
   crackableCount: number;
   plantedPeak: number;
   mutations: number;
+  /** Migration charges spent, hosts moved by them, and hosts a full-band
+   *  re-roll deleted. */
+  induceCalls: number;
+  induceMoves: number;
+  induceDeletes: number;
+  /** Induce pushes that rode as a linked one-off beside a busy induce vantage. */
+  sidecarCalls: number;
+  /** maxRam of each host holding a stasis link when the run ended. */
+  linkedRam: number[];
   elapsedMs: number;
   reason?: string;
 }
 
 interface Job {
-  kind: "attempt" | "reclaim" | "cache" | "pin" | "unpin";
+  kind: "attempt" | "reclaim" | "cache" | "pin" | "unpin" | "induce";
   target: string;
   threads: number;
   doneAt: number;
@@ -189,6 +239,9 @@ const CACHE_OPEN_MS = 200;
 
 interface Agent {
   job?: Job;
+  /** The linked one-off riding beside `job`: a second induce whose 6 s call
+   *  runs CONCURRENTLY with the main's, RAM permitting. At most one. */
+  sidecarJob?: Job;
   /** A spawn-free local reclaimer, not a full agent: it only grinds its own
    *  block and exits when the block clears. */
   bootstrap?: boolean;
@@ -269,6 +322,9 @@ export function runSpreadCase(
   const lastPlantAt = new Map<string, number>();
   /** Conclusive attempts spent per host, the arena's own ledger. */
   const tried = new Map<string, number>();
+  /** Per-target migration-charge estimate, exactly as the deployed controller
+   * keeps it: from each induce call's own readback, reset on a move. */
+  const migrationCharge = new Map<string, number>();
   /** Attempts that open each host, resolved once per identity. */
   const crackCost = new Map<string, number | undefined>();
 
@@ -286,7 +342,33 @@ export function runSpreadCase(
     crackableCount: 0,
     plantedPeak: 0,
     mutations: 0,
+    induceCalls: 0,
+    induceMoves: 0,
+    induceDeletes: 0,
+    sidecarCalls: 0,
+    linkedRam: [],
     elapsedMs: 0,
+  };
+
+  /** The contiguous non-gap depth bands of this world, deepest first, for the
+   * bands-reached milestone. */
+  const bands: Array<{ lo: number; hi: number }> = [];
+  for (let depth = 0; depth < netDepth; depth++) {
+    if (isOnAirGap(depth)) continue;
+    const held = bands[bands.length - 1];
+    if (held !== undefined && held.hi === depth - 1) held.hi = depth;
+    else bands.push({ lo: depth, hi: depth });
+  }
+  const bandsReached = new Set<number>();
+  const noteBandsReached = (): void => {
+    if (run.msToAllBandsReached !== undefined) return;
+    for (const name of agents.keys()) {
+      const depth = truth(name)?.depth;
+      if (depth === undefined) continue;
+      const index = bands.findIndex((band) => depth >= band.lo && depth <= band.hi);
+      if (index >= 0) bandsReached.add(index);
+    }
+    if (bandsReached.size === bands.length) run.msToAllBandsReached = clock;
   };
 
   const maxRamOf = (name: string): number => world.servers.get(name)?.maxRam ?? 0;
@@ -427,6 +509,7 @@ export function runSpreadCase(
         // (and release) a stasis host that mutations have orphaned.
         remoteExec: new Set(stasisLinked),
         remoteVantages: [...agents.keys()].map((host) => ({ host, freeGb: jobFreeGb(host) })),
+        stasisLinked,
         expiry: expiry(),
       });
       const plan = planSpread(candidates, limits, clock);
@@ -443,6 +526,7 @@ export function runSpreadCase(
         planted++;
       }
       plantedPeak = Math.max(plantedPeak, [...agents.keys()].filter((h) => !agents.get(h)!.bootstrap).length);
+      if (planted > 0) noteBandsReached();
       if (planted === 0) break;
     }
     if (labHost !== undefined && knowledge.has(labHost)) milestone("msToLabSighted");
@@ -450,6 +534,18 @@ export function runSpreadCase(
     // The REAL hold planner decides the pin, the release, and the walk — the
     // exact refusal checklist the controller runs. `induce` tasks it files are
     // skipped at assignment (migration is out of this lane's scope).
+    // Hosts one in-flight authenticate away from cracked, with the time left
+    // on that call — the pre-charge pipeline's admission ticket.
+    const aboutToCrack = new Map<string, number>();
+    for (const agent of agents.values()) {
+      const job = agent.job;
+      if (!job || job.kind !== "attempt") continue;
+      const needed = crackCost.get(job.target);
+      if (needed === undefined) continue;
+      if ((tried.get(job.target) ?? 0) === needed - 1) {
+        aboutToCrack.set(job.target, Math.max(0, job.doneAt - clock));
+      }
+    }
     const holdPlan = planHold({
       hosts: projectHoldHosts(),
       netDepth,
@@ -460,7 +556,16 @@ export function runSpreadCase(
       walkGb: WALK_GB,
       pinGb: PIN_GB,
       reclaimGb: RECLAIM_GB,
+      induceGbPerThread: INDUCE_GB,
+      migrationCharge,
+      ...(policy.precharge !== false ? { aboutToCrack } : {}),
+      ...(policy.maxFerriesPerBand !== undefined ? { maxFerriesPerBand: policy.maxFerriesPerBand } : {}),
       ...(policy.vantageScoring !== undefined ? { vantageScoring: policy.vantageScoring } : {}),
+      ...(policy.maxPushers !== undefined ? { maxPushersPerTarget: policy.maxPushers } : {}),
+      ...(policy.maxFrontier !== undefined ? { maxFrontierTargets: policy.maxFrontier } : {}),
+      ...(policy.maxLabCandidates !== undefined ? { maxLabCandidates: policy.maxLabCandidates } : {}),
+      ...(policy.spareSlack !== undefined ? { spareSlack: policy.spareSlack } : {}),
+      ...(policy.spareScoring !== undefined ? { spareScoring: policy.spareScoring } : {}),
     });
     const hold = holdPlan.tasks;
     if (debug && clock >= nextDebugAt) {
@@ -530,10 +635,12 @@ export function runSpreadCase(
 
     const inFlight = new Map<string, { from: string; kind: Task["kind"] }[]>();
     for (const [name, agent] of agents) {
-      if (!agent.job) continue;
-      const claims = inFlight.get(agent.job.target) ?? [];
-      claims.push({ from: name, kind: agent.job.kind === "unpin" ? "pin" : agent.job.kind });
-      inFlight.set(agent.job.target, claims);
+      for (const job of [agent.job, agent.sidecarJob]) {
+        if (!job) continue;
+        const claims = inFlight.get(job.target) ?? [];
+        claims.push({ from: name, kind: job.kind === "unpin" ? "pin" : job.kind });
+        inFlight.set(job.target, claims);
+      }
     }
 
     const agentFreeGb = new Map<string, number>();
@@ -555,7 +662,20 @@ export function runSpreadCase(
 
     for (const task of [...tasks].sort((a, b) => a.priority - b.priority)) {
       const agent = agents.get(task.from);
-      if (!agent || agent.job) continue;
+      if (!agent) continue;
+      if (agent.job) {
+        // A second induce filed onto a vantage already holding one rides as
+        // the LINKED ONE-OFF: spawn-free, exec'd through the transient hop,
+        // its 6 s call CONCURRENT with the main's — mirrors `fileTask`.
+        if (policy.sidecar === false || policy.induce === false) continue;
+        if (task.kind !== "induce" || agent.job.kind !== "induce" || agent.sidecarJob !== undefined) continue;
+        const sideRoom = jobFreeGb(task.from) - Math.max(INDUCE_GB * agent.job.threads, HOP_GB);
+        const threads = Math.min(task.threads ?? 1, Math.floor(sideRoom / INDUCE_SIDE_GB));
+        if (threads < 1) continue;
+        run.sidecarCalls++;
+        agent.sidecarJob = { kind: "induce", target: task.host, threads, doneAt: clock + INDUCE_WAIT_MS };
+        continue;
+      }
       if (agent.bootstrap && task.kind !== "reclaim") continue;
       if (task.kind === "attempt") {
         if (crackAttempts(task.host) === undefined || vault.has(task.host)) continue;
@@ -598,6 +718,14 @@ export function runSpreadCase(
           threads: 1,
           doneAt: clock + stasisWaitMs(charisma),
         };
+      } else if (task.kind === "induce") {
+        if (policy.induce === false) continue;
+        agent.job = {
+          kind: "induce",
+          target: task.host,
+          threads: task.threads ?? 1,
+          doneAt: clock + INDUCE_WAIT_MS,
+        };
       } else if (task.kind === "walk") {
         // The walker CAN start: this lane's finish line. The walk itself is
         // lane 1's subject.
@@ -610,9 +738,9 @@ export function runSpreadCase(
     }
   };
 
-  const completeJob = (name: string, agent: Agent): void => {
-    const job = agent.job!;
-    agent.job = undefined;
+  const completeJob = (name: string, agent: Agent, slot: "job" | "sidecarJob" = "job"): void => {
+    const job = agent[slot]!;
+    agent[slot] = undefined;
     const record = truth(job.target);
     if (job.kind === "attempt") {
       if (!record) return;
@@ -673,6 +801,37 @@ export function runSpreadCase(
       stasisLinked.delete(job.target);
       agents.delete(name);
       lastPlantAt.delete(job.target);
+    } else if (job.kind === "induce") {
+      run.induceCalls++;
+      const result = system.chargeMigration(job.target, job.threads, charisma);
+      gainCharisma(result.charismaExp);
+      if (result.deleted) {
+        // A full destination band re-rolled the host out of existence.
+        run.induceDeletes++;
+        agents.delete(job.target);
+        stasisLinked.delete(job.target);
+        vault.delete(job.target);
+        lastPlantAt.delete(job.target);
+        migrationCharge.delete(job.target);
+        fold([{ hostname: job.target, at: clock, present: false }]);
+        return;
+      }
+      // The charge estimate, from the same readback the deployed order
+      // parses out of the engine's response. A landing resets it.
+      migrationCharge.set(job.target, result.moved ? 0 : result.newCharge);
+      if (result.moved) run.induceMoves++;
+      // The deployed order learns only what a fresh details read shows.
+      fold([observeHost(job.target)]);
+      if (result.moved) {
+        // A move rewires the target: its own and its old neighbours' edges are
+        // stale until the probers re-report. Mark topology dirty the honest
+        // way — a fresh probe from every standing host.
+        for (const standing of agents.keys()) {
+          if (!truth(standing)) continue;
+          fold([{ hostname: standing, at: clock, present: true, neighbours: system.probeFrom(standing) }]);
+        }
+        noteBandsReached();
+      }
     }
   };
 
@@ -690,6 +849,7 @@ export function runSpreadCase(
     let next = nextMutationAt;
     for (const agent of agents.values()) {
       if (agent.job && agent.job.doneAt < next) next = agent.job.doneAt;
+      if (agent.sidecarJob && agent.sidecarJob.doneAt < next) next = agent.sidecarJob.doneAt;
     }
     clock = next;
     if (clock >= nextMutationAt) {
@@ -697,15 +857,20 @@ export function runSpreadCase(
       nextMutationAt += mutationEveryMs;
       run.mutations++;
       observationSweep();
+      noteBandsReached();
     }
     for (const [name, agent] of agents) {
       if (agent.job && agent.job.doneAt <= clock) completeJob(name, agent);
+      // The one-off dies with its vantage: only a still-standing agent's
+      // sidecar completes (deployed: the controller kills it on retirement).
+      if (agents.has(name) && agent.sidecarJob && agent.sidecarJob.doneAt <= clock) completeJob(name, agent, "sidecarJob");
     }
   }
 
   run.crackableCount = crackables().length + [...vault].filter((name) => !truth(name)).length;
   run.crackedCount = vault.size;
   run.plantedPeak = plantedPeak;
+  run.linkedRam = [...stasisLinked].map((name) => maxRamOf(name)).sort((a, b) => b - a);
   run.elapsedMs = clock;
   if (!run.solved) run.reason = `walker not started within ${Math.round(capMs / 60_000)} minutes`;
   return run;

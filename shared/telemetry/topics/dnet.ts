@@ -12,6 +12,8 @@ export interface DarknetAgentDigest {
   pending?: number;
   /** The job the agent has spawned into, by kind, if any. */
   active?: string;
+  /** The linked one-off riding beside it, by kind, if any. */
+  sidecar?: string;
   /** Capacity available to the next job after fixed controller/prober reserves. */
   freeGb?: number;
   /** Jobs finished and failed here since the controller booted. */
@@ -181,23 +183,24 @@ export interface DarknetLabDigest {
   walkers: DarknetLabWalker[];
 }
 
-/** Cumulative returns observed from completed darknet farm calls this install.
- * No additional Netscript reads are made for this: agents classify the result
- * already returned by phishingAttack/openCache/promoteStock. Promotion is
- * activity, not cash profit—the API changes volatility and exposes no realized
- * P&L attribution. */
+/** Since-install observed returns. Promotion is activity, not attributable P&L. */
 export interface DarknetProfit {
   phishAttempts: number;
   phishSuccesses: number;
   /** Cash parsed at the display precision returned in the API message. */
   phishCash: number;
-  phishCaches: number;
+  phishCachesCreated: number;
+  /** A won cache can disappear with its host before opening. */
+  phishCachesOpened: number;
   cachesOpened: number;
   /** Cash parsed at the display precision returned in the API message. */
   cacheCash: number;
   cacheShares: number;
-  /** Exact compact reward labels, for example `program: BruteSSH.exe` or
-   * `shares: ECP`. Counts keep the payload bounded without shipping log lines. */
+  /** Exact post-open file observations. */
+  cacheContractsCreated: number;
+  cacheDataFilesRead: number;
+  cacheDataFilesParsed: number;
+  /** Compact labels keep log text off the wire. */
   cacheRewards: Record<string, number>;
   promotionAttempts: number;
   promotionBatches: number;
@@ -256,15 +259,8 @@ export interface DarknetState {
     refused: Record<string, number>;
     examples: { host: string; why: string; detail: string }[];
   };
-  /** What the farm ladder decided last derivation — the leftovers, and the only
-   *  part of the darknet that PAYS.
-   *
-   *  Beside `spread` and for the same reason: a strict ladder that admits one
-   *  rung per host is unreadable without the refusals it fell through on the way
-   *  there. "phishing, because there is no cache to open and no block worth
-   *  grinding" is the whole answer, and two thirds of it are refusals. */
+  /** Current derivation, including refusals needed to explain ladder fallthrough. */
   farm?: {
-    /** Tasks admitted, by kind. */
     admitted: Record<string, number>;
     refused: Record<string, number>;
     examples: { host: string; why: string; detail: string }[];
@@ -277,11 +273,10 @@ export interface DarknetState {
      *  (`PHISH_CACHE_COOLDOWN_MS`) is a constant in `rates.ts`, so only the
      *  stamp travels. */
     lastPhishCacheAt?: number;
-    /** The one resident elected to carry the net-wide phishing cache window.
-     *  There is exactly one `.d.cache` every three minutes for the whole net and
-     *  the roll that claims it scales with threads, so concentrating threads on
-     *  one host is strictly better than spreading them. */
+    /** Resident pinned to the net-wide cache roll. */
     cacheHunter?: string;
+    expectedMoneyPerSec: number;
+    expectedCharismaExpPerSec: number;
   };
   /** How far our log parser has drifted from the game's grammar.
    *

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { only } from "../../shared/features/profile.ts";
 import { parseGoal } from "../../shared/goals/presets.ts";
 import { runGame } from "../game-run.ts";

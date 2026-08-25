@@ -79,16 +79,11 @@ player-time auction (`shared/strategy/arbiter.ts:24`).
 
 ## Challenges
 
-- **A retry is not free.** With Array Jumping Game at one try, a second guess costs
-  the whole reward. The driver quarantines on first rejection — type, data, answer and
-  `triesBefore`, for offline replay — and never re-attempts. Quarantine lifts in
-  exactly three places, and none of them is a solver rebuild: the `ls` sweep reaping
-  a key whose file is gone, `syncDarknetContracts` forgetting a host, and
-  `sideModule.reset` on prestige. `CONTRACT_SOLVER_VERSION` used to release it on a
-  solver change and was dropped — releasing quarantine on a rebuild only ever bought
-  a retry of contracts that had failed for unrelated reasons. An unregistered type is
-  quarantined too — `solve` returns
-  `undefined`, not a guess (`contracts.ts:584-585`, `side.ts:168`).
+- **A retry is not free.** The first rejection is quarantined with its replay
+  inputs and never retried. Only fresh absence, darknet host retirement, or
+  prestige releases it; a dirty listing or solver rebuild does not. Unknown
+  types are quarantined rather than guessed (`contracts.ts:584-585`,
+  `side.ts:168`).
 - **A thrown error is not a rejected answer.** `reward === ""` is quarantined as
   `answer rejected`, a caught throw carries its error text, and "Cannot find contract"
   means the file is already gone, not a failure (`side.ts:241-249`).
@@ -172,17 +167,15 @@ The driver releases the pipeline the moment the attempts are submitted for the s
 
 ### Attribution by origin
 
-Every counter is split `network` / `darknet` (`ContractOrigin`), because darknet contracts
-arrive through a resident listing and cracking those hosts has a cost worth weighing
-against what their contracts actually pay. An origin's row is **absent** until it attempts
-something — absent means "never seen", not "measured zero". Only the bare origin tag
-reaches the wire; the darknet identity never does. The window is since-install, matching
-`moneySources.sinceInstall` so the cross-check compares like with like.
+Outcomes are since-install and split `network` / `darknet`; an absent row means
+no attempt, not zero reward. The separate observed/solvable census cannot be
+derived from the bounded queue. Dirty darknet listings revoke actionability but
+retain terminal attribution until fresh absence or host retirement. Only the
+origin tag crosses telemetry.
 
-These figures can **undercount and never double-count**: if the attempt dodge dies after
-its body ran, some attempts may have landed while the result set was lost, and those
-contracts are gone from the next `ls` sweep. A persistent shortfall against the game's
-exact ledger is the symptom.
+The counters can undercount, but not double-count, if a dodge dies after the
+game accepts an attempt and before its result returns. The exact game ledger is
+the cross-check.
 
 ## BitNode modifiers
 

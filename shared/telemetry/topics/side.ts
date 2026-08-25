@@ -89,17 +89,14 @@ export interface ContractFailure {
 export type ContractFailureSummary = Omit<ContractFailure, "data" | "answer">;
 
 export interface SideState {
-  /** Unquarantined contract work queue, capped by the probe
-   *  (see the Side limits in shared/strategy/side/contracts.ts). NEVER the
-   *  whole network: a long-lived save reached 8,557
-   *  contracts, and dumping them made this one record 1.66 MB. */
+  /** Bounded work window; totals below describe the full census. */
   contracts: ContractDigest[];
-  /** Every .cct on the network, solvable or not. */
+  /** Every observed .cct across ordinary servers and the darknet. */
   contractTotal?: number;
-  /** Unquarantined candidates. Types are filled by bounded driver inspection;
-   * unsupported files leave this count when quarantined. `contracts.length`
-   * is the capped work window, not the count. */
+  /** Unquarantined candidates, including rows outside the work window. */
   solvableTotal?: number;
+  /** Full census by discovery path. */
+  contractsByOrigin: Record<ContractOrigin, { observed: number; solvable: number }>;
   /** Contracts with no registered solver, counted PER TYPE. One row per type
    *  is the actionable shape: a gap in the registry is a missing solver. */
   unsolvableByType?: Record<string, number>;

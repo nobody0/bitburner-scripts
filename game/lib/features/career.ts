@@ -645,6 +645,7 @@ const driver: FeatureDriver = {
         },
         incomeFallback: decision.incomeFallback,
         priority: { band: decision.workPriority, value: decision.ranked[0]?.score ?? 0 },
+        ...(decision.ranked[0]?.produces !== undefined ? { produces: decision.ranked[0].produces } : {}),
         schedule: {
           mode: schedule.mode,
           reason: schedule.reason ?? "initial",

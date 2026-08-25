@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   RECLAIM_CLEAR_BUDGET_MS,
-  PHISH_CHARISMA_WEIGHT,
   electCacheHunter,
   phishWindowOpen,
   planFarm,
@@ -13,9 +12,14 @@ import {
 } from "../shared/strategy/dnet/farm.ts";
 import {
   PHISH_CACHE_COOLDOWN_MS,
+  phishCacheChance,
+  phishCharismaExp,
+  phishExpectedRates,
+  phishMoney,
+  phishMoneyChance,
   phishWaitMs,
+  promoteExpectedCharismaExpPerSec,
   ramBlockRemoved,
-  reclaimWaitMs,
 } from "../shared/strategy/dnet/rates.ts";
 
 /** The farm ladder: what a resident does with a host that has stopped teaching
@@ -176,7 +180,9 @@ describe("propaganda is the bottom rung, and usually refused", () => {
       inputs({ promoteSymbols: [{ symbol: "ECP", expectedProfit: 1e6 }] }),
     );
     expect(kindsOf(plan)).toEqual(["promote"]);
-    expect(reasonsOf(plan)).toContain("phish-no-room");
+    // Candidate rates are priced at the threads that actually fit, so the
+    // unaffordable action contributes zero and is never tried first.
+    expect(reasonsOf(plan)).not.toContain("phish-no-room");
     expect(plan.tasks[0]!.symbol).toBe("ECP");
   });
 
@@ -350,6 +356,36 @@ describe("exactly one host hunts the cache window", () => {
     const cramped = [host({ host: "dn-deep", depth: 9, freeGb: 14 })];
     expect(planFarm(cramped, inputs()).tasks[0]!.threads).toBe(2);
   });
+
+  test("difficulty above three owns the cache window, even when a shallow host is roomier", () => {
+    const plan = planFarm([
+      host({ host: "low", difficulty: 3, depth: 20, freeGb: 100 }),
+      host({ host: "quality", difficulty: 8, depth: 2, freeGb: 14 }),
+    ], inputs());
+    expect(plan.cacheHunter).toBe("quality");
+  });
+
+  test("low-difficulty hosts soft-avoid open-window phishing but fall back when promotion cannot run", () => {
+    const symbols = [{ symbol: "ECP", expectedProfit: 1e9 }];
+    const preferred = host({ host: "quality", difficulty: 8, freeGb: 30 });
+    const low = host({ host: "low", difficulty: 3, freeGb: 12 });
+    const promoted = planFarm([preferred, low], inputs({ promoteSymbols: symbols }));
+    expect(promoted.tasks.find((task) => task.host === "low")?.kind).toBe("promote");
+
+    const fallback = planFarm([preferred, { ...low, busy: new Set<FarmKind>(["promote"]) }], inputs({ promoteSymbols: symbols }));
+    expect(fallback.tasks.find((task) => task.host === "low")?.kind).toBe("phish");
+  });
+
+  test("the soft avoidance disappears while the cache window is shut", () => {
+    const plan = planFarm([
+      host({ host: "quality", difficulty: 8, freeGb: 30 }),
+      host({ host: "low", difficulty: 3, depth: 25, freeGb: 12 }),
+    ], inputs({
+      promoteSymbols: [{ symbol: "ECP", expectedProfit: 1 }],
+      lastPhishCacheAt: NOW - 1_000,
+    }));
+    expect(plan.tasks.find((task) => task.host === "low")?.kind).toBe("phish");
+  });
 });
 
 describe("a cramped block is ground from next door", () => {
@@ -431,10 +467,6 @@ describe("phish and promote compete on expected value", () => {
   // position, rising with depth — the money term phish has and promote lacks.
   const rich = [{ symbol: "ECP", expectedProfit: 1e9 }];
 
-  test("phishing values its extra charisma experience at the policy multiplier", () => {
-    expect(PHISH_CHARISMA_WEIGHT).toBe(1.5);
-  });
-
   test("a big enough edge flips a host to promote even with room for both", () => {
     const plan = planFarm([host({ freeGb: 12 })], inputs({
       promoteSymbols: rich,
@@ -477,10 +509,10 @@ describe("phish and promote compete on expected value", () => {
     expect(reasonsOf(plan)).toContain("promote-in-flight");
   });
 
-  test("no symbol degenerates to the old ladder", () => {
+  test("without a priced symbol phishing wins directly", () => {
     // With nothing on promote's side of the scale, phish wins the comparison
     // outright — and an admitted winner means the loser's rung is never
-    // reached, exactly as the old ladder behaved.
+    // reached, so no irrelevant promotion refusal is published.
     const plan = planFarm([host({ freeGb: 12 })], inputs({ lastPhishCacheAt: NOW - 1_000 }));
     expect(kindsOf(plan)).toEqual(["phish"]);
     expect(reasonsOf(plan)).not.toContain("promote-no-symbol");
@@ -488,6 +520,45 @@ describe("phish and promote compete on expected value", () => {
 });
 
 describe("the transcribed formulas", () => {
+  test("expected phishing XP follows cache, money, and quarter-rate failure branches", () => {
+    const shut = phishExpectedRates({ depth: 4, threads: 2, charisma: 200, cacheWindowOpen: false });
+    const open = phishExpectedRates({ depth: 4, threads: 2, charisma: 200, cacheWindowOpen: true });
+    const waitSec = phishWaitMs(200) / 1_000;
+    const cacheChance = phishCacheChance(2, 200);
+    const moneyChance = phishMoneyChance(200);
+    const moneyPerSuccess = phishMoney(4, 2, 200);
+    expect(shut.moneyPerSec).toBeCloseTo(moneyChance * moneyPerSuccess / waitSec, 12);
+    expect(open.moneyPerSec).toBeCloseTo((1 - cacheChance) * moneyChance * moneyPerSuccess / waitSec, 12);
+    expect(shut.charismaExpPerSec).toBeCloseTo(
+      phishCharismaExp(2) * (0.25 + 0.75 * moneyChance) / waitSec,
+      12,
+    );
+    expect(open.charismaExpPerSec).toBeCloseTo(
+      phishCharismaExp(2) * (0.25 + 0.75 * (cacheChance + (1 - cacheChance) * moneyChance)) / waitSec,
+      12,
+    );
+  });
+
+  test("promotion commonly beats phishing for charisma at mature skill", () => {
+    const phish = phishExpectedRates({ depth: 4, threads: 1, charisma: 569, cacheWindowOpen: false });
+    expect(promoteExpectedCharismaExpPerSec(1, 569)).toBeGreaterThan(phish.charismaExpPerSec);
+  });
+
+  test("a live charisma gate can flip the priced action without erasing money", () => {
+    const base = {
+      promoteSymbols: [{ symbol: "ECP", expectedProfit: 1e4 }],
+      lastPhishCacheAt: NOW - 1_000,
+      economics: { bestMoneyPerSec: 1_000, bestCharismaExpPerSec: 10, moneyWorthSec: 3_000, charismaWorthSec: 300 },
+    } satisfies Partial<FarmInputs>;
+    const ungated = planFarm([host({ depth: 20, freeGb: 12 })], inputs(base));
+    const gated = planFarm([host({ depth: 20, freeGb: 12 })], inputs({
+      ...base,
+      economics: { ...base.economics, charismaWorthSec: 3_000 },
+    }));
+    expect(ungated.tasks[0]?.kind).toBe("phish");
+    expect(gated.tasks[0]?.kind).toBe("promote");
+  });
+
   test("getRamBlockRemoved clamps to the block and rounds to two places", () => {
     // Depth 3, one thread, 200 charisma. Upstream's
     // 0.02 * 2 * 0.92^(d+1) * threads * (1 + cha/100) lands on 0.08596..., and

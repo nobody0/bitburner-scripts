@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
 import { SimWorld } from "../world.ts";
-import { ProcessTable, ScriptDeath, type SimProcess } from "../ns/process.ts";
+import { ProcessTable, type SimProcess } from "../ns/process.ts";
 import { makeSimNs, type SimNsHost } from "../ns/api.ts";
 import { DarknetSystem } from "../features/dnet.ts";
 import { mulberry32 } from "../core/rng.ts";

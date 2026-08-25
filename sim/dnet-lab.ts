@@ -169,7 +169,10 @@ export function biasedDfsRoute(firstDirection: Direction = "north"): LabRoute {
 export function plannerRoute(tuning?: Partial<LabTuning>, firstDirection: Direction = LAB_FIRST_PROBE): LabRoute {
   const held: LabTuning = { ...LAB_TUNING, ...tuning };
   return {
-    name: `planner:w${held.unknownCost}:r${held.radarMinCover}:d${held.radarDoorCover}:${firstDirection}`,
+    name: `planner:w${held.unknownCost}:r${held.radarMinCover}:d${held.radarDoorCover}`
+      + `${held.radarEconomicCost !== undefined && Number.isFinite(held.radarEconomicCost) ? `:ec${held.radarEconomicCost}` : ""}`
+      + `${held.corridorBias !== undefined && held.corridorBias < 1 ? `:cb${held.corridorBias}` : ""}`
+      + `:${firstDirection}`,
     start: ({ stage }) => {
       const prior = labPrior(stage);
       let field: LabField = emptyField();

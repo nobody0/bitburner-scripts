@@ -617,7 +617,7 @@ describe("Netscript contract fidelity", () => {
   });
 
   test("killing installBackdoor cancels its timer and world mutation", async () => {
-    const { ns, host, world } = harness();
+    const { host, world } = harness();
     const target = world.servers.get("n00dles")!;
     target.hasAdminRights = true;
     const factions = new FactionSystem(world, world.player);

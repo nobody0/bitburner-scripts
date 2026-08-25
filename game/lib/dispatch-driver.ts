@@ -187,8 +187,6 @@ export async function pump(
   failed: number;
   directive: ReturnType<typeof planFarm>["directive"];
   nextWakes: Array<{ ms: number; target?: string }>;
-  nextWakeMs?: number;
-  nextWakeTarget?: string;
 }> {
   const result = planFarm(view, state.memory, completions, {
     ...(options.arenaReserves ? { arenaReserves: options.arenaReserves } : {}),
@@ -228,12 +226,6 @@ export async function pump(
     else failed.push(action.opId);
   }
   if (failed.length > 0) reportFailed(state.memory, failed);
-  const nextWake = result.actions.reduce<{ ms: number; target?: string }>(
-    (earliest, action) => action.type === "sleep" && action.ms < earliest.ms
-      ? { ms: action.ms, ...(action.target ? { target: action.target } : {}) }
-      : earliest,
-    { ms: Infinity },
-  );
   const wakeByTarget = new Map<string, { ms: number; target?: string }>();
   for (const action of result.actions) {
     if (action.type !== "sleep") continue;
@@ -248,8 +240,6 @@ export async function pump(
     failed: failed.length,
     directive: result.directive,
     nextWakes: [...wakeByTarget.values()],
-    ...(Number.isFinite(nextWake.ms) ? { nextWakeMs: nextWake.ms } : {}),
-    ...(nextWake.target ? { nextWakeTarget: nextWake.target } : {}),
   };
 }
 

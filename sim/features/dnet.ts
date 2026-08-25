@@ -26,7 +26,6 @@ import {
 } from "../../shared/strategy/dnet/rates.ts";
 import { generateSecret, passwordRng, type PasswordFormat } from "./dnet-generators.ts";
 import {
-  capturePackets,
   checkPassword as checkPasswordAgainst,
   getExactCorrectChars,
   getRandomCharsInPassword,
@@ -1664,7 +1663,7 @@ export class DarknetSystem {
       const last = this.#packetWorld(host).lastAttempted();
       if (last !== null) {
         const placement = getExactCorrectChars(host.password, last);
-        const rightChars = host.password.split("").filter((c, i) => placement[i]).slice(0, 2);
+        const rightChars = host.password.split("").filter((_, i) => placement[i]).slice(0, 2);
         return rightChars.length === 0
           ? "No characters are in the right place."
           : `The characters ${rightChars.join(", ")} are in the right place. `;

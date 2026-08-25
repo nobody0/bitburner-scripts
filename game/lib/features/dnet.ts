@@ -1,5 +1,7 @@
 import type { NS } from "@ns";
 import { stepDarknet } from "../../../shared/strategy/dnet/decide.ts";
+import { FARM_NOMINAL_CHANNEL_WORTH_SEC } from "../../../shared/strategy/dnet/farm.ts";
+import { MONEY_CHANNEL } from "../../../shared/strategy/income.ts";
 import { CONTRACT_QUEUE_LIMIT } from "../../../shared/strategy/side/contracts.ts";
 import {
   holdHostFrom,
@@ -65,6 +67,7 @@ import {
 } from "../contracts.ts";
 import { actionRamClaim, featureDodgeOn } from "./dodge.ts";
 import type { DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
+import { slotRates } from "../income.ts";
 
 /** The HOME DRIVER: the third process of the darknet's three, and the only one
  * that runs on `home`.
@@ -98,6 +101,7 @@ export function syncDarknetContracts(
   knowledge: DnetKnowledge,
   now: number,
   expiry: ExpiryOpts,
+  retiredHosts: readonly string[] = [],
 ): void {
   const listings = state.darknetContractListings ??= {};
   const handled = state.darknetContractHandledAt ??= {};
@@ -108,25 +112,36 @@ export function syncDarknetContracts(
     }
   };
 
-  const forgetHost = (hostname: string): void => {
+  const invalidateListing = (hostname: string): void => {
     delete listings[hostname];
+  };
+
+  const retireHost = (hostname: string): void => {
+    invalidateListing(hostname);
     deleteHostKeys(handled, hostname);
     deleteHostKeys(state.contractQuarantine, hostname);
   };
 
+  // A dirty file fact only says the listing must be refreshed. Replacement
+  // and disappearance are stronger facts supplied by the knowledge fold: only
+  // those may discard terminal outcomes belonging to the old host identity.
+  for (const hostname of retiredHosts) retireHost(hostname);
+
   for (const hostname of Object.keys(listings)) {
     const host = knowledge.hosts.get(hostname);
-    if (!host || host.goneAt !== undefined || host.dirty.files === true) forgetHost(hostname);
+    if (!host || host.dirty.files === true) invalidateListing(hostname);
+    else if (host.goneAt !== undefined) retireHost(hostname);
   }
 
   for (const host of [...knowledge.hosts.values()].sort((a, b) => a.hostname.localeCompare(b.hostname))) {
     if (host.goneAt !== undefined) {
-      forgetHost(host.hostname);
+      retireHost(host.hostname);
       continue;
     }
     const observedAt = host.seenAt.files;
     if (observedAt === undefined || host.contracts === undefined || host.dirty.files === true) continue;
-    if (listings[host.hostname]?.identity !== host.identity) forgetHost(host.hostname);
+    if (listings[host.hostname]?.identity !== undefined
+      && listings[host.hostname]!.identity !== host.identity) retireHost(host.hostname);
     const files = [...host.contracts].sort();
     const validUntil = observedAt + expiryMs("files", { ...expiry, immune: isImmune(host, expiry) });
     if (host.identity === undefined) continue;
@@ -716,7 +731,7 @@ const dnet: FeatureDriver = {
     )) {
       home.backdoored.delete(hostname);
     }
-    syncDarknetContracts(ctx.state, home.knowledge, now, expiry);
+    syncDarknetContracts(ctx.state, home.knowledge, now, expiry, [...invalidatedHosts]);
     // Attempt outcomes fold into home's OWN ledger — the same helper the
     // controller uses — so the panel's cracking progress survives a controller
     // death the way the map does. An unknown-model outcome is also the only
@@ -1203,6 +1218,27 @@ const dnet: FeatureDriver = {
       : undefined;
 
     if (controllerAlive && rendezvous) {
+      const fileInvalidations = Object.entries(ctx.state.darknetContractRefreshHosts ?? {})
+        .map(([host, at]) => ({ host, at }));
+      const rateMarket = slotRates(ctx.state, ctx.board);
+      const measuredRate = (channel: string): number | undefined => {
+        const value = rateMarket.best.get(channel);
+        return value?.state === "measured" ? value.value : undefined;
+      };
+      const playerMults = ctx.state.topics.player?.mults;
+      const farmEconomics = {
+        ...(measuredRate(MONEY_CHANNEL) !== undefined ? { bestMoneyPerSec: measuredRate(MONEY_CHANNEL) } : {}),
+        ...(measuredRate("charisma") !== undefined ? { bestCharismaExpPerSec: measuredRate("charisma") } : {}),
+        moneyWorthSec: rateMarket.worth.get(MONEY_CHANNEL) ?? FARM_NOMINAL_CHANNEL_WORTH_SEC,
+        charismaWorthSec: Math.max(
+          FARM_NOMINAL_CHANNEL_WORTH_SEC,
+          rateMarket.worth.get("charisma") ?? 0,
+        ),
+        charismaExpMult: playerMults?.charisma_exp ?? 1,
+        crimeMoneyMult: playerMults?.crime_money ?? 1,
+        dnetMoneyMult: playerMults?.dnet_money ?? 1,
+        nodeMoneyMult: progression?.multipliers?.["DarknetMoneyMultiplier"] ?? 1,
+      };
       rendezvous.order({
         charisma: ctx.state.topics.player?.skills.charisma ?? 1,
         ...(timing !== undefined ? { timing } : {}),
@@ -1233,6 +1269,8 @@ const dnet: FeatureDriver = {
         ...(ctx.state.topics.player?.mults.crime_success !== undefined
           ? { crimeSuccessMult: ctx.state.topics.player.mults.crime_success }
           : {}),
+        farmEconomics,
+        ...(fileInvalidations.length > 0 ? { fileInvalidations } : {}),
         // The net facts only the dodged probe can read. The controller PLANS
         // stasis — it is the only thing that knows which hosts have live
         // residents and which are irreplaceable — and it ACTS, because
@@ -1260,6 +1298,13 @@ const dnet: FeatureDriver = {
         ...(home.lastStormAt !== undefined ? { lastStormAt: home.lastStormAt } : {}),
         vaultSnapshot: { entries: [...home.vault.values()], at: now },
       });
+      if (fileInvalidations.length > 0) {
+        for (const { host, at } of fileInvalidations) {
+          if (ctx.state.darknetContractRefreshHosts?.[host] === at) {
+            delete ctx.state.darknetContractRefreshHosts[host];
+          }
+        }
+      }
     }
 
     // Nothing follows. `stepDarknet` no longer proposes an action for home to
@@ -1466,7 +1511,7 @@ async function serveDarknetBackdoors(
  * Read from the same two facts the tick uses, so the claim and the action cannot
  * disagree: a claim without an action wastes a reservation, and an action
  * without a claim spends RAM the broker never accounted for. */
-function dnetSeedWanted(state: GameState): boolean {
+function dnetSeedWanted(): boolean {
   // Deliberately NOT gated on `topic.probed`: the tick's seed action is not
   // either (see the beachhead block). `darkweb` is guaranteed the moment dnet
   // access is granted, so the claim reserves seed RAM on the first tick and
@@ -1532,6 +1577,7 @@ export const dnetModule: FeatureModule = {
     home.lastStormAt = Date.now();
     delete state.darknetContractListings;
     delete state.darknetContractHandledAt;
+    delete state.darknetContractRefreshHosts;
     state.contractQueue = state.contractQueue?.filter((contract) => contract.dnet === undefined);
     delete state.topics.dnet;
   },
@@ -1540,7 +1586,7 @@ export const dnetModule: FeatureModule = {
     // there is to reserve RAM for. `stepDarknet` used to propose traversal
     // actions here too; none of them were executable from home, so the claim
     // beside them reserved RAM for work that always refused.
-    if (dnetSeedWanted(ctx.state)) {
+    if (dnetSeedWanted()) {
       return [actionRamClaim(ctx, "dnet", "action:seed", DNET_SEED_METHODS)];
     }
     return [];

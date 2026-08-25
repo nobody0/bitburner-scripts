@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_SPREAD_LIMITS, allocateCredentialChecks, candidatesFrom, deriveTasks, planSpread, type SpreadCandidate } from "../shared/strategy/dnet/plan.ts";
+import { classifyPlantRoute, DEFAULT_SPREAD_LIMITS, allocateCredentialChecks, candidatesFrom, deriveTasks, planSpread, type SpreadCandidate } from "../shared/strategy/dnet/plan.ts";
 import { choosePreemptionVantage } from "../shared/strategy/dnet/priority.ts";
 import { foldReports, type DnetHosts } from "../shared/strategy/dnet/host.ts";
 import type { ReportHost } from "../shared/strategy/dnet/courier.ts";
@@ -67,16 +67,32 @@ describe("every refusal to spread is named", () => {
     expect(plan.refused[0]!.detail).toContain("memoryReallocation");
   });
 
-  test("a cramped blocked host boots the largest local reclaimer that fits", () => {
+  test("an ordinary cramped blocked host is refused, not bootstrapped", () => {
+    // The bootstrap used to plant here too; the deep-world benchmark priced
+    // ordinary bootstraps at 1.26x walker-start on the two-gap world (CI
+    // excluding zero) and a pure tie shallow — the reclaimer is reserved for
+    // the lab candidate, whose block gates the whole walk.
     const plan = planSpread([
       candidate({ host: "blocked", usableRam: 5.3, blockedRam: 10 }),
     ], DEFAULT_SPREAD_LIMITS, NOW);
-    expect(plan.refused).toEqual([]);
-    expect(plan.plant[0]).toEqual(expect.objectContaining({
-      host: "blocked",
-      bootstrapReclaim: true,
-      bootstrapThreads: 2,
-    }));
+    expect(plan.plant).toEqual([]);
+    expect(plan.refused[0]?.why).toBe("not-enough-ram");
+  });
+
+  test("a stasis-managed target is priced at managed resident + prober, not the full agent", () => {
+    // The exact band the observed prober-only orphan lived in: 3.5GB usable
+    // fits the spawn-free managed resident (1.6) beside the prober (1.8), but
+    // the flat 5.4GB unmanaged bar refused it forever — the stasis link's
+    // whole point is that its host never needs the spawn safety net.
+    const managed = planSpread([
+      candidate({ host: "pinned", usableRam: 3.5, blockedRam: 10, stasisManaged: true }),
+    ], DEFAULT_SPREAD_LIMITS, NOW);
+    expect(managed.plant.map((p) => p.host)).toEqual(["pinned"]);
+    const ordinary = planSpread([
+      candidate({ host: "plain", usableRam: 3.5, blockedRam: 10 }),
+    ], DEFAULT_SPREAD_LIMITS, NOW);
+    expect(ordinary.plant).toEqual([]);
+    expect(ordinary.refused[0]?.why).toBe("not-enough-ram");
   });
 
   test("an ordinary host that fits the resident and prober uses the normal plant", () => {
@@ -95,6 +111,18 @@ describe("every refusal to spread is named", () => {
       bootstrapThreads: 4,
       omitProber: true,
     }));
+  });
+
+  test("a stasis host is exempt from the plant cooldown — it cannot flap", () => {
+    // The cooldown is anti-flap for a host that keeps RESTARTING. A stasis
+    // host is immune to restart and recovered by remote exec, so a recent
+    // plant must never block re-staffing it — else its managed dispatch (one
+    // plant per order, each restamping the cooldown) wedges it agentless.
+    const ordinary = planSpread([candidate({ host: "plain", lastPlantAt: NOW })], DEFAULT_SPREAD_LIMITS, NOW);
+    expect(ordinary.refused[0]?.why).toBe("cooldown");
+    const stasis = planSpread([candidate({ host: "pinned", lastPlantAt: NOW, stasisManaged: true })], DEFAULT_SPREAD_LIMITS, NOW);
+    expect(stasis.plant.map((p) => p.host)).toEqual(["pinned"]);
+    expect(stasis.refused).toEqual([]);
   });
 
   test("nothing is refused for being far away, or for being the third one", () => {
@@ -201,6 +229,36 @@ describe("spreading prefers the deep and the roomy, deterministically", () => {
     const forward = planSpread(hosts, DEFAULT_SPREAD_LIMITS, NOW).plant.map((h) => h.host);
     const backward = planSpread([...hosts].reverse(), DEFAULT_SPREAD_LIMITS, NOW).plant.map((h) => h.host);
     expect(forward).toEqual(backward);
+  });
+});
+
+describe("classifyPlantRoute — the who-may-launch axis", () => {
+  const route = (over: Partial<Parameters<typeof classifyPlantRoute>[0]>) =>
+    classifyPlantRoute({
+      target: "target",
+      vantage: "vantage",
+      vantageNeighbours: undefined,
+      targetNeighbours: undefined,
+      remoteExecCapable: false,
+      ...over,
+    });
+
+  test("adjacent when either direction of the symmetric edge names the other", () => {
+    expect(route({ vantageNeighbours: ["target"] })).toBe("adjacent");
+    expect(route({ targetNeighbours: ["vantage"] })).toBe("adjacent");
+  });
+
+  test("adjacency wins over remote — an edge keeps the authenticate fallback", () => {
+    expect(route({ vantageNeighbours: ["target"], remoteExecCapable: true })).toBe("adjacent");
+  });
+
+  test("remote only with the capability and no edge", () => {
+    expect(route({ remoteExecCapable: true })).toBe("remote");
+  });
+
+  test("ineligible without an edge or the capability — a credential alone is not a route", () => {
+    expect(route({})).toBe("ineligible");
+    expect(route({ vantageNeighbours: ["other"], targetNeighbours: ["other"] })).toBe("ineligible");
   });
 });
 

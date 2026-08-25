@@ -358,7 +358,6 @@ export function evaluate(
   komi = 0,
   scoreLeadBonus = 0,
 ): number {
-  const them = other(us);
   const size = board.size;
   const area = size * size;
   const indexOf = (x: number, y: number) => x * size + y;
@@ -1013,7 +1012,6 @@ export function finalizeGoDecision(
 ): GoDecision {
   if (prepared.immediate) return prepared.immediate;
   const { view, positionValue } = prepared;
-  const us: Stone = "X";
   const cohesion = view.cohesionWeight ?? opponentCohesion(view.opponent, view.board.size);
   const defaultContinuationWidth = view.board.size === 5
     ? view.opponent === "Illuminati" ? 14

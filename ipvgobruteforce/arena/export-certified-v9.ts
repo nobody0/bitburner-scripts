@@ -8,7 +8,7 @@
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   encodeOpponentTurnBehavior,
   opponentTurnBehavior,

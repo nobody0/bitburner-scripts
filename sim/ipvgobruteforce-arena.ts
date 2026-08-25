@@ -162,12 +162,6 @@ function randomFor(seed: number): () => number {
   };
 }
 
-function chooseUncertainty(random: () => number, maximum: number, timing: ArenaTiming): number {
-  if (timing === "minimum") return 0;
-  if (timing === "maximum") return maximum;
-  return Math.floor(random() * (maximum + 1));
-}
-
 /** Per-reply wall-processing budget the alignment model assumes. One ALIGN
  * anchors dispatch just after an engine rollover; each controlled reply then
  * drifts the next dispatch offset by its own processing time, so claiming

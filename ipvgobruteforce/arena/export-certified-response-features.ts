@@ -199,8 +199,6 @@ async function main(): Promise<void> {
     await kata?.close();
   }
   output.sort((left, right) => {
-    const a = left.generation as Record<string, unknown>;
-    const b = right.generation as Record<string, unknown>;
     return conditionalGroup(left).localeCompare(conditionalGroup(right))
       || String(modelInputKey(String((left.example as Record<string, unknown>).state),
         (left.example as Record<string, unknown>).behavior as number[],

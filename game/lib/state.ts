@@ -80,6 +80,9 @@ export interface GameState {
   darknetContractListings?: Record<string, DarknetContractListing>;
   /** Newest listing already given a terminal solver outcome, by contract key. */
   darknetContractHandledAt?: Record<string, number>;
+  /** Darknet hosts whose files may have changed after Side touched a contract.
+   * Home forwards these stamps to the remote controller, then clears them. */
+  darknetContractRefreshHosts?: Record<string, number>;
   /** Injected feature switches. Empty in the real game; a simulation sets them
    *  to isolate a feature. Applied in caps(), so every consumer agrees. */
   featureOverrides?: FeatureOverrides;

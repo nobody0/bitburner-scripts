@@ -132,7 +132,12 @@ cheap precisely because an anomaly rate high enough to fill it is itself the
 finding. Batches that landed having never launched a hack are counted
 separately (`incomplete`): support paid for with nothing stolen is a different
 failure from support arriving out of order, and folding the two together would
-hide the more expensive one. The same reasoning covers rates: the rollup
+hide the more expensive one. Two counters explain a batch that was never
+launched rather than lost: `quotaSkips` (keyed `phase:role`) counts launches
+deferred because the role's quota was full, and `launchLate` records per-role
+lateness — together they name which role starved when a reorder or a missed
+window traces back to the launch side rather than the landing side. The same
+reasoning covers rates: the rollup
 publishes CUMULATIVE `launched`/`landed`/`allocation` counters and the viewer
 differentiates them (`ui/app/project.ts`), which costs no bytes and makes a
 replay scrub recompute the identical curve.
@@ -197,20 +202,14 @@ measuring". The exact combined figure remains
 split; the two are published for the same window on purpose so they can be read
 against each other.
 
-Darknet returns use the same aggregate rule. `dnet.profit` is cumulative for
-the install and changes only when an existing phish, cache, or promotion order
-settles; it adds no Netscript reads and emits no per-attempt events. It carries
-phishing attempts/successes/cache wins and response-precision cash, cache cash,
-shares and compact reward-label counts, plus successful promotion batches,
-threads and symbols. Promotion is intentionally not converted to dollars:
-`promoteStock` changes volatility, and no honest API attribution connects one
-batch to later realized trading P&L.
+`dnet.profit` is since-install and event-free. Cash retains response precision;
+promotion stays an activity count because later trading P&L cannot be honestly
+attributed to one batch. The cache funnel separates created and opened
+`.d.cache` files, then records exact post-open CCT and data-file observations.
 
-The dnet Farming refusal table is a current planner-pass explanation, not
-telemetry counters: its number is the count of hosts that skipped each ladder
-step. A host can appear under several steps in the same pass, so those rows must
-not be added together or read as failures. Cumulative outcomes live only in the
-Returns card.
+Side publishes a full observed/solvable origin census because its visible queue
+is bounded. Farming refusals and expected cash/XP rates describe the current
+plan, not cumulative outcomes; one host may contribute to several refusal rows.
 
 Two records carry the endgame decision loop (`spec/strategy/endgame.md`).
 `endgame.route` fires only when the chosen route CHANGES — decisions, not

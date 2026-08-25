@@ -6,7 +6,7 @@ import { initState } from "../game/lib/state.ts";
 import { deriveCapabilities } from "../shared/features/unlock.ts";
 import { assignCoupled, assignIndependent } from "../shared/strategy/assignment.ts";
 import { BLACKOP_CONFIDENCE, STAMINA_FLOOR, stepBladeburner } from "../shared/strategy/bladeburner/decide.ts";
-import { CORP_STAGES, stepCorp, type CorpView } from "../shared/strategy/corp/stages.ts";
+import { stepCorp, type CorpView } from "../shared/strategy/corp/stages.ts";
 import { reachableFrom, stepDarknet, unlockValue } from "../shared/strategy/dnet/decide.ts";
 import { darknetRoute } from "../game/lib/features/dnet.ts";
 import { emptyKnowledge, foldKnowledgeReports } from "../shared/strategy/dnet/host.ts";

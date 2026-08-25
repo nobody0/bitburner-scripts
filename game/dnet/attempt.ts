@@ -18,7 +18,7 @@ import {
   type SolverState,
   type SolverStep,
 } from "../../shared/strategy/dnet/solvers/types.ts";
-import type { AgentIo, ControllerDeps, Order, Report } from "./shared.ts";
+import type { AgentIo, Order, Report } from "./shared.ts";
 import { awaitDnetOperation } from "./timing.ts";
 
 /** The `attempt` order body owns authenticate plus any heartbleed needed to

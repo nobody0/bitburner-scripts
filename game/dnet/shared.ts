@@ -54,7 +54,7 @@ import type { DarknetProfit } from "../../shared/telemetry/topics/dnet.ts";
  * and a build handoff leaves both on disk: an agent from the previous build
  * reading a global whose shape moved under it is a bug with no symptom.
  * Refusing by number makes it exit instead. */
-export const DNET_PROTOCOL = 10;
+export const DNET_PROTOCOL = 11;
 
 /** The script base every allocation starts from. Transcribed rather than read,
  * because a launcher sizes a process it has not started yet.
@@ -63,7 +63,7 @@ export const SCRIPT_BASE_GB = 1.6;
 
 // --- orders and reports: DATA, never closures --------------------------------
 
-export type OrderKind = TaskKind | "idle" | "bootstrapReclaim";
+export type OrderKind = TaskKind | "idle" | "bootstrapReclaim" | "launchSidecar";
 
 /** Everything an order needs, carried as data. It lives in the realm rather
  * than in `ns.args` because it may carry a password, and `ns.args` is visible
@@ -123,6 +123,14 @@ export interface Order {
    *  the difference decides who is stamped irreplaceable, who holds the storm
    *  and whose absence re-plans a walk. */
   scout?: true;
+  /** A LINKED ONE-OFF sidecar: exec'd by the resident beside the main order
+   *  instead of being spawned into after it. Spawn-free (its `ramOverrideGb`
+   *  is priced without the successor spawn), reports through `entry.sidecar`,
+   *  exits when its body settles, and dies with its host's agents — the
+   *  controller kills it whenever it retires the vantage. Born for the second
+   *  induce push whose 6 s aligns with the main's: "I have X GB and six
+   *  seconds — find something to do." */
+  oneOff?: true;
 }
 
 /** What an order hands back. Data, never live objects: the controller folds it
@@ -143,6 +151,11 @@ export interface Report {
   karmaLoss?: number;
   /** Since-last-report contribution; the controller and home fold it. */
   profit?: Partial<DarknetProfit>;
+  /** Induce only: the target's accumulated migration charge (0..1), parsed
+   *  from the engine's own "Migration prep is now at X.XX%" response — the
+   *  only read-back the engine offers for `migrationInductionServers`. 0 after
+   *  a completed move (the engine resets on landing). */
+  induceCharge?: number;
   stormFiredAt?: number;
   grammar?: { unrecognised: number; shapes: string[] };
   detail?: string;
@@ -213,6 +226,17 @@ export interface HostEntry extends DnetHost {
   probeRefreshAt?: number;
   /** THE process on this host. `order.kind === "idle"` is resident mode. */
   agent?: AgentHandle;
+  /** The one linked one-off riding beside the main agent, when the resident
+   * exec'd a sidecar. Dies with the vantage; at most one at a time. */
+  sidecar?: AgentHandle;
+  /** The order the one-off process should run, staged by the `launchSidecar`
+   * hop just before its exec — the sidecar mirror of `pendingOrder`. Claimed
+   * out of `staged` by the hop, NOT by the one-off, so the ordinary successor
+   * chain can never spawn into it by mistake. */
+  sidecarOrder?: Order;
+  /** When the hop claimed `sidecarOrder`; ages the claim out if the exec'd
+   * one-off died before adopting it — the sidecar mirror of `pendingOrderAt`. */
+  sidecarOrderAt?: number;
   /** A spawn-free local reclaimer — not an agent, and must not be staged to. */
   bootstrap?: { pid: number; startedAt: number };
   /** Pending orders, kept priority-sorted; the agent consumes `staged[0]`. */
@@ -261,8 +285,9 @@ export interface ControllerHandle {
   noteMutation(at: number): number;
   /** Wake the controller's derive race — a probe, an adopt, a home order. */
   wake(cause: string): void;
-  /** An agent registers itself the instant it boots. */
-  adopt(host: string, handle: AgentHandle): void;
+  /** An agent registers itself the instant it boots. A one-off sidecar
+   * registers into the entry's `sidecar` slot instead of the agent slot. */
+  adopt(host: string, handle: AgentHandle, sidecar?: boolean): void;
   /** Resolve after every named order has reported. Used by a prequeued bleed
    * to follow a whole parallel authentication wave without polling. */
   afterOrders(ids: readonly string[]): Promise<void>;
@@ -340,11 +365,19 @@ const DETAILS = ["dnet.getServerDetails"] as const;
 export const KIND_CALLS: Readonly<Record<OrderKind, readonly string[]>> = {
   // Resident mode: spawn, and nothing else.
   idle: [...SPAWN],
+  // The TRANSIENT launcher the resident spawns through to start a linked
+  // one-off sidecar: exec the sidecar, then chain onward into the main order
+  // as any completing order does. It exists so `exec` is paid on a 1-thread
+  // process for one hop rather than living on every resident (1.3 GB per
+  // host, forever) or on a multi-thread order (1.3 GB PER THREAD).
+  launchSidecar: [...SPAWN, "exec"],
   // The dedicated list job: one `ls` of the host it stands on.
   inventory: [...SPAWN, "dnsLookup", "ls", "read", "rm", ...DETAILS],
   bleed: [...SPAWN, "dnet.heartbleed", ...DETAILS],
   attempt: [...SPAWN, "dnet.authenticate", "dnet.heartbleed", ...DETAILS],
-  plant: [...SPAWN, "dnet.connectToSession", "dnet.authenticate", "scp", "exec", "kill", "dnsLookup", ...DETAILS],
+  // `asleep` (0 GB) is the replant grace: a refused exec right after an agent
+  // handoff usually races the dead predecessor's not-yet-freed allocation.
+  plant: [...SPAWN, "dnet.connectToSession", "dnet.authenticate", "scp", "exec", "kill", "dnsLookup", "asleep", ...DETAILS],
   reclaim: [...SPAWN, "dnet.memoryReallocation", ...DETAILS],
   // Spawn-free local recovery: base + one action per thread.
   bootstrapReclaim: ["dnet.memoryReallocation"],

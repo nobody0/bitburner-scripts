@@ -1,7 +1,7 @@
 import type { NS } from "@ns";
 import type { FeatureOverrides } from "../../shared/features/profile.ts";
 import { roundSigFigs } from '../../shared/format.ts';
-import { capsDelta, type Capabilities } from "../../shared/features/unlock.ts";
+import { capsDelta } from "../../shared/features/unlock.ts";
 import { PRIORITY, type Claim, type SlotState } from "../../shared/strategy/arbiter.ts";
 import { classifyReset, type PrestigeKind, type ResetIdentity } from "../../shared/reset.ts";
 import { coordinate, emptyDigest, postNeeds, type Coordination } from "../../shared/strategy/coordination.ts";

@@ -7,10 +7,14 @@ export function emptyDnetProfit(): DarknetProfit {
     phishAttempts: 0,
     phishSuccesses: 0,
     phishCash: 0,
-    phishCaches: 0,
+    phishCachesCreated: 0,
+    phishCachesOpened: 0,
     cachesOpened: 0,
     cacheCash: 0,
     cacheShares: 0,
+    cacheContractsCreated: 0,
+    cacheDataFilesRead: 0,
+    cacheDataFilesParsed: 0,
     cacheRewards: {},
     promotionAttempts: 0,
     promotionBatches: 0,
@@ -24,10 +28,14 @@ export function mergeDnetProfit(target: DarknetProfit, delta: DnetProfitDelta | 
   target.phishAttempts += delta.phishAttempts ?? 0;
   target.phishSuccesses += delta.phishSuccesses ?? 0;
   target.phishCash += delta.phishCash ?? 0;
-  target.phishCaches += delta.phishCaches ?? 0;
+  target.phishCachesCreated += delta.phishCachesCreated ?? 0;
+  target.phishCachesOpened += delta.phishCachesOpened ?? 0;
   target.cachesOpened += delta.cachesOpened ?? 0;
   target.cacheCash += delta.cacheCash ?? 0;
   target.cacheShares += delta.cacheShares ?? 0;
+  target.cacheContractsCreated += delta.cacheContractsCreated ?? 0;
+  target.cacheDataFilesRead += delta.cacheDataFilesRead ?? 0;
+  target.cacheDataFilesParsed += delta.cacheDataFilesParsed ?? 0;
   target.promotionAttempts += delta.promotionAttempts ?? 0;
   target.promotionBatches += delta.promotionBatches ?? 0;
   target.promotionThreads += delta.promotionThreads ?? 0;
@@ -73,11 +81,19 @@ export function phishProfit(message: string, success: boolean): DnetProfitDelta 
     phishAttempts: 1,
     phishSuccesses: success ? 1 : 0,
     phishCash: amountAfter(message, /Phishing attack succeeded! \$([0-9](?:[0-9.,]*[0-9])?(?:e[+-]?[0-9]+)?)([kmbtqQsSon]?) retrieved/),
-    phishCaches: success && message.includes("Found a cache file") ? 1 : 0,
+    phishCachesCreated: success && message.includes("Found a cache file") ? 1 : 0,
   };
 }
 
-export function cacheProfit(message: string): DnetProfitDelta {
+export function cacheProfit(
+  message: string,
+  observed: {
+    filename: string;
+    contractsCreated: number;
+    dataFilesRead: number;
+    dataFilesParsed: number;
+  },
+): DnetProfitDelta {
   const moneyPrefix = "You have discovered a cache with ";
   // formatMoney obeys the player's configurable currency symbol and whether it
   // appears before or after the value. The augmentation response shares the
@@ -102,8 +118,12 @@ export function cacheProfit(message: string): DnetProfitDelta {
   else if (message.includes("4S Data")) label = "4S data";
   return {
     cachesOpened: 1,
+    phishCachesOpened: observed.filename.endsWith(".d.cache") ? 1 : 0,
     cacheCash: cash,
     cacheShares: shares ? Number(shares[1]) : 0,
+    cacheContractsCreated: observed.contractsCreated,
+    cacheDataFilesRead: observed.dataFilesRead,
+    cacheDataFilesParsed: observed.dataFilesParsed,
     cacheRewards: { [label]: 1 },
   };
 }

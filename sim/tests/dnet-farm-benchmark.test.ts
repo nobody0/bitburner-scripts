@@ -35,6 +35,8 @@ describe("the earn-in-a-full-net arena", () => {
     expect(summary.meanPhishCaches).toBeGreaterThan(0);
   });
 
+  // These two each run a fresh one-hour case inside the test body (~5-7 s), so
+  // they get an explicit budget instead of bun's 5 s default.
   test("a seed is deterministic: the same world replays to the same run", () => {
     const again = runFarmCase(generateNet(2, { stock: true }), SHIPPED_FARM, HOURS);
     const reference = shipped[1]!;
@@ -42,7 +44,7 @@ describe("the earn-in-a-full-net arena", () => {
     expect(again.moneyEarned).toBe(reference.moneyEarned);
     expect(again.crackedTotal).toBe(reference.crackedTotal);
     expect(again.walkerAttempts).toBe(reference.walkerAttempts);
-  });
+  }, 30_000);
 
   test("withholding the storm still leaves the invariant intact", () => {
     const quiet = runFarmCase(
@@ -53,5 +55,5 @@ describe("the earn-in-a-full-net arena", () => {
     expect(quiet.stormsFired).toBe(0);
     expect(quiet.walkerInterruptions).toBe(0);
     expect(quiet.cachesOpened).toBeGreaterThan(0);
-  });
+  }, 30_000);
 });

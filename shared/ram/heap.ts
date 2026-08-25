@@ -230,7 +230,6 @@ export class Heap {
   /** Find blocks for a request without mutating state. */
   #place(request: AllocRequest, tentative?: Map<string, number>): Block[] | undefined {
     const { blockSize, threads, policy, coreAware = false } = request;
-    const wanted = blockSize * threads;
 
     if (policy === "homeFirst" && this.#home) {
       const actualThreads = coreAware ? Math.ceil(threads / coreEffect(this.#home.cores) - 1e-12) : threads;

@@ -44,7 +44,7 @@ const CYCLES_PER_SEC = 1_000 / ENGINE_CYCLE_MS;
  *    and never records their payout.
  *  - `side` solves coding contracts for one-off rewards. A per-second figure would
  *    have to be invented from a solve cadence nobody measures.
- *  - `go`, `stanek` and `dnet` produce bonuses and unlocks, not cash. */
+ *  - `go` and `stanek` produce bonuses and unlocks, not cash. */
 export function announcedIncome(state: GameState): IncomeAnnouncement[] {
   const out: IncomeAnnouncement[] = [];
 
@@ -114,6 +114,14 @@ export function announcedIncome(state: GameState): IncomeAnnouncement[] {
     out.push({ by: "career", state: "measured", perSec: careerBestPerSec(state) });
   } else {
     out.push({ by: "career", state: "unknown", reason: "career has not published a ranked option" });
+  }
+
+  // Forward phishing cash from the admitted Darknet fleet. Cache payouts stay
+  // out: they are lumpy rewards whose next kind is not observable, while the
+  // phishing rate is an exact expectation from the chosen threads and hosts.
+  const dnetMoney = state.topics.dnet?.farm?.expectedMoneyPerSec;
+  if (dnetMoney !== undefined) {
+    out.push({ by: "dnet", state: "measured", perSec: Math.max(0, dnetMoney) });
   }
 
   // These features genuinely cannot turn their current topics into an income
@@ -279,6 +287,19 @@ export function announcedRates(state: GameState): RateAnnouncement[] {
       perSec: bestExp,
     }
     : { by: "hacking", channel: HACKING_CHANNEL, state: "unknown", reason: "fleet experience has not been observed" });
+
+  const dnetCharisma = state.topics.dnet?.farm?.expectedCharismaExpPerSec;
+  if (dnetCharisma !== undefined) {
+    out.push({ by: "dnet", channel: "charisma", state: "measured", perSec: Math.max(0, dnetCharisma) });
+  }
+
+  // The selected career option is the current player-time alternative. Keep
+  // all raw channels, including charisma when nobody is presently gated on it;
+  // Dnet uses that denominator for its always-useful XP floor.
+  for (const [channel, perSec] of Object.entries(state.topics.career?.plan?.produces ?? {})) {
+    if (!(perSec >= 0)) continue;
+    out.push({ by: "career", channel, state: "measured", perSec });
+  }
 
   // Reputation has no background producer: only player work earns it, so the
   // bidders themselves are the whole field. Announced explicitly as unknown so

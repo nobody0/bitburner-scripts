@@ -237,7 +237,7 @@ function standingOf(faction: string, view: FactionsView): FactionStanding | unde
  * from selection entirely. Estimated rather than solved: this runs inside the
  * local search, and the exact ordering DP is exponential — `orderPurchases` is
  * for the transaction boundary, where money actually changes hands. */
-function unionCost(augNames: readonly string[], choices: readonly Choice[], view: FactionsView): number {
+function unionCost(augNames: readonly string[], view: FactionsView): number {
   // No seller attribution and no PurchaseCandidate wrappers: an augmentation
   // costs the same wherever it is bought, the estimate reads only the name,
   // the prerequisites and the queue depth, and nothing built here leaves this
@@ -332,7 +332,7 @@ function portfolioTime(
     cursor += sec;
   }
 
-  const totalCost = unionCost(augNames, choices, view) + donationCost;
+  const totalCost = unionCost(augNames, view) + donationCost;
   const moneySpotSec = Math.max(0, totalCost - settlingMoney(view)) / Math.max(1, view.incomePerSec);
   const moneySec = pacedSec(moneySpotSec, pace?.elapsedSec ?? 0, moneyExponent);
   // Money production runs underneath the work rather than after it.

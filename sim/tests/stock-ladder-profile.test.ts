@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { STOCK_VOLATILITY_STEP, volatilityRange } from "../../shared/features/stocks.ts";
 import { parseGoal } from "../../shared/goals/presets.ts";
 import { runGame, type GameRunResult } from "../game-run.ts";

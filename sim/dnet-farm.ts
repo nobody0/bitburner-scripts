@@ -1,10 +1,8 @@
 import { attemptCharismaExp } from "./features/dnet.ts";
 import {
   ATTEMPT_GB,
-  BOOTSTRAP_GB,
   CONTROLLER_GB,
   crackAttemptsFor,
-  generateNet,
   price,
   PROBER_GB,
   RECLAIM_GB,
@@ -360,6 +358,7 @@ export function runFarmCase(
         lastPlantAt,
         remoteExec: new Set(stasisLinked),
         remoteVantages: [...agents.keys()].map((host) => ({ host, freeGb: jobFreeGb(host) })),
+        stasisLinked,
         expiry: expiry(),
       });
       let planted = 0;

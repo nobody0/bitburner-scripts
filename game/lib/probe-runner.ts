@@ -59,12 +59,10 @@ export interface ProbeRunner {
    *  broker could place them. `lastRunAt` cannot serve: a probe too big for a
    *  cold-start host never earns a stamp, and the burst would never end. */
   readonly warmedUp: Set<string>;
-  /** Probe id -> summed RAM cost of its distinct methods. */
-  readonly costs: Map<string, number>;
 }
 
 export function initProbeRunner(): ProbeRunner {
-  return { lastRunAt: new Map(), warmedUp: new Set(), costs: new Map() };
+  return { lastRunAt: new Map(), warmedUp: new Set() };
 }
 
 function methodCost(ns: NS, method: string): number {
@@ -87,21 +85,6 @@ function priceMethods(ns: NS, methods: readonly string[]): number {
   let total = 0;
   for (const method of new Set(methods)) total += methodCost(ns, method);
   return total;
-}
-
-/** What a probe costs to LAUNCH.
- *
- * For a stepped probe this is the largest single step, not the sum — that is
- * the entire point of splitting one. Each step is its own stub, so the peak
- * RAM the game ever has to find at once is one step's worth. */
-function priceProbe(ns: NS, runner: ProbeRunner, probe: DodgedProbe): number {
-  const cached = runner.costs.get(probe.id);
-  if (cached !== undefined) return cached;
-  const price = isStepped(probe)
-    ? probe.steps.reduce((peak, step) => Math.max(peak, priceMethods(ns, step.methods)), 0)
-    : priceMethods(ns, probe.methods);
-  runner.costs.set(probe.id, price);
-  return price;
 }
 
 /** Dynamic RAM a dodge closure can use right now.

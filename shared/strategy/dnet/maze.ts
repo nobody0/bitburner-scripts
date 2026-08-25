@@ -554,6 +554,17 @@ export interface LabTuning {
    *  UNKNOWN door-candidate slots of a seam whose door has not been found.
    *  Infinity disables the scout. */
   radarDoorCover: number;
+  /** Economic speculative radar: when the window covers 2+ live candidates and
+   *  the believed walk to the NEAREST of them costs at least this many
+   *  attempts, pay 1 attempt now to resolve them from here instead of walking
+   *  there to be disproved. Infinity (default) disables — the decisive radar
+   *  still always fires. */
+  radarEconomicCost?: number;
+  /** Price an unknown slot that CONTINUES a straight known-open corridor at
+   *  `unknownCost * corridorBias`. A randomized-DFS carve favours long
+   *  corridors, so straight-ahead unknowns are likelier open than the flat
+   *  prior says. 1 (default) disables. */
+  corridorBias?: number;
 }
 
 export const LAB_TUNING: LabTuning = { unknownCost: 2.5, radarMinCover: Infinity, radarDoorCover: 3 };
@@ -614,6 +625,19 @@ export function decideLab(field: LabField, at: Cell, prior: LabPrior, tuning: La
         note: `radar covers ${covered.length} of ${remaining.length} exit candidates`,
       };
     }
+    // The ECONOMIC speculative radar: 2+ candidates in the window, and the
+    // believed walk to the nearest of them costs enough attempts that paying
+    // ONE now to resolve them from here beats walking there to be disproved.
+    if (covered.length >= 2 && Number.isFinite(tuning.radarEconomicCost ?? Infinity)) {
+      const toCovered = planStep(field, at, prior, covered, tuning.unknownCost);
+      if (toCovered !== undefined && toCovered.cost >= tuning.radarEconomicCost!) {
+        return {
+          kind: "radar",
+          field: { ...field, ruledOut, radared: [...field.radared, here] },
+          note: `radar resolves ${covered.length} candidates ${toCovered.cost.toFixed(1)} believed attempts away`,
+        };
+      }
+    }
   }
 
   // A door-scouting radar, when enabled: reveal several still-unknown seam
@@ -641,7 +665,7 @@ export function decideLab(field: LabField, at: Cell, prior: LabPrior, tuning: La
   // decisive radar above fires from anywhere inside their corner — so there is
   // nothing to aim at but the candidates themselves.
   const targets = exit !== undefined ? [exit] : remaining;
-  const step = planStep(field, at, prior, targets, tuning.unknownCost);
+  const step = planStep(field, at, prior, targets, tuning.unknownCost, tuning.corridorBias ?? 1);
   if (step === undefined) {
     return { kind: "lost", reason: `no believable route from ${here} to ${targets.join(" or ")}` };
   }
@@ -714,6 +738,7 @@ function planStep(
   prior: LabPrior,
   targets: readonly string[],
   unknownCost: number,
+  corridorBias = 1,
 ): { direction: Direction; target: string; cost: number } | undefined {
   const cols = (prior.width - 1) >> 1;
   const rows = (prior.height - 1) >> 1;
@@ -763,6 +788,18 @@ function planStep(
   const doorFound = prior.doorSets.map((set, index) =>
     prior.doorSetExclusive[index] === true && set.some((held) => field.slots[held] === true));
 
+  /** The DFS-carve corridor prior: an unknown slot that CONTINUES a straight
+   * known-open corridor (the next slot along the same axis, on either side, is
+   * observed open) is likelier open than the flat prior says. Clamped at 1 so
+   * the manhattan/2 heuristic stays admissible. */
+  const unknownPrice = (sx: number, sy: number): number => {
+    if (corridorBias >= 1) return unknownCost;
+    const continues = sx % 2 === 0
+      ? field.slots[`${sx - 2},${sy}`] === true || field.slots[`${sx + 2},${sy}`] === true
+      : field.slots[`${sx},${sy - 2}`] === true || field.slots[`${sx},${sy + 2}`] === true;
+    return continues ? Math.max(1, unknownCost * corridorBias) : unknownCost;
+  };
+
   const price = (sx: number, sy: number): number => {
     if (sx <= 0 || sy <= 0 || sx >= prior.width - 1 || sy >= prior.height - 1) return Infinity;
     const held = field.slots[`${sx},${sy}`];
@@ -770,7 +807,7 @@ function planStep(
     if (onSeam(sx, sy)) {
       const set = prior.doorIndex[`${sx},${sy}`];
       if (set === undefined || doorFound[set] === true) return Infinity;
-      return unknownCost;
+      return unknownPrice(sx, sy);
     }
     const a = sx % 2 === 0 ? nodeOf(sx - 1, sy) : nodeOf(sx, sy - 1);
     const b = sx % 2 === 0 ? nodeOf(sx + 1, sy) : nodeOf(sx, sy + 1);
@@ -780,7 +817,7 @@ function planStep(
       if (cycleSeen[quadrantOf(sx, sy)] === true || !touchesQuadrantStart(sx, sy)) return Infinity;
       return unknownCost;
     }
-    return unknownCost;
+    return unknownPrice(sx, sy);
     // NOTE, so the next tuner does not re-dig this hole: a "degree inference"
     // (three provable walls around a cell force its fourth slot open, priced 1)
     // was implemented and swept — byte-identical results over 480 paired cases.

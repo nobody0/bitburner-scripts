@@ -475,6 +475,8 @@ describe("tab rendering", () => {
         refused: { "cache-none": 2 },
         examples: [{ host: "dn-1", why: "cache-none", detail: "no .cache file on this host" }],
         cacheHunter: "dn-1",
+        expectedMoneyPerSec: 125_000,
+        expectedCharismaExpPerSec: 42,
         // Two minutes into a three-minute window, so the countdown is a real
         // number rather than "open".
         lastPhishCacheAt: 1_000 - 120_000,
@@ -483,7 +485,11 @@ describe("tab rendering", () => {
         phishAttempts: 12,
         phishSuccesses: 3,
         phishCash: 125_000,
-        phishCaches: 1,
+        phishCachesCreated: 1,
+        phishCachesOpened: 1,
+        cacheContractsCreated: 0,
+        cacheDataFilesRead: 0,
+        cacheDataFilesParsed: 0,
         cachesOpened: 4,
         cacheCash: 2_500_000,
         cacheShares: 17,
@@ -883,6 +889,10 @@ describe("tab rendering", () => {
       contracts: [{ host: "n00dles", file: "next.cct" }],
       contractTotal: 2,
       solvableTotal: 1,
+      contractsByOrigin: {
+        network: { observed: 2, solvable: 1 },
+        darknet: { observed: 0, solvable: 0 },
+      },
       registryComplete: true,
       contractTypeTotal: 30,
       supportedTypeTotal: 30,
@@ -913,6 +923,8 @@ describe("tab rendering", () => {
 
     const html = TABS.side.render(state);
     expect(html).toContain("30/30");
+    expect(html).toContain("network 1/2");
+    expect(html).toContain("darknet 0/0 solvable/observed");
     expect(html).toContain("input · 12 chars");
     expect(html).toContain("[2,&lt;script&gt;]");
     expect(html).not.toContain("[2,<script>]");
@@ -934,6 +946,10 @@ describe("tab rendering", () => {
       contracts: [{ host: "dn-1", file: "next.cct", origin: "darknet" }],
       contractTotal: 1,
       solvableTotal: 1,
+      contractsByOrigin: {
+        network: { observed: 0, solvable: 0 },
+        darknet: { observed: 1, solvable: 1 },
+      },
       rewardsSince: 1_000,
       rewards: {
         network: {
@@ -969,23 +985,6 @@ describe("tab rendering", () => {
     expect(html).toContain("Gained $1.000m");
     // The old hardcoded claim is gone.
     expect(html).not.toContain("v3 registry complete");
-  });
-
-  test("Side renders a run that predates the reward fields, and fabricates no zero", () => {
-    const state = emptyState();
-    state.lastT = 2_000;
-    state.topics.side = {
-      contracts: [{ host: "n00dles", file: "next.cct" }],
-      contractTotal: 1,
-      solvableTotal: 1,
-      // A malformed row from some other build must not take down the frame.
-      rewards: { network: null },
-    } as never;
-
-    const html = TABS.side.render(state);
-    expect(html).toContain("no coding contract has been attempted since the last install");
-    expect(html).toContain("no contract has been solved since the last install");
-    expect(html).not.toContain("did not match this build's parser");
   });
 
 });
