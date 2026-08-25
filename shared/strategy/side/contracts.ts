@@ -77,14 +77,26 @@ function mergeOverlappingIntervals(data: unknown): number[][] {
   return out;
 }
 
-/** Unique paths through an m x n grid. */
+/** 0! through 26!: the v3.0.1 generator caps both dimensions at 14. */
+const UNIQUE_PATH_FACTORIALS: readonly bigint[] = [
+  1n, 1n, 2n, 6n, 24n, 120n, 720n, 5040n, 40320n, 362880n,
+  3628800n, 39916800n, 479001600n, 6227020800n, 87178291200n,
+  1307674368000n, 20922789888000n, 355687428096000n,
+  6402373705728000n, 121645100408832000n, 2432902008176640000n,
+  51090942171709440000n, 1124000727777607680000n,
+  25852016738884976640000n, 620448401733239439360000n,
+  15511210043330985984000000n, 403291461126605635584000000n,
+];
+
+/** Unique paths through the game's at-most-14 x 14 grid. */
 function uniquePathsI(data: unknown): number {
   const [rows, cols] = data as [number, number];
-  const grid = new Array<number>(cols).fill(1);
-  for (let r = 1; r < rows; r++) {
-    for (let c = 1; c < cols; c++) grid[c] = grid[c]! + grid[c - 1]!;
-  }
-  return grid[cols - 1] ?? 1;
+  const rowSteps = rows - 1;
+  const colSteps = cols - 1;
+  return Number(
+    UNIQUE_PATH_FACTORIALS[rowSteps + colSteps]!
+    / (UNIQUE_PATH_FACTORIALS[rowSteps]! * UNIQUE_PATH_FACTORIALS[colSteps]!),
+  );
 }
 
 /** Unique paths with obstacles (1 = blocked). */
@@ -102,15 +114,25 @@ function uniquePathsII(data: unknown): number {
   return ways[cols - 1] ?? 0;
 }
 
+/** p(n) - 1 through n=100, the v3.0.1 generator's exact ceiling.
+ * Slot zero preserves the previous solver's out-of-generator result. */
+const TOTAL_WAYS_TO_SUM: readonly number[] = [
+  1, 0, 1, 2, 4, 6, 10, 14, 21, 29, 41, 55, 76, 100, 134, 175, 230, 296, 384, 489,
+  626, 791, 1001, 1254, 1574, 1957, 2435, 3009, 3717, 4564, 5603, 6841, 8348, 10142,
+  12309, 14882, 17976, 21636, 26014, 31184, 37337, 44582, 53173, 63260, 75174, 89133,
+  105557, 124753, 147272, 173524, 204225, 239942, 281588, 329930, 386154, 451275,
+  526822, 614153, 715219, 831819, 966466, 1121504, 1300155, 1505498, 1741629, 2012557,
+  2323519, 2679688, 3087734, 3554344, 4087967, 4697204, 5392782, 6185688, 7089499,
+  8118263, 9289090, 10619862, 12132163, 13848649, 15796475, 18004326, 20506254,
+  23338468, 26543659, 30167356, 34262961, 38887672, 44108108, 49995924, 56634172,
+  64112358, 72533806, 82010176, 92669719, 104651418, 118114303, 133230929, 150198135,
+  169229874, 190569291,
+];
+
 /** Total ways to sum to n using smaller positive integers. */
 function totalWaysToSum(data: unknown): number {
   const target = data as number;
-  const ways = new Array<number>(target + 1).fill(0);
-  ways[0] = 1;
-  for (let coin = 1; coin < target; coin++) {
-    for (let value = coin; value <= target; value++) ways[value] = ways[value]! + ways[value - coin]!;
-  }
-  return ways[target] ?? 0;
+  return TOTAL_WAYS_TO_SUM[target]!;
 }
 
 /** Total ways to sum to n using the given denominations. */
@@ -179,7 +201,16 @@ function minimumPathSumTriangle(data: unknown): number {
 function largestPrimeFactor(data: unknown): number {
   let n = data as number;
   let largest = 1;
-  for (let factor = 2; factor * factor <= n; factor++) {
+  while (n % 2 === 0) {
+    largest = 2;
+    n /= 2;
+  }
+  while (n % 3 === 0) {
+    largest = 3;
+    n /= 3;
+  }
+  // Every prime above three is 6k - 1 or 6k + 1.
+  for (let factor = 5, step = 2; factor * factor <= n; factor += step, step = 6 - step) {
     while (n % factor === 0) {
       largest = factor;
       n /= factor;
@@ -610,60 +641,70 @@ function nearestSquareRoot(data: unknown): bigint {
   return value - root * root < upper * upper - value ? root : upper;
 }
 
-/** Segmented sieve over the game's at-most-one-million-wide interval.
- *
- * Three things carry the cost here, and each is addressed. The segment holds
- * only ODD candidates — two is counted by hand and every prime steps by
- * `2 * prime` — which halves both the allocation and the marking. The marking
- * loop then walks slot indices directly, since an odd multiple stepping by
- * `2 * prime` in value steps by exactly `prime` in slot index. And the final
- * tally reads the segment four bytes at a time as 32-bit words: slots hold 0 or
- * 1, so summing a word's bytes counts its marks without a branch per slot. */
-function totalPrimes(data: unknown): number {
-  let [low, high] = data as [number, number];
-  if (low < 2) low = 2;
-  if (low > high) return 0;
-  let count = 0;
-  if (low === 2) {
-    count = 1;
-    low = 3;
-    if (low > high) return count;
-  }
-  // Slot i covers the odd number `first + 2 * i`.
-  const first = low % 2 === 0 ? low + 1 : low;
-  if (first > high) return count;
-  const size = ((high - first) >> 1) + 1;
-  // Padded to whole 32-bit words so the tally can read words, not bytes.
-  const words = (size + 3) >> 2;
-  const segment = new Uint8Array(words * 4);
-  const limit = Math.floor(Math.sqrt(high));
-  // Odd base primes up to sqrt(high) — at most ~2450 for this contract's range.
-  const baseSize = limit < 3 ? 0 : ((limit - 3) >> 1) + 1;
-  const baseComposite = new Uint8Array(baseSize);
-  for (let i = 0; i < baseSize; i++) {
-    if (baseComposite[i]) continue;
-    const prime = 3 + 2 * i;
-    if (prime * prime <= limit) {
-      for (let multiple = prime * prime; multiple <= limit; multiple += 2 * prime) {
-        baseComposite[(multiple - 3) >> 1] = 1;
-      }
+const PRIME_RANK_MAX = 6_000_000;
+const PRIME_RANK_ODDS = ((PRIME_RANK_MAX - 3) >> 1) + 1;
+const PRIME_RANK_WORDS = (PRIME_RANK_ODDS + 31) >> 5;
+
+interface PrimeRank {
+  /** One bit per odd integer from three: set means composite. */
+  composites: Uint32Array;
+  /** Number of odd primes in every complete preceding word. */
+  prefix: Uint32Array;
+}
+
+let primeRank: PrimeRank | undefined;
+
+function popcount32(value: number): number {
+  value -= (value >>> 1) & 0x5555_5555;
+  value = (value & 0x3333_3333) + ((value >>> 2) & 0x3333_3333);
+  return (((value + (value >>> 4)) & 0x0f0f_0f0f) * 0x0101_0101) >>> 24;
+}
+
+/** Build π(x) ranks once, only if this contract type is actually encountered.
+ * v3.0.1 generates high <= 6,000,000, so odd-only bits plus one rank per word
+ * cover the entire domain in about 750 KB. */
+function buildPrimeRank(): PrimeRank {
+  const composites = new Uint32Array(PRIME_RANK_WORDS);
+  for (let index = 0;; index++) {
+    const prime = 2 * index + 3;
+    if (prime * prime > PRIME_RANK_MAX) break;
+    if (composites[index >> 5]! & (1 << (index & 31))) continue;
+    for (let multiple = (prime * prime - 3) >> 1; multiple < PRIME_RANK_ODDS; multiple += prime) {
+      const word = multiple >> 5;
+      composites[word] = composites[word]! | (1 << (multiple & 31));
     }
-    // Both `prime * prime` and the adjusted `ceil(first / prime) * prime` are
-    // odd multiples of an odd prime, so the later of the two is one as well.
-    let start = Math.ceil(first / prime) * prime;
-    if (start % 2 === 0) start += prime;
-    if (prime * prime > start) start = prime * prime;
-    for (let slot = (start - first) >> 1; slot < size; slot += prime) segment[slot] = 1;
   }
-  // Marking the padding as composite keeps it out of the word-wise tally.
-  for (let slot = size; slot < words * 4; slot++) segment[slot] = 1;
-  const packed = new Uint32Array(segment.buffer);
-  let marked = 0;
-  for (let w = 0; w < words; w++) {
-    const word = packed[w]!;
-    marked += (word & 0xff) + ((word >>> 8) & 0xff) + ((word >>> 16) & 0xff) + (word >>> 24);
+
+  const prefix = new Uint32Array(PRIME_RANK_WORDS + 1);
+  for (let word = 0; word < PRIME_RANK_WORDS; word++) {
+    const valid = Math.min(32, PRIME_RANK_ODDS - word * 32);
+    const mask = valid === 32 ? 0xffff_ffff : 0xffff_ffff >>> (32 - valid);
+    prefix[word + 1] = prefix[word]! + valid - popcount32(composites[word]! & mask);
   }
-  return count + words * 4 - marked;
+  return { composites, prefix };
+}
+
+function primeCountAtMost(value: number, rank: PrimeRank): number {
+  if (value < 2) return 0;
+  if (value < 3) return 1;
+  const slots = ((value - 3) >> 1) + 1;
+  const word = slots >> 5;
+  const remainder = slots & 31;
+  let count = 1 + rank.prefix[word]!; // Include two by hand.
+  if (remainder > 0) {
+    const mask = 0xffff_ffff >>> (32 - remainder);
+    count += remainder - popcount32(rank.composites[word]! & mask);
+  }
+  return count;
+}
+
+/** Number of primes in the game's bounded inclusive range. */
+function totalPrimes(data: unknown): number {
+  const [low, high] = data as [number, number];
+  if (low > high) return 0;
+  if (low < 0 || high > PRIME_RANK_MAX) throw new RangeError("prime range exceeds the v3.0.1 contract bounds");
+  const rank = primeRank ??= buildPrimeRank();
+  return primeCountAtMost(high, rank) - primeCountAtMost(low - 1, rank);
 }
 
 /** Largest all-zero rectangle via one monotonic-stack pass per row. */

@@ -15,6 +15,12 @@ import { CodingContractTypes } from "../vendor/bitburner/src/CodingContract/Cont
 // official answers are bound here with the signatures the contracts document.
 const officialPrimes = CodingContractTypes["Total Number of Primes"]
   .getAnswer as (data: [number, number]) => number;
+const officialUniquePaths = CodingContractTypes["Unique Paths in a Grid I"]
+  .getAnswer as (data: [number, number]) => number;
+const officialTotalWays = CodingContractTypes["Total Ways to Sum"]
+  .getAnswer as (data: number) => number;
+const officialLargestPrimeFactor = CodingContractTypes["Find Largest Prime Factor"]
+  .getAnswer as (data: number) => number;
 const officialMath = CodingContractTypes["Find All Valid Math Expressions"]
   .getAnswer as (data: [string, number]) => string[];
 const officialLz = CodingContractTypes["Compression III: LZ Compression"]
@@ -29,6 +35,34 @@ function isPrime(value: number): boolean {
 }
 
 describe("coding contract solver boundaries", () => {
+  test("bounded lookup solvers cover every official input", () => {
+    for (let rows = 2; rows <= 14; rows++) {
+      for (let cols = 2; cols <= 14; cols++) {
+        const data: [number, number] = [rows, cols];
+        expect(solveContract("Unique Paths in a Grid I", data)).toBe(officialUniquePaths(data));
+      }
+    }
+    for (let target = 8; target <= 100; target++) {
+      expect(solveContract("Total Ways to Sum", target)).toBe(officialTotalWays(target));
+    }
+  });
+
+  test("largest-prime-factor wheel handles boundary factor shapes", () => {
+    const values = [
+      500,
+      2 ** 29,
+      3 ** 18,
+      5 ** 12,
+      31_607 * 31_609,
+      999_950_000,
+      999_999_937,
+      1_000_000_000,
+    ];
+    for (const value of values) {
+      expect(solveContract("Find Largest Prime Factor", value)).toBe(officialLargestPrimeFactor(value));
+    }
+  });
+
   test("Total Number of Primes counts every small range, including empty ones", () => {
     const wrong: string[] = [];
     for (let low = 0; low <= 40; low++) {
@@ -51,6 +85,8 @@ describe("coding contract solver boundaries", () => {
     for (const range of [[0, 1e5], [2, 100003], [999983, 1999983], [5e6, 6e6], [4999999, 5100001]] as [number, number][]) {
       expect(solveContract("Total Number of Primes", range)).toBe(officialPrimes(range));
     }
+    expect(solveContract("Total Number of Primes", [-1, 100])).toBeUndefined();
+    expect(solveContract("Total Number of Primes", [0, 6_000_001])).toBeUndefined();
   });
 
   test("Find All Valid Math Expressions matches the game on exhaustive short inputs", () => {
