@@ -401,7 +401,6 @@ interface CachedJitRuntime {
  * under its own caps, and the incoming generation back-fills the RAM it
  * releases. Cleared when nothing of the generation remains. */
 interface RetiringJitRuntime {
-  solution: CycleSolution;
   schedule: JitSchedule;
   generation: number;
   /** Launched old-generation farm RAM by role, snapshotted at handoff and
@@ -2026,14 +2025,13 @@ export function dispatch(
           (["h", "w1", "g", "w2"] as const).some(
             (role) => nextRoleGb[role] + 1e-9 < currentRuntime.roleGb[role],
           );
-        const reshape = currentRuntime !== undefined &&
+        const kindHandoff = currentRuntime !== undefined &&
           kindChanged &&
           !memory.retiringJitByTarget.has(server.hostname);
-        if (reshape) {
+        if (kindHandoff) {
           // phaseOut: never-started batches are cancelled, started ones cash
-          // in fully under the outgoing generation's own caps, and the new
-          // generation's first landing sits past everything the old one
-          // queued (the reference's targetUnsafeUntil).
+          // in fully under the outgoing generation's own caps while the new
+          // generation safely back-fills the released capacity.
           cancelUnstartedJitTarget(memory, server.hostname, now);
           // THIS target's launched RAM only: memory.heldGbByRole is global
           // across targets, and a switched-away target's still-flying farm ops
@@ -2056,7 +2054,6 @@ export function dispatch(
             retiringHeldGbByRole[role] += pooled[role];
           }
           memory.retiringJitByTarget.set(server.hostname, {
-            solution: currentRuntime!.solution,
             schedule: currentRuntime!.schedule,
             generation: currentRuntime!.generation,
             heldGbByRole: retiringHeldGbByRole,
@@ -2083,7 +2080,7 @@ export function dispatch(
           : undefined;
         const completeUpsizeFits = currentRuntime !== undefined && upsizedSchedule !== undefined &&
           retainOrExpandJitSchedule(currentRuntime.schedule, upsizedSchedule, segmentCap) === upsizedSchedule;
-        const retainedSolution = !reshape && currentRuntime !== undefined &&
+        const retainedSolution = !kindHandoff && currentRuntime !== undefined &&
           (currentRuntime.leanLocked || anyShrink || kindChanged || !completeUpsizeFits)
           ? currentRuntime.solution
           : undefined;
@@ -2407,8 +2404,8 @@ export function dispatch(
  * lane as h=61 forcing an 80 ms interval (12 batches/s) where a leaner shape
  * packs 40 ms at a higher realized $/s. When the optimum cannot hold the
  * minimum interval, solve a leaner candidate sized for it and present
- * whichever earns more per second; the generational handoff makes the
- * resulting shape change safe (no in-place mixing). */
+ * whichever earns more per second, then lock that choice before the
+ * generation plans its first batch. */
 function leanCadenceAlternative(
   memory: DispatchMemory,
   server: ServerView,
@@ -2427,18 +2424,12 @@ function leanCadenceAlternative(
   // Already at the floor (or unschedulable — the launch path's own fallbacks
   // handle that case): nothing to trade.
   if (!schedule || schedule.intervalMs < 2 * intervalMs - 1e-9) return undefined;
-  // FRESH pipelines only, and never while any drain is in flight. The trade
-  // is settled once, when the target's first shape is chosen: correcting it
-  // later means a handoff — firing one on an already-deep pipeline deadlocked
-  // the one-server lane to $0 (incoming schedule starved by the retiring
-  // commitment), and firing one during a retarget's cross-target drain
-  // collapsed switch income retention 1.02 -> 0.18. Mid-generation drift is
-  // instead settled at the next natural reshape, which starts fresh and
-  // consults this comparison again.
-  // Same-target retiring is fine — a reshape just cleared the runtime and
-  // this IS the incoming generation's shape decision. Cross-target drains
-  // (a retarget cashing in the old host) are not: re-shaping the incoming
-  // target mid-switch collapsed income retention 1.02 -> 0.18.
+  // FRESH pipelines only, and never during a cross-target drain. Correcting
+  // this choice after batches exist would require another handoff; doing that
+  // on a deep pipeline deadlocked the one-server lane to $0, while doing it
+  // during a retarget collapsed switch income retention 1.02 -> 0.18. A
+  // same-target retirement is safe because the kind handoff has already
+  // cleared the runtime and this is the incoming generation's one decision.
   for (const target of memory.retiringJitByTarget.keys()) {
     if (target !== server.hostname) return undefined;
   }
@@ -4718,7 +4709,7 @@ function launchBatches(
       }
     }
     // The generation's shape decision: at runtime creation only (fresh target
-    // or the pass right after a reshape), consult the cadence-lean
+    // or the pass right after a kind handoff), consult the cadence-lean
     // alternative and lock it in for the generation if it wins decisively.
     let leanLocked = false;
     if (
@@ -4762,8 +4753,8 @@ function launchBatches(
         // durations — measured as chronic grow-quota starvation (334k grow
         // launch-skips; grows landing +489 ms late, past their w2, ratcheting
         // security into the recovery guard). Never let a re-fit shrink a
-        // role's quota mid-generation; the drift settles at the next
-        // generational handoff, which starts from fresh quotas. The heap
+        // role's quota mid-generation; the next kind handoff starts from
+        // fresh quotas. The heap
         // remains the hard capacity bound.
         schedule = retainOrExpandJitSchedule(incumbent.schedule, schedule, scheduleCapGb);
       }
