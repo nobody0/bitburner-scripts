@@ -16,7 +16,7 @@ import {
   type PreemptibleFarmWorker,
   type ReclamationPlan,
 } from '../../shared/ram/broker.ts';
-import { releaseWorkerExits, requestShareStops, type Tracked } from '../../shared/strategy/dispatch.ts';
+import { MAX_LIVE_WORKERS, releaseWorkerExits, requestShareStops, type Tracked } from '../../shared/strategy/dispatch.ts';
 
 /** Game-side driver for the pure HWGW engine. It only moves data: builds a
  * WorldView from the cached scan plus live reads of the hot targets, hands
@@ -204,6 +204,11 @@ export async function pump(
   state.memory = result.memory;
 
   const failed: number[] = [];
+  const refused = workerLaunchRefusals(
+    state.memory,
+    result.actions,
+    state.globals.worker_info?.size ?? 0,
+  );
   let launched = 0;
   for (const action of result.actions) {
     if (action.type === "stopShare") {
@@ -211,17 +216,29 @@ export async function pump(
       continue;
     }
     if (action.type === "share") {
+      if (refused.has(action.opId)) {
+        failed.push(action.opId);
+        continue;
+      }
       if (await startShare(ns, state, action)) launched++;
       else failed.push(action.opId);
       continue;
     }
     if (action.type === "charge") {
+      if (refused.has(action.opId)) {
+        failed.push(action.opId);
+        continue;
+      }
       if (await startCharge(ns, state, action)) launched++;
       else failed.push(action.opId);
       continue;
     }
     if (action.type !== "hack" && action.type !== "grow" && action.type !== "weaken") continue;
     if (action.opId === undefined) continue;
+    if (refused.has(action.opId)) {
+      failed.push(action.opId);
+      continue;
+    }
     if (await startOp(ns, state, action, action.opId, view.time)) launched++;
     else failed.push(action.opId);
   }
@@ -241,6 +258,56 @@ export async function pump(
     directive: result.directive,
     nextWakes: [...wakeByTarget.values()],
   };
+}
+
+/** Independent game-side safety rail. The pure planner owns the normal limit,
+ * but the live registry is the final authority immediately before ns.exec.
+ * Shotgun batches are admitted as groups so the ceiling cannot launch only a
+ * hack while refusing its grow/weaken cover. */
+export function workerLaunchRefusals(
+  memory: FarmMemory,
+  actions: readonly import("../../shared/world.ts").Action[],
+  liveWorkers: number,
+): Set<number> {
+  const refused = new Set<number>();
+  let available = Math.max(0, MAX_LIVE_WORKERS - liveWorkers);
+  const shotgunByBatch = new Map<number, number[]>();
+  for (const action of actions) {
+    if (action.type !== "hack" && action.type !== "grow" && action.type !== "weaken") continue;
+    if (action.opId === undefined || (action.worker && !action.worker.spawn)) continue;
+    const batchId = memory.dispatch.tracked.get(action.opId)?.batchId;
+    if (batchId === undefined || memory.dispatch.batches.get(batchId)?.kind !== "shotgun") continue;
+    const ids = shotgunByBatch.get(batchId) ?? [];
+    ids.push(action.opId);
+    shotgunByBatch.set(batchId, ids);
+  }
+  const decidedShotgun = new Set<number>();
+  for (const action of actions) {
+    if (
+      action.type !== "share" && action.type !== "charge" &&
+      action.type !== "hack" && action.type !== "grow" && action.type !== "weaken"
+    ) continue;
+    const opId = action.opId;
+    if (opId === undefined) continue;
+    const fresh = action.type === "share" || action.type === "charge" ||
+      ((action.type === "hack" || action.type === "grow" || action.type === "weaken") &&
+        (!action.worker || action.worker.spawn));
+    if (!fresh) continue;
+    const batchId = (action.type === "hack" || action.type === "grow" || action.type === "weaken")
+      ? memory.dispatch.tracked.get(opId)?.batchId
+      : undefined;
+    const shotgun = batchId === undefined ? undefined : shotgunByBatch.get(batchId);
+    if (shotgun) {
+      if (decidedShotgun.has(batchId!)) continue;
+      decidedShotgun.add(batchId!);
+      if (shotgun.length <= available) available -= shotgun.length;
+      else for (const id of shotgun) refused.add(id);
+      continue;
+    }
+    if (available > 0) available--;
+    else refused.add(opId);
+  }
+  return refused;
 }
 
 /** Deliver a cooperative share stop. `stop` is assigned by the worker after

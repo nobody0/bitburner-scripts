@@ -3,6 +3,8 @@ import {
   BATCH_KINDS,
   JIT_LAUNCH_GUARD_MS,
   MAX_LAUNCH_ACTIONS_PER_PASS,
+  MAX_SHOTGUN_WORKER_LAUNCHES_PER_PASS,
+  SHOTGUN_LANDING_MARGIN_MS,
   PREP_ORDER_MS,
   requestShareStops,
   SPACER_MS,
@@ -1324,7 +1326,7 @@ describe("shotgun mode", () => {
         : []
     );
     expect(shotgunPadding.length).toBeGreaterThan(0);
-    expect(minOf(shotgunPadding)).toBeGreaterThanOrEqual(JIT_LAUNCH_GUARD_MS - 1e-6);
+    expect(minOf(shotgunPadding)).toBeCloseTo(SHOTGUN_LANDING_MARGIN_MS, 6);
 
     const landings = h.completions.filter((c) => c.batched);
     const hacks = landings.filter((l) => l.kind === "hack");
@@ -1391,6 +1393,7 @@ describe("shotgun mode", () => {
           action.phase !== "prep",
       );
       expect(launches.length).toBeLessThanOrEqual(MAX_LAUNCH_ACTIONS_PER_PASS);
+      expect(launches.length).toBeLessThanOrEqual(MAX_SHOTGUN_WORKER_LAUNCHES_PER_PASS);
       for (const action of result.actions) world.execute(action);
       world.clock.run(() => false, world.clock.now() + 25);
     }
@@ -1624,9 +1627,12 @@ describe("shotgun mode", () => {
     expect(weakenPadding.length).toBeGreaterThan(0);
     expect(minOf(hackPadding)).toBeGreaterThan(maxOf(weakenPadding));
 
-    // Even the anchoring weaken is padded, because its worker starts
-    // asynchronously: `now + weakenMs` would land it after the shared deadline.
-    expect(minOf(weakenPadding)).toBeGreaterThanOrEqual(JIT_LAUNCH_GUARD_MS - 1e-6);
+    // The anchoring weaken lands exactly one 5ms safety slice after its native
+    // duration. Shotgun must not inherit JIT's much larger startup guard.
+    expect(SHOTGUN_LANDING_MARGIN_MS).toBe(5);
+    for (const padding of weakenPadding) {
+      expect(padding).toBeCloseTo(SHOTGUN_LANDING_MARGIN_MS, 6);
+    }
   });
 
   test("returns to JIT when a richer target with a long hack time is cracked", () => {

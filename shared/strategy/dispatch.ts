@@ -106,9 +106,12 @@ export const SECURITY_RECOVERY_DRIFT = 3 * PREPPED_SEC_TOLERANCE;
  * heartbeat consumes forty batches, so the old eight-batch limit could only
  * stay full because completion wakes incorrectly performed planning too. */
 export const MAX_JIT_BATCHES_PER_MAINTENANCE = 512;
-/** Shotgun emits a whole wave per pass — every batch lands the same engine
- * tick, so there is no interleave to protect, only the pump budget. */
-export const SHOTGUN_BATCHES_PER_PASS = 256;
+/** Worker launches, not batches: split weakens consume several slots. A batch
+ * is admitted only when every one of its workers fits. Live calibration:
+ * 10/100/1000 launches took 3.9/2.0/12.2ms; the selected warm pump cap is 100. */
+export const MAX_SHOTGUN_WORKER_LAUNCHES_PER_PASS = 100;
+/** Same-tick shotgun deadline margin beyond the weaken's native duration. */
+export const SHOTGUN_LANDING_MARGIN_MS = MINIMUM_WORKER_PRECISION_MS;
 /** Up to 24 source slabs per prep phase. A correct distributed grow needs an
  * atomic grow plus its own interleaved weaken, hence two calls per slab; using
  * the old 24-CALL ceiling would halve grow concurrency merely because the
@@ -175,29 +178,8 @@ export const MIN_HACK_STRENGTH_THREADS = 0.1;
  * `stats.capped.processes` so that shows up in telemetry instead of as a
  * crash. */
 export const MAX_LIVE_WORKERS = 400_000;
-/** Ceiling on launch actions emitted in ONE pass.
- *
- * Every action becomes a synchronous `ns.exec` in the driver — the loop at
- * game/lib/dispatch-driver.ts has no await and no cap of its own — so an
- * unbounded pass blocks the engine's timers for as long as it takes to spawn
- * the whole wave, which is exactly the freeze this bounds. The JIT path
- * already self-limits through MAX_PREP_OPS_PER_PASS; shotgun and the eager
- * path did not.
- *
- * The reference solved the same problem twice over: it serialized every spawn
- * behind an await (imports/batchRunner.ts:65) and capped work per scheduler
- * call at 5 job-starts (:346). We cannot copy the await — the pump is invoked
- * without one, so making it async would let two passes interleave — so the
- * bound has to live here, in the pure layer, where the simulator sees it too.
- *
- * Checked at BATCH granularity, never per action: cutting a batch in half
- * could emit a hack whose weaken cover is still unlaunched. The check counts
- * the batch about to be emitted, so this is a true ceiling rather than a
- * threshold that the last batch may overshoot. Work not emitted this pass is
- * not lost; the next tick or wake continues from the same pending state.
- *
- * Farm launches only. Prep waves are bounded separately and independently by
- * MAX_PREP_OPS_PER_PASS. */
+/** General JIT hot-wake action bound. Shotgun uses its independent worker
+ * launch budget above; prep uses MAX_PREP_OPS_PER_PASS. */
 export const MAX_LAUNCH_ACTIONS_PER_PASS = 256;
 
 /** Real fractional threads for a requested one-core EFFECT.
@@ -241,7 +223,8 @@ function opsPerBatchFor(kind: CycleSolution["kind"]): number {
  * `workers`. O(1) — this is consulted per batch on the hot path. */
 export function liveProcessCount(memory: DispatchMemory): number {
   const { workers, busy } = poolCounts(memory.pool);
-  return workers + Math.max(0, memory.tracked.size - busy);
+  return workers + Math.max(0, memory.tracked.size - busy)
+    + memory.shareWorkers.size + memory.chargeWorkers.size;
 }
 export interface Tracked {
   /** SOURCE host the op's RAM is reserved on. */
@@ -334,6 +317,9 @@ interface PendingJitOp {
   /** Physical heap block committed before the worker launch window. Once the
    * action is emitted ownership transfers to `tracked`/workerExit. */
   reservation?: Reservation;
+  /** Worker processes committed by this pending op. One until placement is
+   * known; afterwards this is the exact reservation block count. */
+  workerCount: number;
   reservedAt?: number;
   /** A due contiguous allocation already failed. If its window expires, the
    * miss is fragmentation/placement rather than scheduler lateness. */
@@ -805,6 +791,9 @@ export interface DispatchMemory {
   jitByTarget: Map<string, PendingJitBatch[]>;
   pendingJitBatchCount: number;
   pendingJitOpCount: number;
+  /** Planned worker commitments, refined to allocation-block counts as JIT
+   * reservations are placed. */
+  pendingJitWorkerCount: number;
   /** Unstarted batch count by target. Downscale checks this before touching a
    * queue, so a fully committed 100k-deep pipeline remains O(1) per heartbeat. */
   unstartedJitBatchCountByTarget: Map<string, number>;
@@ -958,6 +947,7 @@ export function initDispatch(): DispatchMemory {
     jitByTarget: new Map(),
     pendingJitBatchCount: 0,
     pendingJitOpCount: 0,
+    pendingJitWorkerCount: 0,
     unstartedJitBatchCountByTarget: new Map(),
     pendingJitRoleCountByTarget: new Map(),
     jitWakeByTarget: new Map(),
@@ -1417,6 +1407,11 @@ function launchShare(
     policy: "spread",
   });
   if (!allocation.ok) return;
+  if (liveProcessCount(memory) + allocation.reservation.blocks.length > MAX_LIVE_WORKERS) {
+    allocation.reservation.release();
+    memory.stats.capped.processes++;
+    return;
+  }
   for (const block of allocation.reservation.blocks) {
     const workerId = memory.nextOpId++;
     const gb = block.threads * WORKER_RAM.share;
@@ -1449,6 +1444,10 @@ function launchCharge(
     .filter((entry) => entry.threads > 0)
     .sort((a, b) => b.threads - a.threads || b.host.cores - a.host.cores || a.host.hostname.localeCompare(b.host.hostname));
   for (const { host, threads: available } of hosts) {
+    if (liveProcessCount(memory) + 1 > MAX_LIVE_WORKERS) {
+      memory.stats.capped.processes++;
+      return;
+    }
     const threads = Math.min(available, Math.floor(remaining / WORKER_RAM.charge));
     if (threads < 1) break;
     const gb = threads * WORKER_RAM.charge;
@@ -2990,6 +2989,7 @@ function enqueueJitBatch(memory: DispatchMemory, batch: PendingJitBatch): void {
   queue.push(batch);
   memory.pendingJitBatchCount++;
   memory.pendingJitOpCount += batch.ops.length;
+  memory.pendingJitWorkerCount += batch.ops.reduce((sum, op) => sum + op.workerCount, 0);
   memory.unstartedJitBatchCountByTarget.set(
     batch.target,
     (memory.unstartedJitBatchCountByTarget.get(batch.target) ?? 0) + 1,
@@ -3004,6 +3004,7 @@ function removePendingJitOp(memory: DispatchMemory, batch: PendingJitBatch, op: 
   if (at < 0) return;
   batch.ops.splice(at, 1);
   memory.pendingJitOpCount--;
+  memory.pendingJitWorkerCount -= op.workerCount;
   bumpPendingJitRole(memory, batch.target, op.role, -1);
   if (batch.ops.length === 0) {
     memory.pendingJitBatchCount--;
@@ -3014,6 +3015,7 @@ function removePendingJitOp(memory: DispatchMemory, batch: PendingJitBatch, op: 
 function clearPendingJitBatch(memory: DispatchMemory, batch: PendingJitBatch): void {
   if (batch.ops.length === 0) return;
   memory.pendingJitOpCount -= batch.ops.length;
+  memory.pendingJitWorkerCount -= batch.ops.reduce((sum, op) => sum + op.workerCount, 0);
   memory.pendingJitBatchCount--;
   if (!batch.started) bumpUnstartedJitBatch(memory, batch.target, -1);
   for (const op of batch.ops) bumpPendingJitRole(memory, batch.target, op.role, -1);
@@ -3085,6 +3087,7 @@ function abandonJitPending(memory: DispatchMemory, now: number): void {
   memory.drainingJitTargets.clear();
   memory.pendingJitBatchCount = 0;
   memory.pendingJitOpCount = 0;
+  memory.pendingJitWorkerCount = 0;
   memory.hackZeroStreak = 0;
 }
 
@@ -3102,6 +3105,7 @@ function abandonJitTarget(memory: DispatchMemory, target: string, now: number): 
     if (batch.ops.length > 0) {
       memory.pendingJitBatchCount--;
       memory.pendingJitOpCount -= batch.ops.length;
+      memory.pendingJitWorkerCount -= batch.ops.reduce((sum, op) => sum + op.workerCount, 0);
     }
     batch.wakeRevision = (batch.wakeRevision ?? 0) + 1;
   }
@@ -3567,6 +3571,11 @@ function launchDuePrep(
       break;
     }
     const reservation = fallback.reservation;
+    if (liveProcessCount(memory) + 1 > MAX_LIVE_WORKERS) {
+      reservation.release();
+      memory.stats.capped.processes++;
+      break;
+    }
     if (memory.segmentGb[op.segment] + reservation.gb > segmentCapGb + 1e-9) {
       reservation.release();
       break;
@@ -3788,6 +3797,15 @@ function launchDueJit(
           op.placementBlocked = true;
           break reservePending;
         }
+        const workerCount = allocation.reservation.blocks.length;
+        if (
+          liveProcessCount(memory) + memory.pendingJitWorkerCount - op.workerCount + workerCount >
+            MAX_LIVE_WORKERS
+        ) {
+          allocation.reservation.release();
+          memory.stats.capped.processes++;
+          break reservePending;
+        }
         if (
           heldGbFor(batch, op.role) + allocation.reservation.gb > roleCapGb + 1e-9 ||
           memory.segmentGb.farm + allocation.reservation.gb > segmentCapGb + 1e-9
@@ -3796,6 +3814,8 @@ function launchDueJit(
           break reservePending;
         }
         op.reservation = allocation.reservation;
+        memory.pendingJitWorkerCount += workerCount - op.workerCount;
+        op.workerCount = workerCount;
         op.reservedAt = now;
         pendingHeld[op.role] += allocation.reservation.gb;
         heldByRole[op.role] += allocation.reservation.gb;
@@ -4191,6 +4211,20 @@ function launchDueJit(
         }
         reservation = allocation.reservation;
       }
+      const workerCount = reservation?.blocks.length ?? 0;
+      if (
+        workerCount > 0 &&
+        liveProcessCount(memory) + memory.pendingJitWorkerCount - op.workerCount + workerCount >
+          MAX_LIVE_WORKERS
+      ) {
+        if (!op.reservation) reservation?.release();
+        memory.stats.capped.processes++;
+        continue batches;
+      }
+      if (!op.reservation && workerCount > 0) {
+        memory.pendingJitWorkerCount += workerCount - op.workerCount;
+        op.workerCount = workerCount;
+      }
       if (
         !op.reservation && (
           heldGbFor(batch, op.role) + (reservation?.gb ?? 0) > roleCapGb + 1e-9 ||
@@ -4411,6 +4445,7 @@ function planJitBatches(
     role,
     kind,
     threads,
+    workerCount: 1,
     startAt: landing - opDurationMs(kind, ctx, worstDifficulty, required) - JIT_LAUNCH_GUARD_MS,
     landing,
     stock,
@@ -4425,7 +4460,7 @@ function planJitBatches(
     const targetDepth = targetJitQueue(memory, server.hostname).length;
     if (targetDepth + memory.inFlight.hack >= maxDepth) return;
     if (
-      liveProcessCount(memory) + memory.pendingJitOpCount + opsPerBatch >
+      liveProcessCount(memory) + memory.pendingJitWorkerCount + opsPerBatch >
         MAX_LIVE_WORKERS
     ) {
       memory.stats.capped.processes++;
@@ -4871,27 +4906,15 @@ function launchBatches(
   };
   const statics = staticsOf(server);
 
-  const perPass = shotgun ? SHOTGUN_BATCHES_PER_PASS : MAX_BATCHES_PER_PASS;
   // Both rails are read at BATCH granularity. Emitting a partial batch would
   // put a hack in flight whose weaken cover was never launched, so a rail that
   // trips has to stop the whole batch before its first action, never between.
-  const actionsAtPassStart = actions.length;
-  const opsPerBatch = opsPerBatchFor(solution.kind);
-  for (let launched = 0; launched < perPass; launched++) {
+  let workerLaunchesThisPass = 0;
+  for (let launched = 0; shotgun || launched < MAX_BATCHES_PER_PASS; launched++) {
     const batchesInFlight = memory.inFlight.hack;
     // Shotgun has no interleave to protect — depth is bounded by RAM, by the
     // live-process ceiling, and by the per-pass emission bound below.
     if (!shotgun && batchesInFlight >= maxDepth) return;
-    // A batch is at most one process per op; requiring the whole batch to fit
-    // keeps the check batch-atomic like the two above it.
-    if (liveProcessCount(memory) + opsPerBatch > MAX_LIVE_WORKERS) {
-      memory.stats.capped.processes++;
-      return;
-    }
-    if (actions.length - actionsAtPassStart + opsPerBatch > MAX_LAUNCH_ACTIONS_PER_PASS) {
-      memory.stats.capped.passActions++;
-      return;
-    }
     // Under pooling the budget check moves after the pool plan — a batch
     // composed entirely of idle workers needs no new RAM at all.
     if (!pooling && remaining < solution.ramPerBatch) return;
@@ -4909,9 +4932,9 @@ function launchBatches(
     // but does not expose same-deadline ordering as a Netscript API contract.
     // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptWorker.ts#L48-L66
     const anchor = shotgun
-      // Even weaken needs positive padding: its worker starts asynchronously,
-      // so `now + weakenMs` would make it land after the shared FIFO deadline.
-      ? now + weakenMs + JIT_LAUNCH_GUARD_MS
+      // One measured timer-precision slice protects the shared FIFO deadline
+      // without paying the much larger JIT reservation/startup guard.
+      ? now + weakenMs + SHOTGUN_LANDING_MARGIN_MS
       // A launch budget, not a landing separation: ops are placed at
       // `landing - duration - JIT_LAUNCH_GUARD_MS`, so an anchor closer than
       // that guard puts the first weaken's startAt in the past and the whole
@@ -5089,6 +5112,24 @@ function launchBatches(
         memory.stats.allocFailsByPhase.eager++;
         return;
       }
+      const workerCount = allocation.reservations.reduce(
+        (sum, reservation) => sum + reservation.blocks.length,
+        0,
+      );
+      if (liveProcessCount(memory) + workerCount > MAX_LIVE_WORKERS) {
+        for (const reservation of allocation.reservations) reservation.release();
+        memory.stats.capped.processes++;
+        return;
+      }
+      if (
+        shotgun &&
+        workerLaunchesThisPass + workerCount > MAX_SHOTGUN_WORKER_LAUNCHES_PER_PASS
+      ) {
+        for (const reservation of allocation.reservations) reservation.release();
+        memory.stats.capped.passActions++;
+        return;
+      }
+      workerLaunchesThisPass += workerCount;
       memory.lastAnchor = anchor;
       ops.forEach((op, index) => {
         const reservation = allocation.reservations[index]!;
@@ -5132,7 +5173,7 @@ function launchBatches(
       .map((op, i) => ({ op, miss: plans[i]!.missThreads }))
       .filter((entry) => entry.miss >= 1)
       .map((entry) => allocFor(entry.op.kind, entry.miss));
-    let reservations: { blocks: { hostname: string; threads: number }[]; gb: number }[] = [];
+    let reservations: Reservation[] = [];
     if (missRequests.length > 0) {
       const allocation = memory.heap.allocateAll(missRequests);
       if (!allocation.ok) {
@@ -5141,6 +5182,15 @@ function launchBatches(
         return;
       }
       reservations = allocation.reservations;
+    }
+    const workerCount = reservations.reduce(
+      (sum, reservation) => sum + reservation.blocks.length,
+      0,
+    );
+    if (liveProcessCount(memory) + workerCount > MAX_LIVE_WORKERS) {
+      for (const reservation of reservations) reservation.release();
+      memory.stats.capped.processes++;
+      return;
     }
     memory.lastAnchor = anchor;
     let reservationIndex = 0;
@@ -5244,6 +5294,11 @@ function launchPrepWave(
   ): number => {
     let effectThreads = 0;
     for (const block of reservation.blocks) {
+      if (liveProcessCount(memory) + 1 > MAX_LIVE_WORKERS) {
+        memory.heap.free(block.hostname, block.threads * WORKER_RAM[kind]);
+        memory.stats.capped.processes++;
+        continue;
+      }
       if (ops >= opCap) {
         // Never launched -> never completes -> free it now (the rewrite's leak).
         memory.heap.free(block.hostname, block.threads * WORKER_RAM[kind]);
@@ -5399,6 +5454,7 @@ function launchPrepWave(
     if (
       !weaken ||
       weaken.blocks.length + 1 > maxOps ||
+      liveProcessCount(memory) + reservedOps + weaken.blocks.length + 1 > MAX_LIVE_WORKERS ||
       grow.gb + weaken.gb > maxGb + 1e-9
     ) {
       if (weaken) weaken.release();
