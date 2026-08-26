@@ -102,14 +102,12 @@ export const MAX_BATCHES_PER_PASS = 8;
  * cascade cannot compound — every batch solved against min security steals
  * and grows wrong once the target sits multiple points above it. */
 export const SECURITY_RECOVERY_DRIFT = 3 * PREPPED_SEC_TOLERANCE;
-/** Heartbeat-only producer budget. At a 5 ms landing cadence a 200 ms
- * heartbeat consumes forty batches, so the old eight-batch limit could only
- * stay full because completion wakes incorrectly performed planning too. */
-export const MAX_JIT_BATCHES_PER_MAINTENANCE = 512;
-/** Worker launches, not batches: split weakens consume several slots. A batch
- * is admitted only when every one of its workers fits. Live calibration:
- * 10/100/1000 launches took 3.9/2.0/12.2ms; the selected warm pump cap is 100. */
-export const MAX_SHOTGUN_WORKER_LAUNCHES_PER_PASS = 100;
+/** Shared farm work ceiling for one synchronous planner/driver pass. Shotgun
+ * counts actual new workers (split weakens consume several); JIT planning and
+ * wake extraction count batches. Live calibration: 10/100/1000 worker
+ * launches took 3.9/2.0/12.2ms, so the selected warm-pass ceiling is 100.
+ * Actual JIT/prep emission remains under its stricter 48-worker cap. */
+export const MAX_FARM_WORK_PER_PASS = 100;
 /** Same-tick shotgun deadline margin beyond the weaken's native duration. */
 export const SHOTGUN_LANDING_MARGIN_MS = MINIMUM_WORKER_PRECISION_MS;
 /** Up to 24 source slabs per prep phase. A correct distributed grow needs an
@@ -178,9 +176,6 @@ export const MIN_HACK_STRENGTH_THREADS = 0.1;
  * `stats.capped.processes` so that shows up in telemetry instead of as a
  * crash. */
 export const MAX_LIVE_WORKERS = 400_000;
-/** General JIT hot-wake action bound. Shotgun uses its independent worker
- * launch budget above; prep uses MAX_PREP_OPS_PER_PASS. */
-export const MAX_LAUNCH_ACTIONS_PER_PASS = 256;
 
 /** Real fractional threads for a requested one-core EFFECT.
  *
@@ -451,7 +446,7 @@ export interface DispatchStats {
   /** Batches not planned or launched because a safety rail was hit rather than
    * because the economics said no: `processes` is the live-worker ceiling
    * (MAX_LIVE_WORKERS), `passActions` the per-pass emission bound
-   * (MAX_LAUNCH_ACTIONS_PER_PASS). Both are clamps, not errors — but a
+   * (MAX_FARM_WORK_PER_PASS). Both are clamps, not errors — but a
    * persistently non-zero `processes` means the cadence wants more depth than
    * the browser can hold, which is worth seeing rather than crashing on. */
   capped: { processes: number; passActions: number };
@@ -1645,7 +1640,7 @@ export function dispatch(
           memory,
           wakeTarget,
           view.time + JIT_LAUNCH_WINDOW_MS,
-          MAX_LAUNCH_ACTIONS_PER_PASS,
+          MAX_FARM_WORK_PER_PASS,
         );
         if (due.length > 0) {
           launchDueJit(
@@ -4456,7 +4451,7 @@ function planJitBatches(
   // is COMMITTED rather than only where it is launched. Planning past it would
   // just build a queue that launchDueJit then refuses.
   const opsPerBatch = opsPerBatchFor(solution.kind);
-  for (let planned = 0; planned < MAX_JIT_BATCHES_PER_MAINTENANCE; planned++) {
+  for (let planned = 0; planned < MAX_FARM_WORK_PER_PASS; planned++) {
     const targetDepth = targetJitQueue(memory, server.hostname).length;
     if (targetDepth + memory.inFlight.hack >= maxDepth) return;
     if (
@@ -5123,7 +5118,7 @@ function launchBatches(
       }
       if (
         shotgun &&
-        workerLaunchesThisPass + workerCount > MAX_SHOTGUN_WORKER_LAUNCHES_PER_PASS
+        workerLaunchesThisPass + workerCount > MAX_FARM_WORK_PER_PASS
       ) {
         for (const reservation of allocation.reservations) reservation.release();
         memory.stats.capped.passActions++;

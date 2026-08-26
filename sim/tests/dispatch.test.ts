@@ -2,8 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   BATCH_KINDS,
   JIT_LAUNCH_GUARD_MS,
-  MAX_LAUNCH_ACTIONS_PER_PASS,
-  MAX_SHOTGUN_WORKER_LAUNCHES_PER_PASS,
+  MAX_FARM_WORK_PER_PASS,
   SHOTGUN_LANDING_MARGIN_MS,
   PREP_ORDER_MS,
   requestShareStops,
@@ -193,6 +192,20 @@ function harness(options: {
 }
 
 describe("HWGW dispatcher", () => {
+  test("one heartbeat plans at most the shared farm work ceiling", () => {
+    const world = new SimWorld({
+      seed: 14,
+      network: JIT_TEST_NETWORK,
+      homeRam: 2 ** 20,
+      startingMoney: 1e9,
+    });
+    prepareJitTestWorld(world);
+
+    const memory = planFarm(world.view(), initFarm(), [], { jit: true }).memory;
+    expect(memory.dispatch.pendingJitBatchCount).toBeGreaterThan(0);
+    expect(memory.dispatch.pendingJitBatchCount).toBeLessThanOrEqual(MAX_FARM_WORK_PER_PASS);
+  });
+
   function reachFirstHackWindow(
     world: SimWorld,
     initial: ReturnType<typeof planFarm>,
@@ -1392,8 +1405,7 @@ describe("shotgun mode", () => {
           (action.type === "hack" || action.type === "grow" || action.type === "weaken") &&
           action.phase !== "prep",
       );
-      expect(launches.length).toBeLessThanOrEqual(MAX_LAUNCH_ACTIONS_PER_PASS);
-      expect(launches.length).toBeLessThanOrEqual(MAX_SHOTGUN_WORKER_LAUNCHES_PER_PASS);
+      expect(launches.length).toBeLessThanOrEqual(MAX_FARM_WORK_PER_PASS);
       for (const action of result.actions) world.execute(action);
       world.clock.run(() => false, world.clock.now() + 25);
     }

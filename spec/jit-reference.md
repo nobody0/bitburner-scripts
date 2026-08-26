@@ -329,7 +329,7 @@ semantic gap. **MISSING** — no equivalent.
 | Second batch shape solved for cadence | `batchPlanner.ts:908-1004` (three shapes) | `leanCadenceAlternative` + `leanLocked` — a leaner shape adopted only on a decisive (>1.25×) realized-rate win, locked for that target/mode | **PARTIAL** — one alternative, solved only when the fat shape packs a slow grid; see §9 |
 | Missed successor aborts its pending suffix | `batchRunner.ts` downstream abortion counters | fixed operation deadlines in `launchDueJit`; current and later launch-order ops are released | **HAVE** — no late support launch and no successor re-anchoring |
 | Observed-security drain guard | — | `SECURITY_RECOVERY_DRIFT = 3·PREPPED_SEC_TOLERANCE` stops admission and weakens back | **HAVE here, MISSING in reference** |
-| Engine-capacity rails (process ceiling, per-pass launch cap) | `HIGHEST_MAX_PARALLEL`, `batchPlanner.ts:16-19` | `MAX_LIVE_WORKERS`, `MAX_LAUNCH_ACTIONS_PER_PASS` via `stats.capped` | **HAVE** — see §9 "Closed" |
+| Engine-capacity rails (process ceiling, per-pass work cap) | `HIGHEST_MAX_PARALLEL`, `batchPlanner.ts:16-19` | `MAX_LIVE_WORKERS`, `MAX_FARM_WORK_PER_PASS` via `stats.capped` | **HAVE** — see §9 "Closed" |
 | Old target backfills leftover RAM during new-target prep | `batchRunner.ts:586-599` | farm and prep are concurrent segments | **N/A** — see §9 |
 | Measured landing error per op | `batchRunner.ts:177-193` | `DispatchStats.landingError` | **HAVE** |
 | Multi-target concurrent farming | — | — | **MISSING in both** — open opportunity |
@@ -460,17 +460,12 @@ rail is checked in both `planJitBatches` (where depth is committed) and
 `launchBatches` (where it is spent). `liveProcessCount` is O(1): pooled workers plus one-shot ops, less the
 busy pooled ops the two would otherwise double-count.
 
-**A per-pass launch bound.** Every action becomes a synchronous `ns.exec` — the
-driver loop has no `await` and no cap — so an unbounded pass starves the
-engine's timers for the length of the whole wave. The JIT path already
-self-limited through `MAX_PREP_OPS_PER_PASS`; shotgun and the eager path did
-not. The reference solved it twice: serialized spawns (`batchRunner.ts:65`) and
-5 job-starts per scheduler call (`:346`). We cannot copy the `await` — the pump
-is invoked without one, so an async pump would let two passes interleave — so
-`MAX_LAUNCH_ACTIONS_PER_PASS` lives in the pure layer where the simulator sees
-it too. Checked at BATCH granularity and counting the batch about to be emitted:
-splitting a batch could put a hack in flight whose weaken cover was never
-launched.
+**A per-pass work bound.** Every action becomes a synchronous `ns.exec`, so an
+unbounded pass starves the engine's timers for the length of the whole wave.
+`MAX_FARM_WORK_PER_PASS` caps JIT queue production and wake extraction, and
+caps shotgun by actual new worker processes. JIT/prep emission retains its
+stricter 48-worker ceiling. Shotgun admission remains batch-atomic: splitting a
+batch could put a hack in flight whose weaken cover was never launched.
 
 Both rails report through `stats.capped` rather than dropping silently. A
 persistently non-zero `capped.processes` is the interesting one — it means the
