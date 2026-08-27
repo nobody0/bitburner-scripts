@@ -4,7 +4,7 @@ import { skillFromExp } from "../../../shared/formulas.ts";
 import { roundSigFigs } from "../../../shared/format.ts";
 import { formatMoney } from "../../../shared/format.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
-import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
+import { PRIORITY, stepWaitDiscount, type Claim } from "../../../shared/strategy/arbiter.ts";
 import {
   advanceInfrastructureFrontier,
   deferPrerequisitePurchase,
@@ -54,7 +54,7 @@ import {
 } from "../../../shared/strategy/ram-supply.ts";
 import { TOR_COST } from "../../../shared/strategy/dnet/rates.ts";
 import { gameGlobal } from "../globals.ts";
-import { bestReinvestmentReturnPerDollarSec, moneyRateValue, moneyStepValue } from "../income.ts";
+import { bestIncomePerSec, bestReinvestmentReturnPerDollarSec, moneyRateValue, moneyStepValue } from "../income.ts";
 import { buildView, drainCompletions, initDriver, pump, type DriverState } from "../dispatch-driver.ts";
 import { merge, recordProbeFailure, set, type GameState } from "../state.ts";
 import { takeTickLateness } from "../tick-health.ts";
@@ -1036,8 +1036,34 @@ function ramInvestment(ctx: RamInvestmentContext, now = Date.now()): RamInvestme
     return [{ source, supply, option, claimAmount: supply.cost, valuePerDollar }];
   }));
   }
-  return candidates.filter(isEvidencedInvestment).sort((a, b) =>
-    investmentRank(b) - investmentRank(a)
+  // Rank candidates by what would actually be realized: an unaffordable rung
+  // is not bought now, it is SAVED FOR, and the save-up wait forfeits the
+  // compounding an affordable alternative would have started immediately. This
+  // function publishes a single claim, so the comparison cannot happen in the
+  // arbiter — an unaffordable winner hides every affordable alternative from
+  // it. Price the wait with the same DCF primitive the arbiter applies to step
+  // claims. Measured on bn1-speedrun seed 3: without this, all income was
+  // parked from 2.9h to 7.5h saving toward one $318m home rung while $110k
+  // cloud rungs stood ready, and $1b was never reached in 8h.
+  const evidenced = candidates.filter(isEvidencedInvestment);
+  const money = ctx.state.topics.player?.money ?? 0;
+  const income = bestIncomePerSec(ctx.state);
+  const affordableReturn = evidenced.reduce(
+    (best, candidate) => candidate.claimAmount <= money
+      ? Math.max(best, candidate.option.returnPerDollarSec)
+      : best,
+    0,
+  );
+  const discountedRank = (candidate: RamInvestment): number => {
+    const shortfall = Math.max(0, candidate.claimAmount - money);
+    if (!(shortfall > 0)) return investmentRank(candidate);
+    // An unpriceable wait keeps the raw rank — unknown evidence must not
+    // silently change a decision, mirroring the arbiter's step rule.
+    if (income.state !== "measured" || !(income.value > 0)) return investmentRank(candidate);
+    return investmentRank(candidate) * stepWaitDiscount(shortfall / income.value, affordableReturn);
+  };
+  return evidenced.sort((a, b) =>
+    discountedRank(b) - discountedRank(a)
     || (a.supply?.costPerGb ?? Infinity) - (b.supply?.costPerGb ?? Infinity)
     || (b.supply?.addedRam ?? 0) - (a.supply?.addedRam ?? 0)
   )[0];
@@ -2024,13 +2050,24 @@ export const hackingModule: FeatureModule = {
       const program = programForPortNeed(ctx.state, pending.server.numOpenPortsRequired ?? 0);
       if (program) {
         const purchaseCost = portOpenerPurchaseCost(ctx.state, pending.server.numOpenPortsRequired ?? 0);
+        // A BLOCKING root need from the route escalates the purchase above the
+        // faction reserve bands, exactly as backdoorClaimPriority escalates a
+        // route-critical backdoor. Measured on bn1-full seed 2: the node's
+        // LAST step (root w0r1d_d43m0n) needed a $280m opener while $120e12
+        // sat in the bank, and the fixed band-65 claim was granted $0 for the
+        // final 37 minutes of the horizon because aug-fund (90) and donate
+        // (70) reserves drained the pool above it every pass.
+        const routeBlocking = ctx.board.open.some((need) =>
+          need.by === "progression" && need.kind === "root" && need.subject === pending.host && need.urgency === "blocking");
         claims.push(
           {
             by: "hacking",
             id: `port-opener:${program.name}`,
             resource: "money",
             amount: purchaseCost,
-            priority: PRIORITY["hacking:blocking-prerequisite"],
+            priority: routeBlocking
+              ? PRIORITY["hacking:critical-access"]
+              : PRIORITY["hacking:blocking-prerequisite"],
             // This is a savings target as well as an eventual atomic spend.
             // While the full TOR + program price is not yet available, reserve
             // every dollar the higher-priority prerequisite wins. Otherwise an

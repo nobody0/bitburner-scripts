@@ -354,6 +354,14 @@ export const PRIORITY = {
    *  clears, the faction sweep that forecast is waiting on cannot finish.
    *  Home/cloud RAM posts at income:investment so ROI decides. */
   "hacking:blocking-prerequisite": 65,
+  /** A prerequisite purchase on the ROUTE'S TERMINAL PATH — currently the
+   *  port openers for a progression-posted blocking root need. Above
+   *  aug-fund (90) and donate (70): completion is worth the whole remaining
+   *  horizon, and no reserve it displaces can be. Measured on bn1-full
+   *  seed 2: the node's last step (root w0r1d_d43m0n) needed $280m of
+   *  openers while $120e12 sat banked, and at band 65 the claim was granted
+   *  $0 under the faction reserves for the final 37 minutes of the run. */
+  "hacking:critical-access": 111,
 } as const;
 
 export type PriorityKey = keyof typeof PRIORITY;

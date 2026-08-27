@@ -756,6 +756,12 @@ export interface DispatchMemory {
   segmentGb: Record<SegmentKind, number>;
   /** Long-lived, cooperatively stoppable fragment consumers. */
   shareWorkers: Map<number, ShareWorker>;
+  /** No new share launches before this instant. Set whenever share stops are
+   * requested: launching into the RAM a stop is about to free is pure churn,
+   * and each stop's exit signals a controller wake whose pump would otherwise
+   * relaunch immediately — a self-sustaining start/stop cycle. Measured on
+   * bn1-speedrun seed 2: the cycle starved the controller's tick entirely. */
+  shareLaunchHoldUntil?: number;
   /** Non-cancellable one-shot Stanek calls. */
   chargeWorkers: Map<number, ChargeWorker>;
   /** host -> op count in flight, so prep fires in non-overlapping waves. */
@@ -1365,6 +1371,7 @@ export function requestShareStops(
     if (!worker.stopping) {
       worker.stopping = true;
       worker.stopRequestedAt = memory.lastDispatchAt;
+      memory.shareLaunchHoldUntil = memory.lastDispatchAt + SHARE_STOP_RETRY_MS;
       actions.push({ type: "stopShare", opId: worker.workerId });
     }
     requested += worker.gb;
@@ -2338,7 +2345,8 @@ export function dispatch(
     actions.push({ type: "stopShare", opId: worker.workerId });
   }
   const shareStopping = [...memory.shareWorkers.values()].some((worker) => worker.stopping);
-  if (shareEnabled && !shareStopping && !reserveShortfall && (!farmPlacementBlocked || !hadShareWorkers)) {
+  const shareLaunchHeld = memory.shareLaunchHoldUntil !== undefined && now < memory.shareLaunchHoldUntil;
+  if (shareEnabled && !shareStopping && !shareLaunchHeld && !reserveShortfall && (!farmPlacementBlocked || !hadShareWorkers)) {
     // Reserve what the farm can launch in one pass; share takes the rest.
     //
     // Share is evictable, so the reserve only needs to cover what the farm can
