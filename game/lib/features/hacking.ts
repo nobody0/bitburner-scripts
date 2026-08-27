@@ -111,6 +111,9 @@ export function resetHackingState(): void {
   globals.charge_context_pending = false;
   for (const deadline of globals.dispatch_jit_timers?.values() ?? []) clearTimeout(deadline.timer);
   globals.dispatch_jit_timers?.clear();
+  if (shotgunPumpTimer !== undefined) clearTimeout(shotgunPumpTimer);
+  shotgunPumpTimer = undefined;
+  shotgunPumpTarget = undefined;
   state = initDriver();
   pumpMaxMs = 0;
   pumpMsSum = 0;
@@ -322,6 +325,23 @@ function scheduleJitWake(at: number | undefined, target?: string): void {
     signalWake(globals, target);
   }, Math.max(0, at - performance.now()));
   timers.set(key, { timer, at });
+}
+
+let shotgunPumpTimer: ReturnType<typeof setTimeout> | undefined;
+let shotgunPumpTarget: string | undefined;
+
+/** Shotgun continuation is independent of completion/JIT wakes: a completion
+ * must never turn into another launch burst merely because it arrived first. */
+function scheduleShotgunPump(delayMs: number | undefined, target?: string): void {
+  if (shotgunPumpTimer !== undefined) clearTimeout(shotgunPumpTimer);
+  shotgunPumpTimer = undefined;
+  shotgunPumpTarget = undefined;
+  if (delayMs === undefined || target === undefined) return;
+  shotgunPumpTimer = setTimeout(() => {
+    shotgunPumpTimer = undefined;
+    shotgunPumpTarget = target;
+    signalWake(workerGlobals());
+  }, Math.max(0, delayMs));
 }
 
 interface PumpCostReport {
@@ -1731,7 +1751,9 @@ async function runPump(
   installSec: number | undefined,
   sharePricing: ShareValue | undefined,
   chargePricing: ChargePricingInput | undefined,
-  trigger?: { kind: "target-wake"; target: string; source: "completion" | "deadline" },
+  trigger?:
+    | { kind: "target-wake"; target: string; source: "completion" | "deadline" }
+    | { kind: "shotgun-pump"; target: string },
 ): Promise<Awaited<ReturnType<typeof pump>> | undefined> {
   const servers = game.topics.servers;
   const player = game.topics.player;
@@ -1782,15 +1804,20 @@ async function runPump(
     ...(sharePricing ? { shareValue: sharePricing } : {}),
     ...(chargePricing ? { chargeValue: chargePricing } : {}),
   });
-  if (trigger) {
-    const next = result.nextWakes.find((wake) => wake.target === trigger.target);
+  const shotgunWake = result.nextWakes.find((wake) => wake.purpose === "shotgun");
+  if (!trigger || trigger.kind === "shotgun-pump") {
+    scheduleShotgunPump(shotgunWake?.ms, shotgunWake?.target);
+  }
+  const jitWakes = result.nextWakes.filter((wake) => wake.purpose !== "shotgun");
+  if (trigger?.kind === "target-wake") {
+    const next = jitWakes.find((wake) => wake.target === trigger.target);
     scheduleJitWake(next ? view.time + next.ms : undefined, trigger.target);
   } else {
-    const wanted = new Set(result.nextWakes.map((wake) => wake.target ?? ""));
+    const wanted = new Set(jitWakes.map((wake) => wake.target ?? ""));
     for (const key of driver.globals.dispatch_jit_timers?.keys() ?? []) {
       if (!wanted.has(key)) scheduleJitWake(undefined, key || undefined);
     }
-    for (const wake of result.nextWakes) {
+    for (const wake of jitWakes) {
       scheduleJitWake(view.time + wake.ms, wake.target);
     }
   }
@@ -1841,6 +1868,9 @@ export async function pumpOnWake(
   const done = driver.globals.dispatch_done ?? [];
   const targets = new Set(driver.globals.dispatch_wake_targets ?? []);
   for (const completion of done) if (completion.target) targets.add(completion.target);
+  const shotgunTarget = shotgunPumpTarget;
+  shotgunPumpTarget = undefined;
+  if (shotgunTarget) targets.add(shotgunTarget);
 
   // Each target gets its own pass. A weaken on B can bypass throttling for B,
   // but cannot make A's farm queue eligible or refresh A's live state.
@@ -1855,7 +1885,8 @@ export async function pumpOnWake(
     // (WAKE_MAX_PER_FRAME + heartbeats)/sec batches — measured 24.1 launched
     // of 50 planned per second on the one-server lane, with landings sliding
     // 0.4-0.9 s late on the skill-jump lane.
-    const scheduled = targetDone.length === 0;
+    const shotgunContinuation = target === shotgunTarget;
+    const scheduled = shotgunContinuation || targetDone.length === 0;
     if (!weakenWindow && !scheduled && now - lastPumpAt < WAKE_MIN_MS) {
       wakeSkipGap++;
       continue;
@@ -1876,7 +1907,9 @@ export async function pumpOnWake(
       installSec,
       latestShareValue,
       latestChargeValue,
-      { kind: "target-wake", target, source: targetDone.length > 0 ? "completion" : "deadline" },
+      shotgunContinuation
+        ? { kind: "shotgun-pump", target }
+        : { kind: "target-wake", target, source: targetDone.length > 0 ? "completion" : "deadline" },
     );
   }
 }

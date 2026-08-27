@@ -3,6 +3,7 @@ import {
   BATCH_KINDS,
   JIT_LAUNCH_GUARD_MS,
   MAX_FARM_WORK_PER_PASS,
+  SHOTGUN_PUMP_INTERVAL_MS,
   SHOTGUN_LANDING_MARGIN_MS,
   PREP_ORDER_MS,
   requestShareStops,
@@ -1386,7 +1387,7 @@ describe("shotgun mode", () => {
     // engine's timers for the length of the whole wave. Shotgun is where that
     // bites: it deliberately fires a full wave per pass and, unlike the JIT
     // path, had no emission ceiling at all. Work not emitted this pass is not
-    // lost — the next tick continues from the same pending state.
+    // lost — an explicit 5ms continuation starts the next bounded chunk.
     const world = new SimWorld({ seed: 5, network: DEFAULT_NETWORK, homeRam: 1_048_576, startingMoney: 1e15 });
     world.person.skills.hacking = 5_000;
     for (const server of world.servers.values()) {
@@ -1396,6 +1397,7 @@ describe("shotgun mode", () => {
       server.moneyAvailable = server.moneyMax;
     }
     let memory = initFarm();
+    let sawContinuation = false;
     for (let pass = 0; pass < 12; pass++) {
       const result = planFarm(world.view(), memory, [], { modeOverride: "shotgun", jit: true });
       memory = result.memory;
@@ -1406,9 +1408,47 @@ describe("shotgun mode", () => {
           action.phase !== "prep",
       );
       expect(launches.length).toBeLessThanOrEqual(MAX_FARM_WORK_PER_PASS);
+      const continuationWake = result.actions.find((action) =>
+        action.type === "sleep" && action.purpose === "shotgun"
+      );
+      if (continuationWake) {
+        expect(continuationWake).toEqual({
+          type: "sleep",
+          ms: SHOTGUN_PUMP_INTERVAL_MS,
+          target: result.directive.farm!.host,
+          purpose: "shotgun",
+        });
+        expect(launches.length).toBeGreaterThan(0);
+        sawContinuation = true;
+        for (const action of result.actions) world.execute(action);
+        world.clock.run(() => false, world.clock.now() + SHOTGUN_PUMP_INTERVAL_MS);
+
+        const target = result.directive.farm!.host;
+        const completionWake = planFarm(world.view(), memory, [], {
+          modeOverride: "shotgun",
+          jit: true,
+          trigger: { kind: "target-wake", target, source: "completion" },
+        });
+        expect(completionWake.actions.some((action) =>
+          action.type === "hack" || action.type === "grow" || action.type === "weaken"
+        )).toBe(false);
+
+        const continuation = planFarm(world.view(), memory, [], {
+          modeOverride: "shotgun",
+          jit: true,
+          trigger: { kind: "shotgun-pump", target },
+        });
+        const continuedLaunches = continuation.actions.filter((action) =>
+          action.type === "hack" || action.type === "grow" || action.type === "weaken"
+        );
+        expect(continuedLaunches.length).toBeGreaterThan(0);
+        expect(continuedLaunches.length).toBeLessThanOrEqual(MAX_FARM_WORK_PER_PASS);
+        break;
+      }
       for (const action of result.actions) world.execute(action);
       world.clock.run(() => false, world.clock.now() + 25);
     }
+    expect(sawContinuation).toBe(true);
   });
 
   test("falls back to a same-deadline four-op shotgun when no HGW solution fits", () => {

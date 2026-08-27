@@ -108,6 +108,9 @@ export const SECURITY_RECOVERY_DRIFT = 3 * PREPPED_SEC_TOLERANCE;
  * launches took 3.9/2.0/12.2ms, so the selected warm-pass ceiling is 100.
  * Actual JIT/prep emission remains under its stricter 48-worker cap. */
 export const MAX_FARM_WORK_PER_PASS = 100;
+/** Delay between bounded shotgun chunks. This yields the browser between
+ * bursts without tying shotgun throughput to the 200ms maintenance tick. */
+export const SHOTGUN_PUMP_INTERVAL_MS = MINIMUM_WORKER_PRECISION_MS;
 /** Same-tick shotgun deadline margin beyond the weaken's native duration. */
 export const SHOTGUN_LANDING_MARGIN_MS = MINIMUM_WORKER_PRECISION_MS;
 /** Up to 24 source slabs per prep phase. A correct distributed grow needs an
@@ -876,7 +879,8 @@ export interface DispatchOptions {
    * prep target can never launch farm work for another server. */
   trigger?:
     | { kind: "tick" }
-    | { kind: "target-wake"; target: string; source: "completion" | "deadline" };
+    | { kind: "target-wake"; target: string; source: "completion" | "deadline" }
+    | { kind: "shotgun-pump"; target: string };
   /** Per-host executable dodge arena withheld from farm allocation. */
   arenaReserves?: Readonly<Record<string, number>>;
   /** Money still needed for the active goal — sets the switch horizon. */
@@ -1509,6 +1513,7 @@ export function dispatch(
   options: DispatchOptions = {},
 ): { actions: Action[]; directive: TargetDirective; switched?: { from?: string; to: string } } {
   const wakeTarget = options.trigger?.kind === "target-wake" ? options.trigger.target : undefined;
+  const shotgunPump = options.trigger?.kind === "shotgun-pump";
   const arenaReserves = options.arenaReserves ?? {};
   memory.lastDispatchAt = view.time;
   const byHost = new Map(view.servers.map((s) => [s.hostname, s]));
@@ -1718,21 +1723,27 @@ export function dispatch(
   const modeAtPassStart = memory.mode;
   // Target wakes are scheduling interrupts, not economic decision points.
   // The 200 ms heartbeat remains the sole owner of target and segment changes.
-  const stepped = stepEvaluator(
-    view,
-    memory.evaluator,
-    capacity,
-    options.goalRemaining ?? Infinity,
-    options.horizonMs ?? Infinity,
-    {
-      ...(options.reinvestmentReturnPerDollarSec !== undefined
-        ? { reinvestmentReturnPerDollarSec: options.reinvestmentReturnPerDollarSec }
-        : {}),
-      ...(options.hackingSkillGoal !== undefined ? { hackingSkillGoal: options.hackingSkillGoal } : {}),
-      ...(options.shareValue ? { shareValue: options.shareValue } : {}),
-      ...(options.chargeValue ? { chargeValue: options.chargeValue } : {}),
-    },
-  );
+  const stepped = shotgunPump
+    ? {
+        memory: memory.evaluator,
+        directive: memory.activeDirective ?? memory.evaluator.directive,
+        switched: undefined,
+      }
+    : stepEvaluator(
+        view,
+        memory.evaluator,
+        capacity,
+        options.goalRemaining ?? Infinity,
+        options.horizonMs ?? Infinity,
+        {
+          ...(options.reinvestmentReturnPerDollarSec !== undefined
+            ? { reinvestmentReturnPerDollarSec: options.reinvestmentReturnPerDollarSec }
+            : {}),
+          ...(options.hackingSkillGoal !== undefined ? { hackingSkillGoal: options.hackingSkillGoal } : {}),
+          ...(options.shareValue ? { shareValue: options.shareValue } : {}),
+          ...(options.chargeValue ? { chargeValue: options.chargeValue } : {}),
+        },
+      );
   memory.evaluator = stepped.memory;
   const requestedSegments = adaptSegmentsToFleet(stepped.directive.segments, capacity.fleetGb);
   const requestedFarmCapGb = requestedSegments.find((segment) => segment.kind === "farm")?.gb ?? 0;
@@ -1814,11 +1825,11 @@ export function dispatch(
     // nuke checks only open-port count; hacking skill is checked later by hack,
     // so zero-port servers can be rooted as fleet upkeep immediately.
     // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L531-L547
-    if (!server.hasAdminRights && server.numOpenPortsRequired === 0) {
+    if (!shotgunPump && !server.hasAdminRights && server.numOpenPortsRequired === 0) {
       actions.push({ type: "nuke", target: server.hostname });
     }
   }
-  if (options.buyInfrastructure) {
+  if (!shotgunPump && options.buyInfrastructure) {
     const cloud = cheapestCloudQuote(view.prices.cloudServer);
     const owned = view.servers.filter((s) => s.purchasedByPlayer && s.hostname !== "home").length;
     if (cloud && owned < view.prices.cloudServerLimit && view.player.money >= cloud.cost) {
@@ -1846,6 +1857,7 @@ export function dispatch(
   let requestedSpillGb = 0;
   memory.pooling = false;
   for (const segment of directive.segments) {
+    if (shotgunPump && segment.kind !== "farm") continue;
     if (segment.kind === "prep" && !prepActive) spillGb += Math.max(0, segment.gb - memory.segmentGb.prep);
   }
   for (const segment of requestedSegments) {
@@ -1952,8 +1964,9 @@ export function dispatch(
               (sum, role) => sum + projectedHwgwSchedule.quotaGb[role.role] / Math.max(1e-9, role.gb),
               0,
             );
-        const mode = options.modeOverride
-          ?? decideMode({
+        const mode = shotgunPump
+          ? memory.mode
+          : options.modeOverride ?? decideMode({
             hackMs,
             projectedHwgwOps,
             ...(boundSolution.ramPerBatch > 0 ? {
@@ -2142,6 +2155,7 @@ export function dispatch(
           (currentRuntime?.pooling === true || liveProcessCount(memory) > POOL_PRESSURE_OPS) &&
           weakenMs / depth <= POOL_REUSE_WINDOW_MS;
         memory.pooling ||= pooling;
+        const passCapsBefore = memory.stats.capped.passActions;
         launchBatches(
           memory,
           actions,
@@ -2161,6 +2175,14 @@ export function dispatch(
           landingCtxAt,
           !drainingJit,
         );
+        if (shotgun && memory.stats.capped.passActions > passCapsBefore) {
+          actions.push({
+            type: "sleep",
+            ms: SHOTGUN_PUMP_INTERVAL_MS,
+            target: server.hostname,
+            purpose: "shotgun",
+          });
+        }
       } else {
         launchDuePrep(memory, actions, server, now, launchCtx, segmentCap, weakenWakeTargets.has(server.hostname));
         budget = segmentCap - memory.segmentGb[segment.kind];
@@ -2176,6 +2198,8 @@ export function dispatch(
       launchPrepWave(memory, actions, view, server, budget, "prep");
     }
   }
+
+  if (shotgunPump) return { actions, directive };
 
   const nonShareDeficitGb = directive.segments
     .filter((segment) => segment.kind !== "share")

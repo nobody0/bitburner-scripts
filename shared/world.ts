@@ -166,7 +166,7 @@ export type Action =
   | { type: "upgradeServer"; host: string; ram: number }
   | { type: "upgradeHomeRam" }
   | { type: "upgradeHomeCore" }
-  | { type: "sleep"; ms: number; target?: string };
+  | { type: "sleep"; ms: number; target?: string; purpose?: "shotgun" };
 
 /** Delivered to the driver when a scheduled op settles. `workerExit` reports a
  * pooled serve-worker's process ending (idle timeout, kill, reload): its opId

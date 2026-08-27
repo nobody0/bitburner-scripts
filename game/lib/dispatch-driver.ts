@@ -180,13 +180,16 @@ export async function pump(
     hackingSkillGoal?: number;
     shareValue?: SharePricingInput;
     chargeValue?: ChargePricingInput;
-    trigger?: { kind: "tick" } | { kind: "target-wake"; target: string; source: "completion" | "deadline" };
+    trigger?:
+      | { kind: "tick" }
+      | { kind: "target-wake"; target: string; source: "completion" | "deadline" }
+      | { kind: "shotgun-pump"; target: string };
   } = {},
 ): Promise<{
   launched: number;
   failed: number;
   directive: ReturnType<typeof planFarm>["directive"];
-  nextWakes: Array<{ ms: number; target?: string }>;
+  nextWakes: Array<{ ms: number; target?: string; purpose?: "shotgun" }>;
 }> {
   const result = planFarm(view, state.memory, completions, {
     ...(options.arenaReserves ? { arenaReserves: options.arenaReserves } : {}),
@@ -210,6 +213,7 @@ export async function pump(
     state.globals.worker_info?.size ?? 0,
   );
   let launched = 0;
+  let launchedHgw = 0;
   for (const action of result.actions) {
     if (action.type === "stopShare") {
       executeShareStop(state, action.opId);
@@ -239,17 +243,25 @@ export async function pump(
       failed.push(action.opId);
       continue;
     }
-    if (await startOp(ns, state, action, action.opId, view.time)) launched++;
+    if (await startOp(ns, state, action, action.opId, view.time)) {
+      launched++;
+      launchedHgw++;
+    }
     else failed.push(action.opId);
   }
   if (failed.length > 0) reportFailed(state.memory, failed);
-  const wakeByTarget = new Map<string, { ms: number; target?: string }>();
+  const wakeByTarget = new Map<string, { ms: number; target?: string; purpose?: "shotgun" }>();
   for (const action of result.actions) {
     if (action.type !== "sleep") continue;
-    const key = action.target ?? "";
+    if (action.purpose === "shotgun" && launchedHgw === 0) continue;
+    const key = `${action.purpose ?? "deadline"}\0${action.target ?? ""}`;
     const previous = wakeByTarget.get(key);
     if (!previous || action.ms < previous.ms) {
-      wakeByTarget.set(key, { ms: action.ms, ...(action.target ? { target: action.target } : {}) });
+      wakeByTarget.set(key, {
+        ms: action.ms,
+        ...(action.target ? { target: action.target } : {}),
+        ...(action.purpose ? { purpose: action.purpose } : {}),
+      });
     }
   }
   return {

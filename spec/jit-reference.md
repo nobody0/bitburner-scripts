@@ -465,7 +465,9 @@ unbounded pass starves the engine's timers for the length of the whole wave.
 `MAX_FARM_WORK_PER_PASS` caps JIT queue production and wake extraction, and
 caps shotgun by actual new worker processes. JIT/prep emission retains its
 stricter 48-worker ceiling. Shotgun admission remains batch-atomic: splitting a
-batch could put a hack in flight whose weaken cover was never launched.
+batch could put a hack in flight whose weaken cover was never launched. A
+saturated shotgun pass schedules one dedicated continuation 5 ms later; normal
+completion wakes remain bookkeeping-only and cannot recursively launch waves.
 
 Both rails report through `stats.capped` rather than dropping silently. A
 persistently non-zero `capped.processes` is the interesting one — it means the
