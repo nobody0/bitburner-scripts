@@ -164,7 +164,9 @@ export function nodeForecast(now: number, route: RouteEta | undefined, basis: st
   return estimatedForecast(
     now,
     basis,
-    route.parts.map((part) => ({
+    // Hidden parts are AND-parallel legs covered by a slower sibling's window;
+    // they are priced by the marginals but must not extend the countdown.
+    route.parts.filter((part) => !part.hidden).map((part) => ({
       what: part.what,
       resource: part.resource,
       sec: part.sec,
@@ -199,6 +201,14 @@ export interface InstallForecastView {
   optionalInstallAllowed?: boolean;
   /** Earliest reset imposed by the selected route. */
   mandatory?: { sec: number; measured: boolean };
+  /** Funding leg of the selected route's next augmentation tranche — the
+   * earliest an optional install could become possible when nothing is
+   * committed yet. Taken from the route ETA's augmentations part, so the
+   * bound inherits that part's measured flag. */
+  routePackageSec?: { sec: number; measured: boolean };
+  /** Remaining node seconds, bounding "no further install this node" when the
+   * route stage forbids optional installs and mandates none. */
+  nodeRemainingSec?: number;
 }
 
 /** Estimate the current committed install cycle. The faction intent already
@@ -249,12 +259,60 @@ export function installForecast(now: number, view: InstallForecastView, basis: s
     : undefined;
 
   const intent = view.intent;
+  // An honest lower bound beats a missing answer: `installHorizonSec` maps an
+  // unknown install forecast to a one-hour amortization window, which prices
+  // every install-mortal purchase (cloud RAM, Go boards, stock positions) as
+  // if a reset could land any minute. Measured on bn1-speedrun seed 3: with no
+  // install even possible, cloud rungs were devalued ~280x against home RAM,
+  // the fleet froze saving toward one $318m home rung, and $1b was never
+  // reached in 8h where hacking alone took 76 minutes. When the route says an
+  // install cannot happen before X, X is the forecast — still marked by its
+  // parts' own `measured` flags, never silently invented.
+  const packageBound = view.routePackageSec
+    ? {
+        what: "fund the route's next augmentation tranche",
+        resource: "augmentations" as const,
+        sec: Math.max(0, view.routePackageSec.sec),
+        measured: view.routePackageSec.measured,
+        mode: "parallel" as const,
+      }
+    : undefined;
   if (view.optionalInstallAllowed === false) {
-    return mandatoryComponents
-      ? estimatedForecast(now, basis, mandatoryComponents)
+    if (mandatoryComponents) return estimatedForecast(now, basis, mandatoryComponents);
+    // The route forbids optional installs and mandates none: install-mortal
+    // state survives for the rest of the node as currently forecast.
+    return view.nodeRemainingSec !== undefined
+      ? estimatedForecast(now, basis, [{
+          what: "route stage forbids an optional install",
+          resource: "install",
+          sec: Math.max(0, view.nodeRemainingSec),
+          measured: false,
+          mode: "sequential",
+        }])
       : unknownForecast(now, basis, "the selected route stage forbids an optional install");
   }
   if (view.countCadenceReady === false) {
+    if (packageBound) {
+      return estimatedForecast(now, basis, [
+        packageBound,
+        ...(view.cadenceSec !== undefined
+          ? [{
+              what: "install cadence value crossing",
+              resource: "augmentations" as const,
+              sec: Math.max(0, view.cadenceSec),
+              measured: true,
+              mode: "parallel" as const,
+            }]
+          : []),
+        {
+          what: "final purchase and donation sweep",
+          resource: "install",
+          sec: INSTALL_FINAL_SWEEP_SEC,
+          measured: false,
+          mode: "sequential",
+        },
+      ]);
+    }
     return unknownForecast(
       now,
       basis,
@@ -271,9 +329,20 @@ export function installForecast(now: number, view: InstallForecastView, basis: s
         mode: "sequential",
       }]);
     }
-    return mandatoryComponents
-      ? estimatedForecast(now, basis, mandatoryComponents)
-      : unknownForecast(now, basis, "no committed augmentation package yet");
+    if (mandatoryComponents) return estimatedForecast(now, basis, mandatoryComponents);
+    if (packageBound) {
+      return estimatedForecast(now, basis, [
+        packageBound,
+        {
+          what: "final purchase and donation sweep",
+          resource: "install",
+          sec: INSTALL_FINAL_SWEEP_SEC,
+          measured: false,
+          mode: "sequential",
+        },
+      ]);
+    }
+    return unknownForecast(now, basis, "no committed augmentation package yet");
   }
 
   const workSec = Math.max(0, intent.unlockSec + intent.repSec);

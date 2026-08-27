@@ -369,6 +369,40 @@ describe("anchored uncapped forecasts", () => {
       reason: "the funded augmentation set has not reached the route's reset tranche",
     });
 
+    // With the route's own funding leg available, the tranche hold is an
+    // honest lower bound, not an unknown that installHorizonSec would replace
+    // with a one-hour amortization window.
+    const trancheBounded = installForecast(0, {
+      installNow: false,
+      queuedCount: 0,
+      phase: "start",
+      workMeasured: true,
+      moneyMeasured: true,
+      finalSweepReady: false,
+      cadenceSec: 500,
+      countCadenceReady: false,
+      routePackageSec: { sec: 7_200, measured: true },
+      intent: {
+        faction: "CyberSec", repTarget: 100, augmentations: ["a"], value: 1, etaSec: 1, rate: 1,
+        marginalRate: 1, unlockSec: 0, repSec: 0, moneySec: 0, favorAfterInstall: 0,
+        totalCost: 1, purchaseCost: 1, donationCost: 0, purpose: "augmentations",
+      },
+    }, "count tranche bounded");
+    expect(trancheBounded).toMatchObject({ state: "estimated", remainingSec: 7_260 });
+
+    // No committed package yet, but the route knows how long assembling one
+    // takes: forecast that bound instead of reporting nothing.
+    const packageBounded = installForecast(0, {
+      installNow: false,
+      queuedCount: 0,
+      phase: "start",
+      workMeasured: false,
+      moneyMeasured: false,
+      finalSweepReady: false,
+      routePackageSec: { sec: 5_400, measured: false },
+    }, "package bounded");
+    expect(packageBounded).toMatchObject({ state: "estimated", remainingSec: 5_460 });
+
     const committed = installForecast(0, {
       installNow: false,
       installWanted: true,
@@ -412,6 +446,21 @@ describe("anchored uncapped forecasts", () => {
       optionalInstallAllowed: false,
     }, "held");
     expect(noMandatory.state).toBe("unknown");
+
+    // A route stage that forbids optional installs and mandates none means
+    // install-mortal state survives to node end: forecast the node bound so
+    // installHorizonSec does not substitute a one-hour window.
+    const nodeBounded = installForecast(0, {
+      installNow: false,
+      queuedCount: 2,
+      phase: "finishUp",
+      workMeasured: true,
+      moneyMeasured: true,
+      finalSweepReady: false,
+      optionalInstallAllowed: false,
+      nodeRemainingSec: 3_000,
+    }, "held to node end");
+    expect(nodeBounded).toMatchObject({ state: "estimated", remainingSec: 3_000 });
   });
 });
 
@@ -423,6 +472,52 @@ describe("endgame view invariants the driver relies on", () => {
     expect(rep.sec).toBeGreaterThan(0);
     expect(rep.measured).toBe(false);
     expect(rep.sec * 50).toBeCloseTo(RED_PILL_REP, 0);
+  });
+
+  test("the projected work rate replaces the fallback before Daedalus work is measured", () => {
+    const v = view({ augCount: 30, hackingSkill: 2_500, money: DAEDALUS_MONEY });
+    const daedalus = etasFor(v, { ...noRates(), daedalusRepPerSecProjected: 12.5 })
+      .find((eta) => eta.id === "daedalus")!;
+    const rep = daedalus.parts.find((part) => part.what === "daedalus reputation")!;
+    expect(rep.measured).toBe(false);
+    expect(rep.sec * 12.5).toBeCloseTo(RED_PILL_REP, 0);
+  });
+
+  test("the donation route is priced and wins when favor banking beats the grind", () => {
+    const v = view({ augCount: 30, hackingSkill: 2_500, money: DAEDALUS_MONEY });
+    // Work rate 12.5/s makes the direct grind 2.5e6/12.5 = 200,000s. The
+    // donation path: 462,000-ish unlock rep at the same rate + one install
+    // overhead + $2.5e12 of donation at $1e9/s = ~40,458s. It must win, and
+    // the parts must say what they are.
+    const daedalus = etasFor(v, {
+      ...noRates(),
+      moneyPerSec: 1e9,
+      daedalusRepPerSecProjected: 12.5,
+      daedalusDonateUnlockRepGap: 462_000,
+      daedalusDonationDollarsPerRep: 1e6,
+    }).find((eta) => eta.id === "daedalus")!;
+    const unlock = daedalus.parts.find((part) => part.what === "daedalus favor unlock reputation")!;
+    const install = daedalus.parts.find((part) => part.what === "daedalus favor-banking install")!;
+    const donate = daedalus.parts.find((part) => part.what === "daedalus reputation donation")!;
+    expect(daedalus.parts.find((part) => part.what === "daedalus reputation")).toBeUndefined();
+    expect(unlock.sec).toBeCloseTo(462_000 / 12.5, 0);
+    expect(install.sec).toBeGreaterThan(0);
+    expect(donate.sec).toBeCloseTo((RED_PILL_REP * 1e6 - DAEDALUS_MONEY) / 1e9, 0);
+  });
+
+  test("unlocked donation skips the banking install and buys only the remaining gap", () => {
+    const v = view({ augCount: 30, hackingSkill: 2_500, money: DAEDALUS_MONEY });
+    const daedalus = etasFor(v, {
+      ...noRates(),
+      moneyPerSec: 1e9,
+      daedalusRepPerSecProjected: 12.5,
+      daedalusDonateUnlockRepGap: 0,
+      daedalusDonationDollarsPerRep: 1e6,
+      daedalusDonationUnlocked: true,
+    }).find((eta) => eta.id === "daedalus")!;
+    expect(daedalus.parts.find((part) => part.what === "daedalus favor-banking install")).toBeUndefined();
+    const donate = daedalus.parts.find((part) => part.what === "daedalus reputation donation")!;
+    expect(donate.sec).toBeCloseTo((RED_PILL_REP * 1e6 - DAEDALUS_MONEY) / 1e9, 0);
   });
 });
 /** The post-Red-Pill regrow guard is a SHORT-tail protection, and it inverts
@@ -479,5 +574,35 @@ describe("regrow install override", () => {
       optionalInstallAllowed: false,
       rates: rates({ hackingSkillPerSec: 0 }),
     })).toBe(false);
+  });
+});
+
+describe("acquisition-aware skill climbs", () => {
+  test("the invite gate prices buy-the-stack-then-climb when the direct climb is hopeless", () => {
+    // Current mult 1, exp rate measured: 2500 directly needs e^((2500+200)/32)
+    // ~ e^84 experience — effectively never. With a shelf of strong hacking
+    // augs and a measured acquisition rate, the plan is to buy k and climb.
+    const v = view({ augCount: 30, hackingSkill: 100, money: DAEDALUS_MONEY });
+    const daedalus = etasFor(v, {
+      ...noRates(),
+      moneyPerSec: 1e9,
+      hackingExp: 1_000,
+      hackingExpPerSec: 1e6,
+      hackingSkillMult: 1,
+      augsPerSec: 1 / 600,
+      hackingCatalog: {
+        augs: Array.from({ length: 20 }, () => ({ skillLn: Math.log(1.5), expLn: Math.log(1.2) })),
+      },
+    }).find((eta) => eta.id === "daedalus")!;
+    const stack = daedalus.parts.find((part) => part.what.includes("hacking skill multiplier stack"));
+    const climb = daedalus.parts.find((part) => part.what.includes("invite gate (hacking skill)"));
+    expect(stack).toBeDefined();
+    expect(stack!.resource).toBe("augmentations");
+    // The whole plan lands in hours, not centuries.
+    const gateSec = daedalus.parts
+      .filter((part) => part.what.includes("invite gate") && part.hidden !== true)
+      .reduce((sum, part) => sum + part.sec, 0);
+    expect(gateSec).toBeLessThan(48 * 3600);
+    expect(climb ?? stack).toBeDefined();
   });
 });

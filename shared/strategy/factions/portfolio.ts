@@ -282,7 +282,11 @@ function portfolioValue(
     const offered = unownedSetFrom(choice.faction, view);
     let overlap = 0;
     for (let i = 0; i < augNames.length; i++) if (offered.has(augNames[i]!)) overlap++;
-    favor += favorValueFromFuture(standing, choice.pkg.favorAfterInstall, offered.size - overlap, view);
+    const servesTerminal = (view.route === "daedalus" || view.route === "gang")
+      && !view.owned.has("The Red Pill")
+      && (standing.joined || standing.invited)
+      && offered.has("The Red Pill");
+    favor += favorValueFromFuture(standing, choice.pkg.favorAfterInstall, offered.size - overlap, view, servesTerminal);
   }
   // Same split `packageValues` makes, and for the same reason: count is ROUTE
   // progress toward a gate, not a rate. It is kept once acquired and an install

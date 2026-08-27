@@ -390,7 +390,15 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
   // set therefore counts as "something to activate" for a mandatory install
   // just as it does for optional cadence.  installReady remains blocked on an
   // empty queue until the sweep has actually converted it.
-  const somethingToActivate = view.queued.length > 0 || view.resetRealizable === true;
+  // A favor crossing IS activation value in itself — banking it is the whole
+  // point of the reset (bankedFavorActivationValue already prices it), and the
+  // donate-path route step depends on it. Without this, a run whose queue was
+  // empty at the crossing deadlocked: no install wanted -> no final sweep ->
+  // nothing queued -> no install wanted. Measured on bn1-full seed 2: the
+  // route stood 13.5 minutes from completing the node for the last 8 hours of
+  // the horizon while the favor-banking install was never armed.
+  const somethingToActivate =
+    view.queued.length > 0 || view.resetRealizable === true || crossings.length > 0;
   const routeInstallWanted = view.routeRequiresInstall && somethingToActivate;
   // The marginal-value rule is the PRIMARY driver when a route ETA exists;
   // the legacy cash-ratio phase gate covers the no-data case. The favor

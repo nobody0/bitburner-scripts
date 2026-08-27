@@ -63,7 +63,9 @@ describe("progression marginal value", () => {
       selectedRoute: "daedalus",
       install: unknownForecast(0, "none", "no package"),
     });
-    expect(marginals.money).toMatchObject({ state: "estimated", horizon: "node" });
+    // The horizon label may be "node" (perturbation) or "future-binding"
+    // (the local-slope floor won); either way the worth is real and positive.
+    expect(marginals.money.state).toBe("estimated");
     expect(marginals.money.secondsPerRelativeRate).toBeGreaterThan(0);
   });
 
@@ -97,5 +99,28 @@ describe("progression marginal value", () => {
       progressPerSec: 1,
       rateAtProgress: (progress) => 10 + progress * 0.2,
     })).toBeGreaterThan(0);
+  });
+});
+
+describe("parallel-maximum masking (the invite-gate collapse)", () => {
+  test("a skill leg hidden behind a slower money gate keeps its floor worth", () => {
+    // Count gate met; the invite needs $100b AND hacking 2500. Money is far
+    // slower, so the emitted binding part is the money gate and an
+    // infinitesimal hacking perturbation moves nothing — but the climb is
+    // real future work, and its linear slope must floor the hacking worth.
+    const current = view({ augCount: 30, money: 0, hackingSkill: 100 });
+    const marginals = progressionMarginals({
+      view: current,
+      decision: stepEndgame(current),
+      // moneyPerSec prices the money gate at 1e11/1e4 = 1e7s; the hacking
+      // climb at 2400 levels / 1/s = 2400s is fully masked behind it.
+      rates: { ...noRates(), moneyPerSec: 10_000, hackingSkillPerSec: 1 },
+      selectedRoute: "daedalus",
+      install: unknownForecast(0, "none", "no install pending"),
+    });
+    expect(marginals.hacking.state).toBe("estimated");
+    expect(marginals.hacking.secondsPerRelativeRate).toBeGreaterThanOrEqual(
+      linearSecondsPerRelativeRate(2_000),
+    );
   });
 });

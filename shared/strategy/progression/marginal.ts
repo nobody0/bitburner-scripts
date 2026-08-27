@@ -287,28 +287,43 @@ export function progressionMarginals(
     }
     const install = installSaved !== undefined && installSaved > 0 ? installSaved : 0;
     const node = nodeSaved !== undefined && nodeSaved > 0 ? nodeSaved : 0;
-    if (install > 0 || node > 0) {
-      return {
-        state: "estimated",
-        secondsPerRelativeRate: Math.max(install, node) / delta,
-        horizon: node > install ? "node" : "install",
-        ...at,
-      };
-    }
+    const perturbedSlope = Math.max(install, node) / delta;
 
-    // Preserve the slope of a dependency hidden behind a parallel maximum.
-    // This is not credited on top of another horizon; it is used only when the
-    // immediate install and full node perturbations both report no movement.
+    // FLOOR the perturbed slope with the local slope of every leg this
+    // resource must still complete — including AND-parallel legs masked by a
+    // slower sibling (EtaPart.hidden). The infinitesimal perturbation cannot
+    // see through a parallel maximum, but the decisions priced off these
+    // worths (augmentation multipliers, work-slot bids) buy FINITE rate
+    // changes that do flip which branch binds. Measured: with the money gate
+    // masking the invite hacking climb, worth(hacking) collapsed 612k -> 7.6k
+    // BN-seconds exactly while the run chose its augmentations, and the
+    // multiplier stack that would have cut two 7-14h climbs was never bought.
+    // The floor covers exactly what the perturbation is blind to: hidden
+    // AND-parallel legs (covered by a slower sibling's window, so a rate
+    // change moves nothing) — plus, as before, the all-parts fallback when
+    // both perturbations report no movement at all. Flooring on VISIBLE legs
+    // too double-weighted long unmeasured parts the perturbation already
+    // prices: measured on a 6h screen, worth(hacking) drowned every other
+    // channel and total income fell 160x.
+    const hiddenNodeSec = baselineRoute
+      ? resourceSeconds(baselineRoute.parts.filter((part) => part.hidden === true), resource)
+      : 0;
     const installResourceSec = input.install.state === "unknown"
       ? 0
       : resourceSeconds(input.install.components, resource);
     const nodeResourceSec = baselineRoute ? resourceSeconds(baselineRoute.parts, resource) : 0;
-    const dependentSec = Math.max(installResourceSec, nodeResourceSec);
-    if (dependentSec > 0) {
+    const dependentSec = perturbedSlope > 0
+      ? hiddenNodeSec
+      : Math.max(installResourceSec, nodeResourceSec);
+    const floorSlope = dependentSec > 0 ? linearSecondsPerRelativeRate(dependentSec, delta) : 0;
+
+    if (perturbedSlope > 0 || floorSlope > 0) {
       return {
         state: "estimated",
-        secondsPerRelativeRate: linearSecondsPerRelativeRate(dependentSec, delta),
-        horizon: "future-binding",
+        secondsPerRelativeRate: Math.max(perturbedSlope, floorSlope),
+        horizon: perturbedSlope >= floorSlope
+          ? (node > install ? "node" : "install")
+          : "future-binding",
         ...at,
       };
     }

@@ -24,7 +24,7 @@ import {
   scoreAugMults,
   weightsFromMarginals,
 } from "../../../shared/strategy/factions/augs.ts";
-import { workRepPerSec, type WorkType } from "../../../shared/strategy/factions/rep.ts";
+import { donationForRep, favorNeededToDonate, favorToRep, workRepPerSec, type WorkType } from "../../../shared/strategy/factions/rep.ts";
 import { stepGang } from "../../../shared/strategy/gang/decide.ts";
 import { goDemands } from "../../../shared/strategy/go/demand.ts";
 import {
@@ -72,6 +72,7 @@ import { bankedFavorActivationValue, chooseNextBitNode, dwellInstallVerdict, INS
 import { STALL_BITNODE_COMPLETION } from "../../../shared/strategy/progression/bitnode-order.ts";
 import {
   DAEDALUS_COMBAT,
+  DAEDALUS_HACKING,
   daedalusAugsRequired,
   GANG_FACTIONS,
   GANG_KARMA,
@@ -2301,6 +2302,7 @@ interface ProgressionMemory {
   trackers: {
     moneyEarned: RateTracker;
     hacking: RateTracker;
+    hackingExp: RateTracker;
     combat: RateTracker;
     augs: RateTracker;
     daedalusRep: RateTracker;
@@ -2337,6 +2339,7 @@ function freshProgressionMemory(): ProgressionMemory {
     trackers: {
       moneyEarned: new RateTracker(true),
       hacking: new RateTracker(),
+      hackingExp: new RateTracker(),
       combat: new RateTracker(),
       augs: new RateTracker(),
       daedalusRep: new RateTracker(),
@@ -2549,6 +2552,8 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
   }
   if (earned !== undefined) trackers.moneyEarned.sample(t, earned);
   trackers.hacking.sample(t, view.hackingSkill);
+  const hackingExpNow = ctx.state.topics.player?.exp?.hacking;
+  if (hackingExpNow !== undefined) trackers.hackingExp.sample(t, hackingExpNow);
   trackers.combat.sample(t, view.lowestCombatSkill);
   // Series whose zero can be FABRICATED (the backing probe has not landed
   // yet) are sampled only when the reading is real: a phantom (t0, 0) sample
@@ -2620,12 +2625,87 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
         (ctx.state.topics.player?.money ?? 0) + Math.max(0, stockTopicForPrior.portfolioValue ?? 0),
       )
     : 0;
+  // Formula-projected Daedalus reputation economics. The measured tracker is
+  // zero until Daedalus work actually starts, which priced the 2.5m-rep leg
+  // at a flat fallback for the whole run. Project the work rate from the
+  // transcribed rep formulas at the invite gate's own floor (the leg cannot
+  // begin below the gate), and hand the ETA the donation route's numbers —
+  // earn only the favor-unlock reputation, bank it at an install, buy the
+  // rest with money — so it can take the cheaper of the two paths.
+  const playerTopic = ctx.state.topics.player;
+  const repFactionMult = (playerTopic?.mults as Record<string, number> | undefined)?.["faction_rep"] ?? 1;
+  const factionWorkRepGain = nodeMultsForPrior?.["FactionWorkRepGain"] ?? 1;
+  const daedalusStanding = ctx.state.topics.factions?.standings?.find((s) => s.name === "Daedalus");
+  const daedalusFavor = daedalusStanding?.favor ?? 0;
+  const invitePerson = {
+    skills: {
+      hacking: Math.max(view.hackingSkill, DAEDALUS_HACKING),
+      strength: view.lowestCombatSkill,
+      defense: view.lowestCombatSkill,
+      dexterity: view.lowestCombatSkill,
+      agility: view.lowestCombatSkill,
+      charisma: playerTopic?.skills?.charisma ?? 1,
+      intelligence: playerTopic?.skills?.intelligence ?? 0,
+    },
+    mults: { faction_rep: repFactionMult },
+  };
+  const projectedDaedalusRep = workRepPerSec(
+    "hacking",
+    invitePerson,
+    daedalusFavor,
+    {
+      factionWorkRepGain,
+      shareBonus: ctx.state.topics.fleet?.sharePower ?? 1,
+      sf15Level: sfLevel(ctx.caps.sourceFiles, 15),
+      hasFocusAug: false,
+    },
+    true,
+  );
+  // Aggregate hacking power still on the shelf: the product of every unowned
+  // catalogue augmentation's hacking-skill and hacking-exp multipliers, and
+  // how many distinct augmentations carry them. The route's regrow leg prices
+  // "assemble the stack, then climb" against "climb with what we have" — the
+  // skill curve is exponential in 1/mult, so without this the honest climb
+  // number is astronomically large and prescribes nothing.
+  const factionsTopic = ctx.state.topics.factions;
+  const ownedAugNames = new Set([
+    ...Object.keys(view.installedAugs ?? {}),
+    ...(view.queuedAugs ?? []),
+  ]);
+  const catalogAugs: { skillLn: number; expLn: number }[] = [];
+  for (const [name, meta] of Object.entries(factionsTopic?.augMeta ?? {})) {
+    if (ownedAugNames.has(name)) continue;
+    const skillMult = meta.mults?.["hacking"];
+    const expMult = meta.mults?.["hacking_exp"];
+    const skillLn = skillMult !== undefined && skillMult > 1 ? Math.log(skillMult) : 0;
+    const expLn = expMult !== undefined && expMult > 1 ? Math.log(expMult) : 0;
+    if (skillLn <= 0 && expLn <= 0) continue;
+    catalogAugs.push({ skillLn, expLn });
+  }
+  catalogAugs.sort((a, b) => (b.skillLn + b.expLn) - (a.skillLn + a.expLn));
+  const favorToDonate = ctx.state.topics.factions?.favorToDonate ?? favorNeededToDonate(1);
+  const donateUnlockRepGap = Math.max(
+    0,
+    favorToRep(favorToDonate) - favorToRep(daedalusFavor) - (daedalusStanding?.rep ?? 0),
+  );
   return {
     moneyPerSec: measuredMoneyPerSec > 0 ? measuredMoneyPerSec : hackingPrior + marketPrior,
     hackingSkillPerSec: trackers.hacking.perSec(),
     combatSkillPerSec: trackers.combat.perSec(),
     augsPerSec: augmentationAcquisitionRate(progressionMemory.augmentationCycles) || trackers.augs.perSec(),
     daedalusRepPerSec: trackers.daedalusRep.perSec(),
+    ...(hackingExpNow !== undefined ? { hackingExp: hackingExpNow } : {}),
+    ...((): { hackingExpPerSec?: number } => {
+      const perSec = trackers.hackingExp.perSec();
+      return perSec > 0 ? { hackingExpPerSec: perSec } : {};
+    })(),
+    hackingSkillMult: ((playerTopic?.mults as Record<string, number> | undefined)?.["hacking"] ?? 1)
+      * (nodeMultsForPrior?.["HackingLevelMultiplier"] ?? 1),
+    ...(catalogAugs.length > 0 ? { hackingCatalog: { augs: catalogAugs } } : {}),
+    ...(projectedDaedalusRep > 0 ? { daedalusRepPerSecProjected: projectedDaedalusRep } : {}),
+    daedalusDonateUnlockRepGap: donateUnlockRepGap,
+    daedalusDonationDollarsPerRep: donationForRep(1, repFactionMult, factionWorkRepGain),
+    daedalusDonationUnlocked: daedalusFavor >= favorToDonate,
     gangRepPerSec: trackers.gangRep.perSec(),
     blackOpsPerSec: trackers.blackOps.perSec(),
     bladeburnerRankPerSec: sampledRank > 0 ? sampledRank : plannedRank ?? 0,
@@ -3233,6 +3313,13 @@ function progressionRefresh(ctx: NeedContext): void {
         }
       : undefined,
   });
+  // The route's own funding leg bounds how soon an optional install could
+  // become possible when nothing is committed yet; the node forecast bounds
+  // "no further install this node" when the route stage forbids one. Both are
+  // handed to the install forecast so install-mortal assets amortize over an
+  // honest window instead of `installHorizonSec`'s one-hour fallback.
+  const routeAugPackagePart = selectedEta?.parts.find((part) => part.resource === "augmentations");
+  const nodeRemainingForInstall = usableForecastSec(nextNodeForecast);
   const previousInstallForecast = readablePlan(ctx.state)?.forecasts.install;
   const nextInstallForecast = shouldReforecast(previousInstallForecast, ctx.now, installBasis)
       ? installForecast(ctx.now, {
@@ -3253,6 +3340,10 @@ function progressionRefresh(ctx: NeedContext): void {
         countCadenceReady,
         optionalInstallAllowed,
         ...(selectedEta?.nextMandatoryInstall ? { mandatory: selectedEta.nextMandatoryInstall } : {}),
+        ...(routeAugPackagePart
+          ? { routePackageSec: { sec: routeAugPackagePart.sec, measured: routeAugPackagePart.measured } }
+          : {}),
+        ...(nodeRemainingForInstall !== undefined ? { nodeRemainingSec: nodeRemainingForInstall } : {}),
       }, installBasis)
     : forecastAt(previousInstallForecast!, ctx.now);
   const forecasts: PlanningHorizons = { node: nextNodeForecast, install: nextInstallForecast };

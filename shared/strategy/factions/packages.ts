@@ -132,6 +132,21 @@ function favorCanActivateBeforeGoal(view: FactionsView): boolean {
     || view.requirementView.augCount < Math.ceil(view.targetAugCount / 2);
 }
 
+/** A faction whose shelf carries the route's terminal purchase keeps its
+ * donation-unlock favor path alive regardless of the count-phase gate above:
+ * crossing favorToDonate there converts the terminal reputation requirement
+ * into money, which late in the node is the fastest remaining path by orders
+ * of magnitude. Measured on bn1-full seed 2: with the gate applied, no
+ * candidate ever targeted Daedalus's 462k unlock rep, the run ground to 459k
+ * — 147 seconds short of the crossing — and stalled 13 minutes from
+ * completing the node for the final 8 hours of the horizon. */
+function favorServesRouteTerminal(standing: FactionStanding, offered: readonly AugInfo[], view: FactionsView): boolean {
+  return (view.route === "daedalus" || view.route === "gang")
+    && !view.owned.has("The Red Pill")
+    && (standing.joined || standing.invited)
+    && offered.some((aug) => aug.name === "The Red Pill");
+}
+
 export function packageValues(
   augs: readonly AugInfo[],
   allOffered: readonly AugInfo[],
@@ -214,7 +229,13 @@ export function favorValue(
   // set) and calls `favorValueFromFuture` directly.
   let future = 0;
   for (const aug of allOffered) if (!acquired.has(aug.name)) future++;
-  return favorValueFromFuture(standing, favorAfterInstall, future, view);
+  return favorValueFromFuture(
+    standing,
+    favorAfterInstall,
+    future,
+    view,
+    favorServesRouteTerminal(standing, allOffered, view),
+  );
 }
 
 /** {@link favorValue} with the future-work count already resolved. */
@@ -223,10 +244,11 @@ export function favorValueFromFuture(
   favorAfterInstall: number,
   future: number,
   view: FactionsView,
+  servesRouteTerminal = false,
 ): number {
   const beforeRate = 1 + standing.favor / 100;
   const afterRate = 1 + favorAfterInstall / 100;
-  const favorUseful = favorCanActivateBeforeGoal(view);
+  const favorUseful = favorCanActivateBeforeGoal(view) || servesRouteTerminal;
   // Favor IS a reputation rate multiplier, so the term is quoted in what a
   // relative reputation-rate increase is worth — the same BN-seconds `quality`
   // is in. Scaled, not reshaped: the `future` weighting and the crossing
@@ -266,7 +288,8 @@ function targetCandidates(standing: FactionStanding, offered: readonly AugInfo[]
   // zero-augmentation package at a deep faction and starve the permanent
   // augmentations needed by the current route. Unlock an unjoined faction for
   // an actual augmentation first; after membership, favor competes normally.
-  if ((standing.joined || standing.invited) && favorCanActivateBeforeGoal(view)) {
+  if ((standing.joined || standing.invited)
+    && (favorCanActivateBeforeGoal(view) || favorServesRouteTerminal(standing, offered, view))) {
     const currentAfterInstall = addRepToFavor(standing.favor, standing.rep);
     const work = bestWorkType(standing.offers, view.person, standing.favor, view.repContext, true);
     const workReach = standing.rep + (work?.repPerSec ?? 0) * view.horizonSec;

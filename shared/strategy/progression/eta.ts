@@ -14,6 +14,7 @@ import {
   type RouteId,
 } from "./endgame.ts";
 import { cycleProgressEtaWithPrior, type CyclePoint, type CurveResource } from "./regrowth.ts";
+import { expForSkill } from "../../formulas.ts";
 
 /** Per-route time-to-finish HEURISTICS, and the route choice built on them.
  *
@@ -77,6 +78,34 @@ export interface RouteRates {
   gangRepPerSec: number;
   blackOpsPerSec: number;
   bladeburnerRankPerSec: number;
+  /** Current hacking experience, for closed-form climb pricing. */
+  hackingExp?: number;
+  /** Measured hacking experience per second. The skill curve is exactly
+   * level = mult * (32*ln(exp + 534.6) - 200), so with an exp rate the time to
+   * any level is computable in closed form — extrapolating the LEVEL rate
+   * instead systematically underprices high targets (measured: the regrow leg
+   * priced 2.6h at 3.5h into a run whose real regrow took 13.8h, collapsing
+   * the hacking channel's worth exactly when augmentations were chosen). */
+  hackingExpPerSec?: number;
+  /** Effective live hacking skill multiplier (player mult x node mult). */
+  hackingSkillMult?: number;
+  /** Hacking power still on the shelf: per-augmentation ln-multipliers of
+   * every unowned catalogue augmentation carrying hacking skill/exp mults,
+   * sorted strongest-first. Lets a climb leg price "assemble the best k, then
+   * climb" as a real plan and choose k itself. */
+  hackingCatalog?: { augs: readonly { skillLn: number; expLn: number }[] };
+  /** Formula-projected Daedalus work rep/sec at the invite gate, for pricing
+   * the reputation leg before any Daedalus work has been measured. Derived by
+   * the driver from the transcribed rep formulas; never a live measurement. */
+  daedalusRepPerSecProjected?: number;
+  /** Reputation still to EARN at Daedalus (over current rep and favor) for
+   * favor to cross the donation threshold at the next install. 0 when the
+   * earned total already crosses it. */
+  daedalusDonateUnlockRepGap?: number;
+  /** Dollars per reputation point when donating to Daedalus. */
+  daedalusDonationDollarsPerRep?: number;
+  /** Favor is already past the donation threshold right now. */
+  daedalusDonationUnlocked?: boolean;
   /** Direct stat-multiplier gain already committed to the next end-loaded
    * install. It changes the experience needed for a post-prestige level; the
    * benefit is forecast only and never applied to live progress. */
@@ -117,6 +146,13 @@ export interface EtaPart {
   resource: ProgressResource;
   sec: number;
   measured: boolean;
+  /** A required AND-parallel leg masked behind a slower sibling. It does not
+   * add to the route total (the sibling's window covers it), but it is real
+   * future work in its resource: the marginals price it so a dependency
+   * hidden behind a parallel maximum is never worth zero. Measured without
+   * this: the invite money gate masked the hacking climb and the hacking
+   * channel's worth collapsed 80x exactly when augmentations were chosen. */
+  hidden?: boolean;
 }
 
 export type ProgressResource =
@@ -188,7 +224,7 @@ function part(
 }
 
 function total(parts: EtaPart[]): number {
-  return parts.reduce((sum, entry) => sum + entry.sec, 0);
+  return parts.reduce((sum, entry) => sum + (entry.hidden ? 0 : entry.sec), 0);
 }
 
 function moneyGatePart(view: EndgameView, rates: RouteRates, afterReset: boolean): EtaPart {
@@ -207,12 +243,12 @@ function moneyGatePart(view: EndgameView, rates: RouteRates, afterReset: boolean
 
 /** The shared tail of all three Red Pill routes: install the pill, then climb back
  * to the world-daemon level after the reset wiped hacking to 1. */
-function redPillTail(view: EndgameView, wdSkill: number | undefined, rates: RouteRates): EtaPart[] {
+function redPillTail(view: EndgameView, wdSkill: number | undefined, rates: RouteRates, deepFuture = false): EtaPart[] {
   const parts: EtaPart[] = [];
   const skill = wdSkill ?? 3000;
   if (!view.redPillInstalled) {
     parts.push({ what: "install", resource: "install", sec: INSTALL_OVERHEAD_SEC, measured: false });
-    parts.push(postInstallRegrow(skill, rates));
+    parts.push(...postInstallRegrow(skill, rates, deepFuture));
   } else if (view.hackingSkill < skill) {
     parts.push(part("regrow", "hacking", skill - view.hackingSkill, rates.hackingSkillPerSec, 1 / FALLBACK_SEC_PER_HACK_LEVEL));
   } else if (!view.worldDaemonRooted) {
@@ -251,14 +287,94 @@ export function regrowInstallOverride(input: {
     return false;
   }
   const remainNowSec = (gate - input.hackingSkill) / input.rates.hackingSkillPerSec;
-  const remainAfterSec = INSTALL_OVERHEAD_SEC + postInstallRegrow(gate, input.rates).sec;
+  const remainAfterSec = INSTALL_OVERHEAD_SEC
+    + postInstallRegrow(gate, input.rates).reduce((sum, part) => sum + part.sec, 0);
   return remainAfterSec < remainNowSec;
 }
 
-export function postInstallRegrow(skill: number, rates: RouteRates): EtaPart {
+/** Closed-form time to a hacking level from the exact skill curve and a
+ * measured experience rate. Returns undefined without that evidence. */
+function hackingClimbSec(
+  targetLevel: number,
+  startExp: number,
+  effectiveMult: number,
+  rates: RouteRates,
+): number | undefined {
+  const expRate = rates.hackingExpPerSec;
+  if (expRate === undefined || !(expRate > 0) || !(effectiveMult > 0)) return undefined;
+  const needed = Math.max(0, expForSkill(Math.ceil(targetLevel), effectiveMult) - Math.max(0, startExp));
+  return needed / expRate;
+}
+
+/** "Assemble the best k hacking augmentations, then climb" — the minimum over
+ * k of acquisition plus the closed-form climb with that stack. Returns
+ * undefined when the closed form has no evidence to price with. */
+function stackedClimbPlan(
+  targetLevel: number,
+  startExp: number,
+  baseMult: number,
+  rates: RouteRates,
+  label: string,
+): EtaPart[] | undefined {
+  const direct = hackingClimbSec(targetLevel, startExp, baseMult, rates);
+  if (direct === undefined) return undefined;
+  const catalog = rates.hackingCatalog;
+  const baseExpRate = rates.hackingExpPerSec ?? 0;
+  if (catalog && catalog.augs.length > 0 && baseExpRate > 0) {
+    const secPerAug = 1 / (rates.augsPerSec > 0 ? rates.augsPerSec : 1 / FALLBACK_SEC_PER_AUG);
+    let best = { total: direct, k: 0, acquireSec: 0, climbSec: direct };
+    let skillLnSum = 0;
+    let expLnSum = 0;
+    for (let k = 1; k <= catalog.augs.length; k++) {
+      const entry = catalog.augs[k - 1]!;
+      skillLnSum += entry.skillLn;
+      expLnSum += entry.expLn;
+      const acquireSec = k * secPerAug;
+      if (acquireSec >= best.total) break;
+      const climbSec = Math.max(0, expForSkill(Math.ceil(targetLevel), baseMult * Math.exp(skillLnSum)) - Math.max(0, startExp))
+        / (baseExpRate * Math.exp(expLnSum));
+      const totalSec = acquireSec + climbSec;
+      if (totalSec < best.total) best = { total: totalSec, k, acquireSec, climbSec };
+    }
+    if (best.k > 0) {
+      return [
+        {
+          what: `${label} multiplier stack (${best.k} augmentations)`,
+          resource: "augmentations",
+          sec: best.acquireSec,
+          measured: rates.augsPerSec > 0,
+        },
+        { what: label, resource: "hacking", sec: best.climbSec, measured: true },
+      ];
+    }
+  }
+  return [{ what: label, resource: "hacking", sec: direct, measured: true }];
+}
+
+export function postInstallRegrow(skill: number, rates: RouteRates, deepFuture = false): EtaPart[] {
+  // Prefer the exact curve when the multiplier stack at climb time is
+  // actually KNOWN — the live multiplier plus this cycle's committed package.
+  // A leg on the far side of a future install whose contents are not yet
+  // chosen (deepFuture) must not be priced at today's multiplier: the curve
+  // is exponential in 1/mult, so that produced a 2.1e30-hour "regrow" that
+  // poisoned every downstream comparison, when the truthful statement is
+  // "the stack that install buys is what makes this leg affordable".
+  const committedMult = rates.hackingSkillMult !== undefined
+    ? rates.hackingSkillMult * Math.max(1, rates.postInstallHackingSkillMult)
+    : undefined;
+  const closed = !deepFuture && committedMult !== undefined
+    ? hackingClimbSec(skill, 0, committedMult, rates)
+    : undefined;
+  if (closed !== undefined && committedMult !== undefined) {
+    // The climb with what we HAVE, versus assembling more of the hacking
+    // catalogue first: the curve is exponential in 1/mult, so once the
+    // current stack prices the climb in days, acquisition is the real plan.
+    const plan = stackedClimbPlan(skill, 0, committedMult, rates, "regrow");
+    if (plan) return plan;
+  }
   const equivalentSkill = skill / Math.max(1, rates.postInstallHackingSkillMult);
   const rate = rates.hackingSkillPerSec > 0 ? rates.hackingSkillPerSec : 1 / FALLBACK_SEC_PER_HACK_LEVEL;
-  return curvePart("regrow", "hacking", equivalentSkill - 1, (equivalentSkill / rate) * REGROW_DISCOUNT, rates);
+  return [curvePart("regrow", "hacking", equivalentSkill - 1, (equivalentSkill / rate) * REGROW_DISCOUNT, rates)];
 }
 
 /** Estimate every route from the current state. Pure; the decision supplies
@@ -320,26 +436,50 @@ export function routeEtas(view: EndgameView, decision: EndgameDecision, rates: R
               hackingSkill: 1,
               lowestCombatSkill: 1,
             };
-            const postResetGate = [
-              moneyGatePart(afterReset, rates, true),
-              skillPart(afterReset, rates, true),
-            ];
-            const slowest = postResetGate.reduce((a, b) => (b.sec > a.sec ? b : a));
-            parts.push({ ...slowest, what: `post-install invite gate (${slowest.what})` });
+            const postMoney = moneyGatePart(afterReset, rates, true);
+            const postSkill = skillPart(afterReset, rates, true);
+            const postSkillSec = postSkill.reduce((sum, part) => sum + part.sec, 0);
+            if (postMoney.sec >= postSkillSec) {
+              parts.push({ ...postMoney, what: `post-install invite gate (${postMoney.what})` });
+              for (const gatePart of postSkill) {
+                if (!(gatePart.sec > 0)) continue;
+                parts.push({ ...gatePart, what: `post-install invite gate (${gatePart.what}, parallel)`, hidden: true });
+              }
+            } else {
+              for (const gatePart of postSkill) {
+                parts.push({ ...gatePart, what: `post-install invite gate (${gatePart.what})` });
+              }
+              if (postMoney.sec > 0) {
+                parts.push({ ...postMoney, what: `post-install invite gate (${postMoney.what}, parallel)`, hidden: true });
+              }
+            }
           } else {
             // With the count gate already installed, money and the two skill
             // branches accrue in parallel from the live state.
             const skill = skillPart(view, rates);
-            const gate = [moneyGatePart(view, rates, false), skill];
-            const slowest = gate.reduce((a, b) => (b.sec > a.sec ? b : a));
-            parts.push({ ...slowest, what: `invite gate (${slowest.what})` });
+            const skillSec = skill.reduce((sum, part) => sum + part.sec, 0);
+            const liveMoney = moneyGatePart(view, rates, false);
+            if (liveMoney.sec >= skillSec) {
+              parts.push({ ...liveMoney, what: `invite gate (${liveMoney.what})` });
+              for (const gatePart of skill) {
+                if (!(gatePart.sec > 0)) continue;
+                parts.push({ ...gatePart, what: `invite gate (${gatePart.what}, parallel)`, hidden: true });
+              }
+            } else {
+              for (const gatePart of skill) {
+                parts.push({ ...gatePart, what: `invite gate (${gatePart.what})` });
+              }
+              if (liveMoney.sec > 0) {
+                parts.push({ ...liveMoney, what: `invite gate (${liveMoney.what}, parallel)`, hidden: true });
+              }
+            }
 
             const inviteNeeds: RouteNeed[] = [];
             if (view.money < DAEDALUS_MONEY) {
               inviteNeeds.push({ kind: "money", target: DAEDALUS_MONEY, have: view.money });
             }
             if (view.hackingSkill < DAEDALUS_HACKING && view.lowestCombatSkill < DAEDALUS_COMBAT) {
-              inviteNeeds.push(skill.resource === "combat"
+              inviteNeeds.push(skill[skill.length - 1]!.resource === "combat"
                 ? { kind: "combatSkills", target: DAEDALUS_COMBAT, have: view.lowestCombatSkill }
                 : { kind: "skill", subject: "hacking", target: DAEDALUS_HACKING, have: view.hackingSkill });
             }
@@ -349,17 +489,82 @@ export function routeEtas(view: EndgameView, decision: EndgameDecision, rates: R
             if (inviteNeeds.length > 0) needs = inviteNeeds;
           }
           // Reputation is sequential: it only starts once Daedalus invites.
-          parts.push(
-            part(
-              "daedalus reputation",
-              "reputation",
-              RED_PILL_REP - (countInstallPending ? 0 : view.daedalusRep),
-              rates.daedalusRepPerSec,
-              FALLBACK_DAEDALUS_REP_PER_SEC,
-            ),
-          );
+          // Two ways to close it, priced against each other:
+          //  - work: the measured rate once Daedalus work has started, else the
+          //    formula-projected rate at the invite gate. The tracker is zero
+          //    for the whole run before any Daedalus work exists, which left
+          //    this leg at the flat fallback (2.5e6/50 = 13.9h — 36% of the
+          //    entire route estimate on a cold BN1) and inflated the
+          //    reputation channel's worth everywhere downstream.
+          //  - donate: earn only the favor-unlock reputation, bank it at an
+          //    install, then buy the requirement with money. Favor activates
+          //    only at a reset, so one cycle overhead is charged unless the
+          //    count install is already pending on this route.
+          const repGap = RED_PILL_REP - (countInstallPending ? 0 : view.daedalusRep);
+          const measuredRepRate = rates.daedalusRepPerSec;
+          const projectedRepRate = rates.daedalusRepPerSecProjected ?? 0;
+          const repWorkRate = measuredRepRate > 0
+            ? measuredRepRate
+            : projectedRepRate > 0 ? projectedRepRate : FALLBACK_DAEDALUS_REP_PER_SEC;
+          const repWorkSec = Math.max(0, repGap) / repWorkRate;
+          const donateUnlockGap = rates.daedalusDonateUnlockRepGap;
+          const dollarsPerRep = rates.daedalusDonationDollarsPerRep ?? 0;
+          const donationUnlocked = rates.daedalusDonationUnlocked === true;
+          // Rep resets at the favor-banking install, so the donation buys the
+          // full requirement; with donations already unlocked it buys only the
+          // remaining gap and no install is needed.
+          const donateRep = donationUnlocked ? Math.max(0, repGap) : RED_PILL_REP;
+          const donateParts: EtaPart[] | undefined =
+            donateUnlockGap !== undefined && dollarsPerRep > 0 && rates.moneyPerSec > 0
+              ? [
+                  {
+                    what: "daedalus favor unlock reputation",
+                    resource: "reputation" as const,
+                    sec: (donationUnlocked ? 0 : Math.max(0, donateUnlockGap)) / repWorkRate,
+                    measured: measuredRepRate > 0,
+                  },
+                  // The count install precedes the invite and so cannot bank
+                  // Daedalus favor: without unlocked donations the banking
+                  // install is always an extra reset after the unlock grind.
+                  ...(donationUnlocked
+                    ? []
+                    : [{
+                        what: "daedalus favor-banking install",
+                        resource: "install" as const,
+                        sec: INSTALL_OVERHEAD_SEC,
+                        measured: false,
+                      }]),
+                  {
+                    what: "daedalus reputation donation",
+                    resource: "money" as const,
+                    // Donations spend the BANK, not just the flow: pricing the
+                    // full amount against income made an already-affordable
+                    // donation look like hours whenever income dipped, and the
+                    // route fell back to a 30h reputation grind.
+                    sec: Math.max(0, donateRep * dollarsPerRep - view.money) / rates.moneyPerSec,
+                    measured: false,
+                  },
+                ]
+              : undefined;
+          if (donateParts && total(donateParts) < repWorkSec) {
+            parts.push(...donateParts);
+          } else {
+            parts.push({
+              what: "daedalus reputation",
+              resource: "reputation",
+              sec: repWorkSec,
+              measured: measuredRepRate > 0,
+            });
+          }
         }
-        parts.push(...redPillTail(view, wdSkill, rates));
+        // The regrow's multiplier stack is unknowable until the count install
+        // chooses it; after that the current queue IS the stack.
+        parts.push(...redPillTail(
+          view,
+          wdSkill,
+          rates,
+          view.augCount < (daedalusAugsRequired(view.bitNode, sf12) ?? 30),
+        ));
       } else if (route.id === "gang") {
         if (!view.ownsRedPill) {
           if (!view.inGang) {
@@ -389,7 +594,7 @@ export function routeEtas(view: EndgameView, decision: EndgameDecision, rates: R
             parts.push({ what: `install labyrinth reward ${stage + 1}`, resource: "install", sec: INSTALL_OVERHEAD_SEC, measured: false });
           }
           nextMandatoryInstall = { sec: firstQueued ? 0 : LABYRINTH_WALK_SEC, measured: firstQueued };
-          parts.push(postInstallRegrow(wdSkill ?? 3000, rates));
+          parts.push(...postInstallRegrow(wdSkill ?? 3000, rates));
         }
       } else {
         if (!view.inBladeburner) {
@@ -438,7 +643,7 @@ export function routeEtas(view: EndgameView, decision: EndgameDecision, rates: R
 
 /** Daedalus accepts hacking 2500 OR all four combat skills at 1500 — whichever
  * climb is faster is the one the estimate prices. */
-function skillPart(view: EndgameView, rates: RouteRates, afterInstall = false): EtaPart {
+function skillPart(view: EndgameView, rates: RouteRates, afterInstall = false): EtaPart[] {
   const hackingGain = afterInstall ? Math.max(1, rates.postInstallHackingSkillMult) : 1;
   const combatGain = afterInstall ? Math.max(1, rates.postInstallCombatSkillMult) : 1;
   // For the same experience, skill is proportional to the direct stat
@@ -450,9 +655,24 @@ function skillPart(view: EndgameView, rates: RouteRates, afterInstall = false): 
   const combatGap = Math.max(0, combatTarget - view.lowestCombatSkill);
   const hackFallback = hackGap / (rates.hackingSkillPerSec > 0 ? rates.hackingSkillPerSec : 1 / FALLBACK_SEC_PER_HACK_LEVEL);
   const combatFallback = combatGap / (rates.combatSkillPerSec > 0 ? rates.combatSkillPerSec : 1 / FALLBACK_SEC_PER_COMBAT_LEVEL);
-  const hack = curvePart("hacking skill", "hacking", hackTarget - 1, hackFallback, rates, view.hackingSkill > 1);
+  // The hacking branch is a PLAN, not just a rate: the climb is exponential
+  // in 1/mult, so "buy the best k hacking augmentations, then climb" is often
+  // the fastest path to the gate and must be priced as such — the invite gate
+  // read 30-80h on the combat branch while the run owned the money to make
+  // the hacking branch trivial.
+  const hackParts: EtaPart[] = (rates.hackingSkillMult !== undefined
+    ? stackedClimbPlan(
+        DAEDALUS_HACKING,
+        afterInstall ? 0 : rates.hackingExp ?? 0,
+        rates.hackingSkillMult * hackingGain,
+        rates,
+        "hacking skill",
+      )
+    : undefined)
+    ?? [curvePart("hacking skill", "hacking", hackTarget - 1, hackFallback, rates, view.hackingSkill > 1)];
   const combat = curvePart("combat skills", "combat", combatTarget - 1, combatFallback, rates, view.lowestCombatSkill > 1);
-  return hack.sec <= combat.sec ? hack : combat;
+  const hackSec = hackParts.reduce((sum, part) => sum + part.sec, 0);
+  return hackSec <= combat.sec ? hackParts : [combat];
 }
 
 // --- route choice -----------------------------------------------------------
