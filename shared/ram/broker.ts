@@ -16,6 +16,26 @@ export const RESIDENT_BASE_GB = 1.6;
  * handoff briefly needs for two `start.js` instances. */
 export const HOME_RESERVE_GB = 4.1;
 
+/** The bootstrap host's reserved SLICE: ONE resident at Go-turn size.
+ *
+ * Go is the first feature that must run the moment a resident stands — its
+ * node-power rewards compound for the whole run — and its dearest calls
+ * (`go.makeMove`, `go.getBoardState`) price at 4 GB, so the guaranteed floor
+ * is base 1.6 + 4 = 5.6 GB. One slot, not two: the residents do not need
+ * simultaneous guarantees — the second stands in ordinary free RAM (the
+ * unreserved rest of this host, n00dles, anything rooted), and if the farm
+ * ever squeezes it out its standing ask re-carves room. The REST of the
+ * bootstrap host and all of n00dles belong to the batcher: reserving both
+ * hosts whole withheld 20 GB from an 8 GB-home cold start.
+ *
+ * Growth beyond the slice is the resident ask-carve's job, and the static
+ * network supplies the ladder (worst-case skill rolls, vendored metadata):
+ * neo-net (32 GB, skill <= 50, 1 port), zer0 (32 GB, 75), iron-gym (32 GB,
+ * 100), silver-helix (64 GB, 150, 2 ports — fits the singularity-era ~61 GB
+ * ask). A grown ask lands on the smallest rooted host that fits, so the
+ * upgrade happens the moment the sweep roots the next rung. */
+export const BOOTSTRAP_RESIDENT_SLICE_GB = RESIDENT_BASE_GB + 4;
+
 export interface BrokerHost {
   hostname: string;
   maxRam: number;
@@ -62,11 +82,12 @@ export interface ArenaPlan {
  *
  *   - **home**, `HOME_RESERVE_GB`, always. It is the placer's last resort and
  *     the boot path's only ground.
- *   - **the bootstrap host** — `foodnstuff`, else `n00dles` — whole, held as a
- *     floor BEFORE any resident stands on it. Both root on the first tick of a
- *     fresh game (0 ports, skill 1) and both are near-worthless to the
- *     batcher, so the bootstrap can count on finding one of them free at the
- *     moment it needs somewhere to put the first resident (game/lib/bootstrap.ts).
+ *   - **the bootstrap host** — `foodnstuff`, else `n00dles` — a Go-sized
+ *     SLICE (`BOOTSTRAP_RESIDENT_SLICE_GB`), held as a floor BEFORE any
+ *     resident stands on it. Both root on the first tick of a fresh game
+ *     (0 ports, skill 1), so the bootstrap can count on the slice being free
+ *     when it places the first resident (game/lib/bootstrap.ts). The rest of
+ *     the host and all of n00dles farm.
  *   - **each resident's own ask**, which is the carve. A resident whose budget
  *     must GROW — the pre-SF4-level-3 singularity reads price at 48-80 GB and
  *     exceed every static host — needs a block big enough to respawn into, and
@@ -92,7 +113,7 @@ export function ramArena(
   const home = byName.get('home');
   if (home) hold('home', Math.min(home.maxRam, HOME_RESERVE_GB));
   const bootstrap = byName.get('foodnstuff') ?? byName.get('n00dles');
-  if (bootstrap) hold(bootstrap.hostname, bootstrap.maxRam);
+  if (bootstrap) hold(bootstrap.hostname, Math.min(bootstrap.maxRam, BOOTSTRAP_RESIDENT_SLICE_GB));
 
   for (const resident of residents) {
     const wantGb = Math.max(resident.gb, resident.wantGb);

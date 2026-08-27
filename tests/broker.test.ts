@@ -1,11 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import {
-  HOME_RESERVE_GB,
+import { BOOTSTRAP_RESIDENT_SLICE_GB, HOME_RESERVE_GB,
   ramArena,
   RESIDENT_BASE_GB,
   type BrokerHost,
-  type ResidentAsk,
-} from '../shared/ram/broker.ts';
+  type ResidentAsk, } from '../shared/ram/broker.ts';
 
 const hosts = (): BrokerHost[] => [
   { hostname: 'home', maxRam: 8, freeGb: 4.4, rooted: true, deployed: true },
@@ -27,10 +25,16 @@ describe('the arena floor', () => {
     expect(ramArena(hosts(), [], 1).reserves.home).toBe(HOME_RESERVE_GB);
   });
 
-  test('the bootstrap host is held whole BEFORE any resident stands on it', () => {
+  test('the bootstrap host holds a Go-sized slice BEFORE any resident stands on it', () => {
     // game/lib/bootstrap.ts places the first resident blind, on foodnstuff or
-    // n00dles. If the farm may take them first there is nowhere to boot to.
-    expect(ramArena(hosts(), [], 0).reserves).toEqual({ home: HOME_RESERVE_GB, foodnstuff: 16 });
+    // n00dles. If the farm may take the slice first there is nowhere to boot
+    // to — but only the slice: the rest of the host farms, and Go must be
+    // servable from the first placement (its node-power rewards compound for
+    // the whole run).
+    expect(ramArena(hosts(), [], 0).reserves).toEqual({
+      home: HOME_RESERVE_GB,
+      foodnstuff: BOOTSTRAP_RESIDENT_SLICE_GB,
+    });
   });
 
   test('n00dles stands in only until foodnstuff is rooted', () => {
@@ -90,7 +94,10 @@ describe('the resident carve', () => {
 
   test('nothing in the fleet can hold the want — the arena stays at its floor', () => {
     const arena = ramArena(hosts(), [{ gb: 0, wantGb: 1_000 }], 0);
-    expect(arena.reserves).toEqual({ home: HOME_RESERVE_GB, foodnstuff: 16 });
+    expect(arena.reserves).toEqual({
+      home: HOME_RESERVE_GB,
+      foodnstuff: BOOTSTRAP_RESIDENT_SLICE_GB,
+    });
   });
 });
 
