@@ -161,6 +161,23 @@ export async function runController(
   // runs, so a satisfied need disappears the moment its poster stops asking.
   const contributions = new ContributionCache();
 
+  // Loop-body dodge work must never take the controller down: a DodgeExecError
+  // is one lost placement race (the farm refilled a host between the broker's
+  // stale free-RAM view and the exec), and every one of these paths reruns on
+  // its own cadence. Measured on bn1-full: an uncaught probe throw at fleet
+  // saturation killed the controller at 14.5h and the run sat dead for ten
+  // hours. Kills still propagate — ScriptDeath is a shutdown, not a failure.
+  const contained = async (phase: string, run: () => Promise<void>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      if (isScriptDeath(error)) throw error;
+      TELEMETRY: if (__TELEMETRY__) {
+        tel!.event("feature.failed", { feature: "controller", phase, error: String(error) });
+      }
+    }
+  };
+
   for (let tick = 0; ; tick++) {
     // Yield to a newer controller (manual restart, double autoexec, handoff).
     if (gameGlobal.controllerEpoch !== epoch) {
@@ -298,7 +315,7 @@ export async function runController(
         // Rescan and reclaim NOW, not on the next sweep. Waiting would leave
         // the dispatcher with no world to farm for 30 s, and would leave the
         // new node's orphans holding RAM for just as long.
-        await sweepFleet(ns, state, tel, true);
+        await contained("reset-sweep", () => sweepFleet(ns, state, tel, true));
         TELEMETRY: if (__TELEMETRY__) republish(state);
       }
       for (const id of delta.unlocked) {
@@ -490,7 +507,6 @@ export async function runController(
         }
       }
     }
-
     const switched = takeTargetSwitch();
     TELEMETRY: if (__TELEMETRY__ && switched) tel!.event("farm.targetSwitch", switched);
 
@@ -519,10 +535,39 @@ export async function runController(
     let clock = Date.now();
     if (nextTick < clock - TICK_MS) nextTick = clock;
     let wakePromise = armWake(workerGlobals());
+    // Wake-storm bound. A wake pump can itself CAUSE the next wake: the pump
+    // stops or starts a share worker, its atExit signals, and the loop runs
+    // again — a self-sustaining cycle that starved the tick body entirely.
+    // Measured on bn1-speedrun seed 2: 27,000 wake races inside one 200 ms
+    // window once share sizing sat on a decision boundary; the controller
+    // never ticked again and the run sat dead to the horizon. A real 200 ms
+    // window fits at most a handful of genuine landing bursts, so a generous
+    // cap changes nothing in normal operation and converts the pathological
+    // cycle into an ordinary tick.
+    let wakeRaces = 0;
+    let lastWakePumpAt = 0;
     while ((clock = Date.now()) < nextTick) {
+      if (wakeRaces >= 32) {
+        // Sleep out the rest of the window WITHOUT racing the wake: breaking
+        // here instead would run the next pass on the same instant, the still-
+        // pending wake would win the next race immediately, and the cycle
+        // would repeat with the clock frozen forever.
+        await realmSleep(nextTick - clock);
+        break;
+      }
       if ((await sleepOrWake(nextTick - clock, wakePromise)) === "tick") break;
+      wakeRaces++;
       wakePromise = armWake(workerGlobals());
       if (active.unlocked["hacking"] !== "yes") continue;
+      // Coalesce wake-pumps to one per landing slot. The wake exists to catch
+      // the min-security instant after a weaken lands; on a large fleet
+      // landings are continuous, and pumping the full planner per landing did
+      // unbounded work per unit of game time (measured: 32-race storms every
+      // tick, the controller crawling at ~10 game-ms per storm). Extra wakes
+      // inside one slot coalesce into the next allowed pump; nothing is lost
+      // because the pump reads the completion QUEUE, not the wake itself.
+      if (Date.now() - lastWakePumpAt < 50) continue;
+      lastWakePumpAt = Date.now();
       try {
         // A worker releases real RAM before its completion is drained. Settle
         // only process exits, so the arena's reserve claims that exact block,
