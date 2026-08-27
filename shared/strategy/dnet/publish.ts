@@ -223,18 +223,8 @@ export function publishHost(
   };
 }
 
-/** What the map draws on the box border, decided ONCE here so the map and the
- * table can never disagree about a host's status.
- *
- * `reachable` is the set of hosts adjacent to something we hold, and it has to
- * be computed over the whole graph rather than per host — which is the bug this
- * argument exists to fix. The old rule asked whether the host had its OWN fresh
- * neighbour list, but that fact only appears once an agent is standing on it,
- * which only happens after it is cracked. So every host we could crack RIGHT NOW
- * reported "(no connection)", and the panel called the entire work queue
- * unreachable.
- *
- * Upstream's own rule is the plain one, and it looks outward, not inward. It is
+/** What the map and table show for authentication reachability.
+ * `reachable` is computed across the graph using upstream's outward rule:
  * `allowAuth`, handed to each box as its `enableAuth` prop:
  *
  *     allowAuth = server.hasAdminRights

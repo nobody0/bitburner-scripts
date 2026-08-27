@@ -7,9 +7,7 @@ export function preemptionCandidateFromHandle(
   handle: AgentHandle | undefined,
   extra: Omit<PreemptionCandidate, "host" | "activeKind" | "activePriority" | "activeStartedAt" | "activeExpectedDoneAt"> = {},
 ): PreemptionCandidate {
-  // No handle means no active work, which is what makes the host a free
-  // worker rather than a preemption victim. (There used to be an `=== "idle"`
-  // test beside this; no order is ever built with that kind.)
+  // No handle means no active work, so the host is free rather than preemptible.
   if (handle === undefined) return { host, ...extra };
   return {
     host,

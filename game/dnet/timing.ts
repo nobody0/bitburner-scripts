@@ -29,18 +29,9 @@ export const RELEASED = Symbol("dnet-released");
  *     CONCURRENCY ERROR — Currently running: induceServerMigration,
  *                         Tried to run: getScriptName
  *
- * The exit path is made of `ns` calls (`getScriptName`, `spawn`, `atExit`), so
- * a released body used to walk out of its wait and straight into that throw —
- * which killed the respawn and left the host holding its prober alone. That is
- * the whole prober-only failure, and it hit hardest exactly where preemption
- * was most useful, because a released body is the only kind that reaches its
- * exit with a call still running.
- *
- * So the release publishes the outstanding call. The body stops waiting for
- * the RESULT immediately — the controller re-plans in that same instant, which
- * is what the release was for — and the process waits for the engine before it
- * touches `ns` again. Nothing here can shorten that: interrupting a call in
- * flight is `ns.kill` from another script and nothing else. */
+ * A release publishes the outstanding call. The controller may re-plan
+ * immediately, but the process waits for that call before touching `ns` again.
+ * Only another script calling `ns.kill` can interrupt an engine call. */
 export async function awaitDnetOperation<T>(
   io: AgentIo,
   request: DnetDelayRequest,

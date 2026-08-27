@@ -92,15 +92,8 @@ export interface PlantJobTarget {
   omitProber?: boolean;
 }
 
-/** What each kind of work needs, resolved by the CONTROLLER when it files the
- * order. A kind with no data of its own carries `{}`.
- *
- * These used to be sixteen optional fields on one `Order`, which meant every
- * one of them was readable on every kind: `order.filename` type-checked on a
- * `promote` and `order.symbol` on a `cache`, so the bodies opened with runtime
- * guards — "no cache filename; a job never invents one" — against states the
- * type should have made unrepresentable. Under `payload` a field exists only
- * on the kind that has it, and reaching it means narrowing on `kind` first. */
+/** Per-kind order data resolved by the controller. A kind with no data carries
+ * `{}`; payload fields become accessible only after narrowing on `kind`. */
 export interface OrderPayloads {
   inventory: Record<string, never>;
   bleed: {
@@ -268,11 +261,8 @@ export interface AgentHandle {
    *  flight. Calling it does not stop the engine's work — it stops US waiting
    *  for it, which is the only part that was costing anything. */
   release?: () => void;
-  /** The engine call still running after a release. Bitburner allows ONE
-   *  Netscript call per script at a time; until this settles, every `ns`
-   *  member in this process throws CONCURRENCY ERROR — the exit path's
-   *  `getScriptName`/`spawn` included, which is how a released body used to
-   *  lose its host. Awaited before the exit path, never cancelled. */
+  /** The engine call still running after a release. Await it before any exit
+   *  Netscript call because Bitburner permits one call per script at a time. */
   inFlight?: Promise<unknown>;
   /** Resolves the instant the order finishes or is cancelled. Idempotent. */
   done: Promise<Report>;
@@ -319,24 +309,10 @@ export interface HostEntry extends DnetHost {
   probeRefreshPid?: number;
   /** THE process on this host. `order.kind === "idle"` is resident mode. */
   agent?: AgentHandle;
-  /** When a process was last started for this host but has not adopted yet.
-   *
-   * The gap is a plant between the prober's first report and the agent's
-   * `exec`, and it is not an error state: a host with a process on its way
-   * counts as standing.
-   *
-   * It used to matter far more, because a host BETWEEN orders also read as
-   * agentless and fell out of `standing` — every route through it became
-   * `no-route` and its queued work was retired as stranded. That is fixed at
-   * the root now: `liveEntries` counts a host with a live lender, because the
-   * prober's `exec` is all `dispatch` needs to put a process there.
-   *
-   * Cleared on adoption, on retirement, and — when the starter died — by the
-   * engine saying the announced process is not there. Never by a clock. */
+  /** A process has been launched for this host but has not adopted yet. It
+   * counts as standing and clears on adoption, retirement, or confirmed death. */
   inbound?: {
-    /** When it was announced. DIAGNOSTIC ONLY — nothing decides on this. The
-     * window used to expire after a fixed 3s, which is a guess standing in for
-     * a question the engine can answer exactly. */
+    /** Announcement time for diagnostics only; no decision uses it. */
     at: number;
     /** WHICH launch announced it. The two paths fail for opposite reasons and
      * want opposite fixes: a `spawn` is announced by the dying agent and is
@@ -560,21 +536,8 @@ export const PROBER_CALLS: readonly string[] = ["dnet.probe", "exec", "dnet.conn
  * launched with one (global work), and both are other scripts' slots. */
 export const CONTROLLER_CALLS: readonly string[] = ["dnet.nextMutation"];
 
-/** What every kind of process costs, as NUMBERS.
- *
- * None of this can change at runtime: a kind's dynamic surface is fixed in
- * `KIND_CALLS` and `getFunctionRamCost` answers from the game's own constant
- * table. So it is written down rather than rediscovered — a plant used to
- * re-price three surfaces of ~15 members every time it ran, dozens of engine
- * round trips for numbers settled at build time, on the one job the whole
- * spread waits behind.
- *
- * Written as literals rather than computed at boot for a second reason: this
- * is the RAM budget of the whole feature on one screen. Anyone — or anything —
- * reasoning about what the darknet can afford reads it here instead of
- * simulating the pricing. `tests/ram-budget.test.ts` pins every entry against
- * `getFunctionRamCost`, so a game update or a changed `KIND_CALLS` fails the
- * build rather than silently mis-sizing a launch.
+/** Fixed per-kind RAM prices. `tests/ram-budget.test.ts` checks each literal
+ * against `KIND_CALLS` and the game's `getFunctionRamCost` table.
  *
  * `spawning` keeps its own `spawn` chain (2.0 GB of it); `managed` is the
  * spawn-free price a controller-dispatched process pays. `pin` and `walk` are
@@ -601,7 +564,6 @@ export const ORDER_PRICES: Readonly<Record<OrderKind, number>> = {
  * there is no resident beside it any more:
  *
  *     1.6 base + 1.3 exec + 0.2 dnet.probe + 0.05 dnet.connectToSession = 3.15
- *                              (was: prober 1.8 + idle resident 3.6 = 5.4)
  *
  * ONLY the host-bound calls. `dnet.probe` scans from the calling host and
  * `exec` reaches only self and connected, so neither can come from anywhere
@@ -628,13 +590,9 @@ export const PROBER_STASIS_CALLS: readonly string[] = ["dnet.probe", "dnet.conne
 /** The controller's own reserve on darkweb: base + a free mutation clock. */
 export const CONTROLLER_GB = 1.6;
 
-/** `attempt` WITHOUT the ring reader: `heartbleed`'s 0.6 removed.
- *
- * One script runs one Netscript call at a time, so an attempt cannot bleed
- * while it authenticates — and `attempt` is thread-scaled, so declaring both
- * charged 0.6 GB on EVERY thread for a call most attempts never make. Threads
- * are the only thing that shortens `authenticate`, so that waste came straight
- * out of the speed of the crack.
+/** `attempt` without `heartbleed`. One script cannot bleed while it
+ * authenticates, and avoiding the unused surface leaves more authentication
+ * threads.
  *
  * Only a CONVERSATIONAL solve needs the two in one process: `authenticate`
  * returns a generic failure and the model's real answer goes to the target's
@@ -644,16 +602,7 @@ export const CONTROLLER_GB = 1.6;
  * vantage or on this agent's next spawn. */
 export const ATTEMPT_LEAN_GB = 2.0;
 
-/** One kind's price. There is only one now.
- *
- * There used to be two — `spawning` and `managed` — differing by exactly the
- * 2.0 GB of `spawn`, because a worker that had to become the next order carried
- * its own launcher and a controller-dispatched one did not. Every worker is
- * dispatched now, so every kind pays the cheaper of the two and the distinction
- * has nothing left to describe.
- *
- * `needsRing` applies to `attempt` alone: false is the lean price, and it is
- * the common case. */
+/** One kind's price. `needsRing` selects the full or lean attempt surface. */
 export function priceOf(kind: OrderKind, needsRing = true): number {
   return kind === "attempt" && !needsRing ? ATTEMPT_LEAN_GB : ORDER_PRICES[kind];
 }
@@ -666,18 +615,8 @@ export function threadsFor(roomGb: number, perThreadGb: number, scaled: boolean,
   return scaled ? Math.floor(roomGb / perThreadGb) : requested;
 }
 
-/** Every host an order acts on.
- *
- * `Order.host` is the generic identity every order carries, and for a PLANT it
- * names only `targets[0]` — the frontier is the job. Every place that asked
- * "does this order concern host X" by reading `o.host` was therefore right for
- * one target and silently wrong for the rest: the in-flight overlay left
- * siblings free to be re-derived onto a second vantage, the plant cooldown
- * protected one host out of five, and a single gone target retired a healthy
- * frontier. They were one defect wearing several hats.
- *
- * Ask through here. A reader that wants the identity alone still says
- * `order.host` and means it. */
+/** Every host an order acts on. A plant acts on its full target frontier;
+ * other orders act only on `order.host`. */
 export function hostsOf(order: Order): readonly string[] {
   if (order.kind !== "plant") return [order.host];
   return order.payload.targets.map((target) => target.host);

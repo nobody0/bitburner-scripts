@@ -22,16 +22,9 @@ import { awaitDnetOperation } from "./timing.ts";
 import { runWalk } from "./walk.ts";
 import { cacheProfit, phishProfit, promotionProfit } from "./profit.ts";
 
-/** What every order body DOES, dispatched by a `switch` in the AGENT's process.
- *
- * These were closures the old controller shipped through the realm; now they are
- * direct `ns.*` calls the agent makes itself. The RAM is controlled purely by
- * the `ramOverride` the controller sized for each kind — the static analyser is
- * bypassed at spawn — so the only thing that matters is that a kind's dynamic
- * surface stays inside `KIND_CALLS[kind]`. Bracket notation everywhere so an
- * accidental dot-reference cannot smuggle a member past that budget. Regexes
- * are safe, but a method call named `exec` is not: the static analyser mistakes
- * `RegExp.exec` for the 1.3 GB Netscript member. */
+/** Order bodies dispatched in the agent process. Each kind must stay within
+ * `KIND_CALLS[kind]`; bracket notation prevents accidental static RAM charges.
+ * Avoid method calls named `exec`, which the analyser treats as `ns.exec`. */
 
 type OrderResult = Omit<Report, "id" | "kind" | "host" | "from">;
 
@@ -256,13 +249,8 @@ async function plantOne(
     return diagnose("scp refused", "launch-refused");
   }
 
-  // A replant RACES the RAM of the process it replaces: a managed handoff (or
-  // a finished order) wakes the controller synchronously, but the engine only
-  // frees the dead process's allocation on its next tick — so the first exec
-  // can see a "full" host that is actually empty. A refused exec gets a
-  // breath and another try before it counts as a real refusal; each failed
-  // one otherwise stamps the 60 s plant cooldown, and the observed result was
-  // a roomy stasis host spending most of its life prober-only.
+  // A replant can race RAM cleanup for the process it replaces. Retry only a
+  // refused exec after yielding the microtask queue.
   // ONLY a refused exec is retried. `handoffLaunch` also returns 0 when the
   // child DID start and merely failed to acknowledge its descriptor in time:
   // that process is alive and holding its RAM (and an agent with no
@@ -283,13 +271,7 @@ async function plantOne(
       lastOutcome.refused = outcome.refused;
       lastOutcome.uncaptured = outcome.uncaptured;
       if (pid !== 0 || outcome.refused !== true || attempt >= 2) return pid;
-      // A MICROTASK, never a sleep. `ns.asleep` is a `setTimeout`, so the
-      // 300 ms breath this used to take was a real macrotask on the one job
-      // the whole spread waits behind. It was there because a replant races
-      // the RAM of the process it replaces — but `killWorkerScript` frees that
-      // synchronously (`stopAndCleanUpWorkerScript`), and a process exiting on
-      // its own terms is cleaned up in the microtask after its body resolves.
-      // Yielding the queue is therefore enough, and costs nothing.
+      // Process cleanup completes on the microtask queue; no timed sleep is needed.
       await Promise.resolve();
     }
   };
@@ -659,12 +641,8 @@ async function relaunchProbeOrder(jobNs: NS, order: Order<"relaunchProbe">): Pro
   };
 }
 
-/** The switch, exhaustive over `TaskKind` — a missing arm is a compile error.
- *
- * It used to carry two more arms, for `idle` and `bootstrapReclaim`, returning
- * "not run through the order switch". Those are PROCESS MODES: no order is ever
- * built with either kind, so both arms were unreachable. Keying `Order` to
- * `TaskKind` rather than `OrderKind` is what made the compiler say so. */
+/** Exhaustive order dispatch. Process modes such as `idle` and
+ * `bootstrapReclaim` are not task kinds. */
 export function runOrder(ns: NS, order: Order, io: AgentIo): Promise<OrderResult> {
   switch (order.kind) {
     case "attempt": return runAttempt(ns, order, io);

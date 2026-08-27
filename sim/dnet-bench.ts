@@ -1,10 +1,5 @@
-/** Paired-benchmark arithmetic shared by the darknet optimality lanes.
- *
- * The lab lane (`dnet-lab.ts`) grew its own copy first; the spread and farm
- * lanes reuse this one so the three lanes cannot disagree about what a paired
- * 95% CI is. Case N of both series must be the same generated world — the
- * caller's seed discipline, not this module's.
- */
+/** Paired-benchmark arithmetic shared by darknet lanes.
+ * Case N in both series must represent the same generated world. */
 
 export interface PairedComparison {
   baseline: string;

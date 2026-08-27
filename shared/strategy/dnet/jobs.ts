@@ -1,28 +1,7 @@
-/** ONE table describing every kind of darknet job.
+/** Scheduling policy for every darknet job kind.
  *
- * A kind used to be described in about twenty places — a union here, a
- * priority map there, six `ReadonlySet`s of kind names, two copies of the farm
- * list, an inline six-term `!==` chain for rerouting, and a handful of
- * `kind === "walk"` tests scattered through the controller. Adding a kind meant
- * finding all of them, and getting one wrong was silent: the kind simply did
- * not participate in whatever that list controlled, and nothing failed.
- *
- * So every per-kind FACT lives here, and callers read it by indexing:
- * `JOBS[task.kind].threadScaled`. There are deliberately no `isThreadScaled`
- * style wrappers — a one-line predicate per flag is a name to learn and a hop
- * to follow, and it hides the one thing worth seeing, which is that the answer
- * came out of this table.
- *
- * What is NOT here, on purpose:
- *
- * - The ns call surface, the GB price and the body. Those need `NS` and the
- *   game's own cost table, so they live in `game/dnet/shared.ts`. This file
- *   stays pure, which is what lets the simulator and the plan tests read it.
- * - The controller's report handling (`onReport`). Those branches reach
- *   controller-private state — the edge graph, the vault, the storm clock — so
- *   a row big enough to carry them would be larger than the switch it replaced.
- *   That switch stays a switch: this table is not total over the feature, only
- *   over the facts a SCHEDULER needs. */
+ * Netscript surfaces and RAM prices live in `game/dnet/shared.ts`; report
+ * handling remains in the controller because it mutates controller state. */
 
 /** Everything the scheduler knows about one kind. Every flag defaults to
  * false, so a row states only what is true of it. */
@@ -53,10 +32,7 @@ export interface JobPolicy {
    *  planner to re-plant, so the prober beside it is DISPLACED rather than
    *  reserved around. */
   readonly consumesHost?: true;
-  /** Earning work — LEFTOVERS. Filed only onto a host that is already spare,
-   *  which is why no farm kind may preempt: it would cancel an order it cannot
-   *  then replace, the next derive would re-file the victim, and the two would
-   *  loop against each other at engine speed. Observed exactly that way. */
+  /** Earning work filed only on spare hosts; it may not preempt. */
   readonly farm?: true;
   /** What a host does as a matter of course, so its price must fit beside the
    *  fixed infrastructure on a 16 GB host. */

@@ -57,14 +57,7 @@ type OrderResult = Omit<Report, "id" | "kind" | "host" | "from">;
  *
  * `String.prototype.endsWith`, never a RegExp: `RegExp.prototype.exec` anywhere
  * in a bundle that reaches a game script bills the full 1.3 GB of `ns.exec`. */
-/** What this job OBSERVED about its target, which is nothing it had to ask for.
- *
- * The body used to re-`getServerDetails` the host to carry its facts home. That
- * cost 0.1 GB on every thread of a thread-scaled job to report what the
- * controller already held — and it holds it because it described the host
- * itself. So the report carries the one thing only this process knows: that a
- * winning authenticate has just dirtied the host's files, which is what makes
- * the controller order the `ls` that reads the drop. */
+/** Report the one new target fact: successful authentication dirties files. */
 function observedHost(host: string, won: boolean): ReportHost {
   // Stamped HERE, not when home eventually drains this: a drain is a batch, and
   // a drain-time stamp would give every host in it one age and make the fold's
@@ -209,14 +202,8 @@ export async function runAttempt(ns: NS, order: Order<"attempt">, io: AgentIo): 
       }
     }
     const at = Date.now();
-    // ONE CALL, and it is the only one this job is priced for.
-    //
-    // `connectToSession` used to be tried first here — it is instant where
-    // `authenticate` is seconds, and on an already-rooted host it answers the
-    // same question. But it is 0.05 GB on EVERY THREAD of a thread-scaled job,
-    // to make a call that needs no threads at all. It belongs to the
-    // controller, which can make it through any prober's `ns` for one host at
-    // a time and never dispatch this job at all when it succeeds.
+    // This job is priced only for authenticate. The controller performs the
+    // unthreaded session check through a prober before dispatch.
     const answer = await awaitDnetOperation(io, {
       operation: "authenticate", host: state.host, from: state.from, threads: state.threads,
     }, () => jobNs["dnet"]["authenticate"](state.host, password));

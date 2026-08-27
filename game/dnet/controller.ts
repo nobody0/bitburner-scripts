@@ -126,9 +126,7 @@ import { emptyDnetProfit, mergeDnetProfit } from "./profit.ts";
 
 const BEAT_INTERVAL_MS = 15_000;
 const STAND_DOWN_POLL_MS = 250;
-/** What one queued order is worth in time when nothing better is known. Only
- * used to COMPARE loaded vantages, so being the same for all of them matters
- * more than the absolute value. */
+/** Fallback duration used only to compare loaded vantages. */
 const TYPICAL_ORDER_MS = 6_000;
 const MAX_GRAMMAR_SHAPES = 20;
 const MAX_LOOSE_PASSWORDS = 40;

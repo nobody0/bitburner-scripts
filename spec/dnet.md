@@ -64,13 +64,9 @@ check. Only `home` holds the TOR edge to `darkweb`, so:
 
 > **`ns.exec` onto `darkweb` works from `home` and from nowhere else.**
 
-`ns.scp` passes no connection requirement at all (`NetscriptFunctions.ts:769-773`),
-so *copying* to `darkweb` works from any host, while the `exec` must issue from
-home. The seed used to carry an explicit `pinHost` for exactly that, because a
-dodge stub landing on an arbitrary leased fleet host would `scp` successfully and
-then get a silent `0` from `exec` — indistinguishable from "the host is full".
-The pin is gone: every proxied `exec` routes through `nsMain`, which IS home, so
-the property now holds by construction (`spec/ns-proxy.md`).
+`ns.scp` passes no connection requirement (`NetscriptFunctions.ts:769-773`), so
+copying to `darkweb` works from any host while `exec` must issue from home.
+Every proxied `exec` routes through home-bound `nsMain` (`spec/ns-proxy.md`).
 
 That is the beachhead the whole feature stands on: from `darkweb`, `probe()`
 finally returns the depth-0 servers that `home` cannot see, and cracking starts
@@ -597,19 +593,14 @@ directly connected: `ns.exec` calls the darknet gate with
 `backdoorInstalled` satisfies the direct-connection requirement. **It is the
 only bypass there is.**
 
-A stasis link grants remote `exec` too, and an earlier revision of this spec
-confidently said otherwise — the reasoning looked airtight from the consumer
-side. The gate does test `options.backdoorBypasses &&
-targetServer.backdoorInstalled` and nothing else
+A stasis link grants remote `exec`. The gate tests `options.backdoorBypasses &&
+targetServer.backdoorInstalled`
 (`DarkNet/effects/offlineServerHandling.ts:82-97`), and `hasStasisLink` never
-appears in a reachability check. But the producer settles it: `setStasisLink`
+appears in a reachability check. `setStasisLink`
 sets **both** flags — `server.hasStasisLink = shouldLink; server.backdoorInstalled
 = shouldLink` (`DarkNet/effects/effects.ts:233-234`). Pinning a host installs a
 backdoor on it, so the gate passes for the ordinary reason; releasing the link
-takes the backdoor away again. Upstream's error message and doc comment were
-right all along. The lesson is recorded at length in
-`shared/strategy/dnet/hold.ts`: verifying every reader of a flag proves nothing
-until you have also read every writer.
+takes the backdoor away again.
 
 > **Stasis buys everything a backdoor buys, plus durability — and it is
 > invisible to the instability tax. The only thing rationing it is the slots.**
@@ -684,28 +675,12 @@ These are **two independent axes**, and the routing keeps them separate.
 
 Durability also sets the plant's RAM bar: `planSpread` prices a stasis-linked
 target at the spawn-free managed resident plus the prober
-(`managedResidentRamGb + proberRamGb` ≈ 3.4 GB) rather than the unmanaged
-`agentRamGb` (≈ 5.4 GB). Pricing every target at the flat unmanaged bar left
-blocked stasis hosts in between refused `not-enough-ram` forever — agentless
-with a lone revived prober, the observed prober-only orphan.
+(`managedResidentRamGb + proberRamGb` ≈ 3.4 GB), rather than the unmanaged
+`agentRamGb` (≈ 5.4 GB).
 
-**There is no plant cooldown, and no stasis exemption from one.** There used to
-be a minute-long hold on any host that had been planted and was empty again,
-justified as anti-flap for a host stuck RESTARTING. The game does not produce
-that: a restart is a per-mutation roll across the whole net, so no single host
-flaps on a seconds timescale, and the right answer to a restart is to replant
-at once. What the hold did instead was exile every host that emptied for an
-ordinary reason — a managed stasis handoff, a kind that hands its host back, an
-agent chaining out of its last order — and it made a broken plant read as a
-host politely waiting its turn. Observed in play: fourteen empty hosts at once,
-nearly all of them held, with nothing wrong with any of them.
-
-The one hold that remains is `plantRetryMs`, a two-second breath after a plant
-that could not LAUNCH. That is the case the guard was really for — a plant
-re-deriving on every pass is a spin to stop — and it applies to every host,
-immune ones included, because an `exec` can be refused for reasons unrelated to
-whether the host can be restarted out from under us. It is stamped per FRONTIER
-target, since one refused launch usually refused all of them.
+**There is no post-plant cooldown.** An empty, plantable host is replanted at
+once. `plantRetryMs` applies only after a launch refusal, preventing immediate
+re-derivation. It applies to every host and is stamped per frontier target.
 
 The model is "this host needs an agent, and there is no reason to wait", not a
 stamp to be raced clear.
@@ -1543,10 +1518,8 @@ observable without inventing a report-channel health model.
 
 ### What a walk reports
 
-A walk is the longest-running thing the darknet does — hours on the deep rungs —
-and it used to be the least observable: a resident row saying `active: walk` was
-the whole of it. The `dnet.lab` topic block fixes that, and it carries exactly
-one thing the panel cannot work out for itself.
+A walk can run for hours on deep rungs. The `dnet.lab` topic carries the one
+thing the panel cannot derive: the map observed by the walker.
 
 Everything else about a lab is DERIVED in `ui/`: `labStage(hostname)` gives the
 rung, the charisma gate and the requested maze size, and `labPrior()` turns that
@@ -1587,11 +1560,19 @@ state. Resetting only counters prevents the initial RAM-block backlog from
 masquerading as stable cache throughput. The lane reports both means and p10
 rates for caches and money across paired seeds. Its only policy counterfactual
 is withholding the storm; the post-lab row is a lifecycle phase, not a tuning
-candidate. Production fixes the validated choices in code: capacity-first
-cache hunting, a ten-minute optional block-clear budget, and storm admission
-within thirty seconds of a phishing cache. The rejected 90-second arm raised
+candidate. Production fixes the validated choices in code: depth-first cache
+hunting (capacity breaks depth ties), a ten-minute optional block-clear budget,
+and storm admission within thirty seconds of a phishing cache. The rejected
+90-second arm raised
 mean caches slightly but lost money and lower-tail cache stability on the same
 warmed seeds.
+
+The lane follows the live file-observation path: first authentication, a final
+RAM clear, and a winning phish invalidate cache facts, then a separate inventory
+order restores them. `planFarm` refuses `cache-unknown` until that listing lands;
+unknown is never treated as an empty list. Home also sends `promoteSymbols` as a
+complete snapshot, including `[]`, so a vanished stock edge clears the
+controller's prior symbols instead of leaving stale propaganda running.
 
 ## Open
 

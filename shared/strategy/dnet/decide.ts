@@ -1,36 +1,6 @@
-/** Which darknet hosts are worth pinning, and how much charisma the net wants.
- *
- * **This module decides nothing that anybody executes, and that is deliberate
- * rather than unfinished.** It used to emit `authenticate`, `stasis` and
- * `releaseStasis` actions, and every one of them was mechanically unexecutable
- * from where home stands:
- *
- * - `authenticate` needs a DIRECT CONNECTION, and home is adjacent to exactly
- *   one thing — `darkweb`. Authentication happens in a job, standing next door
- *   to its target, and `shared/strategy/dnet/plan.ts` is what plans it.
- * - `setStasisLink` takes no host at all: it pins the CALLING script's own
- *   server, so spending a link means running a 12 GB script on the host being
- *   pinned. Home cannot be that script, and neither can anything home launches
- *   directly.
- *   Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Darknet.ts#L337-L374
- *
- * So the actions were a plan expressed in calls the planner could never make,
- * and they were rendered as a "selected" action next to a refusal explaining
- * why it would not happen. They are deleted rather than left refusing, on the
- * same principle as `plan.ts`'s deleted refusal names: a decision nothing can
- * carry out teaches the reader that something is about to happen.
- *
- * What survives is two things a reader genuinely wants:
- *
- * 1. **The stasis RANKING.** Still exact and still meaningful. A stasis link is
- *    the only thing that makes a host immune to move, delete and restart
- *    (`darknetNetworkUtils.ts:72`, `NetworkMovement.ts:228`), so a link on a
- *    host really does keep every path through it alive — the correction that a
- *    stasis link also sets `backdoorInstalled` means a pinned host preserves
- *    its resident and remains a tax-free remote `exec` recovery target.
- * 2. **`charismaNeeded`.** Read by `dnetNeeds` and posted to the needs board, so
- *    career delivers charisma instead of this feature grinding it. That is a
- *    real action, taken by the feature that owns it. */
+/** Read-only darknet guidance for home: stasis ranking and required charisma.
+ * Executable authentication and stasis actions are planned on connected Dnet
+ * hosts in `plan.ts` and `hold.ts`. */
 
 export interface DarknetServer {
   hostname: string;

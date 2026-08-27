@@ -42,10 +42,8 @@ import { STORM_PHISH_OVERLAP_MS, STORM_QUIET_MS } from "./rates.ts";
  * ## Who applies freshness
  *
  * `deriveTasks` reads the RAW map and applies `planningView` itself — it is the
- * entry point that owns `now` and the expiry opts. The sub-planners below
- * (`planSpread`, `planStorm`, and `hold.ts`/`farm.ts`'s) take records that have
- * ALREADY been viewed: a field that is absent is unknown, exactly the contract
- * the old projections had. */
+ * entry point that owns `now` and the expiry opts. Sub-planners receive viewed
+ * records, where an absent field means unknown. */
 
 /** The kinds, and every scheduling fact about them, live in `jobs.ts`.
  *
@@ -200,8 +198,7 @@ function vantagesFor(
     if (standing?.neighbours?.includes(host.hostname)) vantages.push(agentHost);
   }
   const roomOn = (name: string): number => opts.agentFreeGb?.get(name) ?? 0;
-  // Self wins RAM ties: it is already a session holder, and keeping it ahead of
-  // an equal-RAM neighbour preserves the old ordering wherever RAM is unknown.
+  // Self wins RAM ties because it already holds the session.
   const selfBias = (name: string): number => (name === host.hostname ? 1 : 0);
   vantages.sort((a, b) =>
     roomOn(b) - roomOn(a)
@@ -276,14 +273,8 @@ export function deriveTasks(
     && candidate.isStationary !== true
     && !vault.has(candidate.hostname));
 
-  /** Every attempt this pass wants, with the keys that order them.
-   *
-   * Collected rather than priced inline because the order is a comparison
-   * BETWEEN targets, and a per-host formula cannot express one. Depth alone —
-   * all the old rank carried — ties constantly, and two attempts that tie have
-   * no stable order at all: which one a vantage ends up running can flip from
-   * pass to pass. The last key being the hostname is what makes this a TOTAL
-   * order, and a total order is the whole point.
+  /** Every attempt this pass wants, with a total ordering across targets.
+   * Hostname is the final key so equal candidates remain deterministic.
    *
    * Choosing a target only. Once an attempt has started it is not re-chosen —
    * `canPreempt` refuses same-kind displacement, so an authenticate never
@@ -495,9 +486,8 @@ export function deriveTasks(
         });
         attemptRanking.push({
           task: tasks[tasks.length - 1]!,
-          // A probe buys information rather than a vantage, and an oracle solve
-          // costs a conversation — both sort behind work that can open a host
-          // outright, which is the job the surcharges used to do.
+          // Probes and oracle conversations sort behind work that can open a
+          // host outright.
           score: attemptScore(host, attempt.kind === "candidate"
             ? Math.max(1, attempt.total - attempt.index)
             : attempt.kind === "solve" ? attempt.budget : 1)
@@ -654,22 +644,8 @@ export function deriveTasks(
 
 /** Where to put the next agent, and why not everywhere else.
  *
- * Spreading is the whole point of the feature — BN15's own text asks for scripts
- * that are "self-sufficient and durable, and spread themselves to stay alive" —
- * so the policy is: **every neighbour we can reach gets an agent, at any depth,
- * unconditionally.** Nothing here is a budget any more.
- *
- * It used to carry three: a hop budget, a per-source fan-out and a global agent
- * cap. All three were guesses, and each one produced a refusal that could fire
- * on a host there was nothing wrong with. They are gone, and their refusal names
- * are gone with them rather than left as dead strings — a name that can never
- * fire teaches the panel reader that a limit exists.
- *
- * What survives is six GROUNDED refusals, each naming something about the host
- * itself, and `not-enough-ram` now does the real work. A planner that silently
- * skipped a host would make all six invisible at once, so every rule here
- * produces a NAMED REFUSAL rather than a skip, and the refusals are what the
- * panel shows when the net stops growing.
+ * Every reachable neighbour gets an agent. Each rejection names a current host
+ * constraint so the panel can explain why expansion stopped.
  *
  * Depth is not a bound. It is the ORDERING KEY: see `planSpread`.
  *
@@ -755,10 +731,7 @@ export interface SpreadCandidate {
    * resident. The walker subsequently takes the entire pinned host. */
   reclaimOnly?: boolean;
   omitProber?: boolean;
-  /** Stasis-linked target: its resident is CONTROLLER-MANAGED and spawn-free,
-   * so the RAM bar is `managedResidentRamGb` (+ prober), not the full
-   * `agentRamGb`. Pricing it at the unmanaged bar refused every blocked
-   * stasis host between the two forever — the observed prober-only orphan. */
+  /** Stasis-linked target: its resident is controller-managed and spawn-free. */
   stasisManaged?: boolean;
   bootstrapReclaim?: boolean;
   bootstrapThreads?: number;
@@ -881,22 +854,14 @@ export function planSpread(
       refuse("unknown-ram", "no believable RAM facts; survey it before planting");
       continue;
     }
-    // A stasis-linked target runs the spawn-free MANAGED resident: its bar is
-    // managed resident + prober capacity, roughly two GB under the unmanaged
-    // `agentRamGb` — the difference that left blocked stasis hosts refused
-    // (and prober-only) forever.
+    // A stasis target needs only its managed resident and optional prober.
     const needed = candidate.stasisManaged === true
       ? limits.managedResidentRamGb + (candidate.omitProber ? 0 : limits.proberRamGb)
       : candidate.omitProber
         ? limits.residentRamGb
         : limits.agentRamGb;
-    // The spawn-free bootstrap reclaimer plants ONLY on the lab candidate
-    // (`reclaimOnly` — the pinned host whose block gates the whole walk).
-    // It used to plant on every cramped host too; the deep-world benchmark
-    // priced that at 1.26x walker-start on the two-gap world (CI excluding
-    // zero) and a pure tie on the shallow one: an ordinary cramped host is
-    // better left to `not-enough-ram` until the net's own churn or a remote
-    // grind opens it, and the bootstrap's plant slot spent elsewhere.
+    // Bootstrap reclaim is reserved for the pinned lab candidate whose block
+    // gates the walk. Ordinary cramped hosts wait for normal reclaim capacity.
     if (candidate.blockedRam !== undefined && candidate.blockedRam > 0
       && candidate.reclaimOnly === true
       && candidate.usableRam >= limits.bootstrapRamGb) {
@@ -1151,11 +1116,7 @@ export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormP
     return { refused };
   }
 
-  // 2. A seed, freshly seen, on a live host. Upstream mints at most one among
-  // the movables, but a pinned host can hold a second — be total: prefer the
-  // stasis-linked holder (storm-proof, so the movable one should burn first is
-  // the WRONG instinct — the pinned seed is the one we can always still fire),
-  // then name order, so the choice never moves under the panel.
+  // 2. Prefer a live, stasis-linked seed holder, then break ties by name.
   const holders = hosts
     .filter((host) => host.goneAt === undefined && host.stormSeed === true)
     .sort((a, b) => {
@@ -1168,11 +1129,7 @@ export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormP
     refuse(NET, "no-seed", "no fresh STORM_SEED.exe sighting on any live host");
     return { refused };
   }
-  // The sorted preference decides only among holders we can actually fire
-  // from: taking `holders[0]` outright refused `seed-unreachable` whenever the
-  // preferred (pinned) holder happened to be unstaffed — a freshly pinned host
-  // is empty until the spread re-plants it — and never looked at the movable
-  // holder standing right there with a resident on it.
+  // Prefer a holder that can fire now; otherwise retain the sorted refusal target.
   const holder = holders.find((candidate) => candidate.agentAlive === true) ?? holders[0]!;
 
   // 3. The fire job runs ON the holder; the file cannot be scp'd off it.
@@ -1220,8 +1177,7 @@ export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormP
     return { refused };
   }
 
-  // 6. A finisher mid-walk must be pinned before anything reroll-shaped runs.
-  // Retired once the lab is walked: there is no finisher left to protect.
+  // 6. A running walker must be pinned before a reroll.
   if (!ctx.labWalked && ctx.walkInFlight && !ctx.walkerPinned) {
     refuse(holder.hostname, "walker-unpinned", "a finisher is mid-walk on an unpinned host; a restart costs the whole walk");
     return { refused };

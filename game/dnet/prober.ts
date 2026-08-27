@@ -31,15 +31,8 @@ import { live } from "./shared.ts";
  * the lent `ns` useless while looking perfectly idle. This is the single line
  * the whole design rests on.
  *
- * That is also why the mutation clock moved to the controller. This process
- * used to block on `dnet.nextMutation()` forever, which is precisely the state
- * that makes an `ns` unlendable.
- *
- * **Death is an event now, not an absence.** The `atExit` clears the lent `ns`
- * and wakes the controller, so a host that has lost its launcher says so in the
- * same engine turn instead of being inferred from a stale timestamp. The
- * controller re-execs a replacement through a neighbour; this process still
- * cannot revive itself and still does not try.
+ * `atExit` clears the lent `ns` and wakes the controller. The controller
+ * launches replacements through neighbours; the prober never revives itself.
  *
  * The one rule it shares with `agent.ts`: no billable `ns` member beyond
  * `PROBER_CALLS` (`dnet.probe`, `exec`), because its cost is the `ramOverride`

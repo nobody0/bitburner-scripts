@@ -51,10 +51,7 @@ describe("every refusal to spread is named", () => {
   );
 
   test("an ordinary cramped blocked host is refused, not bootstrapped", () => {
-    // The bootstrap used to plant here too; the deep-world benchmark priced
-    // ordinary bootstraps at 1.26x walker-start on the two-gap world (CI
-    // excluding zero) and a pure tie shallow — the reclaimer is reserved for
-    // the lab candidate, whose block gates the whole walk.
+    // Bootstrap reclaim is reserved for the lab candidate that gates the walk.
     const plan = planSpread([
       candidate({ host: "blocked", usableRam: 5.3, blockedRam: 10 }),
     ], DEFAULT_SPREAD_LIMITS);
@@ -63,10 +60,7 @@ describe("every refusal to spread is named", () => {
   });
 
   test("a stasis-managed target is priced at managed resident + prober, not the full agent", () => {
-    // The exact band the observed prober-only orphan lived in: 3.5GB usable
-    // fits the spawn-free managed resident (1.6) beside the prober (1.8), but
-    // the flat 5.4GB unmanaged bar refused it forever — the stasis link's
-    // whole point is that its host never needs the spawn safety net.
+    // 3.5GB fits the managed resident beside its prober, but not a full agent.
     const managed = planSpread([
       candidate({ host: "pinned", usableRam: 3.5, blockedRam: 10, stasisManaged: true }),
     ], DEFAULT_SPREAD_LIMITS);
@@ -97,12 +91,7 @@ describe("every refusal to spread is named", () => {
   });
 
   test("a host that was planted and is empty again is replanted AT ONCE", () => {
-    // There is no hold for having been planted. That was justified as anti-flap
-    // for a host stuck restarting, which the game does not produce — a restart
-    // is a per-mutation roll across the whole net, and the right answer to one
-    // is to replant immediately. What it actually did was exile every host
-    // that emptied for an ordinary reason: a managed stasis handoff, a kind
-    // that hands its host back, an agent chaining out of its last order.
+    // Empty plantable hosts are eligible immediately.
     const emptied = candidate({ host: "replant-me" });
     expect(planSpread([emptied], DEFAULT_SPREAD_LIMITS).plant.map((p) => p.host))
       .toEqual(["replant-me"]);
@@ -110,11 +99,7 @@ describe("every refusal to spread is named", () => {
   });
 
   test("nothing is refused for being far away, or for being the third one", () => {
-    // The three invented budgets are GONE — hop budget, per-source fan-out and
-    // global agent cap — and with them their refusal names. Every neighbour we
-    // can reach gets an agent, at any depth, unconditionally. A refusal that can
-    // never fire tells the panel reader a limit is in force when it is not, so
-    // this asserts the deletion rather than an unused name.
+    // Depth and candidate count do not impose policy limits.
     const deep = planSpread([candidate({ host: "deep", depth: 39 })], DEFAULT_SPREAD_LIMITS);
     expect(deep.plant.map((entry) => entry.host)).toEqual(["deep"]);
     expect(deep.refused).toEqual([]);
@@ -896,12 +881,7 @@ describe("attempts stand on the roomiest vantage, and buy threads with it", () =
 });
 
 describe("a plant task is a FRONTIER, and `host` is only its name", () => {
-  // The invariant every reader downstream depends on. `Order.host` is the
-  // generic identity each order carries; for a plant it names `targets[0]` and
-  // nothing more, and asking "does this order concern host X" by reading it was
-  // one defect that showed up as six: the in-flight overlay left siblings free
-  // to be re-derived onto a second vantage, the plant cooldown protected one
-  // host out of five, and one gone target retired a healthy frontier.
+  // For a plant, `Order.host` names `targets[0]`; the task covers the full frontier.
   const knowledge: DnetHosts = new Map();
   const at = 1_000_000;
   const seen: ReportHost[] = [

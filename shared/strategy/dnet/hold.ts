@@ -1036,14 +1036,12 @@ export function planInduce(view: HoldView): InducePlan {
   const openTargets = openSpareTargets(view);
   const unconquered = unconqueredBands(view);
   const bottomCount = live.filter((host) => host.depth === bottom).length;
-  // As observed — knowledge may be missing seats we have never seen, so this
-  // errs toward NOT evicting, which is the direction that spends nothing.
+  // Unknown seats make this false, conservatively preventing eviction.
   const bottomFull = bottomCount >= NET_WIDTH;
   // The frontier's PROGRESS criterion: our deepest standing agent, and how
   // deep a host's migration band can actually reach (air-gap rows hold
   // nothing). A push only counts as frontier work when the band reaches
-  // STRICTLY past the coverage — a band we already stand at the bottom of is
-  // a random walk, not progress, and pushing it was the old pump.
+  // STRICTLY past the current coverage; otherwise the push makes no progress.
   const deepestCovered = live.reduce(
     (held, host) => (host.agentAlive && host.depth !== undefined && host.depth > held ? host.depth : held),
     -1,

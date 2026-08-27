@@ -219,9 +219,7 @@ describe("the walker", () => {
   });
 
   test("a wall does not move it, and it does not walk into the same wall twice", async () => {
-    // The failure this rules out is the expensive one: a walker that assumed
-    // its move landed would read every later response relative to a position it
-    // invented, and nothing would ever correct it.
+    // Every position must come from the engine response, including refusals.
     const r = rig();
     const result = await runOrder(r.ns, makeOrder("walk", { host: LAB_LADDER[0]!.hostname, from: "dn-1" }, {}), makeIo());
     // The planner only ever steps into an edge the render showed open, so after
@@ -393,12 +391,7 @@ describe("the push", () => {
 
 describe("propaganda", () => {
   test("a job cannot be given a promote it has no symbol for", () => {
-    // Nothing standing on a darknet host can see the market, so the symbol is
-    // home's or there is no job. That used to be a runtime guard in the body
-    // ("no symbol; a job never invents one") answering with local code 902,
-    // one wasted order after the mistake. `promote`'s payload requires the
-    // symbol, so the order cannot be built at all — and `@ts-expect-error`
-    // fails the build if that ever stops being true.
+    // Promotion requires the symbol at construction time.
     // @ts-expect-error - promote requires { symbol }
     makeOrder("promote", { host: "dn-1" }, {});
   });

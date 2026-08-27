@@ -6,11 +6,9 @@ import type { PasswordEvidence } from "./evidence.ts";
  *
  * The darknet is the only subject in this project that rearranges itself while
  * we look at it, so a bare value is not knowledge here — a value without a
- * timestamp is a claim about a world that may already be gone. The old model
- * wrapped every field in its own `{value, at}` fact; this one keeps the same
- * semantics with a flat record whose fields are stamped and invalidated in
- * GROUPS, because fields that arrive through one call go stale through the same
- * events. See spec/dnet.md. */
+ * timestamp is a claim about a world that may already be gone. Fields are
+ * stamped and invalidated in groups because values returned by one call share
+ * the same lifetime. See spec/dnet.md. */
 
 /** Field groups, named for what refreshes them.
  *
@@ -19,11 +17,8 @@ import type { PasswordEvidence } from "./evidence.ts";
  * neighbour list long after the net rewired it.
  *
  * - ram: blockedRam. Restart preserves it; memory reallocation changes it.
- * - `files`: caches/contracts/stormSeed. A resident's `ls` is its
- *   separate refresh channel. Splitting the
- *   old `resource` class in two is deliberate: with a single bit a details
- *   sweep would re-bless a stale cache listing, and acting on one means calling
- *   `openCache` on a filename the host no longer holds, which THROWS. */
+ * - `files`: caches/contracts/stormSeed, refreshed separately by resident `ls`.
+ *   Details observations must not refresh file listings. */
 export type DirtyGroup = DnetFactGroup;
 
 export const DIRTY_GROUPS: readonly DirtyGroup[] = ["position", "topology", "ram", "files"];
@@ -260,12 +255,7 @@ export function markCredentialKnown(host: DnetHost | undefined): void {
   delete host.attempts;
 }
 
-/** Deepest first; a host whose depth we cannot place sorts LAST.
- *
- * The planners all rank deepest-first — a deep host is the scarce vantage — and
- * each used to carry its own copy of this line. The sentinel sits BELOW the
- * floor because the comparison runs descending: an unsurveyed host must never
- * outrank one we can actually place. Callers keep their own tie-breaks. */
+/** Deepest first; unknown depth sorts last. Callers supply tie-breakers. */
 export function compareDepthDesc(a: number | undefined, b: number | undefined): number {
   return (b ?? Number.MIN_SAFE_INTEGER) - (a ?? Number.MIN_SAFE_INTEGER);
 }
@@ -318,27 +308,8 @@ function hostExpiry(
   return { ...opts, immune: isImmune(host, opts) };
 }
 
-/** How long a group of fields stays believable without a fresh observation:
- * FOREVER. A fact is replaced by a newer observation or invalidated by a dirty
- * bit, and by nothing else.
- *
- * There used to be an age fallback here — position and topology were distrusted
- * after a fraction of the expected time to the next mutation, about 43s and 27s
- * respectively. It was justified as belt-and-braces against unobserved
- * mutations, and what it actually did was blind the spread on a wall clock.
- * `neighbours` is the whole of `topology`, and `candidatesFrom` reads it
- * through `fresh`: 27 seconds after its last probe an agent named nobody,
- * stopped being a vantage for anything, and every host behind it became
- * `no-route`. A net fully rooted with every password known would open a few
- * hosts and then stop, for no reason any log could name.
- *
- * The invalidation it was standing in for is real, and it is already handled
- * properly: `nextMutation` means we are uncertain about every host, so the
- * controller re-describes the whole map and `reviveProbers` re-execs every
- * prober whose stamp predates that mutation. The refresh happens AT the
- * mutation rather than on a timer, which is why a prober is a permanent script
- * on every host in the first place. A stale edge list is at worst one refused
- * plant; going blind costs the entire spread. */
+/** Facts do not expire by age. New observations replace them, while mutation
+ * events mark affected groups dirty and trigger refreshes. */
 export function expiryMs(_group: DirtyGroup | "identity", _opts: ExpiryOpts = {}): number {
   return Infinity;
 }
