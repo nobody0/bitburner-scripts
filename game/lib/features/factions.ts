@@ -1124,6 +1124,20 @@ function needs(ctx: NeedContext): Need[] {
     return savedSec > 0 ? savedSec : undefined;
   };
 
+  // Some factions express their combat gate as FOUR one-stat requirements
+  // rather than one `haveCombatSkills(n)`, which dodges the combat-set
+  // collapse in requirements.ts — and four needs at full weight quadruple
+  // one gate's price. Measured on bn15-full: Mug outbid the node's own
+  // measured charisma channel 3,820 to 1,222 BN-seconds on the strength of
+  // one minor faction's combat gate counted four times. One gate, one
+  // weight: split it across the stats, the same way the aug scorer splits
+  // the combat gate response across the four multipliers.
+  const combatStats = new Set(["strength", "defense", "dexterity", "agility"]);
+  const combatSplit = new Map<string, number>();
+  for (const blocker of plan.blockers) {
+    if (blocker.kind !== "skill" || !combatStats.has(blocker.subject ?? "")) continue;
+    combatSplit.set(blocker.faction, (combatSplit.get(blocker.faction) ?? 0) + 1);
+  }
   const out: Need[] = [];
   for (const blocker of plan.blockers) {
     if (!blocker.reachable) continue;
@@ -1132,6 +1146,9 @@ function needs(ctx: NeedContext): Need[] {
     if (blocker.kind === "bitNode" || blocker.kind === "sourceFile" || blocker.kind === "location") continue;
     const isChainHead = chainHead.has(blocker) && actionable(blocker);
     const valueSec = accessValueSec(blocker, plan.blockers.filter((other) => other.faction === blocker.faction));
+    const gateShare = blocker.kind === "skill" && combatStats.has(blocker.subject ?? "")
+      ? Math.max(1, combatSplit.get(blocker.faction) ?? 1)
+      : 1;
     out.push({
       by: "factions",
       kind: blocker.kind as Need["kind"],
@@ -1141,7 +1158,7 @@ function needs(ctx: NeedContext): Need[] {
       // Weight rises as the blocker nears completion: finishing a nearly-done
       // requirement unblocks a whole faction, while a barely-started one is
       // speculative. The chain head carries the until-rep parity weight.
-      weight: isChainHead ? 6 : 1 + blocker.progress * 4,
+      weight: (isChainHead ? 6 : 1 + blocker.progress * 4) / gateShare,
       ...(valueSec !== undefined ? { valueSec } : {}),
       urgency: isChainHead || (remaining.get(blocker.faction) ?? 0) <= 1 ? "blocking" : "wanted",
     });
