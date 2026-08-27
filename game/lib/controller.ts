@@ -117,10 +117,18 @@ export async function runController(
       // never refreshes the view that would place it — the run deadlocks.
       //
       // `HOME_RESERVE_GB` is held farm-free unconditionally and is sized for
-      // precisely this. So anything that fits the reserve places on home
-      // without a lease, whatever the snapshot claims. Anything larger waits
-      // for the arena's carve to open a real block.
-      if (minGb > HOME_RESERVE_GB) return undefined;
+      // the COMMON resident. It must not be a refusal ceiling: a resident
+      // whose minimum has grown past it (measured: the main proxy at 7.1 GB
+      // min after singularity pricing) would get `undefined` here forever —
+      // and since every view refresh is itself a proxied call, that is a
+      // permanent deadlock, not a wait. Measured on bn1-speedrun seed 2: the
+      // first install killed the fleet view, the resident spun on
+      // `proxy.slow` for 22,514 attempts (6.25 virtual hours) and the whole
+      // economy flatlined at $573k. Attempt home at the minimum instead: on
+      // the post-install boot home is empty and the exec succeeds; against a
+      // busy farm the exec fails and the respawn retries exactly as it does
+      // today, but never permanently.
+      if (process.env["DEBUG_PLACE"]) console.error(`PLACE fallback home min=${minGb} t=${Date.now()}`);
       return { host: "home", gb: minGb, release: () => {} };
     }
     const gb = Math.round(Math.min(preferredGb, host.freeGb) * 100) / 100;
@@ -129,9 +137,22 @@ export async function runController(
     if (heap?.host(host.hostname) === undefined) {
       return { host: host.hostname, gb, release: () => {} };
     }
-    const lease = heap.reserveOn(host.hostname, gb, true);
-    if (!lease) return undefined;
-    return { host: host.hostname, gb, release: () => lease.release() };
+    // The PREFERRED size first, but never only: against a farm-packed heap a
+    // 60 GB preferred lease fails where the 7 GB minimum would fit, and
+    // returning undefined here left the resident spinning on `proxy.slow`
+    // for 6.25 virtual hours (22,514 attempts) while every proxied call —
+    // including the sweep that would have refreshed the view — sat dead and
+    // the economy flatlined. Step down to the minimum, then to home's
+    // unconditional reserve, and let the arena's carve grow the resident
+    // back to its preference on a later respawn.
+    const minLeaseGb = Math.round(minGb * 100) / 100;
+    const preferredLease = heap.reserveOn(host.hostname, gb, true);
+    const lease = preferredLease ?? heap.reserveOn(host.hostname, minLeaseGb, true);
+    if (!lease) {
+      if (process.env["DEBUG_PLACE"]) console.error(`PLACE min-lease failed host=${host.hostname} min=${minGb} t=${Date.now()}`);
+      return { host: "home", gb: minGb, release: () => {} };
+    }
+    return { host: host.hostname, gb: preferredLease ? gb : minLeaseGb, release: () => lease.release() };
   };
 
   // The residents were created in start.ts, sized to home, because the run
