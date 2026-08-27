@@ -242,6 +242,8 @@ export interface AgentIo {
   /** Publish the operation currently awaited, and clear it as soon as that
    * operation settles. Updating this estimate is itself a liveness beat. */
   setExpectedDoneAt: (at: number | undefined) => void;
+  /** Set once this body no longer owns its host's slot — it has been
+   *  ORPHANED. Bodies poll it at safe boundaries and stop there. */
   cancelled: () => string | undefined;
   /** Publish the release hook for the Darknet call this body is waiting on, so
    * the controller can let it go WITHOUT killing the process. Cleared as soon
@@ -256,13 +258,12 @@ export interface AgentIo {
 
 /** One agent process, as the controller and the agent both see it.
  *
- * The controller sets cancelReason; bodies observe it at safe boundaries. A
- * body already inside a multi-second Darknet call cannot look, so it also
- * publishes `release` — pulling that lets it fall out of the call it is
- * waiting on, finish, and run its own exit path into the next job. No
- * `ns.kill`, no ns call at all, and no waiting for the engine to return from
- * work whose result we have already decided not to want. `done` settles when
- * the body finishes, is released, or atExit handles a genuine kill. */
+ * A body that must stop early publishes `release`: pulling that lets it fall
+ * out of the Darknet call it is waiting on, finish, and run its own exit path
+ * into the next job. No ns call at all, and no waiting for the engine to
+ * return from work whose result we have already decided not to want. `done`
+ * settles when the body finishes, is released, or atExit handles a genuine
+ * kill. */
 export interface AgentHandle {
   pid: number;
   order: Order;
@@ -271,9 +272,6 @@ export interface AgentHandle {
   beatAt: number;
   /** Whatever the last beat carried, for a long order worth watching live. */
   progress?: Record<string, unknown>;
-  /** Controller-set; the cooperative cancel flag. Bodies poll it at loop
-   *  boundaries and stop there, and it is the licence release checks. */
-  cancelReason?: string;
   /** Let the body out of the Darknet call it is waiting on, right now.
    *  Published by `awaitDnetOperation` for exactly as long as one call is in
    *  flight. Calling it does not stop the engine's work — it stops US waiting
@@ -332,18 +330,18 @@ export interface HostEntry extends DnetHost {
   agent?: AgentHandle;
   /** When a process was last started for this host but has not adopted yet.
    *
-   * Set by BOTH hand-offs, because both have this gap and it is not an error
-   * state: a plant between the prober's first report and the agent's `exec`,
-   * and a spawn between `stageSuccessor` clearing the slot and the successor's
-   * `main` running. The spawn gap is the one that bites — the engine schedules
-   * the successor rather than running it inline, so a derive landing in
-   * between sees a perfectly healthy host with no agent, drops it out of
-   * `standing` (every route through it becomes `no-route`) and retires its
-   * queued work as stranded.
+   * The gap is a plant between the prober's first report and the agent's
+   * `exec`, and it is not an error state: a host with a process on its way
+   * counts as standing.
    *
-   * So a host with a process on its way counts as standing. Cleared on
-   * adoption, on retirement, and — when the starter died — by the engine
-   * saying the announced process is not there. Never by a clock. */
+   * It used to matter far more, because a host BETWEEN orders also read as
+   * agentless and fell out of `standing` — every route through it became
+   * `no-route` and its queued work was retired as stranded. That is fixed at
+   * the root now: `liveEntries` counts a host with a live lender, because the
+   * prober's `exec` is all `dispatch` needs to put a process there.
+   *
+   * Cleared on adoption, on retirement, and — when the starter died — by the
+   * engine saying the announced process is not there. Never by a clock. */
   inbound?: {
     /** When it was announced. DIAGNOSTIC ONLY — nothing decides on this. The
      * window used to expire after a fixed 3s, which is a guess standing in for
@@ -355,19 +353,13 @@ export interface HostEntry extends DnetHost {
      * `exec` is announced by a live vantage and fails visibly unless its child
      * dies before its first line. A lost launch is only worth logging if the
      * log says which one it was. */
-    via: "spawn" | "plant" | "plant-exec";
+    via: "plant" | "plant-exec";
     /** The child, once there IS one. Undefined means the launcher has not
      * exec'd yet and still owns the window — it closes it itself, through
      * `abandonPlant` on refusal or by handing us a pid on success. Once set,
      * the window is decided by `isRunning`: a process that is there will adopt,
      * and one that is not is a ghost. No clock is involved either way. */
     pid?: number;
-    /** What the announced process should be HOLDING, for the one launch that
-     * yields no pid. `ns.spawn` with `spawnDelay: 0` runs the launch
-     * synchronously before the caller's `ScriptDeath`, so the successor's
-     * allocation is already on the host — or was refused and never will be.
-     * The engine's own occupancy answers which, with no clock involved. */
-    expectGb?: number;
   };
   /** A spawn-free local reclaimer — not an agent, and must not be staged to. */
   bootstrap?: { pid: number; startedAt: number };
@@ -442,7 +434,7 @@ export interface ControllerHandle {
   afterOrders(ids: readonly string[]): Promise<void>;
   /** Claim the one outstanding first-probe barrier for this host. `launch`
    * says whether the caller owns starting it; followers only await it. */
-  beginProbeRefresh(host: string): { refresh: DnetProbeRefresh; launch: boolean };
+  beginProbeRefresh(host: string): Promise<{ refresh: DnetProbeRefresh; launch: boolean }>;
   /** Cancel a refused launch and wake every follower with `false`. */
   cancelProbeRefresh(host: string, refresh: DnetProbeRefresh): void;
   /** A prober files its host's adjacency, its pid, and wakes the controller. */
@@ -577,15 +569,6 @@ export const PROBER_CALLS: readonly string[] = ["dnet.probe", "exec", "dnet.conn
  * launched with one (global work), and both are other scripts' slots. */
 export const CONTROLLER_CALLS: readonly string[] = ["dnet.nextMutation"];
 
-/** The controller's hands: every GLOBAL call it makes, on one process for the
- * whole net. None of these care where they are called from, which is exactly
- * why one process can serve all of them. */
-export const HANDS_CALLS: readonly string[] = [
-  "dnet.getServerDetails", "dnsLookup", "getServerMaxRam", "kill", "isRunning",
-];
-/** base 1.6 + the surface above. One process, once, on home. */
-export const HANDS_GB = 2.4;
-
 /** What every kind of process costs, as NUMBERS.
  *
  * None of this can change at runtime: a kind's dynamic surface is fixed in
@@ -633,9 +616,10 @@ export const ORDER_PRICES: Readonly<Record<OrderKind, number>> = {
  * `exec` reaches only self and connected, so neither can come from anywhere
  * else; `connectToSession` is what makes an `exec` aimed at a neighbour legal.
  * Every global call the controller makes — `getServerDetails`, `dnsLookup`,
- * `getServerMaxRam`, `kill` — is borrowed from the HANDS instead, because a
- * lender is charged the union of everything ever called through it and those
- * would otherwise be paid by every host in the net, for ever. */
+ * `getServerMaxRam`, `kill` — goes through the run shared ns resident (`nsp`)
+ * instead, because a lender is charged the union of everything ever called
+ * through it and those would otherwise be paid by every host in the net, for
+ * ever. */
 export const PROBER_GB = 3.15;
 
 /** A STASIS-linked host's prober, without `exec`.
@@ -776,9 +760,6 @@ const CONTROLLER_BEAT_WINDOW_MS = 15_000;
 
 export interface DnetGlobals {
   dnet_controller?: ControllerHandle;
-  /** The controller's hands — see `game/dnet/hands.ts`. A live `ns` bound to a
-   *  parked process, lent for every GLOBAL call the controller makes. */
-  dnet_hands?: NS;
 }
 
 export type DnetGlobalThis = typeof globalThis & DnetGlobals;
@@ -787,13 +768,6 @@ export function dnetRealm(): DnetGlobalThis {
   return globalThis as DnetGlobalThis;
 }
 
-/** The controller an agent should be talking to RIGHT NOW, or nothing.
- *
- * Read fresh and never held across an `await`: an agent that bound the
- * controller at boot kept a reference to an object a replacement of the same
- * generation has already retired. Protocol and generation are checked here and
- * nothing else — the beat window belongs to the election below, which answers
- * the opposite question. */
 /** What the controller already knows about a host — read straight out of the
  * realm, for nothing.
  *
@@ -812,13 +786,13 @@ export function knownHost(host: string): DnetHost | undefined {
   return live()?.hosts.get(host);
 }
 
-/** The controller's hands: the single warm lender for GLOBAL calls. Undefined
- * before it has been seeded and after it dies; every caller must handle that
- * rather than assume, because it is an ordinary state at cold start. */
-export function liveHands(): NS | undefined {
-  return dnetRealm().dnet_hands;
-}
-
+/** The controller an agent should be talking to RIGHT NOW, or nothing.
+ *
+ * Read fresh and never held across an `await`: an agent that bound the
+ * controller at boot kept a reference to an object a replacement of the same
+ * generation has already retired. Protocol and generation are checked here and
+ * nothing else — the beat window belongs to the election below, which answers
+ * the opposite question. */
 export function live(generation?: string): ControllerHandle | undefined {
   const existing = dnetRealm().dnet_controller;
   if (!existing) return undefined;

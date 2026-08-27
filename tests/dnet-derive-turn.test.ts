@@ -84,17 +84,30 @@ function standProber(handle: ControllerHandle, host: string, pid = 900): NS {
   return borrowed;
 }
 
-/** The controller's hands: one warm lender for every GLOBAL call.
+/** The run's shared ns resident, which is where every GLOBAL call the
+ * controller makes now goes.
  *
  * Separate from the probers on purpose. `probe` and `exec` are host-BOUND and
  * can only come from a process standing on that host; `getServerDetails` and
- * friends work anywhere, so exactly one process in the net pays for them
- * instead of every prober paying for ever. With no hands the controller
- * describes nothing — which is the real cold-start state, and why this is the
- * other thing every case does first. */
+ * friends work anywhere, so one resident serves the whole automation instead
+ * of every prober paying for them for ever. With no resident the controller
+ * describes nothing — the real cold-start state, and why this is the other
+ * thing every case does first. */
 function standHands(): NS {
   const borrowed = mockNs();
-  dnetRealm().dnet_hands = borrowed;
+  (globalThis as Record<string, unknown>)["ns_proxy"] = {
+    // `nsp("a.b", ...args)` resolves the dotted path against a real `ns` and
+    // calls it. The stub does exactly that against the mock, so a test drives
+    // the same code path the resident does.
+    call: (path: string, ...args: unknown[]) => {
+      const fn = path.split(".").reduce<unknown>(
+        (held, key) => (held as Record<string, unknown> | undefined)?.[key],
+        borrowed as unknown,
+      );
+      if (typeof fn !== "function") throw new Error(`mock ns has no ${path}`);
+      return Promise.resolve((fn as (...a: unknown[]) => unknown)(...args));
+    },
+  };
   return borrowed;
 }
 
@@ -119,9 +132,13 @@ async function bootController(recovery?: DnetRecoveryState): Promise<ControllerH
   return handle!;
 }
 
-/** Let every queued microtask run, without advancing a single timer. */
+/** Let every queued microtask run, without advancing a single timer.
+ *
+ * A derive pass is a chain of awaited proxy calls now — each host described
+ * costs three — so the drain has to be deep enough to reach the end of it.
+ * Microtask turns are free; the count only has to exceed the longest chain. */
 const settleMicrotasks = async (): Promise<void> => {
-  for (let turn = 0; turn < 8; turn++) await Promise.resolve();
+  for (let turn = 0; turn < 500; turn++) await Promise.resolve();
 };
 
 /** A host as production actually has it: a live PROBER lending its `ns`, and
@@ -165,7 +182,7 @@ afterEach(() => {
   const handle = dnetRealm().dnet_controller;
   if (handle) handle.standDown();
   delete dnetRealm().dnet_controller;
-  delete dnetRealm().dnet_hands;
+  delete (globalThis as Record<string, unknown>)["ns_proxy"];
   resetLaunchState();
 });
 

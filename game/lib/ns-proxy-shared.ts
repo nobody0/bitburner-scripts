@@ -1,5 +1,6 @@
 import type { NS } from "@ns";
 import type { ScriptLaunch } from "./launch-shared.ts";
+import type { NsProxy, NsProxyHandle } from "./ns-proxy.ts";
 
 /** Rendezvous between the proxy (caller) and one resident process.
  *
@@ -34,3 +35,48 @@ export interface NsProxyGlobals {
 export type NsProxyGlobalThis = typeof globalThis & NsProxyGlobals;
 
 export const nsMainGlobal = (): NsProxyGlobalThis => globalThis as NsProxyGlobalThis;
+
+/** The run's two ns residents, reachable from anywhere without threading a
+ * handle through every signature.
+ *
+ * They live on `globalThis` rather than in module scope because the darknet
+ * controller is a SEPARATE bundle: it would otherwise get its own copy and its
+ * own residents, paying twice for the same reads. All scripts share one JS
+ * realm, so one pair serves the whole automation.
+ *
+ * The CALL surface lives here, apart from the factory in `ns-proxy.ts`, for
+ * the same bundling reason: `ns-proxy.ts` names `exec` to launch a resident,
+ * and Bitburner's analyser charges a member by NAME anywhere in a bundle. A
+ * caller that only wants to MAKE calls must not drag the launcher in with it —
+ * the darknet controller is allocated 1.6 GB and is forbidden `exec` outright.
+ * This module is type-only at runtime apart from these accessors. */
+export interface ProxyGlobals {
+  ns_proxy?: NsProxyHandle;
+  ns_proxy_long?: NsProxyHandle;
+}
+
+export type ProxyGlobalThis = typeof globalThis & ProxyGlobals;
+
+export const proxyRealm = (): ProxyGlobalThis => globalThis as ProxyGlobalThis;
+
+export function proxyHandle(slot: keyof ProxyGlobals): NsProxyHandle {
+  const held = proxyRealm()[slot];
+  if (!held) throw new Error(`${slot} is not initialised; game/start.ts must call initProxies()`);
+  return held;
+}
+
+/** Forward every call to whichever handle is published RIGHT NOW.
+ *
+ * Resolving the handle per call, rather than handing one out, is what makes it
+ * safe to hold `nsp` in a local or pass it down: a cold boot retires the
+ * handles and `initProxies` publishes new ones, so anything that had captured
+ * a `.call` would go on talking to a retired resident. */
+const forward = (slot: keyof ProxyGlobals): NsProxy =>
+  ((path: string, ...args: unknown[]) =>
+    (proxyHandle(slot).call as (p: string, ...a: unknown[]) => Promise<unknown>)(path, ...args)) as NsProxy;
+
+/** The general-purpose surface. */
+export const nsp: NsProxy = forward("ns_proxy");
+
+/** The surface for one long-running await. */
+export const nspLong: NsProxy = forward("ns_proxy_long");

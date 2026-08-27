@@ -51,7 +51,7 @@ function makeIo(over: Partial<ControllerDeps> = {}): AgentIo {
 function probeRefreshMethods() {
   const pending = new Map<string, DnetProbeRefresh>();
   return {
-    beginProbeRefresh(host: string) {
+    async beginProbeRefresh(host: string) {
       const existing = pending.get(host);
       if (existing !== undefined) return { refresh: existing, launch: false };
       let resolve!: (value: DnetProbeReport | undefined) => void;

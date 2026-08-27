@@ -27,10 +27,6 @@
     {
       "source": "game/dnet/prober.ts",
       "target": "dnet/prober.js"
-    },
-    {
-      "source": "game/dnet/hands.ts",
-      "target": "dnet/hands.js"
     }
   ],
   "restoreEntry": {

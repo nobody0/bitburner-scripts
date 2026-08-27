@@ -31,14 +31,6 @@ export interface DnetProbeRefresh {
   settle(report: DnetProbeReport | undefined): void;
 }
 
-/** The controller's hands: one parked process for the whole net whose `ns` is
- * lent for every global call. Carries nothing — the realm slot is the whole
- * handshake — but still takes a descriptor so the launch is acknowledged the
- * same way every other one is. */
-export interface DnetHandsLaunch extends ScriptLaunch {
-  readonly kind: "dnet-hands";
-}
-
 /** The first observation produced by one exact prober launch. Returning the
  * value through the readiness barrier keeps first-probe dataflow explicit. */
 export interface DnetProbeReport {

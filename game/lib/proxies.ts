@@ -1,5 +1,8 @@
-import { createNsProxy, type NsProxy, type NsProxyHandle, type ProxyPlacer } from "./ns-proxy.ts";
+import { createNsProxy, type ProxyPlacer } from "./ns-proxy.ts";
+import { proxyHandle as handle, proxyRealm as realm, type ProxyGlobals } from "./ns-proxy-shared.ts";
 import type { ResidentAsk } from "../../shared/ram/broker.ts";
+
+export { nsp, nspLong } from "./ns-proxy-shared.ts";
 
 /** The run's two ns residents, reachable from anywhere without threading a
  * handle through every signature.
@@ -21,15 +24,6 @@ import type { ResidentAsk } from "../../shared/ram/broker.ts";
  *
  * Both are LAZY — nothing is exec'd until the first call — and both size
  * themselves to the fleet (see game/lib/ns-proxy.ts). */
-interface ProxyGlobals {
-  ns_proxy?: NsProxyHandle;
-  ns_proxy_long?: NsProxyHandle;
-}
-
-type ProxyGlobalThis = typeof globalThis & ProxyGlobals;
-
-const realm = (): ProxyGlobalThis => globalThis as ProxyGlobalThis;
-
 /** Budget to ask for. `nsp` asks for foodnstuff's whole 16 GB (14.4 GB
  * dynamic), which fits every routine call. `nspLong` is small on purpose — it
  * exists to keep one long await off `nsp` — and grows on demand if its errand
@@ -87,28 +81,6 @@ export function initProxies(): void {
   held.ns_proxy ??= createNsProxy({ label: "nsp", budgetGb: NSP_BUDGET_GB, place: homeBootstrapPlacer });
   held.ns_proxy_long ??= createNsProxy({ label: "nspLong", budgetGb: NSP_LONG_BUDGET_GB, place: homeBootstrapPlacer });
 }
-
-function handle(slot: keyof ProxyGlobals): NsProxyHandle {
-  const held = realm()[slot];
-  if (!held) throw new Error(`${slot} is not initialised; game/start.ts must call initProxies()`);
-  return held;
-}
-
-/** Forward every call to whichever handle is published RIGHT NOW.
- *
- * Resolving the handle per call, rather than handing one out, is what makes it
- * safe to hold `nsp` in a local or pass it down: a cold boot retires the
- * handles and `initProxies` publishes new ones, so anything that had captured
- * a `.call` would go on talking to a retired resident. */
-const forward = (slot: keyof ProxyGlobals): NsProxy =>
-  ((path: string, ...args: unknown[]) =>
-    (handle(slot).call as (p: string, ...a: unknown[]) => Promise<unknown>)(path, ...args)) as NsProxy;
-
-/** The general-purpose surface. */
-export const nsp: NsProxy = forward("ns_proxy");
-
-/** The surface for one long-running await. */
-export const nspLong: NsProxy = forward("ns_proxy_long");
 
 /** What each resident holds and what it will next ask for, so the arena can
  * reserve room for it (shared/ram/broker.ts).

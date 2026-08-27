@@ -242,8 +242,7 @@ the resident stops wanting the room.
 ## What the darknet keeps, and why it is not an exception
 
 `game/dnet/prober.ts`, `agent.ts` and `orders.ts` keep raw `ns.exec` and the
-lender model, and `game/dnet/hands.ts` keeps lending a read surface. None of
-this is about RAM:
+lender model. None of this is about RAM:
 
 - a darknet session belongs to the calling PID and cannot be transferred, so a
   resident elsewhere cannot win one on the controller's behalf;
@@ -254,10 +253,13 @@ this is about RAM:
 Those are questions of **location and identity**, which no proxy can answer.
 See `spec/dnet.md`.
 
-`hands.ts` is the one place where the proxy would have fitted and did not: its
-five borrow sites in the darknet controller are all synchronous, and several
-are rendezvous methods whose return value another process consumes
-synchronously (`claimPlanted`, `snapshot`). Making them async would let
-probers and agents interleave inside a derive pass, which is the bug class the
-`foldedProbes` WeakSet and the first-probe barrier exist to prevent. That is a
-redesign, not a migration, and it was deliberately not done.
+`hands.ts` was the last holdout and is now retired. Its borrow sites in the
+darknet controller were the global, host-independent reads — `dnet.getServerDetails`,
+`dnsLookup`, `getServerMaxRam`, `kill`, `isRunning` — and those now go through
+`nsp` like everything else, awaited at the call site.
+
+What kept it alive was the worry that awaiting inside a derive pass would let
+probers and agents interleave, which is the bug class the `foldedProbes` WeakSet
+and the first-probe barrier exist to prevent. That worry was about the
+*rendezvous* methods, not the ns reads: `claimPlanted` and `snapshot` consume no
+ns at all, so they stayed synchronous and the interleaving window never opened.

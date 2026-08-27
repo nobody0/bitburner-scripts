@@ -4,7 +4,7 @@ import { buildScript, buildScripts } from "../tools/build.ts";
 import type { BitburnerConfig } from "../tools/config.ts";
 import { analyzeScriptRam, billableRamNames } from "../tools/ram-analysis.ts";
 import {
-  ATTEMPT_LEAN_GB, CONTROLLER_CALLS, CONTROLLER_GB, HANDS_CALLS, HANDS_GB, KIND_CALLS, ORDER_PRICES,
+  ATTEMPT_LEAN_GB, CONTROLLER_CALLS, CONTROLLER_GB, KIND_CALLS, ORDER_PRICES,
   PROBER_CALLS, PROBER_GB, PROBER_STASIS_CALLS, PROBER_STASIS_GB,
   SCRIPT_BASE_GB, orderCalls, priceOf, threadsFor, type OrderKind,
 } from "../game/dnet/shared.ts";
@@ -344,17 +344,29 @@ describe("in-game static RAM budget", () => {
     const analysis = analyzeScriptRam(controller.content);
     expect(analysis.overridden).toBe(false);
 
-    // STATIC figure stays base + one getter: the controller's own reads
+    // NOTHING is referenced by name. The controller's own reads
     // (`getServerDetails`, `getServerMaxRam`, `getServerUsedRam`, `isRunning`,
-    // `kill`) are all BRACKET notation, so the analyser does not charge them and
-    // the static number is unchanged. The launch allocation is
-    // `priceAgent(CONTROLLER_METHODS)` (~2 GB), which is what actually covers the
-    // dynamic cost of those reads.
+    // `kill`) all go through a borrowed `ns` in BRACKET notation, so they are
+    // billed to the lender rather than to this process.
+    //
+    // This list used to hold `getServerMaxRam`, for a dotted call at the top of
+    // the main loop whose result was thrown away. That was fatal, and silently:
+    // the launch allocation is `CONTROLLER_GB` (1.6, base plus a free mutation
+    // clock), while `WorkerScript.dynamicRamUsage` STARTS at the 1.6 base and
+    // adds each distinct member as it is called — so the first `getServerMaxRam`
+    // reached 1.65 against a 1.6 allocation and the engine killed the controller
+    // on its first iteration. The simulator does not model the dynamic check, so
+    // every test passed.
+    // Source: bitburner-src/src/Netscript/WorkerScript.ts (dynamicRamUsage =
+    // RamCostConstants.Base) and NetscriptHelpers.tsx updateDynamicRam.
     const referenced = analysis.entries
       .map((entry) => entry.name)
       .filter((name) => !MANGLE_COLLISIONS.includes(name))
       .sort();
-    expect(referenced).toEqual(["getServerMaxRam"]);
+    expect(referenced).toEqual([]);
+    // The allocation must cover the base and nothing more, which is only true
+    // while the controller references no billable member of its own.
+    expect(CONTROLLER_GB).toBe(SCRIPT_BASE_GB);
     // The controller owns ONE call, and it is the mutation clock.
     //
     // It is the only process in the darknet that blocks, so it may own nothing
@@ -431,13 +443,12 @@ describe("in-game static RAM budget", () => {
     expect(PROBER_METHODS).toEqual(["dnet.probe", "exec", "dnet.connectToSession"]);
     expect(priceOfCalls(PROBER_METHODS)).toBeCloseTo(3.15, 10);
     expect(priceOfCalls(PROBER_METHODS)).toBe(PROBER_GB);
-    // Every GLOBAL call lives on the HANDS instead: one parked process for the
-    // whole net. A lender is charged the union of everything ever called
-    // through it, so leaving these here would have made every host in the net
-    // pay, for ever, for calls the controller makes centrally.
-    expect(priceOfCalls(HANDS_CALLS)).toBe(HANDS_GB);
-    for (const global of HANDS_CALLS) {
-      expect(PROBER_METHODS, `${global} is global; it belongs on the hands`).not.toContain(global);
+    // Every GLOBAL call goes to the run's shared ns resident instead. A lender
+    // is charged the union of everything ever called through it, so leaving
+    // these on the prober would have made every host in the net pay, for ever,
+    // for calls the controller makes centrally.
+    for (const global of ["dnet.getServerDetails", "dnsLookup", "getServerMaxRam", "kill", "isRunning"]) {
+      expect(PROBER_METHODS, `${global} is global; it belongs on the ns resident`).not.toContain(global);
     }
     // It must still never SPAWN: a lender that replaced itself would take the
     // borrowed `ns` with it mid-call.
@@ -554,18 +565,26 @@ describe("in-game static RAM budget", () => {
   });
 
   test("the shipped controller still reaches ns by BRACKET, not by dot", async () => {
-    // The whole 1.65 GB scheme rests on esbuild leaving `x["dnet"]["probe"]()`
-    // alone. A `minifySyntax` flag would rewrite it to `x.dnet.probe()`, which
-    // the game's analyser bills — silently moving the entire job surface onto
-    // the controller. The source-level greps above cannot see that, because it
+    // The whole scheme rests on esbuild leaving `x["dnet"]["probe"]()` alone.
+    // A `minifySyntax` flag would rewrite it to `x.dnet.probe()`, which the
+    // game's analyser bills — silently moving the entire job surface onto the
+    // controller. The source-level greps above cannot see that, because it
     // happens after them; only the artifact can.
     const artifacts = await buildScripts(config, { telemetry: true });
     const controller = artifacts.find((a) => a.filename === "dnet/controller.js")!;
     expect(controller.content).toContain('["dnet"]');
-    // ...and the same for the two ordinary getters a job describes a host with,
-    // which have no `dnet` prefix to hide behind.
-    expect(controller.content).toContain('["getServerMaxRam"]');
-    expect(controller.content).toContain('["getServerUsedRam"]');
+    // `exec` is the other one, borrowed from the host's own prober because it
+    // reaches only self and connected. It has no `dnet` prefix to hide behind,
+    // so a rewrite to `x.exec(...)` would bill this bundle 1.3 GB against a
+    // 1.6 GB allocation and kill the controller on its first launch.
+    expect(controller.content).toContain('["exec"]');
+    // Nothing else is borrowed. Every GLOBAL read — `getServerDetails`,
+    // `dnsLookup`, `getServerMaxRam`, `kill`, `isRunning` — goes to the run's
+    // shared ns resident through `nsp`, so it is billed to that resident and
+    // never appears here at all.
+    for (const global of ["getServerMaxRam", "getServerUsedRam", "dnsLookup", "isRunning"]) {
+      expect(controller.content, `${global} should go through nsp`).not.toContain(`["${global}"]`);
+    }
   });
 
   test("a resident and the heaviest job both fit a darknet host", () => {

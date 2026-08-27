@@ -338,7 +338,7 @@ async function plantOne(
   // are remotely recoverable, and may already own the ordinary constant probe.
   const prepared = controller?.preparePlant(target.host) ?? { reuseProber: false };
   const omitProber = target.omitProber === true || prepared.reuseProber;
-  const claim = omitProber ? undefined : controller?.beginProbeRefresh(target.host);
+  const claim = omitProber ? undefined : await controller?.beginProbeRefresh(target.host);
   const proberPid = omitProber
     ? -1
     : proberFile === undefined || controller === undefined || claim === undefined
@@ -644,7 +644,7 @@ async function relaunchProbeOrder(jobNs: NS, order: Order<"relaunchProbe">): Pro
   // until the replacement has claimed the host entry, exactly as plant does.
   const controller = live();
   if (controller === undefined) return { ok: false, codes: {}, detail: "controller unavailable while repairing prober" };
-  const claim = controller.beginProbeRefresh(order.host);
+  const claim = await controller.beginProbeRefresh(order.host);
   const pid = claim.launch
     ? await handoffLaunch<DnetProberLaunch>(
       { kind: "dnet-prober", host: order.host, refresh: claim.refresh },

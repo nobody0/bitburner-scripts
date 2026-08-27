@@ -41,14 +41,19 @@ import {
  * stub: a `bleed` whose `heartbleed` parks in a killable `ns.sleep` stands in
  * for a blocking call, and a `bleed` against an offline host for an instant
  * one. The sim's teardown ordering is pinned separately by
- * `sim/tests/process-atexit.test.ts`; the full seed→spread→cancel→walk path
- * against the real darknet model by `sim/tests/dnet-session.test.ts`.
+ * `sim/tests/process-atexit.test.ts`.
+ *
+ * NOT covered here, and not covered anywhere: `cancelActive` itself. It is a
+ * closure inside the controller's `main`, so no test can call it — these tests
+ * hand-drive the release and the kill it performs. Deleting its `killPid` call
+ * leaves the whole suite green.
  *
  * What must never regress: a released body reports `cancelled` rather than
  * failed, release alone never frees the host and never crashes the body,
- * release-then-kill does free it, a clean order drops its handle, a worker
- * started with no order exits at once, and a game kill with no cancel reason
- * settles `died` and launches nothing. */
+ * release-then-kill does free it, a body ORPHANED at a boundary stops there
+ * rather than spending its call, a clean order drops its handle, a worker
+ * started with no order exits at once, and a game kill settles `died` and
+ * launches nothing. */
 
 const GENERATION = "15:0";
 /** A target the stub `heartbleed` parks on in a killable `ns.sleep`. */
@@ -87,6 +92,9 @@ interface Rig {
   wakes: string[];
   /** Make the stubbed `setStasisLink` park in a killable sleep. */
   pinBlocks: { value: boolean };
+  /** Hold / open the dependency latch a `bleed` awaits before its call. */
+  holdAfterOrders: () => void;
+  releaseAfterOrders: () => void;
   /** The controller's own `ensureEntry`, so a test can create the host record
    *  the real one would have made before it dispatched. */
   ensure: (hostname: string) => HostEntry;
@@ -113,6 +121,12 @@ function rig(): Rig {
   ]);
 
   const pinBlocks = { value: false };
+  // The dependency latch a `bleed` with `followAttemptIds` parks on. Open by
+  // default; a test holds it to catch the body at that boundary.
+  let latch: Promise<void> = Promise.resolve();
+  let openLatch: (() => void) | undefined;
+  const holdAfterOrders = (): void => { latch = new Promise<void>((resolve) => { openLatch = resolve; }); };
+  const releaseAfterOrders = (): void => { openLatch?.(); openLatch = undefined; };
   // The agent runs orders through `runOrder`'s switch of direct ns.dnet calls,
   // so blocking-vs-instant is steered by the stubbed namespace rather than an
   // injected body. `heartbleed` on BLOCKED_TARGET suspends in a killable
@@ -194,7 +208,7 @@ function rig(): Rig {
       adopted.push({ kind: handle.order.kind, pid: handle.pid, startedAt: handle.startedAt, orderStartedAt: handle.order.startedAt });
       void handle.done.then((report) => void reports.push(report));
     },
-    afterOrders: () => Promise.resolve(),
+    afterOrders: () => latch,
     beginProbeRefresh: () => { throw new Error("not used"); },
     cancelProbeRefresh: () => {},
     reportProbe: () => {},
@@ -221,6 +235,8 @@ function rig(): Rig {
     adopted,
     wakes,
     pinBlocks,
+    holdAfterOrders,
+    releaseAfterOrders,
     entry: () => hosts.get("darkweb"),
   };
 }
@@ -264,16 +280,21 @@ async function inFlight(r: Rig, kind: OrderKind): Promise<AgentHandle> {
 }
 
 describe("release: letting a body out of a call it is waiting on", () => {
-  // A body inside a multi-second Darknet call cannot see the cancel flag, so it
-  // publishes a release hook: pulling it lets the body stop waiting for a
-  // result nobody wants any more, and the controller re-plans that instant.
+  // A body inside a multi-second Darknet call has no boundary at which to
+  // notice anything, so it publishes a release hook: pulling it lets the body
+  // stop waiting for a result nobody wants any more, and the controller
+  // re-plans that instant.
   //
   // What it does NOT do is give the script back. Bitburner allows one Netscript
   // call per script at a time, and the released call keeps that slot until the
   // engine finishes it — so the body can settle its report and then only wait.
   // Recovering the HOST takes a kill, the one thing that clears
   // `env.runningFn`.
-  test("a released body reports cancelled rather than failed", async () => {
+  // What a release does AT THE CALL: it rejects the wait with RELEASED and hands
+  // the still-running engine call to the exit path. Turning that sentinel into a
+  // `cancelled` report is `runOrderToReport`'s job, and is pinned by the next
+  // test — this one never builds a report at all.
+  test("a released wait rejects with RELEASED and publishes the outstanding call", async () => {
     let release: (() => void) | undefined;
     let inFlightCall: Promise<unknown> | undefined;
     const io = {
@@ -281,7 +302,7 @@ describe("release: letting a body out of a call it is waiting on", () => {
       setExpectedDoneAt: () => {},
       hold: (hook: (() => void) | undefined) => { release = hook; },
       inFlight: (settling: Promise<unknown>) => { inFlightCall = settling; },
-      cancelled: () => "superseded",
+      cancelled: () => "orphaned",
       deps: { expectedDelayMs: () => undefined } as unknown as AgentIo["deps"],
     } as AgentIo;
 
@@ -305,7 +326,6 @@ describe("release: letting a body out of a call it is waiting on", () => {
     const orderPid = handle.pid;
     expect(handle.release, "a body inside an engine call publishes its release hook").toBeDefined();
 
-    handle.cancelReason = "preempted";
     handle.release!();
     const report = await handle.done;
     expect(report).toMatchObject({ ok: false, targetState: "cancelled" });
@@ -325,6 +345,34 @@ describe("release: letting a body out of a call it is waiting on", () => {
     expect(r.processes.ps("darkweb").map((p) => p.pid)).toEqual([orderPid]);
   });
 
+  // ORPHANED is the one thing `cancelled()` still reports, and it is how a body
+  // learns the controller gave up on its host: `retireVantage` drops the handle
+  // and tells nobody. The body has to notice at its own next boundary — before
+  // it spends an engine call whose result nobody will read, on a host the
+  // controller already believes is free.
+  test("a body orphaned while it waits stops instead of spending its call", async () => {
+    const r = rig();
+    // Hold the dependency latch, so the body is parked at a boundary rather
+    // than already inside the call.
+    r.holdAfterOrders();
+    start(r, makeOrder("bleed", { host: BLOCKED_TARGET, from: "darkweb" },
+      { followAttemptIds: ["attempt:dn-1"] }));
+    await r.world.clock.runAsync(() => r.entry()?.agent?.order.kind === "bleed", 60_000);
+    const handle = r.entry()!.agent!;
+
+    // Exactly what `retireVantage` does: the handle stops being THE process on
+    // this host. Nothing is sent to the body.
+    r.entry()!.agent = undefined;
+    r.releaseAfterOrders();
+
+    const report = await handle.done;
+    expect(report).toMatchObject({ ok: false, targetState: "cancelled", detail: "orphaned" });
+    // And it never reached `heartbleed`, which on this target parks for 600s.
+    // An orphan that spent its call would hold the host for every second of it.
+    await r.world.clock.runAsync(() => r.processes.ps("darkweb").length === 0, 60_000);
+    expect(r.host.crashes).toEqual([]);
+  });
+
   test("release then kill is what actually hands the host back", async () => {
     const r = rig();
     start(r, makeOrder("bleed", { host: BLOCKED_TARGET, from: "darkweb" }, {}));
@@ -335,13 +383,12 @@ describe("release: letting a body out of a call it is waiting on", () => {
     // body is inside an engine call. The kill is not a fallback: it is the only
     // thing that clears `env.runningFn`, and the engine clears it BEFORE it
     // runs atExit — so the victim's hook settles on a clean slot.
-    handle.cancelReason = "preempted";
     handle.release!();
     expect(r.controllerNs.kill(orderPid)).toBe(true);
 
     expect(r.host.crashes).toEqual([]);
     const report = await handle.done;
-    expect(report).toMatchObject({ ok: false, targetState: "cancelled" });
+    expect(report).toMatchObject({ ok: false, died: true, detail: "killed mid-order" });
     // The host is EMPTY, and that is the point. The worker used to spawn its own
     // successor from inside this kill, which is what put `spawn` — 2.0 GB on
     // every thread — into its surface. The controller launches what comes next.
@@ -376,14 +423,13 @@ describe("a worker runs one order and lets go", () => {
     expect(r.host.crashes).toEqual([]);
   });
 
-  test("a game kill with no cancelReason settles died, and launches nothing", async () => {
+  test("a game kill settles died, and launches nothing", async () => {
     const r = rig();
     const pid = start(r, makeOrder("bleed", { host: BLOCKED_TARGET, from: "darkweb" }, {}));
     const handle = await inFlight(r, "bleed");
 
-    // The host restarting under us, or a killall. No cancel reason was set, so
-    // this is a death rather than a cancellation — and the hook's whole job is
-    // to say so and let go. It never relaunches: a replacement exec'd from here
+    // The host restarting under us, or a killall. The hook's whole job is to
+    // say so and let go. It never relaunches: a replacement exec'd from here
     // would be killed by the same live-map loop before its first line.
     expect(r.controllerNs.kill(pid)).toBe(true);
     const report = await handle.done;

@@ -312,12 +312,12 @@ describe("the attempt order runs the whole conversation in one process", () => {
     })();
   });
 
-  test("cooperative cancellation stops before the next authenticate boundary", async () => {
+  test("an orphaned solve stops before the next authenticate boundary", async () => {
     const r = rig("DeskMemo_3.1", 2);
     const result = await runOrder(
       r.ns,
       makeOrder("attempt", { host: "dn-1", from: "darkweb" }, { needsRing: true }),
-      makeIo(undefined, {}, () => "credential was verified elsewhere"),
+      makeIo(undefined, {}, () => "orphaned"),
     );
     expect(result.targetState).toBe("cancelled");
     expect(r.sent).toEqual([]);
@@ -416,7 +416,11 @@ describe("a verified credential is bound to the server lifetime", () => {
     dnsLookup: () => identity,
   }) as unknown as NS;
 
-  test("a 401 on the same identity quarantines only the credential", async () => {
+  // The body's DIAGNOSIS only. What the controller then does with it — drop the
+  // credential and keep the host, rather than tombstone the host as `replaced`
+  // does — is `retireRejectedCredential`, which lives inside the controller's
+  // `main` and is pinned by nothing.
+  test("a 401 on the same identity is diagnosed credential-rejected", async () => {
     const result = await runOrder(plantNs("10.0.0.1"), makeOrder("plant", { host: "dn-1", from: "darkweb" }, { targets: [{ host: "dn-1", password: "formerly-right", identity: "10.0.0.1" }], payloads: [] }), makeIo());
     expect(result.targetState).toBe("credential-rejected");
   });

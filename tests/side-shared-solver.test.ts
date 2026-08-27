@@ -38,8 +38,6 @@ describe("one contract solver serves both origins", () => {
     expect(contractOrigin(darknet)).toBe("darknet");
 
     // Same type, same data, same answer — whichever origin it came from.
-    const data = [2, 3, 1, 1, 4];
-    expect(solveContract("Array Jumping Game", data)).toBe(solveContract("Array Jumping Game", data));
-    expect(solveContract("Array Jumping Game", data)).toBe(1);
+    expect(solveContract("Array Jumping Game", [2, 3, 1, 1, 4])).toBe(1);
   });
 });
