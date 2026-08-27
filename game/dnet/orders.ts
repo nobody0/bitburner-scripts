@@ -6,9 +6,7 @@ import { grammarDrift, LOG_LINES, targetStateFor } from "./report-shared.ts";
 import { handoffLaunch, temporaryRunOptions, type LaunchOutcome } from "../lib/launch-shared.ts";
 import type { DnetAgentLaunch, DnetProberLaunch } from "./launch.ts";
 import {
-  KIND_CALLS,
   live,
-  orderCalls,
   priceOf,
   PROBER_GB,
   PROBER_STASIS_GB,

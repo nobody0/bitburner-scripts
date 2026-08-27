@@ -9,7 +9,6 @@ import {
   type Cell,
   type Direction,
   type LabField,
-  type LabPrior,
 } from "../shared/strategy/dnet/maze.ts";
 import { expForSkill, skillFromExp } from "../shared/formulas.ts";
 import { LAB_LADDER, type LabStage } from "../shared/strategy/dnet/rates.ts";

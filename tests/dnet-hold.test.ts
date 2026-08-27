@@ -473,7 +473,7 @@ describe("induced migration is anchored on difficulty, not depth", () => {
   test("...but a host whose band cannot reach past our coverage is left alone", () => {
     // The frontier's PROGRESS criterion: difficulty 1 bands "sunk" to row 5 at
     // best, and with an agent already standing at row 6 a re-roll only
-    // shuffles rows we reach — the retired random-walk pump.
+    // shuffles rows we already reach and cannot extend coverage.
     const plan = planInduce(view([
       host({ hostname: "pusher", agentAlive: true, depth: 6, neighbours: ["sunk"] }),
       host({ hostname: "sunk", depth: 4, difficulty: 1, maxRam: 16, hasCredential: true }),

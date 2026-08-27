@@ -1,62 +1,78 @@
 import { describe, expect, test } from "bun:test";
-import { pairedComparison } from "../dnet-bench.ts";
 import {
   ATTEMPT_GB,
+  assertFreshSpreadNet,
   crackAttemptsFor,
   generateNet,
   PROBER_GB,
   runSpreadCase,
-  SHIPPED_SPREAD,
   summarizeSpreadRuns,
 } from "../dnet-spread.ts";
 import { canPreempt, isSameTurn } from "../../shared/strategy/dnet/jobs.ts";
 
-/** The reach-the-lab lane's CI mirror: sane bounds on the shipped policy over
- * paired seeds, plus the pricing and priority facts the arena leans on. The
- * full sweep with variants lives in `tools/dnet-spread-benchmark.ts`
+/** The reach-the-lab lane's CI mirror: sane bounds on the production strategy
+ * over seeded fresh Dnets, plus the pricing and priority facts the arena leans
+ * on. The full sweep lives in `tools/dnet-spread-benchmark.ts`
  * (`bun run bench:sim:dnet-spread`). */
 
 const SEEDS = Array.from({ length: 12 }, (_, index) => index + 1);
 
-const shipped = SEEDS.map((seed) => runSpreadCase(generateNet(seed), SHIPPED_SPREAD));
+const shallow = SEEDS.map((seed) => {
+  const net = generateNet(seed);
+  return { net, run: runSpreadCase(net) };
+});
+const runs = shallow.map(({ run }) => run);
 
 describe("the reach-the-lab arena", () => {
-  test("the shipped policy reaches a startable walker on every seed", () => {
-    for (const run of shipped) {
+  test("the production strategy places a startable walker on every seed", () => {
+    for (const { net, run } of shallow) {
       expect(run.solved, `${run.caseId} seed run failed: ${run.reason ?? ""}`).toBe(true);
       expect(run.walkerThreads!).toBeGreaterThanOrEqual(2);
+      expect(run.walkerTarget).toBe(net.system.currentLab()!.hostname);
+      expect(run.walkerFrom).toBeDefined();
+      const vantage = net.system.record(run.walkerFrom!);
+      expect(vantage?.stasisLinked).toBe(true);
+      expect(vantage?.blockedRam).toBe(0);
+      expect(vantage?.sessions.size).toBeGreaterThan(0);
     }
   });
 
+  test("the fixture is a fresh Dnet and starts exactly at the lab charisma gate", () => {
+    const net = generateNet(101, { augs: 3 });
+    expect(() => assertFreshSpreadNet(net)).not.toThrow();
+    expect(net.world.clock.now()).toBe(0);
+    expect(net.system.mutations).toBe(0);
+    for (const host of net.system.hosts.values()) {
+      expect(host.sessions.size).toBe(0);
+      expect(host.stasisLinked).toBe(false);
+      if (!host.isStationary) expect(net.world.servers.get(host.hostname)?.hasAdminRights).toBe(false);
+    }
+    const run = runSpreadCase(net, 3 * 60 * 60 * 1000);
+    expect(run.startingCharisma).toBe(run.labRequiredCharisma);
+    expect(run.labRequiredCharisma).toBe(net.system.currentLab()!.cha);
+  }, 30_000);
+
   test("the road from cold start to walker stays inside sane bounds", () => {
-    const summary = summarizeSpreadRuns(shipped);
+    const summary = summarizeSpreadRuns(runs);
     // First crack within a minute: darkweb's shallow neighbours hold trivially
     // solvable models, and a first crack an hour in would mean the attempt
     // pipeline is broken, not slow.
     expect(summary.meanMsToFirstCrack).toBeLessThan(60_000);
     // The walker startable within half an hour of a cold start, on average.
     expect(summary.meanMsToWalkerStart).toBeLessThan(30 * 60_000);
+    expect(summary.meanMsLabToWalkerStart).toBeGreaterThanOrEqual(0);
+    expect(summary.meanMsLabToWalkerStart).toBeLessThan(summary.meanMsToWalkerStart);
     // Spreading actually spread: a healthy run stands agents on dozens of
     // hosts, not a handful.
     expect(summary.meanPlantedPeak).toBeGreaterThan(10);
   });
 
   test("a seed is deterministic: the same world replays to the same run", () => {
-    const again = runSpreadCase(generateNet(3), SHIPPED_SPREAD);
-    const reference = shipped[2]!;
+    const again = runSpreadCase(generateNet(3));
+    const reference = runs[2]!;
     expect(again.msToWalkerStart).toBe(reference.msToWalkerStart!);
     expect(again.crackedCount).toBe(reference.crackedCount);
     expect(again.mutations).toBe(reference.mutations);
-  });
-
-  test("paired comparison plumbing: shipped against itself is all ties", () => {
-    const starts = shipped.map((run) => run.msToWalkerStart!);
-    const compared = pairedComparison(
-      { name: "a", values: starts },
-      { name: "b", values: starts },
-    );
-    expect(compared.tied).toBe(SEEDS.length);
-    expect(compared.meanDelta).toBe(0);
   });
 
   test("crack budgeting refuses what the deployed stack cannot open", () => {
@@ -87,22 +103,34 @@ describe("the deep world (air gaps, spares, ferry)", () => {
   // load-bearing at all — rung 0 has none of them.
   const DEEP_CAP_MS = 3 * 60 * 60 * 1000;
   const deep = [1, 2].map((seed) =>
-    runSpreadCase(generateNet(seed, { augs: 3 }), SHIPPED_SPREAD, DEEP_CAP_MS));
+    runSpreadCase(generateNet(seed, { augs: 3 }), DEEP_CAP_MS));
 
-  test("the shipped policy conquers a two-gap world inside the cap", () => {
+  test("the production strategy conquers a two-gap world inside the cap", () => {
     for (const run of deep) {
       expect(run.solved, `${run.caseId}: ${run.reason ?? ""}`).toBe(true);
       expect(run.caseId).toBe("spread:23");
       // Every band held an agent well before the walker started.
       expect(run.msToAllBandsReached).toBeDefined();
       expect(run.msToAllBandsReached!).toBeLessThanOrEqual(run.msToWalkerStart!);
+      expect(run.msToLabSighted!).toBeLessThanOrEqual(run.msToWalkerStart!);
+      expect(run.msToLabPinned!).toBeLessThanOrEqual(run.msToWalkerStart!);
+      expect(run.startingCharisma).toBe(run.labRequiredCharisma);
+      // The finish line must be reached through the deployed mechanics, not a
+      // benchmark shortcut that roots, clears, pins, or crosses gaps directly.
+      expect(run.plantCalls).toBeGreaterThan(0);
+      expect(run.attemptCalls).toBeGreaterThan(0);
+      expect(run.reclaimCalls).toBeGreaterThan(0);
+      expect(run.cacheCalls).toBeGreaterThan(0);
+      expect(run.pinCalls).toBeGreaterThan(0);
+      expect(run.induceCalls).toBeGreaterThan(0);
+      expect(run.induceMoves).toBeGreaterThan(0);
     }
   });
 
   // A whole deep case re-runs inside the test body (~5-8 s), so it gets an
   // explicit budget instead of bun's 5 s default.
   test("a deep seed is deterministic", () => {
-    const again = runSpreadCase(generateNet(1, { augs: 3 }), SHIPPED_SPREAD, DEEP_CAP_MS);
+    const again = runSpreadCase(generateNet(1, { augs: 3 }), DEEP_CAP_MS);
     expect(again.msToWalkerStart).toBe(deep[0]!.msToWalkerStart!);
     expect(again.induceCalls).toBe(deep[0]!.induceCalls);
     expect(again.crackedCount).toBe(deep[0]!.crackedCount);

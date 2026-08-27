@@ -18,7 +18,6 @@ import {
   deriveTasks,
   planSpread,
   type DeriveOptions,
-  type SpreadLimits,
   type Task,
 } from "../shared/strategy/dnet/plan.ts";
 import {
@@ -45,16 +44,16 @@ import { CONTROLLER_CALLS, KIND_CALLS, SCRIPT_BASE_GB } from "../game/dnet/share
  * attempts per candidate:
  *
  * - a model with a solver is charged the solver's own DECLARED `budget(facts)`
- *   — the worst case, which is deliberately conservative and identical across
- *   policy variants, so paired comparisons stay paired;
+ *   — the worst case, which is deliberately conservative and repeatable;
  * - a dictionary model is charged the true password's position in the same
  *   filtered candidate list `planAttempt` walks — exact, since the arena holds
  *   the generated password;
  * - a model neither can open is never cracked, exactly as deployed.
  *
  * Not modelled (documented, not forgotten): heartbleed/oracle feedback (which
- * would only SHORTEN solver conversations below their budget), induced
- * migration, backdoors, and money. The walk itself belongs to lane 1. */
+ * would only SHORTEN solver conversations below their budget), backdoors,
+ * money, and the maze walk after launch. Induced migration, planting,
+ * reclaiming, pinning, and walker placement all execute in this arena. */
 
 // --- pricing, from the same table the game bills against ----------------------
 
@@ -131,77 +130,50 @@ export function generateNet(seed: number, opts: { stock?: boolean; augs?: number
   return { world, system, network };
 }
 
-// --- policy -------------------------------------------------------------------
-
-/** The dials a benchmark wiggles. Shipped values mirror the deployed
- * controller; every variant must keep the same world seed to stay paired. */
-export interface SpreadPolicy {
-  name: string;
-  /** Fill the roomiest vantage with attempt threads (shipped) or send one. */
-  threadScaledAttempts: boolean;
-  /** Plant the minimal spawn-free reclaimer on cramped hosts (shipped) or wait
-   *  for full agent room. */
-  bootstrapReclaim: boolean;
-  /** Gang-grind the lab candidate's block from every able vantage at once
-   *  (`FarmInputs.gangReclaim`), instead of the single elected grinder. */
-  gangReclaim?: boolean;
-  /** How `chooseLabVantage` ranks candidates — raw RAM (shipped) or the
-   *  estimated grind+walk total time. */
-  vantageScoring?: "maxRam" | "totalTime";
-  /** `DeriveOptions.labAdjacentBonus` — crack the future vantage first. */
-  labAdjacentBonus?: number;
-  /** False withholds induce execution — the A/B arm that shows what directed
-   *  migration buys over waiting for natural churn. Default: run it. */
-  induce?: boolean;
-  /** `HoldPlanInputs.maxPushersPerTarget` / `maxFrontierTargets` /
-   *  `maxLabCandidates`. */
-  maxPushers?: number;
-  maxFrontier?: number;
-  maxLabCandidates?: number;
-  maxFerriesPerBand?: number;
-  /** False withholds the pre-charge pipeline (`aboutToCrack`). */
-  precharge?: boolean;
-  /** `HoldPlanInputs.spareSlack` / `spareScoring`. */
-  spareSlack?: number;
-  spareScoring?: "ram" | "ramPerDistance";
-  limits?: Partial<SpreadLimits>;
-  /** Player charisma at case start. */
-  charisma?: number;
+/** Refuse a warmed or partially conquered fixture. This lane measures the
+ * entire road from a newly populated Dnet, so inherited sessions, roots,
+ * stasis links, mutations, or elapsed time would silently shorten it. */
+export function assertFreshSpreadNet(net: SpreadNet): void {
+  if (net.world.clock.now() !== 0) throw new Error("spread arena requires virtual time zero");
+  if (net.system.mutations !== 0) throw new Error("spread arena requires an unmutated Dnet");
+  const lab = [...net.system.hosts.values()].find((host) => isLabyrinth(host.hostname, host.modelId));
+  if (lab === undefined) throw new Error("spread arena requires a current labyrinth");
+  for (const host of net.system.hosts.values()) {
+    if (host.sessions.size > 0) throw new Error(`spread arena requires no existing sessions (${host.hostname})`);
+    if (host.stasisLinked) throw new Error(`spread arena requires no existing stasis links (${host.hostname})`);
+    if (!host.isStationary && net.world.servers.get(host.hostname)?.hasAdminRights === true) {
+      throw new Error(`spread arena requires every movable host unrooted (${host.hostname})`);
+    }
+  }
 }
-
-export const SHIPPED_SPREAD: SpreadPolicy = {
-  name: "shipped",
-  threadScaledAttempts: true,
-  bootstrapReclaim: true,
-  // Promoted by the paired sweep: gang-grinding the lab candidate and scoring
-  // its vantage by grind+walk total time was 0.76x on walker-start, CI
-  // excluding zero. The old single-grinder / raw-RAM shapes stay in the
-  // benchmark as the standing losers.
-  gangReclaim: true,
-  vantageScoring: "totalTime",
-  // The round-3 caps (2 pushers, no frontier) were superseded by the wave
-  // budget: pushers are sized to close the target's believed remaining
-  // migration charge to 100% in one 6 s wave and no further, and the frontier
-  // admits only bands that reach strictly past our deepest agent. Both are
-  // planInduce defaults now — no policy knob needed to get them.
-};
 
 // --- run ----------------------------------------------------------------------
 
 export interface SpreadRun {
   caseId: string;
-  policy: string;
   /** The walker could start: lab vantage cracked, pinned, block at zero. */
   solved: boolean;
+  /** Pinned to the current lab's gate so this measures spreading, not levelling. */
+  startingCharisma: number;
+  labRequiredCharisma: number;
   msToFirstCrack?: number;
   msToHalfCracked?: number;
   msToLabSighted?: number;
   msToLabVantageCracked?: number;
   msToLabPinned?: number;
   msToWalkerStart?: number;
+  /** The actual walk task admitted at the finish line. */
+  walkerFrom?: string;
+  walkerTarget?: string;
   /** First moment every air-gapped band held an agent of ours. */
   msToAllBandsReached?: number;
   walkerThreads?: number;
+  plantCalls: number;
+  bootstrapPlants: number;
+  attemptCalls: number;
+  reclaimCalls: number;
+  cacheCalls: number;
+  pinCalls: number;
   crackedCount: number;
   crackableCount: number;
   plantedPeak: number;
@@ -270,11 +242,10 @@ export function crackAttemptsFor(record: {
 
 export function runSpreadCase(
   net: SpreadNet,
-  policy: SpreadPolicy,
   capMs = DEFAULT_CAP_MS,
 ): SpreadRun {
+  assertFreshSpreadNet(net);
   const { system, world } = net;
-  const limits: SpreadLimits = { ...DEFAULT_SPREAD_LIMITS, ...policy.limits };
   const labHost = [...system.hosts.values()]
     .find((host) => isLabyrinth(host.hostname, host.modelId))?.hostname;
   const netDepth = system.netDepth();
@@ -287,8 +258,9 @@ export function runSpreadCase(
   // road to the gate is charisma farming — a different mode with its own
   // economics, not this lane's question.
   const skillMult = 1;
-  const labGate = system.currentLab()?.cha ?? 60;
-  let charismaExp = expForSkill(policy.charisma ?? labGate, skillMult);
+  const labGate = system.currentLab()?.cha;
+  if (labGate === undefined) throw new Error("spread arena requires a current labyrinth");
+  let charismaExp = expForSkill(labGate, skillMult);
   let charisma = skillFromExp(charismaExp, skillMult);
   const gainCharisma = (exp: number): void => {
     charismaExp += exp;
@@ -322,8 +294,15 @@ export function runSpreadCase(
   let nextDebugAt = 0;
   const run: SpreadRun = {
     caseId: `spread:${netDepth}`,
-    policy: policy.name,
     solved: false,
+    startingCharisma: charisma,
+    labRequiredCharisma: labGate,
+    plantCalls: 0,
+    bootstrapPlants: 0,
+    attemptCalls: 0,
+    reclaimCalls: 0,
+    cacheCalls: 0,
+    pinCalls: 0,
     crackedCount: 0,
     crackableCount: 0,
     plantedPeak: 0,
@@ -475,7 +454,11 @@ export function runSpreadCase(
       (h.agentAlive || h.stasisLinked === true)
       && h.neighbours?.includes(labHost) === true
       && h.hasCredential
-      && truth(h.hostname) !== undefined))?.hostname;
+      && truth(h.hostname) !== undefined), {
+        charisma,
+        walkGb: WALK_GB,
+        reclaimGb: RECLAIM_GB,
+      })?.hostname;
   };
 
   // --- one derive pass: plant, then file and assign -------------------------
@@ -496,12 +479,13 @@ export function runSpreadCase(
         stasisLinked,
         expiry: expiry(),
       });
-      const plan = planSpread(candidates, limits, clock);
+      const plan = planSpread(candidates, DEFAULT_SPREAD_LIMITS);
       let planted = 0;
       for (const plant of plan.plant) {
         if (agents.has(plant.host) || !truth(plant.host)) continue;
-        if (plant.bootstrapReclaim === true && !policy.bootstrapReclaim) continue;
         agents.set(plant.host, plant.bootstrapReclaim === true ? { bootstrap: true } : {});
+        run.plantCalls++;
+        if (plant.bootstrapReclaim === true) run.bootstrapPlants++;
         fold([
           observeHost(plant.host),
           { hostname: plant.host, at: clock, present: true, neighbours: system.probeFrom(plant.host) },
@@ -514,9 +498,8 @@ export function runSpreadCase(
     }
     if (labHost !== undefined && knowledge.has(labHost)) milestone("msToLabSighted");
 
-    // The REAL hold planner decides the pin, the release, and the walk — the
-    // exact refusal checklist the controller runs. `induce` tasks it files are
-    // skipped at assignment (migration is out of this lane's scope).
+    // The REAL hold planner decides the pin, release, induced migrations, and
+    // walk — the exact refusal checklist the controller runs.
     // Hosts one in-flight authenticate away from cracked, with the time left
     // on that call — the pre-charge pipeline's admission ticket.
     const aboutToCrack = new Map<string, number>();
@@ -541,14 +524,7 @@ export function runSpreadCase(
       reclaimGb: RECLAIM_GB,
       induceGbPerThread: INDUCE_GB,
       migrationCharge,
-      ...(policy.precharge !== false ? { aboutToCrack } : {}),
-      ...(policy.maxFerriesPerBand !== undefined ? { maxFerriesPerBand: policy.maxFerriesPerBand } : {}),
-      ...(policy.vantageScoring !== undefined ? { vantageScoring: policy.vantageScoring } : {}),
-      ...(policy.maxPushers !== undefined ? { maxPushersPerTarget: policy.maxPushers } : {}),
-      ...(policy.maxFrontier !== undefined ? { maxFrontierTargets: policy.maxFrontier } : {}),
-      ...(policy.maxLabCandidates !== undefined ? { maxLabCandidates: policy.maxLabCandidates } : {}),
-      ...(policy.spareSlack !== undefined ? { spareSlack: policy.spareSlack } : {}),
-      ...(policy.spareScoring !== undefined ? { spareScoring: policy.spareScoring } : {}),
+      aboutToCrack,
     });
     const hold = holdPlan.tasks;
     if (debug && clock >= nextDebugAt) {
@@ -599,8 +575,8 @@ export function runSpreadCase(
       gbPerThread: { cache: CACHE_GB, reclaim: RECLAIM_GB, phish: PHISH_GB, promote: PROMOTE_GB },
       wantedGb: ATTEMPT_GB,
       openLabCache: false,
-      ...(policy.gangReclaim === true && holdPlan.labCandidate !== undefined
-        ? { gangReclaim: holdPlan.labCandidate }
+      ...(holdPlan.labCandidate !== undefined
+        ? { walkerCandidate: holdPlan.labCandidate }
         : {}),
     });
     for (const task of farmPlan.tasks) {
@@ -640,7 +616,6 @@ export function runSpreadCase(
       hold,
       farm,
       inFlight,
-      ...(policy.labAdjacentBonus !== undefined ? { labAdjacentBonus: policy.labAdjacentBonus } : {}),
     });
 
     for (const task of [...tasks].sort((a, b) => a.priority - b.priority)) {
@@ -653,9 +628,7 @@ export function runSpreadCase(
         if (crackAttempts(task.host) === undefined || vault.has(task.host)) continue;
         const record = truth(task.host);
         if (!record) continue;
-        const threads = policy.threadScaledAttempts
-          ? Math.max(1, Math.floor(jobFreeGb(task.from) / ATTEMPT_GB))
-          : 1;
+        const threads = Math.max(1, Math.floor(jobFreeGb(task.from) / ATTEMPT_GB));
         const wait = authenticateWaitMs(
           {
             modelId: record.modelId,
@@ -691,7 +664,6 @@ export function runSpreadCase(
           doneAt: clock + stasisWaitMs(charisma),
         };
       } else if (task.kind === "induce") {
-        if (policy.induce === false) continue;
         agent.job = {
           kind: "induce",
           target: task.host,
@@ -703,10 +675,12 @@ export function runSpreadCase(
         // lane 1's subject.
         milestone("msToWalkerStart");
         run.walkerThreads = task.threads ?? 1;
+        run.walkerFrom = task.from;
+        run.walkerTarget = task.host;
         run.solved = true;
       }
-      // Everything else (inventory, bleed, cache, phish, promote, induce) is
-      // out of this lane's scope and deliberately unassigned.
+      // Inventory and bleed are observation mechanics already represented by
+      // the arena's fold; phish and promote are money work and stay unassigned.
     }
   };
 
@@ -715,6 +689,7 @@ export function runSpreadCase(
     agent.job = undefined;
     const record = truth(job.target);
     if (job.kind === "attempt") {
+      run.attemptCalls++;
       if (!record) return;
       gainCharisma(attemptCharismaExp(record.difficulty, false, job.threads, false));
       const spent = (tried.get(job.target) ?? 0) + 1;
@@ -733,6 +708,7 @@ export function runSpreadCase(
         onCracked(job.target);
       }
     } else if (job.kind === "reclaim") {
+      run.reclaimCalls++;
       if (!record) return;
       const result = system.reallocateRam(job.target, job.threads, charisma, clock);
       if (result) {
@@ -745,12 +721,14 @@ export function runSpreadCase(
         }
       }
     } else if (job.kind === "cache") {
+      run.cacheCalls++;
       if (!record || job.filename === undefined) return;
       if (system.cachesOn(job.target).includes(job.filename)) {
         system.openCache(job.target, job.filename);
       }
       fold([observeHost(job.target)]);
     } else if (job.kind === "pin") {
+      run.pinCalls++;
       // The deployed pin job probes before it links (`KIND_CALLS.pin` carries
       // `dnet.probe`): a stale believed edge refuses rather than spending the
       // scarce slot on a host the net has already walked away from.
@@ -842,10 +820,12 @@ export function runSpreadCase(
 }
 
 export interface SpreadSummary {
-  policy: string;
   cases: number;
   solved: number;
   meanMsToWalkerStart: number;
+  /** Time after first seeing the lab spent cracking, planting, reclaiming,
+   * pinning, and finally admitting the real walk task. */
+  meanMsLabToWalkerStart: number;
   meanMsToFirstCrack: number;
   meanMsToHalfCracked: number;
   meanCracked: number;
@@ -859,10 +839,13 @@ export function summarizeSpreadRuns(runs: readonly SpreadRun[]): SpreadSummary {
     return held.length === 0 ? Infinity : held.reduce((sum, v) => sum + v, 0) / held.length;
   };
   return {
-    policy: runs[0]!.policy,
     cases: runs.length,
     solved: runs.filter((run) => run.solved).length,
     meanMsToWalkerStart: meanOf(runs.map((run) => run.msToWalkerStart)),
+    meanMsLabToWalkerStart: meanOf(runs.map((run) =>
+      run.msToWalkerStart !== undefined && run.msToLabSighted !== undefined
+        ? run.msToWalkerStart - run.msToLabSighted
+        : undefined)),
     meanMsToFirstCrack: meanOf(runs.map((run) => run.msToFirstCrack)),
     meanMsToHalfCracked: meanOf(runs.map((run) => run.msToHalfCracked)),
     meanCracked: meanOf(runs.map((run) => run.crackedCount)),

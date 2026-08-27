@@ -266,14 +266,12 @@ into an unconquered band. `planInduce` runs five purposes in priority order —
 `free-slot`, `lab`, `seat`, `ferry` (into a band with no resident of ours),
 `frontier` — several pushers per target: the migration charge accumulates on
 the TARGET (`DarknetState.migrationInductionServers`), so N adjacent agents
-charge one host ~N× faster, and the queue dedups induce per (target, vantage)
-like the walk. Each push then runs on the per-agent ladder (induce below
+charge one host ~N× faster, and the queue dedups induce per (target, vantage).
+Each push then runs on the per-agent ladder (induce below
 survey, attempt and reclaim; above phish and promote) — exploration's last
 step, with money as the filler behind it.
 
-Two disciplines, both benchmark-driven, keep the pushes from becoming the
-random-walk pump the first shipped shape was (priced at 1.35× walker-start on
-the shallow world, 1.13× on the two-gap deep one):
+Two disciplines keep induced migration directed and bounded:
 
 - **The charge-wave budget.** Every `induceServerMigration` response reads
   back the engine's accumulated charge ("Migration prep is now at X.XX%") —
@@ -282,17 +280,14 @@ the shallow world, 1.13× on the two-gap deep one):
   identity). `planInduce` then sizes each target's pushers to close the
   believed remaining charge to 100% in ONE 6 s wave and no further: charge is
   additive and resets on the move, so threads past the remainder are pure
-  overshoot, and threads short of it just take more waves. This is the
-  original design intent — "multiple pushers per target is desirable as long
-  as we don't surpass the 100% chance" — made literal.
+  overshoot, and threads short of it just take more waves.
 - **The frontier progress criterion.** A frontier push is admitted only when
   the host's band (`[difficulty-2, difficulty+4]`, air-gap rows excluded)
   reaches STRICTLY past our deepest standing agent — a band we already cover
-  admits nothing, which is the terminal condition the old shape lacked.
+  admits nothing.
   Frontier targets are taken deepest-reach first.
 
-Two more descent disciplines ride on the wave budget (depth-36 paired
-evidence: together 0.63× walker-start against neither):
+Two more descent disciplines ride on the wave budget:
 
 - **Races.** Lab candidates and ferries are RACED, most promising first: a
   landing is a uniform re-roll inside the band, so several carriers charging
@@ -317,10 +312,6 @@ One RAM discipline squeezes the wave's vantages dry:
   the overshoot past 100% is discarded by the reset, but charisma exp —
   5 × threads × difficulty per call — is granted before the clamp, and exp
   beats idle RAM.
-
-The deep benchmark also found that widening the stasis spare slack to grab
-BIGGER link hosts (the intuitive "fix" for small servers holding links) costs
-1.2× on the lab route — the small on-target links are the measured winner.
 
 The trigger policy is `shared/strategy/dnet/plan.ts` — pure, one admitted fire
 or named refusals, in gate order: `storm-in-flight` (our own quiet window;
@@ -832,9 +823,10 @@ The cache branch is an `if` and the money branch its `else if`: claiming a cache
 forecloses that call's money roll, and while the cooldown is unexpired every
 call falls straight through to money.
 
-During an open window, difficulty >3 wins the hunter election because cache
-quality scales with difficulty. Lower-difficulty residents prefer promotion,
-but fall back to phish rather than idle.
+During an open window, difficulty >3 enters the hunter pool because cache
+quality scales with difficulty. The deepest eligible resident wins because
+depth also scales the money call; free RAM breaks depth ties. Lower-difficulty
+residents prefer promotion, but fall back to phish rather than idle.
 
 `openCache(filename)` lowers karma by `difficulty + 1` (returned as a negative
 `karmaLoss`) and yields one reward drawn at random from:
@@ -1586,6 +1578,20 @@ The card degrades in four states, because most runs never reach a lab at all: no
 sighting draws no card, a sighting we cannot walk draws the ladder plus the
 planner's own refusal for that host, a map with no walker on it says the map
 outlives them, and a rooted lab says the maze is finished.
+
+### Farm regression lane
+
+`bun run bench:sim:dnet-farm` warms each established net for one virtual hour,
+then measures two hours without resetting the world, RNG, charisma, or planner
+state. Resetting only counters prevents the initial RAM-block backlog from
+masquerading as stable cache throughput. The lane reports both means and p10
+rates for caches and money across paired seeds. Its only policy counterfactual
+is withholding the storm; the post-lab row is a lifecycle phase, not a tuning
+candidate. Production fixes the validated choices in code: capacity-first
+cache hunting, a ten-minute optional block-clear budget, and storm admission
+within thirty seconds of a phishing cache. The rejected 90-second arm raised
+mean caches slightly but lost money and lower-tail cache stability on the same
+warmed seeds.
 
 ## Open
 

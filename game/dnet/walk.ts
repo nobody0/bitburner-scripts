@@ -75,8 +75,8 @@ export async function runWalk(ns: NS, order: Order<"walk">, io: AgentIo): Promis
   // a career need and one that spends an hour collecting 451s.
   // The planner's whole edge is knowing the generator's arithmetic for THIS
   // stage — the seams, the door candidates, the exit candidates. A lab host
-  // outside the ladder has no stage to know, and walking it blind would be
-  // the old DFS without its aim; stop and say so instead.
+  // outside the ladder has no stage to know; stop and say so instead of
+  // walking it blind.
   if (!stage) {
     return {
       ok: false,

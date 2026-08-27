@@ -311,16 +311,18 @@ describe("exactly one host hunts the cache window", () => {
     host({ host: "dn-mid", depth: 4, freeGb: 40 }),
   ];
 
-  test("the deepest resident is elected, and depth is also the money term", () => {
-    // `0.1 + depth * 0.05`, so the same host is the best one to spend threads on
-    // when the window is shut.
+  test("depth wins the cache hunter seat, then capacity breaks ties", () => {
     expect(electCacheHunter(crew())).toBe("dn-deep");
+    expect(electCacheHunter([
+      host({ host: "deep", depth: 9, freeGb: 20 }),
+      host({ host: "roomy", depth: 4, freeGb: 40 }),
+    ])).toBe("deep");
   });
 
   test("the election is deterministic under a tie", () => {
     const tied = [host({ host: "b", depth: 5, freeGb: 10 }), host({ host: "a", depth: 5, freeGb: 10 })];
     expect(electCacheHunter(tied)).toBe("a");
-    // ...and free RAM breaks a depth tie before the name does.
+    // Free RAM breaks a depth tie before name.
     expect(electCacheHunter([...tied, host({ host: "c", depth: 5, freeGb: 99 })])).toBe("c");
   });
 
@@ -328,8 +330,8 @@ describe("exactly one host hunts the cache window", () => {
     // Money and charisma are linear in threads, the batch is TIME-bounded so
     // threads never extend how long a host is held, and a resident runs one
     // job at a time — RAM a phish does not take is simply idle. The hunter is
-    // still elected (deepest = best money per call, and the panel's answer to
-    // "who claims the window"), but it no longer rations anyone's threads.
+    // still elected (depth, then capacity), but it no longer rations anyone's
+    // threads.
     const open = planFarm(crew(), inputs());
     expect(open.cacheHunter).toBe("dn-deep");
     // 40 GB against a 6.35 GB phish is six threads, for everyone.
@@ -456,6 +458,28 @@ describe("a cramped block is ground from next door", () => {
     const grind = plan.tasks.find((task) => task.host === "dn-tight")!;
     expect(grind.from).toBe("dn-roomy");
     expect(grind.threads).toBe(7);
+  });
+});
+
+describe("the walker candidate is ground from every able vantage", () => {
+  test("the production path gangs the candidate without a policy toggle", () => {
+    const target = host({
+      host: "dn-walker",
+      difficulty: 2,
+      blockedRam: 12,
+      freeGb: 12,
+      hasCredential: true,
+    });
+    const neighbour = host({
+      host: "dn-helper",
+      freeGb: 40,
+      neighbours: ["dn-walker"],
+    });
+    const plan = planFarm([target, neighbour], inputs({ walkerCandidate: "dn-walker" }));
+    const grinders = plan.tasks.filter((task) => task.kind === "reclaim" && task.host === "dn-walker");
+    expect(grinders).toHaveLength(2);
+    expect(grinders.every((task) => task.gang === true)).toBe(true);
+    expect(grinders.map((task) => task.from ?? task.host).sort()).toEqual(["dn-helper", "dn-walker"]);
   });
 });
 

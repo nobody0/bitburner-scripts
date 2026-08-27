@@ -543,10 +543,10 @@ export const STORM_BURST_MS = 30_000;
  * stamp being taken at claim time rather than at the engine's own clock. */
 export const STORM_QUIET_MS = 35_000;
 
-/** How recently a `.d.cache` must have landed for a storm to fire: within this
- * window of a phish cache, the phishing cooldown is freshly spent, so the
- * storm's ~30 s of downtime sits entirely inside the three dead minutes and
- * costs no cache we could otherwise have rolled for. */
+/** How recently a `.d.cache` must have landed for a storm to fire. Matching
+ * the storm's 30-second burst keeps all downtime inside the three-minute dead
+ * cache window. A wider arm raised mean caches slightly but reduced money and
+ * lower-tail cache stability in the warmed farm benchmark. */
 export const STORM_PHISH_OVERLAP_MS = 30_000;
 
 /** Money one paying call yields, at the mean of upstream's U(0.9, 1.2) factor.

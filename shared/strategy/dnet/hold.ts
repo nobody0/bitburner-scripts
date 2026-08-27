@@ -107,15 +107,6 @@ export interface HoldView {
    *  divide the calls-to-move directly — the difference between a hopeless
    *  project and an afternoon. Omitted, pushes are priced at one thread. */
   induceGbPerThread?: number;
-  /** How many rows off a spare target a host may sit and still claim it.
-   *  Absent: `STASIS_TARGET_SLACK`. A wider slack trades placement precision
-   *  for candidate quality — the fix for a tiny on-target host beating a
-   *  giant one row outside the window. */
-  spareSlack?: number;
-  /** How a spare target's window is won: `"ram"` (biggest maxRam — shipped)
-   *  or `"ramPerDistance"` (maxRam halved per row off target, so a 4x bigger
-   *  host wins from up to two rows further away). */
-  spareScoring?: "ram" | "ramPerDistance";
   /** Our per-target estimate of `DarknetState.migrationInductionServers` —
    *  the engine's accumulated charge, which no ns member reads back but whose
    *  every `induceServerMigration` response REPORTS ("Migration prep is now
@@ -124,17 +115,6 @@ export interface HoldView {
    *  at a time, so threads past the remainder are pure overshoot. Absent, a
    *  target is assumed uncharged and gets one full wave's worth. */
   migrationCharge?: ReadonlyMap<string, number>;
-  /** Hard override on pushers per target, ON TOP of the charge budget.
-   *  Normally unnecessary — the charge budget is the cap. */
-  maxPushersPerTarget?: number;
-  /** How many lab candidates the race may staff at once. Absent: as many as
-   *  the leftover pushers can fully power, most promising first. */
-  maxLabCandidates?: number;
-  /** How many hosts may be ferried into ONE unconquered band at once. Absent:
-   *  as many as the leftover pushers can power — a landing is a uniform
-   *  re-roll, so racing several carriers multiplies the per-wave chance of
-   *  actually crossing, the same argument as the lab race. */
-  maxFerriesPerBand?: number;
   /** Hosts whose NEXT authenticate is their last remaining candidate — the
    *  crack is one in-flight call away — mapped to the milliseconds LEFT on
    *  that authenticate. They are admitted to the push pools early
@@ -147,11 +127,6 @@ export interface HoldView {
    *  closing call fires and its landing arrives after the auth (and the
    *  instant plant behind it) by construction. */
   aboutToCrack?: ReadonlyMap<string, number>;
-  /** How many frontier targets a pass may push. Absent: every candidate that
-   *  passes the PROGRESS criterion (its band reaches strictly deeper than our
-   *  deepest agent) — which is what retired the old random-walk pump: a band
-   *  we already cover admits no push at all. */
-  maxFrontierTargets?: number;
   /** Whether one stasis slot must be HELD BACK for the maze walker's vantage.
    *
    *  The walker is the one thing in the feature that cannot be rebuilt — its
@@ -306,20 +281,12 @@ export interface HoldPlanInputs {
   /** One pin job's allocation. */
   pinGb: number;
   induceGbPerThread?: number;
-  /** One reclaim thread's allocation. With `vantageScoring: "totalTime"` the
-   *  lab vantage is chosen by estimated grind+walk time instead of raw RAM. */
+  /** One reclaim thread's allocation. The lab vantage is chosen by estimated
+   *  grind+walk time instead of raw RAM. */
   reclaimGb?: number;
-  vantageScoring?: "maxRam" | "totalTime";
-  /** Induce dials — see `HoldView`. */
+  /** Induce state — see `HoldView`. */
   migrationCharge?: ReadonlyMap<string, number>;
-  maxPushersPerTarget?: number;
-  maxFrontierTargets?: number;
-  maxLabCandidates?: number;
-  maxFerriesPerBand?: number;
   aboutToCrack?: ReadonlyMap<string, number>;
-  /** Spare-placement dials — see `HoldView`. */
-  spareSlack?: number;
-  spareScoring?: "ram" | "ramPerDistance";
 }
 
 export interface HoldPlan {
@@ -345,7 +312,7 @@ interface WalkPlan {
  * pin, fresh blocked RAM, a zero block, a resident, and room for one legal
  * walker thread. Each stops the walk and names the one thing to fix next. */
 export function planWalk(
-  inputs: Pick<HoldPlanInputs, "hosts" | "charisma" | "walkerAt" | "walkGb" | "reclaimGb" | "vantageScoring">,
+  inputs: Pick<HoldPlanInputs, "hosts" | "charisma" | "walkerAt" | "walkGb" | "reclaimGb">,
   refuse: (host: string, why: string, detail: string) => void,
 ): WalkPlan {
   const lab = inputs.hosts.find((h) => isLabyrinth(h.hostname, h.modelId) && h.gone !== true);
@@ -364,8 +331,7 @@ export function planWalk(
   if (walkerAt === undefined) {
     // Only worth choosing when no walk is in flight: for the whole multi-minute
     // walk this filter-and-sort would otherwise run every tick for nothing.
-    const scoring = inputs.vantageScoring === "totalTime"
-      && inputs.walkGb !== undefined && inputs.reclaimGb !== undefined
+    const scoring = inputs.walkGb !== undefined && inputs.reclaimGb !== undefined
       ? { charisma: inputs.charisma, walkGb: inputs.walkGb, reclaimGb: inputs.reclaimGb }
       : undefined;
     const vantageHost = chooseLabVantage(inputs.hosts.filter((h) =>
@@ -461,8 +427,6 @@ export function planHold(inputs: HoldPlanInputs): HoldPlan {
     ),
     charisma: inputs.charisma,
     authDurationMultiplier: 1,
-    ...(inputs.spareSlack !== undefined ? { spareSlack: inputs.spareSlack } : {}),
-    ...(inputs.spareScoring !== undefined ? { spareScoring: inputs.spareScoring } : {}),
   };
   const walk = planWalk(inputs, refuse);
   const labCandidate = inputs.hosts.find((h) => h.hostname === walk.candidate);
@@ -494,10 +458,6 @@ export function planHold(inputs: HoldPlanInputs): HoldPlan {
       induceGbPerThread: inputs.induceGbPerThread,
       needLabVantage: labNeed,
       ...(inputs.migrationCharge !== undefined ? { migrationCharge: inputs.migrationCharge } : {}),
-      ...(inputs.maxPushersPerTarget !== undefined ? { maxPushersPerTarget: inputs.maxPushersPerTarget } : {}),
-      ...(inputs.maxFrontierTargets !== undefined ? { maxFrontierTargets: inputs.maxFrontierTargets } : {}),
-      ...(inputs.maxLabCandidates !== undefined ? { maxLabCandidates: inputs.maxLabCandidates } : {}),
-      ...(inputs.maxFerriesPerBand !== undefined ? { maxFerriesPerBand: inputs.maxFerriesPerBand } : {}),
       ...(inputs.aboutToCrack !== undefined ? { aboutToCrack: inputs.aboutToCrack } : {}),
     });
     for (const refusal of induce.refused) refuse(refusal.hostname, refusal.why, refusal.detail);
@@ -771,8 +731,8 @@ function nearTarget(depth: number | undefined, target: number, slack = STASIS_TA
  * Shared by `planStasis`, which pins toward them, and `planInduce`, which
  * pushes big hosts into their windows. A held link within slack of several
  * targets serves the DEEPEST one, matching the order pins are assigned in. */
-export function openSpareTargets(view: Pick<HoldView, "hosts" | "spareTargets" | "spareSlack">): number[] {
-  const slack = view.spareSlack ?? STASIS_TARGET_SLACK;
+export function openSpareTargets(view: Pick<HoldView, "hosts" | "spareTargets">): number[] {
+  const slack = STASIS_TARGET_SLACK;
   const open = [...(view.spareTargets ?? [])].sort((a, b) => b - a);
   for (const held of view.hosts) {
     if (held.gone || held.stasisLinked !== true || held.irreplaceable) continue;
@@ -839,11 +799,7 @@ export function planStasis(view: HoldView): StasisPlan {
   // Spares claim the open targets, deepest first; per target the biggest
   // measured host within slack wins. A loser may still win a shallower
   // target, so refusals are settled only after every target has chosen.
-  const slack = view.spareSlack ?? STASIS_TARGET_SLACK;
-  const spareScore = (host: HoldHost, target: number): number =>
-    view.spareScoring === "ramPerDistance"
-      ? host.maxRam! / 2 ** Math.abs((host.depth ?? target) - target)
-      : host.maxRam!;
+  const slack = STASIS_TARGET_SLACK;
   const taken = new Set<string>();
   const spares: HoldHost[] = [];
   for (const target of open) {
@@ -851,7 +807,7 @@ export function planStasis(view: HoldView): StasisPlan {
       .filter((host) => !taken.has(host.hostname)
         && host.maxRam !== undefined && nearTarget(host.depth, target, slack))
       .sort((a, b) =>
-        (spareScore(b, target) - spareScore(a, target))
+        (b.maxRam! - a.maxRam!)
         || (b.depth! - a.depth!)
         || (a.hostname < b.hostname ? -1 : 1))[0];
     if (!winner) continue;
@@ -1151,7 +1107,7 @@ export function planInduce(view: HoldView): InducePlan {
     }
     // Standing inside an open stasis window: `planStasis` pins it where it is,
     // and a re-roll is the one thing that could move it OUT.
-    if (openTargets.some((target) => nearTarget(host.depth, target, view.spareSlack ?? STASIS_TARGET_SLACK))) {
+    if (openTargets.some((target) => nearTarget(host.depth, target))) {
       refuse(refused, host, "on-target", "already inside an open stasis target's window; pinning it beats re-rolling it");
       continue;
     }
@@ -1178,7 +1134,7 @@ export function planInduce(view: HoldView): InducePlan {
     }
     // Frontier PROGRESS: the band must reach strictly past our deepest
     // standing agent, or a re-roll cannot extend the conquest at all — it
-    // only shuffles rows we already reach, which is the retired pump.
+    // only shuffles rows we already reach.
     if (host.depth !== undefined && bandDeepest(host.difficulty!) > deepestCovered) {
       frontierPool.push(host);
       continue;
@@ -1291,9 +1247,8 @@ export function planInduce(view: HoldView): InducePlan {
       );
       return false;
     }
-    const pusherCap = view.maxPushersPerTarget ?? pushers.length;
     let admitted = false;
-    for (const pusher of pushers.slice(0, Math.max(1, pusherCap))) {
+    for (const pusher of pushers) {
       if (neededThreads <= 0) break;
       // Threads come from the PUSHER's remaining pool: the charge is linear
       // in the calling script's threads and the 6 s wait is constant. Capped
@@ -1336,17 +1291,11 @@ export function planInduce(view: HoldView): InducePlan {
   // not to spend the LEFTOVER pushers racing the next — a landing is a
   // uniform re-roll inside the band, and at depth 36 minting that last
   // bottom-row vantage is the dominant term of the whole conquest. Pusher
-  // depletion is the limiter; `maxLabCandidates` caps it for the benchmark's
-  // single-candidate arm.
-  let labRaced = 0;
+  // depletion is the limiter.
   for (const host of labPool) {
-    if (labRaced >= (view.maxLabCandidates ?? Infinity)) {
-      refuse(refused, host, "push-covered", "the lab race is already fully staffed");
-      continue;
-    }
-    if (assign(host, "lab", (chosen, calls) =>
+    assign(host, "lab", (chosen, calls) =>
       `${(chosen.maxRam ?? 0)}GB at difficulty ${chosen.difficulty}, band reaches row ${bottom}`
-      + ` — ~${calls} calls`)) labRaced++;
+      + ` — ~${calls} calls`);
   }
   const seatCovered = new Set<number>();
   for (const host of seatPool) {
@@ -1363,27 +1312,17 @@ export function planInduce(view: HoldView): InducePlan {
   // re-roll into the band, so N carriers charging at once multiply the
   // per-wave chance of an actual landing — the same argument as the lab race,
   // and crossing an air gap is the trickiest hop of the whole conquest.
-  const ferried = new Map<number, number>();
   for (const host of ferryPool) {
     const band = ferryBandFor.get(host.hostname)!;
     const label = `${band[0]}-${band[band.length - 1]}`;
-    if ((ferried.get(band[0]!) ?? 0) >= (view.maxFerriesPerBand ?? Infinity)) {
-      refuse(refused, host, "push-covered", `the ferry race into rows ${label} is already fully staffed`);
-      continue;
-    }
-    if (assign(host, "ferry", (chosen, calls) =>
+    assign(host, "ferry", (chosen, calls) =>
       `${(chosen.maxRam ?? 0)}GB with a resident riding, band crosses the air gap into unconquered`
-      + ` rows ${label} — ~${calls} calls a roll`)) ferried.set(band[0]!, (ferried.get(band[0]!) ?? 0) + 1);
+      + ` rows ${label} — ~${calls} calls a roll`);
   }
-  let frontierPushed = 0;
   for (const host of frontierPool) {
-    if (frontierPushed >= (view.maxFrontierTargets ?? Infinity)) {
-      refuse(refused, host, "push-covered", "the pass's frontier push budget is spent");
-      continue;
-    }
-    if (assign(host, "frontier", (chosen, calls) =>
+    assign(host, "frontier", (chosen, calls) =>
       `${(chosen.maxRam ?? 0)}GB at depth ${chosen.depth}, expected landing ${chosen.difficulty! + 1}`
-      + ` — deeper on average; ~${calls} calls`)) frontierPushed++;
+      + ` — deeper on average; ~${calls} calls`);
   }
 
   // An evictee left standing is a bottom-row host like any other.

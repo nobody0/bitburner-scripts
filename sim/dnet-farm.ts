@@ -29,7 +29,7 @@ import {
   type StormContext,
   type Task,
 } from "../shared/strategy/dnet/plan.ts";
-import { planFarm, type FarmHost, type HunterElection } from "../shared/strategy/dnet/farm.ts";
+import { planFarm, type FarmHost } from "../shared/strategy/dnet/farm.ts";
 import {
   authenticateWaitMs,
   isLabyrinth,
@@ -60,7 +60,7 @@ const PHISH_GB = price(KIND_CALLS.phish);
 const CACHE_GB = price(KIND_CALLS.cache);
 const PROMOTE_GB = price(KIND_CALLS.promote);
 
-export interface FarmPolicy {
+export interface FarmScenario {
   name: string;
   /** Fire the storm when `planStorm` admits it (shipped) or never. */
   stormEnabled: boolean;
@@ -68,20 +68,15 @@ export interface FarmPolicy {
    *  lab is unfinished). False models the post-lab net. */
   labPresent?: boolean;
   charisma?: number;
-  /** `FarmInputs.hunterElection` — which sort elects the cache hunter. */
-  hunterElection?: HunterElection;
-  /** `FarmInputs.clearBudgetMs` — the grind-for-the-cache wall-clock budget. */
-  clearBudgetMs?: number;
-  /** `StormContext.phishOverlapMs` — gate 7's fire window. */
-  phishOverlapMs?: number;
 }
 
-export const SHIPPED_FARM: FarmPolicy = { name: "shipped", stormEnabled: true, labPresent: true };
+export const SHIPPED_FARM: FarmScenario = { name: "shipped", stormEnabled: true, labPresent: true };
 
 export interface FarmRun {
   caseId: string;
   policy: string;
   hours: number;
+  warmupHours: number;
   moneyEarned: number;
   moneyPerHour: number;
   /** Caches opened, all sources: phish `.d.cache`, block-clear rewards, and
@@ -117,15 +112,21 @@ const STORM_FIRE_MS = 1_000;
 
 export function runFarmCase(
   net: SpreadNet,
-  policy: FarmPolicy,
+  policy: FarmScenario,
   hours = DEFAULT_HOURS,
+  warmupHours = 1,
 ): FarmRun {
   const { system, world } = net;
   const labPresent = policy.labPresent ?? true;
   const netDepth = system.netDepth();
   const mutationEveryMs = mutationIntervalMs(netDepth, 15);
   const mutationCycles = 150 / netDepth + 1;
-  const capMs = hours * 3_600_000;
+  if (!Number.isFinite(hours) || hours <= 0) throw new Error(`hours must be positive, got ${hours}`);
+  if (!Number.isFinite(warmupHours) || warmupHours < 0) {
+    throw new Error(`warmupHours must be non-negative, got ${warmupHours}`);
+  }
+  const measurementStartsAt = warmupHours * 3_600_000;
+  const capMs = (warmupHours + hours) * 3_600_000;
   const labHost = [...system.hosts.values()]
     .find((host) => isLabyrinth(host.hostname, host.modelId))?.hostname;
 
@@ -162,6 +163,7 @@ export function runFarmCase(
     caseId: `farm:${netDepth}`,
     policy: policy.name,
     hours,
+    warmupHours,
     moneyEarned: 0,
     moneyPerHour: 0,
     cachesOpened: 0,
@@ -323,7 +325,7 @@ export function runFarmCase(
     agents.set("darkweb", {});
   }
 
-  const moneyStart = world.player.money;
+  let moneyStart = world.player.money;
 
   const observationSweep = (): void => {
     const reports: ReportHost[] = [];
@@ -359,7 +361,7 @@ export function runFarmCase(
         expiry: expiry(),
       });
       let planted = 0;
-      for (const plant of planSpread(candidates, DEFAULT_SPREAD_LIMITS, clock).plant) {
+      for (const plant of planSpread(candidates, DEFAULT_SPREAD_LIMITS).plant) {
         if (plant.host === walkerHost || agents.has(plant.host) || !truth(plant.host)) continue;
         agents.set(plant.host, plant.bootstrapReclaim === true ? { bootstrap: true } : {});
         fold([
@@ -411,8 +413,6 @@ export function runFarmCase(
       lastPhishCacheAt,
       openLabCache: false,
       seedHunt,
-      ...(policy.hunterElection !== undefined ? { hunterElection: policy.hunterElection } : {}),
-      ...(policy.clearBudgetMs !== undefined ? { clearBudgetMs: policy.clearBudgetMs } : {}),
     });
 
     // The storm, through its own gates.
@@ -442,7 +442,6 @@ export function runFarmCase(
         budgetRefusedBlocks: new Set(
           farmPlan.refused.filter((r) => r.why === "reclaim-not-needed").map((r) => r.host),
         ),
-        ...(policy.phishOverlapMs !== undefined ? { phishOverlapMs: policy.phishOverlapMs } : {}),
       };
       const storm = planStorm(views, ctx);
       if (storm.fire) {
@@ -588,6 +587,19 @@ export function runFarmCase(
   let derives = 0;
   let nextDebugAt = 10 * 60_000;
   const wallStart = Date.now();
+  let measurementStarted = warmupHours === 0;
+
+  const beginMeasurement = (): void => {
+    measurementStarted = true;
+    moneyStart = world.player.money;
+    run.cachesOpened = 0;
+    run.phishCaches = 0;
+    run.stormsFired = 0;
+    run.seedsSighted = 0;
+    run.crackedTotal = 0;
+    run.walkerInterruptions = 0;
+    run.walkerAttempts = 0;
+  };
 
   while (clock < capMs) {
     iterations++;
@@ -607,12 +619,17 @@ export function runFarmCase(
       deriveDue = false;
     }
     let next = Math.min(nextMutationAt, nextWalkerAttemptAt);
+    if (!measurementStarted) next = Math.min(next, measurementStartsAt);
     if (deriveDue) next = Math.min(next, lastDeriveAt + DERIVE_COALESCE_MS);
     for (const agent of agents.values()) {
       if (agent.job && agent.job.doneAt < next) next = agent.job.doneAt;
     }
     clock = Math.min(next, capMs);
     if (clock >= capMs) break;
+    // Keep the warmed world and RNG position, but measure only the steady
+    // window. Events exactly on the boundary count, so reset before settling
+    // walker, mutation, and job completions at this clock instant.
+    if (!measurementStarted && clock >= measurementStartsAt) beginMeasurement();
     if (clock >= nextWalkerAttemptAt) {
       run.walkerAttempts++;
       nextWalkerAttemptAt = clock + walkerAuthMs();

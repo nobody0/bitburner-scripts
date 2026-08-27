@@ -141,19 +141,13 @@ export interface FarmInputs {
    *  actually mint one (30+ minutes since the last storm) — otherwise the lift
    *  buys rolls that cannot pay. */
   seedHunt?: boolean;
-  /** Which sort elects the cache hunter — see `electCacheHunter`. Absent means
-   *  the shipped default. */
-  hunterElection?: HunterElection;
   /** ONE host whose block is ground by EVERY able grinder at once — self plus
    *  each adjacent credentialed neighbour with room, one task per vantage.
    *  `getRamBlockRemoved` is linear in threads and the charge is per call, so
    *  N grinders clear it ~N× faster; the same per-vantage treatment `induce`
    *  has always had. Meant for the lab candidate, whose block is the last gate
    *  before the walker starts — the budget refusal does not apply to it. */
-  gangReclaim?: string;
-  /** Override of `RECLAIM_CLEAR_BUDGET_MS`, the wall clock we will spend
-   *  clearing a block purely for the `.cache` at its end. A benchmark dial. */
-  clearBudgetMs?: number;
+  walkerCandidate?: string;
 }
 
 export interface FarmTask {
@@ -260,33 +254,22 @@ export function phishWindowOpen(inputs: Pick<FarmInputs, "now" | "lastPhishCache
  * the window is open instead of being diverted to a higher-EV promote. One
  * host is pinned to the cache roll; the rest optimise their own earn. The
  * deepest resident is elected because depth is also the money term
- * (`0.1 + depth * 0.05`), so if only one host is going to roll it should be the
- * one whose calls pay most. Ties by free RAM, then by name, so the election is
- * deterministic and does not move under the panel.
+ * (`0.1 + depth * 0.05`). Free RAM, then name, break ties so the election is
+ * deterministic.
  *
  * `eligible` is how a caller says which hosts can actually SPEND the window: a
  * hunter with no room for a `phishingAttack` is a host pinned to a roll it
  * cannot make, leaving nobody guaranteed to chase the cache.
- *
- * `election` picks the sort: `"capacity"` elects the ROOMIEST host, because
- * `phishCacheChance` is linear in threads while depth only scales the money
- * term — the hunter exists for the cache, so its seat should maximise cache
- * rate. `"depth"` is the previous rule, kept for the standing benchmark
- * comparison. */
-export type HunterElection = "capacity" | "depth";
-
+ */
 export function electCacheHunter(
   hosts: readonly FarmHost[],
   eligible?: (host: FarmHost) => boolean,
-  election: HunterElection = "depth",
 ): string | undefined {
   const pool = hosts.filter((host) =>
     host.goneAt === undefined && host.isLab !== true && (eligible?.(host) ?? true));
   if (pool.length === 0) return undefined;
   const best = [...pool].sort((a, b) => {
-    const primary = election === "capacity"
-      ? b.freeGb - a.freeGb || compareDepthDesc(a.depth, b.depth)
-      : compareDepthDesc(a.depth, b.depth) || b.freeGb - a.freeGb;
+    const primary = compareDepthDesc(a.depth, b.depth) || b.freeGb - a.freeGb;
     if (primary !== 0) return primary;
     return a.host < b.host ? -1 : a.host > b.host ? 1 : 0;
   })[0]!;
@@ -327,7 +310,7 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
     host.goneAt === undefined && host.isLab !== true && host.freeGb >= inputs.gbPerThread.phish);
   const preferredHunters = eligibleHunters.filter((host) => (host.difficulty ?? -Infinity) > 3);
   const hunterPool = preferredHunters.length > 0 ? preferredHunters : eligibleHunters;
-  const hunter = electCacheHunter(hunterPool, undefined, inputs.hunterElection);
+  const hunter = electCacheHunter(hunterPool);
   const avoidingLowDifficulty = windowOpen && preferredHunters.length > 0;
   const economics = inputs.economics ?? {};
   const moneyWorthSec = economics.moneyWorthSec ?? FARM_NOMINAL_CHANNEL_WORTH_SEC;
@@ -461,7 +444,7 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
     // starts, so EVERY able grinder takes it at once — one task per vantage,
     // deduped per vantage by the queue, budget refusal not consulted. The
     // in-flight set still suppresses re-filing per vantage downstream.
-    if (host.host === inputs.gangReclaim && blocked > 0 && host.difficulty !== undefined) {
+    if (host.host === inputs.walkerCandidate && blocked > 0 && host.difficulty !== undefined) {
       const grinders: { from?: string; threads: number }[] = [];
       if (selfThreads >= 1) grinders.push({ threads: selfThreads });
       if (host.hasCredential === true) {
@@ -558,7 +541,7 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
       );
     } else if (
       host.freeGb >= inputs.wantedGb
-      && forecast.clearMs > (inputs.clearBudgetMs ?? RECLAIM_CLEAR_BUDGET_MS)
+      && forecast.clearMs > RECLAIM_CLEAR_BUDGET_MS
       && inputs.seedHunt !== true
     ) {
       // Two ways a grind earns its wall clock, and this is the refusal when

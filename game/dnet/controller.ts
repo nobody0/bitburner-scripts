@@ -390,7 +390,7 @@ export async function main(ns: NS): Promise<void> {
     // frees the allocation only after, so the victim's `armRespawn` spawns its
     // successor on a clear Netscript slot.
     agent.release();
-    killPid(entry.hostname, agent.pid);
+    killPid(agent.pid);
   };
 
   /** Settle a STAGED order that never ran (retired before pickup), by running
@@ -436,7 +436,7 @@ export async function main(ns: NS): Promise<void> {
    * (host deleted) counts as gone. Fire and forget: nobody reads the result, so
    * the rejection is swallowed rather than left to take the controller down.
    * `kill` on a pid that is already gone is free, so there is no guard. */
-  const killPid = (hostname: string, pid: number | undefined): void => {
+  const killPid = (pid: number | undefined): void => {
     if (pid === undefined || pid <= 0 || pid === ns.pid) return;
     void nsp("kill", pid).catch(() => { /* host gone */ });
   };
@@ -462,7 +462,7 @@ export async function main(ns: NS): Promise<void> {
       // A prober outlives the agent beside it (a finished `pin` leaves one
       // standing alone). Kill it rather than forgetting its pid, so the
       // re-plant starts from an empty host instead of around a stranded 1.8 GB.
-      killPid(hostname, entry.prober?.pid);
+      killPid(entry.prober?.pid);
       entry.prober = undefined;
       entry.bootstrap = undefined;
     }
@@ -694,7 +694,7 @@ export async function main(ns: NS): Promise<void> {
     const entry = hosts.get(host);
     const probe = entry?.prober;
     if (probe === undefined || probe.pid <= 0) return;
-    killPid(host, probe.pid);
+    killPid(probe.pid);
     entry!.prober = { ...probe, pid: 0 };
   };
 
@@ -948,16 +948,15 @@ export async function main(ns: NS): Promise<void> {
   };
 
   // --- projections (HoldHost / FarmHost from the flat entries) --------------
-  /** The host with the single walk running or staged, in map order. */
+  /** The host with the single walk running or staged. */
   const walkVantage = (): string | undefined => {
-    let vantage: string | undefined;
     for (const entry of hosts.values()) {
       const active = entry.agent?.order;
       if (active?.kind === "walk" || entry.staged?.some((order) => order.kind === "walk")) {
-        vantage = entry.hostname;
+        return entry.hostname;
       }
     }
-    return vantage;
+    return undefined;
   };
 
   const projectHoldHosts = (at: number, expiry: ExpiryOpts): HoldHost[] => {
@@ -1110,7 +1109,6 @@ export async function main(ns: NS): Promise<void> {
       migrationCharge,
       aboutToCrack: aboutToCrackNow(at),
       reclaimGb: budgets["reclaim"],
-      vantageScoring: "totalTime",
     });
     labCandidateHost = plan.labCandidate;
     if (plan.charismaNeeded !== undefined) charismaNeeded = Math.max(charismaNeeded ?? 0, plan.charismaNeeded);
@@ -1566,7 +1564,7 @@ export async function main(ns: NS): Promise<void> {
    * saying a process is coming, and no process. `processInbound` asks the
    * engine, so the host rejoins the plant pool on the very next pass rather
    * than after a window lapses. */
-  const reapGhostLaunches = (at: number): void => {
+  const reapGhostLaunches = (): void => {
     for (const entry of hosts.values()) {
       const inbound = entry.inbound;
       if (inbound === undefined || entry.agent !== undefined) continue;
@@ -1611,7 +1609,7 @@ export async function main(ns: NS): Promise<void> {
   const fileWork = async (at: number): Promise<Task[]> => {
     // FIRST: one consistent answer about what is running, for the whole pass.
     await refreshLiveness();
-    reapGhostLaunches(at);
+    reapGhostLaunches();
     releaseStranded();
     await drainBootstrapDone(at);
     await drainProbes(at);
@@ -1668,7 +1666,7 @@ export async function main(ns: NS): Promise<void> {
       ...(farmEconomics !== undefined ? { economics: farmEconomics } : {}),
       ...(seedHunt ? { seedHunt: true } : {}),
       ...(holdPlan.labCandidate !== undefined && !labWalkedNow
-        ? { gangReclaim: holdPlan.labCandidate }
+        ? { walkerCandidate: holdPlan.labCandidate }
         : {}),
     });
     const farmAdmitted: Record<string, number> = {};
@@ -1684,7 +1682,7 @@ export async function main(ns: NS): Promise<void> {
     for (const candidate of spreadCandidates) {
       if (candidate.host === holdPlan.labCandidate && stasisLinked.has(candidate.host)) { candidate.omitProber = true; candidate.reclaimOnly = true; }
     }
-    const plan = planSpread(spreadCandidates, SPREAD_LIMITS, at);
+    const plan = planSpread(spreadCandidates, SPREAD_LIMITS);
     assignPlantVantages(plan.plant, remoteExec, at, expiry);
     // A host `candidatesFrom` could not route to never reaches `planSpread`, so
     // it would otherwise be absent from the panel entirely — cracked, empty and
@@ -2078,7 +2076,7 @@ export async function main(ns: NS): Promise<void> {
       // Whichever prober reports most recently owns the slot. Retire the prior
       // pid BEFORE publishing the replacement, so a repair launch racing a
       // merely-late process still converges to one prober.
-      if (entry.prober?.pid !== pid) killPid(host, entry.prober?.pid);
+      if (entry.prober?.pid !== pid) killPid(entry.prober?.pid);
       entry.prober = { neighbours: [...neighbours], at, pid, epoch: rendezvous.mutationEpoch };
       if (refresh !== undefined && entry.probeRefresh === refresh) {
         entry.probeRefresh = undefined;
@@ -2103,7 +2101,7 @@ export async function main(ns: NS): Promise<void> {
       // and a late arrival cannot retract a newer one's `ns` on its way out
       // (its `atExit` compares identity).
       if (entry.prober !== undefined && entry.prober.pid > 0 && entry.prober.pid !== pid) {
-        killPid(host, entry.prober.pid);
+        killPid(entry.prober.pid);
       }
       entry.ns = borrowed;
       probeThrough(entry, pid, Date.now(), refresh);
@@ -2452,7 +2450,7 @@ export async function main(ns: NS): Promise<void> {
     entry.probeRefresh?.settle(undefined);
     entry.probeRefresh = undefined;
     const probe = entry.prober;
-    if (probe !== undefined && probe.pid > 0 && probe.pid !== ns.pid) killPid(entry.hostname, probe.pid);
+    if (probe !== undefined && probe.pid > 0 && probe.pid !== ns.pid) killPid(probe.pid);
   }
   TELEMETRY: if (__TELEMETRY__ && tel) tel.flush();
 }

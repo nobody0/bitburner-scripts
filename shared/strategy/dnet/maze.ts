@@ -318,17 +318,13 @@ export function refuseEdge(field: LabField, at: Cell, direction: Direction): Lab
   return { ...field, slots: { ...field.slots, [key([at[0] + dx, at[1] + dy])]: false } };
 }
 
-/** Fixed policy selected by the paired corpus. These are implementation
- * details, not runtime tuning surface: changing them requires re-running the
- * benchmark and updating its committed regression ceiling. */
+/** Fixed implementation values covered by the committed regression corpus. */
 const UNKNOWN_EDGE_COST = 2.5;
 const RADAR_DOOR_COVER = 3;
 
 /** The probe that opens every walk. The position is unknown until the first
- * response, so the first move is blind either way — but where the DFS probed
- * north (a guaranteed wall from the top row), a probe TOWARD the exit's corner
- * is a free step in the right direction whenever it happens to land, and the
- * paired benchmark prefers east to south. */
+ * response, so the first move is blind. North is a guaranteed wall from the
+ * top row; east points toward the exit corner and can be a useful free step. */
 export const LAB_FIRST_PROBE: Direction = "east";
 
 export type LabPlan =
@@ -339,9 +335,9 @@ export type LabPlan =
     note: string;
     /** The A* cost of the whole plan this move opens, in authentications — the
      *  planner's own honest estimate of what is left, priced with unknown
-     *  ground at `unknownCost`. Published as the walk's progress readout: it is
-     *  the only forward-looking number in the walk that is not a guess pulled
-     *  from a benchmark average. */
+     *  ground at the fixed premium. Published as the walk's progress readout;
+     *  it is the only forward-looking number in the walk that is not a guess
+     *  pulled from a benchmark average. */
     believedCost: number;
   }
   | { kind: "radar"; field: LabField; note: string }

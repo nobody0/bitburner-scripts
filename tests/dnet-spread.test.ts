@@ -43,7 +43,7 @@ describe("every refusal to spread is named", () => {
   ] satisfies readonly [RefusalReason, Partial<SpreadCandidate> & { host: string }, readonly string[]][])(
     "%s is reported with its actionable diagnostic",
     (why, input, details) => {
-      const plan = planSpread([candidate(input)], DEFAULT_SPREAD_LIMITS, NOW);
+      const plan = planSpread([candidate(input)], DEFAULT_SPREAD_LIMITS);
       expect(plan.plant).toEqual([]);
       expect(plan.refused[0]!.why).toBe(why);
       for (const detail of details) expect(plan.refused[0]!.detail).toContain(detail);
@@ -57,7 +57,7 @@ describe("every refusal to spread is named", () => {
     // the lab candidate, whose block gates the whole walk.
     const plan = planSpread([
       candidate({ host: "blocked", usableRam: 5.3, blockedRam: 10 }),
-    ], DEFAULT_SPREAD_LIMITS, NOW);
+    ], DEFAULT_SPREAD_LIMITS);
     expect(plan.plant).toEqual([]);
     expect(plan.refused[0]?.why).toBe("not-enough-ram");
   });
@@ -69,11 +69,11 @@ describe("every refusal to spread is named", () => {
     // whole point is that its host never needs the spawn safety net.
     const managed = planSpread([
       candidate({ host: "pinned", usableRam: 3.5, blockedRam: 10, stasisManaged: true }),
-    ], DEFAULT_SPREAD_LIMITS, NOW);
+    ], DEFAULT_SPREAD_LIMITS);
     expect(managed.plant.map((p) => p.host)).toEqual(["pinned"]);
     const ordinary = planSpread([
       candidate({ host: "plain", usableRam: 3.5, blockedRam: 10 }),
-    ], DEFAULT_SPREAD_LIMITS, NOW);
+    ], DEFAULT_SPREAD_LIMITS);
     expect(ordinary.plant).toEqual([]);
     expect(ordinary.refused[0]?.why).toBe("not-enough-ram");
   });
@@ -81,14 +81,14 @@ describe("every refusal to spread is named", () => {
   test("an ordinary host that fits the resident and prober uses the normal plant", () => {
     const plan = planSpread([
       candidate({ host: "roomy", usableRam: 5.4, blockedRam: 10 }),
-    ], DEFAULT_SPREAD_LIMITS, NOW);
+    ], DEFAULT_SPREAD_LIMITS);
     expect(plan.plant[0]?.bootstrapReclaim).toBeUndefined();
   });
 
   test("a pinned lab candidate reclaims without a prober even when a resident would fit", () => {
     const plan = planSpread([
       candidate({ host: "walker", usableRam: 12, blockedRam: 4, reclaimOnly: true, omitProber: true }),
-    ], DEFAULT_SPREAD_LIMITS, NOW);
+    ], DEFAULT_SPREAD_LIMITS);
     expect(plan.plant[0]).toEqual(expect.objectContaining({
       bootstrapReclaim: true,
       bootstrapThreads: 4,
@@ -104,9 +104,9 @@ describe("every refusal to spread is named", () => {
     // that emptied for an ordinary reason: a managed stasis handoff, a kind
     // that hands its host back, an agent chaining out of its last order.
     const emptied = candidate({ host: "replant-me" });
-    expect(planSpread([emptied], DEFAULT_SPREAD_LIMITS, NOW).plant.map((p) => p.host))
+    expect(planSpread([emptied], DEFAULT_SPREAD_LIMITS).plant.map((p) => p.host))
       .toEqual(["replant-me"]);
-    expect(planSpread([emptied], DEFAULT_SPREAD_LIMITS, NOW).refused).toEqual([]);
+    expect(planSpread([emptied], DEFAULT_SPREAD_LIMITS).refused).toEqual([]);
   });
 
   test("nothing is refused for being far away, or for being the third one", () => {
@@ -115,7 +115,7 @@ describe("every refusal to spread is named", () => {
     // can reach gets an agent, at any depth, unconditionally. A refusal that can
     // never fire tells the panel reader a limit is in force when it is not, so
     // this asserts the deletion rather than an unused name.
-    const deep = planSpread([candidate({ host: "deep", depth: 39 })], DEFAULT_SPREAD_LIMITS, NOW);
+    const deep = planSpread([candidate({ host: "deep", depth: 39 })], DEFAULT_SPREAD_LIMITS);
     expect(deep.plant.map((entry) => entry.host)).toEqual(["deep"]);
     expect(deep.refused).toEqual([]);
 
@@ -123,13 +123,13 @@ describe("every refusal to spread is named", () => {
     // FIT is a queue-depth fact, enforced by the controller's
     // MAX_QUEUED_PER_HOST, not a spreading policy.
     const many = Array.from({ length: 5 }, (_, i) => candidate({ host: `n${i}`, from: "darkweb" }));
-    const fanned = planSpread(many, DEFAULT_SPREAD_LIMITS, NOW);
+    const fanned = planSpread(many, DEFAULT_SPREAD_LIMITS);
     expect(fanned.plant).toHaveLength(5);
     expect(fanned.refused).toEqual([]);
 
     // ...and there is no total either, however many are already live.
     const spread = Array.from({ length: 40 }, (_, i) => candidate({ host: `n${i}`, from: `src${i}` }));
-    expect(planSpread(spread, DEFAULT_SPREAD_LIMITS, NOW).plant).toHaveLength(40);
+    expect(planSpread(spread, DEFAULT_SPREAD_LIMITS).plant).toHaveLength(40);
   });
 
   test("every surviving refusal is a fact about the host in front of us", () => {
@@ -138,11 +138,11 @@ describe("every refusal to spread is named", () => {
     // what is NOT here — there is no refusal for having been planted before.
     const named = new Set<string>();
     for (const plan of [
-      planSpread([candidate({ host: "a", goneAt: NOW - 1 })], DEFAULT_SPREAD_LIMITS, NOW),
-      planSpread([candidate({ host: "b", agentAlive: true })], DEFAULT_SPREAD_LIMITS, NOW),
-      planSpread([candidate({ host: "c", hasCredential: false })], DEFAULT_SPREAD_LIMITS, NOW),
-      planSpread([candidate({ host: "d", usableRam: undefined })], DEFAULT_SPREAD_LIMITS, NOW),
-      planSpread([candidate({ host: "e", usableRam: 0.5 })], DEFAULT_SPREAD_LIMITS, NOW),
+      planSpread([candidate({ host: "a", goneAt: NOW - 1 })], DEFAULT_SPREAD_LIMITS),
+      planSpread([candidate({ host: "b", agentAlive: true })], DEFAULT_SPREAD_LIMITS),
+      planSpread([candidate({ host: "c", hasCredential: false })], DEFAULT_SPREAD_LIMITS),
+      planSpread([candidate({ host: "d", usableRam: undefined })], DEFAULT_SPREAD_LIMITS),
+      planSpread([candidate({ host: "e", usableRam: 0.5 })], DEFAULT_SPREAD_LIMITS),
     ]) {
       for (const refusal of plan.refused) named.add(refusal.why);
     }
@@ -157,15 +157,13 @@ describe("every refusal to spread is named", () => {
 
   test("a plant that failed to launch is re-derived at once, never held off", () => {
     // There is NO hold. Root, a credential and no agent is the whole rule, and
-    // a failed launch does not subtract from it: the next pass plants again.
-    // A hold here only ever meant "a real bug is now invisible for N seconds".
-    const failed = candidate({ host: "refused-me" });
-    expect(planSpread([failed], DEFAULT_SPREAD_LIMITS, NOW).plant).toHaveLength(1);
-    expect(planSpread([failed], DEFAULT_SPREAD_LIMITS, NOW + 1).plant).toHaveLength(1);
+    // no failed-launch timestamp can subtract from it. A hold here only ever
+    // meant "a real bug is now invisible for N seconds".
+    expect(planSpread([candidate({ host: "refused-me" })], DEFAULT_SPREAD_LIMITS).plant).toHaveLength(1);
   });
 
   test("an agent already standing there is not replaced", () => {
-    const plan = planSpread([candidate({ host: "occupied", agentAlive: true })], DEFAULT_SPREAD_LIMITS, NOW);
+    const plan = planSpread([candidate({ host: "occupied", agentAlive: true })], DEFAULT_SPREAD_LIMITS);
     expect(plan.refused[0]!.why).toBe("agent-alive");
   });
 });
@@ -185,7 +183,6 @@ describe("spreading prefers the deep and the roomy, deterministically", () => {
         candidate({ host: "deep-big", depth: 3, usableRam: 32, from: "c" }),
       ],
       DEFAULT_SPREAD_LIMITS,
-      NOW,
     );
     expect(plan.plant.map((entry) => entry.host)).toEqual(["deep-big", "shallow"]);
   });
@@ -200,7 +197,6 @@ describe("spreading prefers the deep and the roomy, deterministically", () => {
         candidate({ host: "deep", depth: 7, from: "c" }),
       ],
       DEFAULT_SPREAD_LIMITS,
-      NOW,
     );
     expect(plan.plant.map((entry) => entry.host)).toEqual(["deep", "shallow", "nowhere"]);
   });
@@ -211,8 +207,8 @@ describe("spreading prefers the deep and the roomy, deterministically", () => {
       candidate({ host: "a", from: "y" }),
       candidate({ host: "c", from: "z" }),
     ];
-    const forward = planSpread(hosts, DEFAULT_SPREAD_LIMITS, NOW).plant.map((h) => h.host);
-    const backward = planSpread([...hosts].reverse(), DEFAULT_SPREAD_LIMITS, NOW).plant.map((h) => h.host);
+    const forward = planSpread(hosts, DEFAULT_SPREAD_LIMITS).plant.map((h) => h.host);
+    const backward = planSpread([...hosts].reverse(), DEFAULT_SPREAD_LIMITS).plant.map((h) => h.host);
     expect(forward).toEqual(backward);
   });
 });
@@ -314,7 +310,7 @@ describe("remote recovery candidates", () => {
     });
     for (const host of ["pinned", "mortal"]) {
       const c = cands.find((entry) => entry.host === host)!;
-      expect(planSpread([c], DEFAULT_SPREAD_LIMITS, NOW).plant).toHaveLength(1);
+      expect(planSpread([c], DEFAULT_SPREAD_LIMITS).plant).toHaveLength(1);
     }
   });
 });
@@ -920,7 +916,7 @@ describe("a plant task is a FRONTIER, and `host` is only its name", () => {
     standing: new Set(["darkweb"]),
     vault: new Set(["a.corp", "b.corp", "c.corp"]),
   });
-  const plan = planSpread(plantable, DEFAULT_SPREAD_LIMITS, at);
+  const plan = planSpread(plantable, DEFAULT_SPREAD_LIMITS);
 
   test("one vantage's whole frontier is one task", () => {
     expect(plan.plant.map((entry) => entry.host).sort()).toEqual(["a.corp", "b.corp", "c.corp"]);

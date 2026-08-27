@@ -10,7 +10,7 @@ import { conclusiveAttempt } from "./courier.ts";
 import type { HoldTask } from "./hold.ts";
 import { compareQueuedDnetWork } from "./priority.ts";
 import { JOBS, isTaskKind, priorityOf, type TaskKind } from "./jobs.ts";
-import { isLabyrinth, STORM_PHISH_OVERLAP_MS, STORM_QUIET_MS } from "./rates.ts";
+import { STORM_PHISH_OVERLAP_MS, STORM_QUIET_MS } from "./rates.ts";
 
 /** What there is to do out there, and who is doing it.
  *
@@ -162,9 +162,6 @@ export interface DeriveOptions {
   /** Work a live process is already doing, keyed by TARGET. A `(kind, target)`
    *  pair in here emits no task. Data only, never a password. */
   inFlight?: ReadonlyMap<string, readonly { from: string; kind: TaskKind }[]>;
-  /** Depth-rows of head start a lab-ADJACENT host's cracking work gets — it is
-   *  the future walker's vantage. 0 (the default) is today's pure-depth rank. */
-  labAdjacentBonus?: number;
 }
 
 /** How far a solve that needs its oracle, and a deliberate probe, sort behind
@@ -274,11 +271,6 @@ export function deriveTasks(
   /** Freshness applied once per host; sub-reads are plain field reads. */
   const views = new Map<string, DnetHost>();
   for (const host of hosts.values()) views.set(host.hostname, planningView(host, now, expiry));
-  /** The labyrinth(s) among the views, for the adjacency bonus. */
-  const labNames = new Set<string>();
-  for (const view of views.values()) {
-    if (isLabyrinth(view.hostname, view.modelId)) labNames.add(view.hostname);
-  }
   const netHasUncrackedMovable = [...views.values()].some((candidate) =>
     candidate.goneAt === undefined
     && candidate.isStationary !== true
@@ -298,8 +290,6 @@ export function deriveTasks(
    * cancels an authenticate. */
   const attemptRanking: {
     task: Task;
-    /** Lab-adjacent first when the policy asks for it (0 by default). */
-    lab: boolean;
     /** Higher is better: `difficulty / calls / requiredCharisma`. Difficulty is
      * what the host is WORTH; calls and charisma are what it costs. A rough
      * proxy for real duration and deliberately so — `authenticateWaitMs` needs
@@ -336,13 +326,7 @@ export function deriveTasks(
     // `darkweb` at -1 lands there too, and belongs there — it is a shop, not a
     // vantage worth racing to.
     //
-    // The lab-adjacency bonus (0 by default) pulls a host whose believed
-    // neighbours include the labyrinth ahead of its depth peers: it is the
-    // future walker's vantage, and cracking it first is what starts the walk.
-    const labAdjacent = (opts.labAdjacentBonus ?? 0) !== 0
-      && (host.neighbours ?? []).some((name) => labNames.has(name));
-    const rank = (host.depth === undefined ? 1 : -host.depth)
-      - (labAdjacent ? opts.labAdjacentBonus! : 0);
+    const rank = host.depth === undefined ? 1 : -host.depth;
     // The heartbleed gate. An UNKNOWN requirement passes: the refused call's own
     // describeHost report is what teaches us the number, so the first try is
     // the action's own report.
@@ -447,7 +431,6 @@ export function deriveTasks(
         });
         attemptRanking.push({
           task: tasks[tasks.length - 1]!,
-          lab: labAdjacent,
           // A guess is ONE authenticate with nothing to lose by being wrong,
           // which is what a flat guess bonus was for. Under this score it needs no
           // bonus: one call is the fewest there is.
@@ -512,7 +495,6 @@ export function deriveTasks(
         });
         attemptRanking.push({
           task: tasks[tasks.length - 1]!,
-          lab: labAdjacent,
           // A probe buys information rather than a vantage, and an oracle solve
           // costs a conversation — both sort behind work that can open a host
           // outright, which is the job the surcharges used to do.
@@ -578,8 +560,7 @@ export function deriveTasks(
   // best-scoring attempt gets the smallest offset. The offsets stay inside the
   // attempt band (0) and well clear of the next one (bleed at 100).
   attemptRanking.sort((a, b) =>
-    Number(b.lab) - Number(a.lab)
-    || b.score - a.score
+    b.score - a.score
     || b.depth - a.depth
     || b.difficulty - a.difficulty
     || b.maxRam - a.maxRam
@@ -810,12 +791,7 @@ export const DEFAULT_SPREAD_LIMITS: SpreadLimits = {
   bootstrapRamGb: 2.6,
 };
 
-/** Every one of them a fact about the host in front of us.
- *
- * `too-deep`, `fan-out` and `agent-cap` were deleted rather than retired: they
- * were the three invented budgets, and a refusal name that can never fire is a
- * worse lie than no name at all — it tells the panel reader a limit is in force
- * when the code has stopped enforcing one. */
+/** Every refusal is a fact about the host in front of us. */
 export type RefusalReason =
   | "gone"
   | "agent-alive"
@@ -867,7 +843,6 @@ export interface SpreadPlan {
 export function planSpread(
   candidates: readonly SpreadCandidate[],
   limits: SpreadLimits,
-  now: number,
 ): SpreadPlan {
   const plant: SpreadCandidate[] = [];
   const refused: Refusal[] = [];
@@ -1132,10 +1107,6 @@ export interface StormContext {
    *  happens AND the fire never fires. Built from the same `FarmPlan`'s
    *  refusals, so the two rules cannot disagree. */
   budgetRefusedBlocks?: ReadonlySet<string>;
-  /** Override of `STORM_PHISH_OVERLAP_MS`, gate 7's fire window. A benchmark
-   *  dial: 30 s of a 180 s cooldown is a 17% duty cycle that must coincide
-   *  with every other gate being green. */
-  phishOverlapMs?: number;
 }
 
 export type StormRefusalReason =
@@ -1259,7 +1230,7 @@ export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormP
   // 7. Fire into the dead phish window, not across an open one. Never having
   // seen a `.d.cache` reads as open — the conservative side, and it corrects
   // itself within one cache.
-  const overlapMs = ctx.phishOverlapMs ?? STORM_PHISH_OVERLAP_MS;
+  const overlapMs = STORM_PHISH_OVERLAP_MS;
   if (ctx.lastPhishCacheAt === undefined || ctx.now - ctx.lastPhishCacheAt > overlapMs) {
     refuse(
       holder.hostname,
