@@ -41,6 +41,8 @@ if (selected.length === 0) {
 }
 
 const minutes = (ms: number | undefined): string => ms === undefined ? "-" : (ms / 60_000).toFixed(2);
+const ratio = (numerator: number, denominator: number): string =>
+  denominator === 0 ? "-" : (numerator / denominator).toFixed(3);
 
 for (const tier of selected) {
   const seedCount = seedOverride ?? tier.defaultSeeds;
@@ -69,5 +71,36 @@ for (const tier of selected) {
     "mean cracked": summary.meanCracked.toFixed(1),
     "planted peak": summary.meanPlantedPeak.toFixed(1),
     "wall time (s)": ((performance.now() - startedAt) / 1000).toFixed(1),
+  }]);
+  const total = <K extends keyof SpreadRun>(key: K): number =>
+    runs.reduce((sum, run) => sum + Number(run[key]), 0);
+  const waves = total("induceWaves");
+  const occupiedRestarts = total("occupiedRestarts");
+  const recovered = total("restartRecovered");
+  const recoveredLater = recovered - total("restartImmediateReplants");
+  const lostGbMs = total("restartLostGbMs");
+  const hypotheticalReserveGbMs = total("hypotheticalRestartReserveGbMs");
+  console.table([{
+    "induce waves": waves,
+    "calls/wave": ratio(total("induceCalls"), waves),
+    relocations: total("induceMoves"),
+    "charge closes/wave": ratio(total("completedInduceWaves"), waves),
+    "relocations/wave": ratio(total("induceMoves"), waves),
+    "deeper landings/wave": ratio(total("deeperInduceWaves"), waves),
+    "direct progress/wave": ratio(total("usefulInduceWaves"), waves),
+    "occupied restarts": occupiedRestarts,
+    "seen immediately": `${total("restartImmediatelyVisible")}/${occupiedRestarts}`,
+    "lost immediately": `${total("restartLost")}/${occupiedRestarts}`,
+    "same-tick replants": total("restartImmediateReplants"),
+    "lost but cascaded same tick": total("restartLostSameTickReplants"),
+    "recovered later": recoveredLater,
+    unrecovered: total("restartUnrecovered"),
+    "mean delayed recovery (s)": recoveredLater === 0
+      ? "-"
+      : (total("restartRecoveryMs") / recoveredLater / 1000).toFixed(1),
+    "max recovery (s)": (Math.max(...runs.map((run) => run.restartMaxRecoveryMs)) / 1000).toFixed(1),
+    "stranded GB-h": (lostGbMs / 3_600_000).toFixed(2),
+    "hypothetical 2GB reserve GB-h": (hypotheticalReserveGbMs / 3_600_000).toFixed(2),
+    "stranded/hypothetical reserve": ratio(lostGbMs, hypotheticalReserveGbMs),
   }]);
 }

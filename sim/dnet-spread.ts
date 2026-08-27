@@ -181,8 +181,34 @@ export interface SpreadRun {
   /** Migration charges spent, hosts moved by them, and hosts a full-band
    *  re-roll deleted. */
   induceCalls: number;
+  /** One wave is all induce calls assigned to one target in one planning pass. */
+  induceWaves: number;
+  /** Waves that reached charge 1, including the full-net deletion edge case. */
+  completedInduceWaves: number;
+  /** Completed waves whose target landed at a greater depth. */
+  deeperInduceWaves: number;
+  /** Waves that directly conquered a new air-gap band or revealed the lab. */
+  usefulInduceWaves: number;
   induceMoves: number;
   induceDeletes: number;
+  /** Restarts that killed one of our residents or bootstrap reclaimers. */
+  occupiedRestarts: number;
+  /** Killed hosts named by a surviving neighbour's immediate probe. */
+  restartImmediatelyVisible: number;
+  /** Killed hosts absent from every surviving agent's immediate probe. */
+  restartLost: number;
+  /** Restarted hosts replanted in the same virtual instant. */
+  restartImmediateReplants: number;
+  /** Initially lost hosts reached by a zero-time plant cascade in that tick. */
+  restartLostSameTickReplants: number;
+  restartRecovered: number;
+  restartUnrecovered: number;
+  restartRecoveryMs: number;
+  restartMaxRecoveryMs: number;
+  /** Usable resident capacity stranded while restarted hosts lacked an agent. */
+  restartLostGbMs: number;
+  /** Arithmetic cost of a hypothetical 2 GB reserve; never affects capacity. */
+  hypotheticalRestartReserveGbMs: number;
   /** maxRam of each host holding a stasis link when the run ended. */
   linkedRam: number[];
   elapsedMs: number;
@@ -195,6 +221,13 @@ interface Job {
   threads: number;
   doneAt: number;
   filename?: string;
+  induceWave?: string;
+}
+
+interface RestartOutage {
+  at: number;
+  usableGb: number;
+  immediatelyVisible: boolean;
 }
 
 const CACHE_OPEN_MS = 200;
@@ -308,11 +341,29 @@ export function runSpreadCase(
     plantedPeak: 0,
     mutations: 0,
     induceCalls: 0,
+    induceWaves: 0,
+    completedInduceWaves: 0,
+    deeperInduceWaves: 0,
+    usefulInduceWaves: 0,
     induceMoves: 0,
     induceDeletes: 0,
+    occupiedRestarts: 0,
+    restartImmediatelyVisible: 0,
+    restartLost: 0,
+    restartImmediateReplants: 0,
+    restartLostSameTickReplants: 0,
+    restartRecovered: 0,
+    restartUnrecovered: 0,
+    restartRecoveryMs: 0,
+    restartMaxRecoveryMs: 0,
+    restartLostGbMs: 0,
+    hypotheticalRestartReserveGbMs: 0,
     linkedRam: [],
     elapsedMs: 0,
   };
+  const induceWaves = new Map<string, { completed: boolean; deeper: boolean; useful: boolean }>();
+  const restartOutages = new Map<string, RestartOutage>();
+  let derivePassSequence = 0;
 
   /** The contiguous non-gap depth bands of this world, deepest first, for the
    * bands-reached milestone. */
@@ -349,6 +400,22 @@ export function runSpreadCase(
     if (!record) return 0;
     const reserve = PROBER_GB + (name === "darkweb" ? CONTROLLER_GB : 0);
     return Math.max(0, maxRamOf(name) - record.blockedRam - reserve);
+  };
+
+  const plantAgent = (name: string, agent: Agent): void => {
+    agents.set(name, agent);
+    const outage = restartOutages.get(name);
+    if (outage === undefined) return;
+    const recoveryMs = clock - outage.at;
+    run.restartRecovered++;
+    run.restartRecoveryMs += recoveryMs;
+    run.restartMaxRecoveryMs = Math.max(run.restartMaxRecoveryMs, recoveryMs);
+    run.restartLostGbMs += outage.usableGb * recoveryMs;
+    if (recoveryMs === 0) {
+      run.restartImmediateReplants++;
+      if (!outage.immediatelyVisible) run.restartLostSameTickReplants++;
+    }
+    restartOutages.delete(name);
   };
 
   const observeHost = (name: string): ReportHost => {
@@ -464,6 +531,7 @@ export function runSpreadCase(
   // --- one derive pass: plant, then file and assign -------------------------
 
   const derivePass = (): void => {
+    const pass = derivePassSequence++;
     // Plants cascade: a plant probes, the probe reveals candidates. Loop to a
     // fixpoint with a hard stop far above any real chain.
     for (let round = 0; round < 32; round++) {
@@ -483,7 +551,7 @@ export function runSpreadCase(
       let planted = 0;
       for (const plant of plan.plant) {
         if (agents.has(plant.host) || !truth(plant.host)) continue;
-        agents.set(plant.host, plant.bootstrapReclaim === true ? { bootstrap: true } : {});
+        plantAgent(plant.host, plant.bootstrapReclaim === true ? { bootstrap: true } : {});
         run.plantCalls++;
         if (plant.bootstrapReclaim === true) run.bootstrapPlants++;
         fold([
@@ -664,11 +732,17 @@ export function runSpreadCase(
           doneAt: clock + stasisWaitMs(charisma),
         };
       } else if (task.kind === "induce") {
+        const induceWave = `${pass}:${task.host}`;
+        if (!induceWaves.has(induceWave)) {
+          induceWaves.set(induceWave, { completed: false, deeper: false, useful: false });
+          run.induceWaves++;
+        }
         agent.job = {
           kind: "induce",
           target: task.host,
           threads: task.threads ?? 1,
           doneAt: clock + INDUCE_WAIT_MS,
+          induceWave,
         };
       } else if (task.kind === "walk") {
         // The walker CAN start: this lane's finish line. The walk itself is
@@ -751,8 +825,15 @@ export function runSpreadCase(
       agents.delete(name);
     } else if (job.kind === "induce") {
       run.induceCalls++;
+      const beforeDepth = record?.depth;
       const result = system.chargeMigration(job.target, job.threads, charisma);
       gainCharisma(result.charismaExp);
+      const completed = result.newCharge >= 1;
+      const wave = job.induceWave === undefined ? undefined : induceWaves.get(job.induceWave);
+      if (completed && wave !== undefined && !wave.completed) {
+        wave.completed = true;
+        run.completedInduceWaves++;
+      }
       if (result.deleted) {
         // A full destination band re-rolled the host out of existence.
         run.induceDeletes++;
@@ -765,11 +846,19 @@ export function runSpreadCase(
       }
       // The charge estimate, from the same readback the deployed order
       // parses out of the engine's response. A landing resets it.
-      migrationCharge.set(job.target, result.moved ? 0 : result.newCharge);
-      if (result.moved) run.induceMoves++;
+      migrationCharge.set(job.target, completed ? 0 : result.newCharge);
+      const afterDepth = truth(job.target)?.depth;
+      if (completed) run.induceMoves++;
+      if (completed && beforeDepth !== undefined && afterDepth !== undefined && afterDepth > beforeDepth
+        && wave !== undefined && !wave.deeper) {
+        wave.deeper = true;
+        run.deeperInduceWaves++;
+      }
       // The deployed order learns only what a fresh details read shows.
       fold([observeHost(job.target)]);
-      if (result.moved) {
+      if (completed) {
+        const bandsBefore = bandsReached.size;
+        const labKnownBefore = labHost !== undefined && knowledge.has(labHost);
         // A move rewires the target: its own and its old neighbours' edges are
         // stale until the probers re-report. Mark topology dirty the honest
         // way — a fresh probe from every standing host.
@@ -778,6 +867,12 @@ export function runSpreadCase(
           fold([{ hostname: standing, at: clock, present: true, neighbours: system.probeFrom(standing) }]);
         }
         noteBandsReached();
+        const madeProgress = bandsReached.size > bandsBefore
+          || (!labKnownBefore && labHost !== undefined && knowledge.has(labHost));
+        if (madeProgress && wave !== undefined && !wave.useful) {
+          wave.useful = true;
+          run.usefulInduceWaves++;
+        }
       }
     }
   };
@@ -797,11 +892,32 @@ export function runSpreadCase(
     for (const agent of agents.values()) {
       if (agent.job && agent.job.doneAt < next) next = agent.job.doneAt;
     }
+    const elapsed = next - clock;
+    const vulnerableAgents = [...agents.keys()].filter((name) =>
+      name !== "darkweb" && !stasisLinked.has(name) && truth(name) !== undefined).length;
+    run.hypotheticalRestartReserveGbMs += 2 * vulnerableAgents * elapsed;
     clock = next;
     if (clock >= nextMutationAt) {
+      const logRefs = new Map([...system.hosts].map(([name, host]) => [name, host.logs] as const));
       system.darknetProcess(mutationCycles);
       nextMutationAt += mutationEveryMs;
       run.mutations++;
+      const restarted = [...system.hosts.values()]
+        .filter((host) => logRefs.get(host.hostname) !== host.logs
+          && host.logs[0]?.includes("Server restarting, terminating scripts"));
+      const occupied = restarted.filter((host) => agents.has(host.hostname));
+      for (const host of occupied) {
+        restartOutages.set(host.hostname, { at: clock, usableGb: jobFreeGb(host.hostname), immediatelyVisible: false });
+        agents.delete(host.hostname);
+        run.occupiedRestarts++;
+      }
+      for (const host of occupied) {
+        const immediatelyVisible = system.probeFrom(host.hostname)
+          .some((neighbour) => agents.has(neighbour) && truth(neighbour) !== undefined);
+        restartOutages.get(host.hostname)!.immediatelyVisible = immediatelyVisible;
+        if (immediatelyVisible) run.restartImmediatelyVisible++;
+        else run.restartLost++;
+      }
       observationSweep();
       noteBandsReached();
     }
@@ -815,6 +931,11 @@ export function runSpreadCase(
   run.plantedPeak = plantedPeak;
   run.linkedRam = [...stasisLinked].map((name) => maxRamOf(name)).sort((a, b) => b - a);
   run.elapsedMs = clock;
+  for (const outage of restartOutages.values()) {
+    const recoveryMs = clock - outage.at;
+    run.restartLostGbMs += outage.usableGb * recoveryMs;
+  }
+  run.restartUnrecovered = restartOutages.size;
   if (!run.solved) run.reason = `walker not started within ${Math.round(capMs / 60_000)} minutes`;
   return run;
 }

@@ -2526,13 +2526,17 @@ export class DarknetSystem {
   #restartHost(victim: string): void {
     const host = this.hosts.get(victim);
     if (!host) return;
+    const server = this.#opts.servers.get(victim);
+    // Upstream kills scripts FIRST. Their atExit callbacks therefore still see
+    // the old sessions, backdoor and topology. Synchronous children appended by
+    // exec or spawn(0) are consumed by killall's live iterator; a delayed spawn
+    // runs only after this entire method (including the replacement edge).
+    this.#opts.processes.killall(victim);
     // Scripts die and SESSIONS are cleared, but the host, its files and its
     // admin rights survive. All four halves are separately wrong-able.
     host.sessions.clear();
     host.logs = [`{"code":200,"message":"Server restarting, terminating scripts..."}`];
-    const server = this.#opts.servers.get(victim);
     if (server) server.backdoorInstalled = false;
-    this.#opts.processes.killall(victim);
     // Preserve the stabilising darkweb edge, remove every other edge, then add
     // one guaranteed adjacent connection exactly as restartServer does.
     for (const neighbour of [...(this.#opts.network.get(victim) ?? [])]) {

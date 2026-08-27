@@ -7,7 +7,7 @@ import { DarknetSystem } from "../features/dnet.ts";
 import { mulberry32 } from "../core/rng.ts";
 import { darkwebServerSpec } from "../network.ts";
 
-/** The teardown window the darknet agents' survival depends on.
+/** The teardown window that kill handling and restart recovery depend on.
  *
  * The engine (stopAndCleanUpWorkerScript) releases the concurrency lock and
  * runs atExit callbacks synchronously in the killer's stack BEFORE the script
@@ -17,12 +17,17 @@ import { darkwebServerSpec } from "../network.ts";
  * The killed script's own await rejects with ScriptDeath only afterwards, on a
  * microtask, and any ns call in that zombie continuation throws.
  *
- * game/dnet/agent.ts's atExit-respawn hook depends on every clause, and each
- * was separately wrong in the simulator before this suite existed: `killed`
+ * Dnet teardown and any future restart recovery depend on every clause, and
+ * each was separately wrong in the simulator before this suite existed: `killed`
  * was set before the handlers ran (no ns call worked at all), and RAM was
  * freed after them with re-entrant kill a no-op (spawn could never fit). A
  * wrong version here would let the survival design pass in the simulator and
- * die in the game — the exact failure a simulator exists to prevent. */
+ * die in the game — the exact failure a simulator exists to prevent.
+ *
+ * A server restart adds one more rule: killServerScripts walks live Maps.
+ * Synchronous exec and spawn(0) replacements are appended during that walk and
+ * die in the same sweep. A positive spawn delay schedules its launch after the
+ * sweep and is the only one of those three that survives. */
 
 interface Harness {
   host: SimNsHost;
@@ -37,15 +42,29 @@ function harness(): Harness {
   const world = new SimWorld({
     seed: 1,
     bitnode,
-    network: [darkwebServerSpec()],
+    network: [
+      {
+        hostname: "n00dles",
+        hackDifficulty: 1,
+        moneyAvailable: 1,
+        requiredHackingSkill: 1,
+        serverGrowth: 1,
+        numOpenPortsRequired: 0,
+        maxRam: 16,
+        hasAdminRights: true,
+      },
+      darkwebServerSpec(),
+    ],
   });
   const processes = new ProcessTable(world.servers, world.clock);
   const files = new Map<string, Set<string>>([
     ["home", new Set(["agent.js"])],
+    ["n00dles", new Set(["agent.js"])],
     ["darkweb", new Set(["agent.js"])],
   ]);
   const network = new Map<string, string[]>([
-    ["home", ["darkweb"]],
+    ["home", ["n00dles", "darkweb"]],
+    ["n00dles", ["home"]],
     ["darkweb", ["home"]],
   ]);
   const host = {
@@ -115,6 +134,44 @@ async function settle(): Promise<void> {
 }
 
 describe("kill during a blocking ns call, and the atExit window", () => {
+  test("a restart-style live sweep kills exec and spawn(0) replacements but not delayed spawn", () => {
+    const h = harness();
+    const execSource = h.start("agent.js", "n00dles", 1);
+    const immediateSource = h.start("agent.js", "n00dles", 1);
+    const delayedSource = h.start("agent.js", "n00dles", 1);
+    const execNs = makeSimNs(h.host, execSource);
+    const immediateNs = makeSimNs(h.host, immediateSource);
+    const delayedNs = makeSimNs(h.host, delayedSource);
+
+    execNs.atExit(() => {
+      execNs.exec("agent.js", "n00dles", { threads: 1, ramOverride: 1 }, "exec");
+    });
+    immediateNs.atExit(() => {
+      immediateNs.spawn(
+        "agent.js",
+        { threads: 1, ramOverride: 1, spawnDelay: 0 },
+        "spawn-zero",
+      );
+    });
+    delayedNs.atExit(() => {
+      delayedNs.spawn(
+        "agent.js",
+        { threads: 1, ramOverride: 1, spawnDelay: 1 },
+        "spawn-delayed",
+      );
+    });
+
+    // restartServer calls killServerScripts synchronously. Its live Map
+    // iterators consume the exec and spawn(0) additions before returning.
+    h.processes.killall("n00dles");
+    expect(h.processes.ps("n00dles")).toEqual([]);
+
+    // setTimeout cannot fire until that synchronous sweep has returned.
+    h.world.clock.run(() => false, 1);
+    expect(h.processes.ps("n00dles").map((process) => process.args)).toEqual([["spawn-delayed"]]);
+    expect(h.host.crashes).toEqual([]);
+  });
+
   test("atExit runs with ns callable, spawn(0) relaunches into the freed RAM, and the effect never lands", async () => {
     const h = harness();
     const { target, password } = neighbourOf(h);

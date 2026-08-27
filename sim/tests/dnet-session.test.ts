@@ -433,13 +433,29 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
       });
       restarts.populate();
       const first = [...restarts.hosts.values()].filter((host) => host.online && !host.isStationary).sort((a, b) => (a.hostname < b.hostname ? -1 : 1))[0]!;
-      const runner = h.start("agent.js", first.hostname);
-      first.sessions.add(runner);
       h.host.files.set(first.hostname, new Set(["agent.js"]));
+      h.host.scripts.set("agent.js", () => new Promise<void>(() => {}));
       const firstServer = h.world.servers.get(first.hostname)!;
       firstServer.hasAdminRights = true;
       firstServer.backdoorInstalled = true;
       first.blockedRam = 0;
+      firstServer.ramUsed = 0;
+      const runner = h.start("agent.js", first.hostname);
+      expect(runner).toBeGreaterThan(0);
+      first.sessions.add(runner);
+      const oldNeighbours = [...(h.host.network.get(first.hostname) ?? [])];
+      const exitView: { session?: boolean; backdoor?: boolean; neighbours?: string[] } = {};
+      const runnerNs = makeSimNs(h.host, h.host.processes.get(runner)!);
+      runnerNs.atExit(() => {
+        exitView.session = first.sessions.has(runner);
+        exitView.backdoor = firstServer.backdoorInstalled;
+        exitView.neighbours = [...(h.host.network.get(first.hostname) ?? [])];
+        runnerNs.spawn(
+          "agent.js",
+          { threads: 1, ramOverride: 1, spawnDelay: 1 },
+          "restart-recovery",
+        );
+      });
       const cache = restarts.addCache(first.hostname, false)!;
       // Cache filename generation legitimately consumed the gameplay stream;
       // restart the deliberately indexed mutation block at its boundary.
@@ -447,7 +463,12 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
 
       restarts.darknetProcess(10_000);
 
+      // restartServer kills scripts before clearing sessions, the backdoor or
+      // old edges. The delayed spawn cannot fire until the whole restart stack
+      // has returned and the replacement edge has been installed.
+      expect(exitView).toEqual({ session: true, backdoor: true, neighbours: oldNeighbours });
       expect(h.host.processes.get(runner)).toBeUndefined();
+      expect(h.host.processes.ps(first.hostname)).toEqual([]);
       expect(first.sessions.size).toBe(0);
       // Files and admin rights survive a restart; only the backdoor does not.
       expect(h.host.files.get(first.hostname)?.has("agent.js")).toBe(true);
@@ -455,6 +476,10 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
       expect(firstServer.backdoorInstalled).toBe(false);
       expect(first.blockedRam).toBe(0);
       expect(restarts.cachesOn(first.hostname)).toContain(cache);
+
+      h.world.clock.run(() => false, h.world.clock.now() + 1);
+      expect(h.host.processes.ps(first.hostname).map((process) => process.args))
+        .toEqual([["restart-recovery"]]);
     });
 
     test("nextMutation resolves once per tick, and wakes every waiter", () => {

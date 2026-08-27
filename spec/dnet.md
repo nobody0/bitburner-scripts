@@ -1552,6 +1552,36 @@ sighting draws no card, a sighting we cannot walk draws the ladder plus the
 planner's own refusal for that host, a map with no walker on it says the map
 outlives them, and a rooted lab says the maze is finished.
 
+### Spread and restart regression lane
+
+`bun run bench:sim:dnet-spread` treats one induce wave as every call assigned
+to one target in one planner pass. It reports calls per wave, charge-closing
+waves, relocations, and deeper landings separately. `direct progress` is the
+strict useful-work signal: that wave itself placed our first resident beyond an
+air gap or exposed the lab. A same-depth relocation can still serve a seat or
+ferry purpose, so it is not silently labelled waste.
+
+The lane also applies the part of `restartServer` that matters to the crawler:
+the host, root and files survive, but its abstract resident and in-flight job
+die. After the engine installs its guaranteed replacement edge, every surviving
+resident probes. A restarted host is `seen immediately` when one of those
+probes names it, `lost immediately` when none does, and `same-tick` when normal
+zero-time plant cascading nevertheless reaches it before virtual time advances.
+Delayed and unrecovered outages remain separate. Their cost is integrated as
+unused resident GB-hours and compared with the GB-hours that reserving 2 GB on
+every occupied, unpinned movable host would consume. This comparison is only
+arithmetic: the lane does not reserve RAM, preserve an agent, force a route, or
+otherwise change normal probes and planner actions.
+
+On four full-Dnet seeds, 3,742 induce waves made 320 relocations, 194 deeper
+landings, and 7 direct-progress landings: respectively `8.55%`, `5.18%`, and
+`0.19%` per wave. The same runs suffered 499 occupied restarts. The guaranteed
+edge exposed 433 (`86.8%`) immediately; 66 were initially lost, but ordinary
+plant cascading recovered 51 of those without advancing virtual time. Only 13
+needed a later route and 2 were still unrecovered at walker placement. The
+resulting 49.25 stranded GB-hours were `10.3%` of the hypothetical 478.76
+GB-hours a blanket 2 GB fleet reserve would have consumed.
+
 ### Farm regression lane
 
 `bun run bench:sim:dnet-farm` warms each established net for one virtual hour,

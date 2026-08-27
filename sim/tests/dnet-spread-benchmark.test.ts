@@ -123,7 +123,19 @@ describe("the deep world (air gaps, spares, ferry)", () => {
       expect(run.cacheCalls).toBeGreaterThan(0);
       expect(run.pinCalls).toBeGreaterThan(0);
       expect(run.induceCalls).toBeGreaterThan(0);
+      expect(run.induceWaves).toBeGreaterThan(0);
+      expect(run.induceCalls).toBeGreaterThanOrEqual(run.induceWaves);
+      expect(run.completedInduceWaves).toBeLessThanOrEqual(run.induceWaves);
+      expect(run.induceMoves).toBeLessThanOrEqual(run.completedInduceWaves);
+      expect(run.deeperInduceWaves).toBeLessThanOrEqual(run.induceMoves);
+      expect(run.usefulInduceWaves).toBeLessThanOrEqual(run.induceMoves);
       expect(run.induceMoves).toBeGreaterThan(0);
+      expect(run.occupiedRestarts).toBeGreaterThan(0);
+      expect(run.restartImmediatelyVisible + run.restartLost).toBe(run.occupiedRestarts);
+      expect(run.restartRecovered + run.restartUnrecovered).toBe(run.occupiedRestarts);
+      expect(run.restartLostSameTickReplants).toBeLessThanOrEqual(run.restartLost);
+      expect(run.restartLostSameTickReplants).toBeLessThanOrEqual(run.restartImmediateReplants);
+      expect(run.hypotheticalRestartReserveGbMs).toBeGreaterThan(0);
     }
   });
 

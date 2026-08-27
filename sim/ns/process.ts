@@ -16,8 +16,8 @@ import type { SimServer } from "../core/effects.ts";
  * 3. During those callbacks the process is still ALIVE to ns — the lock is
  *    released, `killed` not yet set — and an ns.spawn there finalizes the
  *    teardown re-entrantly so its spawnDelay:0 launch fits in the freed RAM.
- *    game/dnet/agent.ts's atExit-respawn hook depends on exactly this;
- *    sim/tests/process-atexit.test.ts pins it against the engine. */
+ *    A host-wide restart adds a live-iterator rule on top; the teardown tests
+ *    pin both cases against the engine. */
 
 /** Bitburner's cancellation marker: a named Error with the killed pid. */
 export class ScriptDeath extends Error {
@@ -154,8 +154,8 @@ export class ProcessTable {
     let killed = 0;
     // Upstream killServerScripts iterates the live running-script maps. Keep
     // this live too: an atExit callback that inserts another process must be
-    // observable to the same teardown, which is the restart-loop hazard the
-    // agent lifecycle is designed around.
+    // observable to the same teardown, which any restart recovery must account
+    // for.
     for (const process of this.#processes.values()) {
       if (process.host !== host || process.pid === exceptPid) continue;
       this.#stop(process, true);

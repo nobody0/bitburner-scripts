@@ -452,9 +452,8 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
      *
      * With `spawnDelay: 0` upstream kills the worker script and runs the target
      * immediately and synchronously; any other delay schedules it. Modelled
-     * because the darknet agents are built on it — a resident spawns into a job
-     * so the job gets the RAM the resident was holding, and peak host RAM is one
-     * script rather than two.
+     * because teardown and restart recovery depend on whether the replacement
+     * joins the current synchronous kill sweep or a later timer turn.
      *
      * The ORDER is the load-bearing part: kill first, launch second. Launching
      * first would need both allocations at once, which is exactly the situation
