@@ -29,6 +29,7 @@ export type { FarmKind };
  * panel shows them in one table and `no-room` means three different things. */
 export type FarmRefusalReason =
   | "gone"
+  | "cache-unknown"
   | "cache-none"
   | "cache-lab-deferred"
   | "cache-in-flight"
@@ -65,6 +66,10 @@ export interface FarmHost {
   freeGb: number;
   /** `.cache` files `ls` reported, believable. */
   caches?: readonly string[];
+  /** A credentialed but currently unstaffed target projected solely so a live
+   * neighbour can reclaim its blocked RAM. It cannot open files or earn until
+   * spread plants a resident, so no cache listing is fabricated for it. */
+  reclaimOnly?: true;
   /** The labyrinth's own host. Its cache is the deferred one. */
   isLab?: boolean;
   goneAt?: number;
@@ -257,16 +262,12 @@ export function phishWindowOpen(inputs: Pick<FarmInputs, "now" | "lastPhishCache
  * (`0.1 + depth * 0.05`). Free RAM, then name, break ties so the election is
  * deterministic.
  *
- * `eligible` is how a caller says which hosts can actually SPEND the window: a
+ * The caller filters for who can actually SPEND the window before electing: a
  * hunter with no room for a `phishingAttack` is a host pinned to a roll it
  * cannot make, leaving nobody guaranteed to chase the cache.
  */
-export function electCacheHunter(
-  hosts: readonly FarmHost[],
-  eligible?: (host: FarmHost) => boolean,
-): string | undefined {
-  const pool = hosts.filter((host) =>
-    host.goneAt === undefined && host.isLab !== true && (eligible?.(host) ?? true));
+export function electCacheHunter(hosts: readonly FarmHost[]): string | undefined {
+  const pool = hosts.filter((host) => host.goneAt === undefined && host.isLab !== true);
   if (pool.length === 0) return undefined;
   const best = [...pool].sort((a, b) => {
     const primary = compareDepthDesc(a.depth, b.depth) || b.freeGb - a.freeGb;
@@ -307,7 +308,8 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
   const windowOpen = phishWindowOpen(inputs);
   const maxPhishThreads = inputs.maxPhishThreads ?? DEFAULT_MAX_PHISH_THREADS;
   const eligibleHunters = hosts.filter((host) =>
-    host.goneAt === undefined && host.isLab !== true && host.freeGb >= inputs.gbPerThread.phish);
+    host.goneAt === undefined && host.isLab !== true && host.reclaimOnly !== true
+    && host.caches !== undefined && host.freeGb >= inputs.gbPerThread.phish);
   const preferredHunters = eligibleHunters.filter((host) => (host.difficulty ?? -Infinity) > 3);
   const hunterPool = preferredHunters.length > 0 ? preferredHunters : eligibleHunters;
   const hunter = electCacheHunter(hunterPool);
@@ -359,7 +361,7 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
   let maximumFleetMoney = 0;
   let maximumFleetCharisma = 0;
   for (const host of hosts) {
-    if (host.goneAt !== undefined || host.isLab === true) continue;
+    if (host.goneAt !== undefined || host.isLab === true || host.reclaimOnly === true || host.caches === undefined) continue;
     const rates = ratesByHost.get(host.host)!;
     maximumFleetMoney += Math.max(rates.phish.moneyPerSec, rates.promote.moneyPerSec);
     maximumFleetCharisma += Math.max(rates.phish.charismaExpPerSec, rates.promote.charismaExpPerSec);
@@ -397,9 +399,15 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
     // First, always, and the argument is not that it pays most: it is that it is
     // the only rung whose payoff can be LOST. A cache file lives on the host,
     // and a delete takes the host's files with it.
-    const caches = [...(host.caches ?? [])].sort();
+    const caches = host.caches === undefined ? undefined : [...host.caches].sort();
     let admitted = false;
-    if (caches.length === 0) {
+    if (host.reclaimOnly === true) {
+      // This synthetic projection exists only to expose a remote-reclaim
+      // target. It has no resident from which `ls` or `openCache` can run.
+    } else if (caches === undefined) {
+      refuse("cache-unknown", "the cache listing is unknown or stale; inventory must prove it empty before lower rungs run");
+      continue;
+    } else if (caches.length === 0) {
       refuse("cache-none", "no .cache file here; ls reported none");
     } else if (host.isLab === true && inputs.openLabCache !== true) {
       // THE DEFERRAL. A labyrinth cache calls `getLabReward`, which queues an
@@ -574,6 +582,7 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
       admitted = true;
     }
     if (admitted) continue;
+    if (host.reclaimOnly === true) continue;
 
     // --- 3./4. earn: phish or promote, whichever pays better ---------------
     //

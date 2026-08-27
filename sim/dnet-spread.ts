@@ -848,7 +848,10 @@ export function runSpreadCase(
       // parses out of the engine's response. A landing resets it.
       migrationCharge.set(job.target, completed ? 0 : result.newCharge);
       const afterDepth = truth(job.target)?.depth;
-      if (completed) run.induceMoves++;
+      // A closed charge is not a relocation: `moveWithin` can re-place a host
+      // inside its own row. `completedInduceWaves` already counts the closes,
+      // so this stays the count of calls that actually moved the host.
+      if (result.moved) run.induceMoves++;
       if (completed && beforeDepth !== undefined && afterDepth !== undefined && afterDepth > beforeDepth
         && wave !== undefined && !wave.deeper) {
         wave.deeper = true;

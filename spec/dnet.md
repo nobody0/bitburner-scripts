@@ -1592,10 +1592,9 @@ rates for caches and money across paired seeds. Its only policy counterfactual
 is withholding the storm; the post-lab row is a lifecycle phase, not a tuning
 candidate. Production fixes the validated choices in code: depth-first cache
 hunting (capacity breaks depth ties), a ten-minute optional block-clear budget,
-and storm admission within thirty seconds of a phishing cache. The rejected
-90-second arm raised
-mean caches slightly but lost money and lower-tail cache stability on the same
-warmed seeds.
+and storm admission within thirty seconds of a phishing cache. The benchmark's
+real inventory path now exposes the current storm policy's lower-tail cost;
+that is an optimization target, not a reason to remove storm-seed farming.
 
 The lane follows the live file-observation path: first authentication, a final
 RAM clear, and a winning phish invalidate cache facts, then a separate inventory

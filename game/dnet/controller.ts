@@ -787,6 +787,16 @@ export async function main(ns: NS): Promise<void> {
       for (const host of report.hosts ?? []) if (host.invalidates?.includes("files")) needsInventory.add(host.hostname);
       signalDerive();
     }
+    // An `ls` that did not run leaves the files group dirty for ever, and a
+    // host whose cache listing is unknown is refused EVERY farm rung
+    // (`cache-unknown` stops the ladder before reclaim). `fileListJobs` clears
+    // the request the moment it stages the order, so a staged inventory
+    // superseded by a better order — or an active one preempted by a plant —
+    // has to re-arm itself here or the host never farms again.
+    if (report.kind === "inventory" && report.ok !== true) {
+      needsInventory.add(report.host);
+      signalDerive();
+    }
     const reportedGone = report.hosts?.some((h) => h.hostname === report.host && !h.present) === true;
     if (report.targetState === "gone" && !reportedGone) {
       const gone: ReportHost = { hostname: report.host, at: Date.now(), present: false };
@@ -1024,7 +1034,7 @@ export async function main(ns: NS): Promise<void> {
         ...(view.neighbours !== undefined ? { neighbours: view.neighbours } : {}),
         hasCredential: vault.has(entry.hostname),
         freeGb: usableGb(entry.hostname, at, expiry),
-        caches: view.caches ?? [],
+        ...(view.caches !== undefined ? { caches: view.caches } : {}),
         isLab: isLabyrinth(entry.hostname, view.modelId),
         ...(entry.goneAt !== undefined ? { goneAt: entry.goneAt } : {}),
         busy,
@@ -1044,7 +1054,7 @@ export async function main(ns: NS): Promise<void> {
         blockedRam: view.blockedRam,
         hasCredential: true,
         freeGb: 0,
-        caches: [],
+        reclaimOnly: true,
         busy,
       });
     }
@@ -2106,12 +2116,17 @@ export async function main(ns: NS): Promise<void> {
     },
     preparePlant(host) {
       const entry = ensureEntry(host);
-      // FIRST detection only, never a replant. On a controller-MANAGED host,
-      // re-arming an inventory on every plant is a livelock: that resident has
-      // no spawn, so it exits whenever something is queued, so the spread
-      // replants it, forever. `drainProbes` already asks for the `ls` of
-      // anything newly seen, so a genuine first plant is still covered.
-      if (entry.seenAt.files === undefined) needsInventory.add(host);
+      // Only while the files group is actually UNKNOWN — never seen, or
+      // dirtied by an action whose `ls` has not landed. Re-arming on every
+      // plant regardless is a livelock: a controller-MANAGED resident has no
+      // spawn, so it exits whenever something is queued, so the spread
+      // replants it, forever. Gating on the fact itself terminates, because
+      // the inventory that runs clears the dirty flag and the next plant asks
+      // for nothing. The dirty case has to be here as well as in `onReport`:
+      // `retireVantage` drops the pending request with the agent, and without
+      // it a replanted host would carry an unknown listing — and therefore a
+      // `cache-unknown` refusal of every farm rung — for the rest of its life.
+      if (entry.seenAt.files === undefined || entry.dirty.files === true) needsInventory.add(host);
       // The placing window opens HERE and closes in `claimPlanted`. Inside it
       // the derive may stage work for a host that has no process yet, because
       // one is on its way and will adopt whatever is waiting.
@@ -2267,7 +2282,7 @@ export async function main(ns: NS): Promise<void> {
       if (inputs.netDepth !== undefined) netDepth = inputs.netDepth;
       if (inputs.bitNode !== undefined) bitNode = inputs.bitNode;
       if (inputs.openLabCache !== undefined) openLabCache = inputs.openLabCache;
-      if (inputs.promoteSymbols !== undefined) promoteSymbols = [...inputs.promoteSymbols];
+      promoteSymbols = [...(inputs.promoteSymbols ?? [])];
       if (inputs.crimeSuccessMult !== undefined) crimeSuccessMult = inputs.crimeSuccessMult;
       if (inputs.farmEconomics !== undefined) farmEconomics = inputs.farmEconomics;
       if (inputs.fileInvalidations !== undefined) {

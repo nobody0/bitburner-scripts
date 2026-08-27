@@ -1016,7 +1016,8 @@ const dnet: FeatureDriver = {
         // only the still-believable ones and may reuse a session remotely just
         // until the restart/delete clock expires.
         backdoors: [...home.backdoored].map(([hostname, installedAt]) => ({ hostname, installedAt })),
-        ...(promoteSymbols.length > 0 ? { promoteSymbols } : {}),
+        // Complete snapshot: an empty list retires stale promotion work.
+        promoteSymbols,
         // A term in both phishing chances, and only home can see the player.
         ...(ctx.state.topics.player?.mults.crime_success !== undefined
           ? { crimeSuccessMult: ctx.state.topics.player.mults.crime_success }

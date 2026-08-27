@@ -6,7 +6,7 @@ import type { NsProxy } from "../game/lib/ns-proxy.ts";
 import type { GameState } from "../game/lib/state.ts";
 import { postNeeds } from "../shared/strategy/needs.ts";
 import { emptyKnowledge } from "../shared/strategy/dnet/host.ts";
-import { DNET_RECOVERY_VERSION, type DnetRecoveryState, type DnetSnapshot } from "../game/dnet/wire.ts";
+import { DNET_RECOVERY_VERSION, type DnetInputs, type DnetRecoveryState, type DnetSnapshot } from "../game/dnet/wire.ts";
 import { emptyDnetProfit } from "../game/dnet/profit.ts";
 import type { ControllerHandle } from "../game/dnet/shared.ts";
 
@@ -40,7 +40,7 @@ function recovery(): DnetRecoveryState {
 
 /** A controller standing on `darkweb` with a live beat and a live prober —
  * the healthy steady state, in which home has nothing left to place. */
-function standController(now: number, proberPid = 4242): ControllerHandle {
+function standController(now: number, proberPid = 4242, configured?: DnetInputs[]): ControllerHandle {
   const handle = {
     protocol: 1,
     buildId: "dev",
@@ -56,7 +56,7 @@ function standController(now: number, proberPid = 4242): ControllerHandle {
       ram: [],
       controllerBeatAt: now,
     }),
-    configure() {},
+    configure(inputs: DnetInputs) { configured?.push(inputs); },
     standDown() {},
     beginProbeRefresh: async () => ({ refresh: { refreshed: Promise.resolve(1) }, launch: true }),
     cancelProbeRefresh() {},
@@ -126,5 +126,22 @@ describe("the darknet beachhead seeds only when something is missing", () => {
 
     // The prober is the half home tops up, so its absence must still place one.
     expect(h.calls).toContain("scp");
+  });
+
+  test("an empty stock edge list clears previously promoted symbols", async () => {
+    const now = Date.now();
+    const configured: DnetInputs[] = [];
+    standController(now, 4242, configured);
+    const h = harness(now);
+    h.state.topics.stock = {
+      plan: { ranked: [{ sym: "ECP", expectedProfit: 1_000_000 }] },
+    } as never;
+
+    await dnetModule.driver.tick(h.ctx);
+    expect(configured.at(-1)?.promoteSymbols).toEqual([{ symbol: "ECP", expectedProfit: 1_000_000 }]);
+
+    h.state.topics.stock = { plan: { ranked: [] } } as never;
+    await dnetModule.driver.tick(h.ctx);
+    expect(configured.at(-1)?.promoteSymbols).toEqual([]);
   });
 });

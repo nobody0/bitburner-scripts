@@ -162,8 +162,8 @@ export function labMaze(lab: DarknetLabDigest, prior?: LabPrior): string {
   // all — four sub-mazes joined by four punched doors — and therefore the reason
   // the marks below matter: every seam slot outside a door set is wall before
   // the first move, so those four doors are the only ways between quadrants.
-  // Nothing here says which walker takes which pair — the route bias is a
-  // job-side decision (`routePrior`) and no walker entry carries it.
+  // Nothing here says which door the walker aims at: the A* over `planStep`
+  // prices all four every step, and no walker entry carries a preference.
   const seams = prior === undefined || prior.seamX === undefined || prior.seamY === undefined
     ? ""
     : `<path class="seam" d="M${prior.seamX * CELL + CELL / 2} 0V${height * CELL}`

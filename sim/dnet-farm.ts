@@ -87,6 +87,8 @@ export interface FarmRun {
   stormsFired: number;
   seedsSighted: number;
   crackedTotal: number;
+  /** File-listing jobs required by action invalidations and freshness. */
+  inventoryCalls: number;
   /** Times the walker's host was found unpinned, offline, or targeted by farm
    *  work. The whole point of the storm gating is that this stays 0. */
   walkerInterruptions: number;
@@ -94,7 +96,7 @@ export interface FarmRun {
 }
 
 interface Job {
-  kind: "attempt" | "reclaim" | "phish" | "cache" | "storm";
+  kind: "inventory" | "attempt" | "reclaim" | "phish" | "cache" | "storm";
   target: string;
   threads: number;
   doneAt: number;
@@ -172,6 +174,7 @@ export function runFarmCase(
     stormsFired: 0,
     seedsSighted: 0,
     crackedTotal: 0,
+    inventoryCalls: 0,
     walkerInterruptions: 0,
     walkerAttempts: 0,
   };
@@ -189,7 +192,8 @@ export function runFarmCase(
   };
   const expiry = (): ExpiryOpts => ({ netDepth, bitNode: 15, stasisLinked });
 
-  const observeHost = (name: string): ReportHost => {
+  const observeHost = (name: string, mode: "details" | "inventory" = "details"): ReportHost => {
+    const withFiles = mode === "inventory";
     const record = truth(name);
     if (!record) {
       // A mutation ate the believed seed carrier: the seed is gone with it, so
@@ -197,12 +201,14 @@ export function runFarmCase(
       if (seedSighted && knowledge.get(name)?.stormSeed === true) seedSighted = false;
       return { hostname: name, at: clock, present: false };
     }
-    const seed = system.stormSeedOn(name);
-    if (seed && !seedSighted) {
-      seedSighted = true;
-      run.seedsSighted++;
+    const seed = withFiles && system.stormSeedOn(name);
+    if (withFiles) {
+      if (seed && !seedSighted) {
+        seedSighted = true;
+        run.seedsSighted++;
+      }
+      if (!seed && seedSighted && knowledge.get(name)?.stormSeed === true) seedSighted = false;
     }
-    if (!seed && seedSighted && knowledge.get(name)?.stormSeed === true) seedSighted = false;
     return {
       hostname: name,
       at: clock,
@@ -218,9 +224,11 @@ export function runFarmCase(
       passwordHint: record.passwordHint,
       data: record.data,
       requiredCharisma: record.requiredCharismaSkill,
-      caches: [...system.cachesOn(name)],
-      contracts: [],
-      stormSeed: seed,
+      ...(withFiles ? {
+        caches: [...system.cachesOn(name)],
+        contracts: [],
+        stormSeed: seed,
+      } : {}),
     };
   };
   const fold = (reports: ReportHost[]): void => {
@@ -259,11 +267,11 @@ export function runFarmCase(
     const reports: ReportHost[] = [];
     for (const host of [...system.hosts.values()]) {
       if (!host.online) continue;
-      reports.push(observeHost(host.hostname));
+      reports.push(observeHost(host.hostname, "inventory"));
       reports.push({ hostname: host.hostname, at: clock, present: true, neighbours: system.probeFrom(host.hostname) });
       if (!host.isStationary && crackAttemptsFor(host) !== undefined) vault.add(host.hostname);
     }
-    reports.push(observeHost("darkweb"));
+    reports.push(observeHost("darkweb", "inventory"));
     reports.push({ hostname: "darkweb", at: clock, present: true, neighbours: system.probeFrom("darkweb") });
     fold(reports);
 
@@ -287,7 +295,7 @@ export function runFarmCase(
         for (const filename of [...system.cachesOn(walkerHost)]) {
           system.openCache(walkerHost, filename);
         }
-        fold([observeHost(walkerHost)]);
+        fold([observeHost(walkerHost, "inventory")]);
         walkerThreads = Math.max(1, Math.floor(maxRamOf(walkerHost) / WALK_GB));
         nextWalkerAttemptAt = walkerAuthMs();
       }
@@ -316,7 +324,7 @@ export function runFarmCase(
       // same free spike.
       system.addSession(name, nextPid++);
       for (const filename of [...system.cachesOn(name)]) system.openCache(name, filename);
-      fold([observeHost(name)]);
+      fold([observeHost(name, "inventory")]);
       if (name === walkerHost) continue;
       if (!truth(name)) continue;
       if (maxRamOf(name) - truth(name)!.blockedRam < DEFAULT_SPREAD_LIMITS.agentRamGb) continue;
@@ -371,6 +379,22 @@ export function runFarmCase(
         planted++;
       }
       if (planted === 0) break;
+    }
+
+    // Production marks file facts dirty when an action may create a cache and
+    // restores them through one same-turn inventory order. Do not let this
+    // arena acquire `ls` knowledge for free in its mutation sweep.
+    for (const [name, agent] of agents) {
+      if (agent.job !== undefined || agent.bootstrap || !truth(name)) continue;
+      const view = planningView(
+        knowledge.get(name) ?? { hostname: name, lastSeenAt: 0, seenAt: {}, dirty: {} },
+        clock,
+        expiry(),
+      );
+      if (view.caches === undefined) {
+        agent.job = { kind: "inventory", target: name, threads: 1, doneAt: clock };
+        run.inventoryCalls++;
+      }
     }
 
     const inFlight = new Map<string, { from: string; kind: Task["kind"] }[]>();
@@ -513,7 +537,10 @@ export function runFarmCase(
     const job = agent.job!;
     agent.job = undefined;
     const record = truth(job.target);
-    if (job.kind === "attempt") {
+    if (job.kind === "inventory") {
+      if (!record) return;
+      fold([observeHost(job.target, "inventory")]);
+    } else if (job.kind === "attempt") {
       if (!record) return;
       gainCharisma(attemptCharismaExp(record.difficulty, false, job.threads, false));
       const spent = (tried.get(job.target) ?? 0) + 1;
@@ -527,7 +554,7 @@ export function runFarmCase(
         // The successful authentication that ends a crack roots the host: the
         // engine mints a clue and rolls the first-auth cache there.
         system.addSession(job.target, nextPid++);
-        fold([observeHost(job.target)]);
+        fold([{ hostname: job.target, at: clock, present: true, invalidates: ["files"] }]);
       }
     } else if (job.kind === "reclaim") {
       if (!record) return;
@@ -535,9 +562,7 @@ export function runFarmCase(
       if (result) {
         gainCharisma(result.charismaExp);
         fold([{ hostname: job.target, at: clock, present: true, blockedRam: result.blockedRam }]);
-        if (result.cleared) {
-          fold([observeHost(job.target)]);
-        }
+        if (result.cleared) fold([{ hostname: job.target, at: clock, present: true, invalidates: ["files"] }]);
         if (result.cleared && agent.bootstrap) agents.delete(name);
       }
     } else if (job.kind === "phish") {
@@ -547,7 +572,7 @@ export function runFarmCase(
       if (result.success && result.message.includes("cache")) {
         lastPhishCacheAt = clock;
         run.phishCaches++;
-        fold([observeHost(job.target)]);
+        fold([{ hostname: job.target, at: clock, present: true, invalidates: ["files"] }]);
       }
     } else if (job.kind === "cache") {
       if (!record || job.filename === undefined) return;
@@ -555,7 +580,7 @@ export function runFarmCase(
         const result = system.openCache(job.target, job.filename);
         if (result.success) run.cachesOpened++;
       }
-      fold([observeHost(job.target)]);
+      fold([observeHost(job.target, "inventory")]);
     } else if (job.kind === "storm") {
       const result = system.unleashStormSeed(job.target, clock);
       if (result.success) {
@@ -597,6 +622,7 @@ export function runFarmCase(
     run.stormsFired = 0;
     run.seedsSighted = 0;
     run.crackedTotal = 0;
+    run.inventoryCalls = 0;
     run.walkerInterruptions = 0;
     run.walkerAttempts = 0;
   };
@@ -661,6 +687,7 @@ export interface FarmSummary {
   meanMoneyPerHour: number;
   meanPhishCaches: number;
   meanStormsFired: number;
+  meanInventoryCallsPerHour: number;
   totalWalkerInterruptions: number;
   meanWalkerAttempts: number;
 }
@@ -676,6 +703,7 @@ export function summarizeFarmRuns(runs: readonly FarmRun[]): FarmSummary {
     meanMoneyPerHour: meanOf(runs.map((run) => run.moneyPerHour)),
     meanPhishCaches: meanOf(runs.map((run) => run.phishCaches)),
     meanStormsFired: meanOf(runs.map((run) => run.stormsFired)),
+    meanInventoryCallsPerHour: meanOf(runs.map((run) => run.inventoryCalls / run.hours)),
     totalWalkerInterruptions: runs.reduce((sum, run) => sum + run.walkerInterruptions, 0),
     meanWalkerAttempts: meanOf(runs.map((run) => run.walkerAttempts)),
   };

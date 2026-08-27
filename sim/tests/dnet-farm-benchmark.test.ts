@@ -32,6 +32,7 @@ describe("the earn-in-a-full-net arena", () => {
     for (const run of shipped) {
       expect(run.cachesPerHour).toBeGreaterThan(100);
       expect(run.moneyPerHour).toBeGreaterThan(100e6);
+      expect(run.inventoryCalls).toBeGreaterThan(0);
     }
     expect(summary.meanCachesPerHour).toBeGreaterThan(150);
     expect(summary.meanMoneyPerHour).toBeGreaterThan(500e6);

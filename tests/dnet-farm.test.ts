@@ -86,6 +86,12 @@ describe("the ladder is strict, and takes the top rung it can", () => {
     expect(reasonsOf(plan)).toEqual(["cache-none", "reclaim-no-block"]);
   });
 
+  test("an unknown cache listing blocks lower rungs until inventory proves it empty", () => {
+    const plan = planFarm([host({ caches: undefined, blockedRam: 4 })], inputs());
+    expect(plan.tasks).toEqual([]);
+    expect(reasonsOf(plan)).toEqual(["cache-unknown"]);
+  });
+
   test("completed atomic farm work is rederived while the same state remains desirable", () => {
     const snapshot = [host()];
     expect(kindsOf(planFarm(snapshot, inputs()))).toEqual(["phish"]);
@@ -400,6 +406,30 @@ describe("a cramped block is ground from next door", () => {
   const helper = (over: Partial<FarmHost> = {}) =>
     host({ host: "dn-roomy", freeGb: 40, neighbours: ["dn-tight"], ...over });
 
+  test("an unstaffed target can be reclaimed without an invented cache listing", () => {
+    const target = host({
+      host: "dn-target",
+      blockedRam: 4,
+      freeGb: 0,
+      caches: undefined,
+      reclaimOnly: true,
+      hasCredential: true,
+    });
+    const neighbour = host({
+      host: "dn-helper",
+      blockedRam: 0,
+      freeGb: 12,
+      neighbours: ["dn-target"],
+    });
+    const plan = planFarm([target, neighbour], inputs());
+    expect(plan.tasks).toContainEqual(expect.objectContaining({
+      kind: "reclaim",
+      host: "dn-target",
+      from: "dn-helper",
+    }));
+    expect(plan.refused.some((refusal) => refusal.host === "dn-target" && refusal.why === "cache-unknown")).toBe(false);
+  });
+
   test("a target that cannot afford its own cure is ground remotely by a credentialed neighbour", () => {
     const plan = planFarm([cramped(), helper()], inputs());
     const remote = plan.tasks.find((task) => task.host === "dn-tight")!;
@@ -481,6 +511,7 @@ describe("the walker candidate is ground from every able vantage", () => {
     expect(grinders.every((task) => task.gang === true)).toBe(true);
     expect(grinders.map((task) => task.from ?? task.host).sort()).toEqual(["dn-helper", "dn-walker"]);
   });
+
 });
 
 describe("phish and promote compete on expected value", () => {

@@ -163,6 +163,7 @@ export interface DnetInputs {
   netDepth?: number;
   bitNode?: number;
   openLabCache?: boolean;
+  /** Complete snapshot; absence means there are no symbols to promote. */
   promoteSymbols?: { symbol: string; expectedProfit: number }[];
   crimeSuccessMult?: number;
   farmEconomics?: FarmEconomics;
