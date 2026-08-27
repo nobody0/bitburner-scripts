@@ -752,6 +752,10 @@ export const dnetTab: Tab = {
       // does: the shape of the net is the point, and filtering it away to seven
       // boxes destroys the thing you came to look at.
       + (options.query ? note(`${matched.length} of ${hosts.length} match — non-matches dimmed, not removed`) : "");
+    const topologyPending = hosts.length > 0
+      && !hosts.some((host) => host.depth !== undefined || host.neighbours !== undefined)
+      ? note("awaiting live topology — this credential-only checkpoint has no depths or links to draw")
+      : "";
 
     const showFilter = view("dnet.show", "all");
     const tableHosts = hosts.filter((host) => {
@@ -1596,7 +1600,7 @@ export const dnetTab: Tab = {
       // game's own NET_WIDTH, and does not fit a half-width column at any zoom
       // that leaves the hostnames readable.
       `<div class="col span">`
-      + card("Darknet", summary + controls + netMap(hosts, options) + netLegend())
+      + card("Darknet", summary + controls + topologyPending + netMap(hosts, options) + netLegend())
       + `</div>`
       + `<div class="col wide">`
       + card(

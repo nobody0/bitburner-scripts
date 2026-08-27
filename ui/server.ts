@@ -359,14 +359,18 @@ function liveRunList(): RunStore[] {
   return [...runs.values()].filter((r) => r.live);
 }
 
+function liveSummary(store: RunStore) {
+  return {
+    ...store.summary(),
+    state: [...store.state.values()],
+    tail: store.tail(),
+  };
+}
+
 function snapshotFor(): unknown {
   return {
     type: "snapshot",
-    runs: liveRunList().map((r) => ({
-      ...r.summary(),
-      state: [...r.state.values()],
-      tail: r.tail(),
-    })),
+    runs: liveRunList().map(liveSummary),
     stored: listRunFiles(),
     // Advertised rather than duplicated in the client: the viewer decides
     // whole-vs-compacted from the file size it already has in `stored`.
@@ -739,7 +743,10 @@ const server = Bun.serve<SocketData, never>({
           runs.set(artifactId, ws.data.store);
           console.log(`run started: ${hello.src}/${hello.script} (${hello.run})`);
         }
-        broadcast({ type: "run-started", run: ws.data.store.summary() });
+        // A handoff can have a real gap between emitters, during which viewers
+        // freeze the run as stored. Include the current fold so resuming that
+        // same install never flashes back to an empty run until its next tick.
+        broadcast({ type: "run-started", run: liveSummary(ws.data.store) });
         return;
       }
       const records = validRecords(message["records"]);

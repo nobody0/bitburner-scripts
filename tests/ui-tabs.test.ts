@@ -662,6 +662,28 @@ describe("tab rendering", () => {
     expect(html).not.toContain(">-1<");
   });
 
+  test("the darknet map identifies a credential-only checkpoint instead of implying an edgeless network", () => {
+    const state = emptyState();
+    state.topics.dnet = {
+      knowledge: {
+        at: 1_000,
+        generation: "test",
+        hosts: [{
+          hostname: "remembered",
+          lastSeenAt: 500,
+          facts: {},
+          credentialKnown: true,
+          authState: "authenticated",
+        }],
+        gone: 0,
+        agents: { live: 0, seenEver: 0, lostSinceBoot: 0 },
+      },
+      maxDepth: -1,
+    };
+
+    expect(TABS.dnet.render(state)).toContain("credential-only checkpoint has no depths or links to draw");
+  });
+
   test("the labyrinth card degrades through every state, and is absent when there is no lab", () => {
     // MOST RUNS NEVER REACH A LAB. The card carries the maze, the walkers and
     // the ETA now, so every one of those has to fold away cleanly rather than

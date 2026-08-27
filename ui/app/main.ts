@@ -39,6 +39,9 @@ const run = {
   id: null as string | null,
   src: null as "game" | "sim" | null,
   live: false,
+  /** Install artifact to resume after a brief emitter handoff. Set only when
+   * the loaded live run ends; choosing a replay clears it. */
+  resumeArtifact: null as string | null,
   records: null as LogRecord[] | null,
   t0: null as number | null,
 };
@@ -504,6 +507,9 @@ function refreshPicker(): void {
  * that genuinely needs the history. So the trade is made explicit: a compacted
  * run loads instantly and says its timeline is gone. */
 async function loadStored(file: string): Promise<void> {
+  // An explicit replay selection must not jump back to a later emitter from
+  // the artifact the operator just left.
+  run.resumeArtifact = null;
   // Every load carries a token, the way renderSpec's fetch does, and nothing
   // is committed once it is stale. Two orderings were observed without one: a
   // 7.9 MB run fetched whole resolved seconds after the operator had moved on
@@ -631,6 +637,7 @@ function attachLive(summary: RunSummaryLike): void {
   run.id = summary.id;
   run.src = summary.hello?.src ?? null;
   run.live = true;
+  run.resumeArtifact = null;
   // A live run keeps no history: the snapshot is folded once, and every later
   // batch is folded as it arrives.
   run.records = null;
@@ -756,7 +763,14 @@ function connect(): void {
       // discarded a replay's retained records and scrub position and attached
       // whatever live run the hub happened to list first. Auto-attach only when
       // nothing is loaded.
-      if (run.id === null) {
+      const resumed = run.resumeArtifact === null
+        ? undefined
+        : liveRuns.find((entry) => entry.id === run.resumeArtifact);
+      if (resumed) {
+        // A game build handoff briefly closes one telemetry emitter before its
+        // successor says hello. Resume the same install from the fresh tail.
+        attachLive(resumed);
+      } else if (run.id === null) {
         if (liveRuns.length > 0) attachLive(liveRuns[0]!);
         else if (storedRuns.length > 0) void loadStored(storedRuns[0]!.file);
         else render();
@@ -789,14 +803,15 @@ function connect(): void {
       // Gated on "nothing loaded" rather than on this being the only live run:
       // pressing sync while a deliberately chosen replay was open started a
       // game run, and that used to yank the operator straight off the replay.
-      if (run.id === null) {
-        const summary = liveRuns.find((entry) => entry.id === msg.run!.id);
-        if (summary) attachLive(summary);
+      const summary = liveRuns.find((entry) => entry.id === msg.run!.id);
+      if (summary && (run.id === null || run.resumeArtifact === msg.run.id)) {
+        attachLive(summary);
       }
     } else if (msg.type === "run-ended" && msg.run) {
       liveRuns = liveRuns.filter((r) => r.id !== msg.run!.id);
       if (msg.stored) storedRuns = msg.stored;
       if (run.id === msg.run.id) {
+        run.resumeArtifact = msg.run.id;
         run.live = false;
         // The live key stops existing the moment the run closes, so the loaded
         // run has to become its stored file or the picker cannot name it at
