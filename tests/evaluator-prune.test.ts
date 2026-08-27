@@ -271,10 +271,6 @@ lane({ feature: "hacking" }).describe("upper-bound pruning is decision-free", ()
       if ((scenario.node.ScriptHackMoneyGain ?? 1) > 0) {
         expect(pruned.memory.prunedSolves).toBeGreaterThan(0);
       }
-      console.log(
-        `prune A/B seed=0x${scenario.seed.toString(16)}: ${pruned.memory.prunedSolves} solves skipped, ` +
-          `evaluator time ${pruned.gateMs.toFixed(1)}ms pruned vs ${full.gateMs.toFixed(1)}ms full`,
-      );
     });
   }
 });

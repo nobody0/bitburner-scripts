@@ -1075,7 +1075,6 @@ describe("HWGW dispatcher", () => {
       worst = Math.max(worst, performance.now() - start);
     }
     expect(worst).toBeLessThan(10);
-    console.log(`bench: worst dispatcher pass ${worst.toFixed(3)}ms`);
   });
 });
 

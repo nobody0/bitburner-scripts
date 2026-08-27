@@ -60,7 +60,6 @@ describe("every password model opens hosts the simulator minted", () => {
         }
       }
       expect(hosts).toBe(difficulties.length * 25);
-      if (process.env["BB_RECORD_SOLVER_COST"]) console.log(`COST ${model} ${worst}`);
       expect(worst, `${model} got more expensive; re-measure before moving this`)
         .toBe(EXPECTED_WORST[model]);
     });

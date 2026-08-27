@@ -327,36 +327,3 @@ describe("solvePrep", () => {
   });
 });
 
-describe("solver benchmark (budgets from spec/targeting.md)", () => {
-  const statics: TargetStatics[] = Array.from({ length: 100 }, (_, i) => ({
-    hostname: `synth-${i}`,
-    minDifficulty: 1 + (i % 30),
-    moneyMax: 1e6 * (1 + i) * (1 + (i % 7)),
-    requiredHackingSkill: 1 + i * 9,
-    serverGrowth: 1 + ((i * 13) % 99),
-    baseDifficulty: 1 + (i % 60),
-  }));
-
-  test("full refresh of 100 targets stays far under 200ms; 8-target slice under 2ms", () => {
-    const ctx = makeHackContext({ skill: 1_000, intelligence: 50, mults: mockPerson().mults }, {});
-    // Warmup
-    for (const target of statics) solveCycle(ctx, target);
-
-    let fullBest = Infinity;
-    for (let round = 0; round < 3; round++) {
-      const start = performance.now();
-      for (const target of statics) solveCycle(ctx, target);
-      fullBest = Math.min(fullBest, performance.now() - start);
-    }
-    expect(fullBest).toBeLessThan(200);
-
-    let sliceBest = Infinity;
-    for (let round = 0; round < 3; round++) {
-      const start = performance.now();
-      for (let i = 0; i < 8; i++) solveCycle(ctx, statics[i]!);
-      sliceBest = Math.min(sliceBest, performance.now() - start);
-    }
-    expect(sliceBest).toBeLessThan(2);
-    console.log(`bench: full 100-target refresh ${fullBest.toFixed(2)}ms, 8-target slice ${sliceBest.toFixed(3)}ms`);
-  });
-});

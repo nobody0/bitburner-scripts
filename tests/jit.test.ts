@@ -151,7 +151,6 @@ soak.describe("JIT topology packing cost", () => {
     };
     const coarse = costMs(200);
     const fine = costMs(20);
-    console.log(`bench: jitTopologyFits 200ms grid=${coarse.toFixed(4)}ms 20ms grid=${fine.toFixed(4)}ms`);
     expect(fine).toBeLessThan(coarse * 3);
   });
 });

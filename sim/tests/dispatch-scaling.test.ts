@@ -219,9 +219,6 @@ soak.describe("dispatcher pass cost", () => {
     const shallow = completionWakeMs(1_000);
     const deep = completionWakeMs(100_000);
     const ratio = deep / shallow;
-    console.log(
-      `bench: completion wake 1k=${shallow.toFixed(3)}ms 100k=${deep.toFixed(3)}ms ratio=${ratio.toFixed(1)} (100x depth)`,
-    );
     expect(deep).toBeLessThan(2.5);
     expect(ratio).toBeLessThan(8);
   });
@@ -232,10 +229,6 @@ soak.describe("dispatcher pass cost", () => {
     const maxDepth = passMs(100_000);
     const ratio = deep / shallow;
     const maxRatio = maxDepth / shallow;
-    console.log(
-      `bench: pass 1k=${shallow.toFixed(3)}ms 20k=${deep.toFixed(3)}ms 100k=${maxDepth.toFixed(3)}ms`
-      + ` ratios=${ratio.toFixed(1)}x/${maxRatio.toFixed(1)}x`,
-    );
     // The ratchet, and it is a RATIO because the absolute figure belongs to
     // whichever machine ran it. A 20x depth increase costing more than 20x is
     // superlinear by definition. After the rolling maintenance fold this is
