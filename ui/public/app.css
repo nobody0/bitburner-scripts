@@ -282,6 +282,42 @@ canvas.microchart { height: 88px; }
 .mult .dl { width: 5ch; text-align: right; }
 
 /* --- BitNode grid --- */
+.bnroute-heading { display: flex; align-items: center; gap: 8px; margin-top: 12px; color: var(--text-secondary); font-size: var(--fs-sm); }
+.bnroute {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin-top: 6px;
+}
+.bnroute-step {
+  position: relative;
+  min-width: 4.5ch;
+  padding: 3px 7px;
+  border: 1px solid var(--bb-well-light);
+  background: var(--bb-background);
+  color: var(--text-secondary);
+  text-align: center;
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+.bnroute-step:not(:last-child)::after {
+  content: "›";
+  position: absolute;
+  left: calc(100% + 7px);
+  color: var(--muted);
+}
+.bnroute-step.complete { border-color: var(--bb-primary-dark); color: var(--bb-primary-light); }
+.bnroute-step.current { box-shadow: inset 0 0 0 1px var(--series-1); border-color: var(--series-1); }
+.bnroute-step.next { border-color: var(--bb-secondary); color: var(--bb-secondary); }
+.bnroute-step.disabled { border-style: dashed; color: var(--muted); text-decoration: line-through; }
+.bnroute-key { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 6px; color: var(--muted); font-size: var(--fs-xs); }
+.bnroute-key span::before { content: "■"; margin-right: 4px; }
+.bnroute-key .complete::before { color: var(--bb-primary-light); }
+.bnroute-key .current::before { color: var(--series-1); }
+.bnroute-key .next::before { color: var(--bb-secondary); }
+.bnroute-key .disabled::before { color: var(--muted); }
+
 .nodegrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin-top: 10px; }
 .node { border: 1px solid var(--bb-well-light); padding: 8px; background: var(--bb-background); }
 .node .n { font-weight: 600; font-size: var(--fs-md); display: flex; justify-content: space-between; }

@@ -1,4 +1,3 @@
-import type { NS } from "@ns";
 import {
   canSolve,
   CONTRACT_BATCH_SIZE,
@@ -23,13 +22,12 @@ import {
   darknetContractIsActionable,
   type ContractQueueEntry,
 } from "../contracts.ts";
+import { isScriptDeath } from "../errors.ts";
 import { merge, type GameState } from "../state.ts";
-import { actionRamClaim, featureDodge } from "./dodge.ts";
 import type { DriverContext, FeatureDriver, FeatureModule } from "./index.ts";
 
 const CONTRACT_REPLAY_LIMIT = 4_096;
 const CONTRACT_REASON_LIMIT = 512;
-const CLAIM_ID = "action:contract";
 
 type Result = { action: string; ok: boolean; detail: string; at: number };
 
@@ -47,8 +45,10 @@ type ContractInspectionResult = InspectedContract | (ContractQueueEntry & { erro
 type ContractDataResult = (InspectedContract & { data: unknown }) | (InspectedContract & { error: string });
 type ContractAttemptResult = { key: string; reward: string } | { key: string; error: string };
 
-/** Queued broker stages retain their data-dependent inputs. A ready getData
- * lease must resume getData, not restart inspection with the wrong budget. */
+/** The three stages are resumable. If a tick dies between them — the driver
+ * throws, the controller swallows it — the next tick picks up where this one
+ * stopped instead of re-reading, and above all instead of re-ATTEMPTING
+ * contracts the game has already answered and charged a try for. */
 let pipelineBatch: ContractQueueEntry[] | undefined;
 let pipelineInspection: ContractInspectionResult[] | undefined;
 let pipelineData: ContractDataResult[] | undefined;
@@ -254,39 +254,34 @@ const side: FeatureDriver = {
     if (batch.length === 0) return;
     pipelineBatch = batch;
 
-    // Three separate dodges keep getData's RAM out of attempt's peak. Each
-    // method is paid once for the whole batch, regardless of its file count.
-    const inspection = pipelineInspection
-      ? { ok: true as const, value: pipelineInspection }
-      : await featureDodge(
-      ctx,
-      "side",
-      `${CLAIM_ID}:inspect`,
-      ["codingcontract.getContractType", "codingcontract.getNumTriesRemaining"],
-      (stubNs: NS) => batch.map((contract): ContractInspectionResult => {
+    // The per-contract try/catch is what keeps one unreadable file from
+    // aborting the batch: a contract can vanish between the probe that listed
+    // it and the read here, and that is an ordinary outcome, not a fault. A
+    // ScriptDeath is not — it means the resident (or this controller) was
+    // killed, and swallowing it would quarantine every contract in the batch
+    // over an error that says nothing about the contracts.
+    let inspection = pipelineInspection;
+    if (!inspection) {
+      inspection = [];
+      for (const contract of batch) {
         try {
-          return {
+          inspection.push({
             ...contract,
-            type: stubNs.codingcontract.getContractType(contract.file, contract.host),
-            triesBefore: stubNs.codingcontract.getNumTriesRemaining(contract.file, contract.host),
-          };
+            type: await ctx.nsp("codingcontract.getContractType", contract.file, contract.host),
+            triesBefore: await ctx.nsp("codingcontract.getNumTriesRemaining", contract.file, contract.host),
+          });
         } catch (error) {
-          return { ...contract, error: String(error) };
+          if (isScriptDeath(error)) throw error;
+          inspection.push({ ...contract, error: String(error) });
         }
-      }),
-    );
-    if (!inspection.ok) {
-      if (inspection.queued) return;
-      clearContractPipeline();
-      merge(ctx.state, "side", { lastResult: record(false, inspection.reason) });
-      return;
+      }
+      pipelineInspection = inspection;
     }
-    pipelineInspection = inspection.value;
 
     const inspected: InspectedContract[] = [];
     const failures: ContractFailure[] = [];
     const finished = new Set<string>();
-    for (const result of inspection.value) {
+    for (const result of inspection) {
       if ("error" in result) {
         finished.add(contractKey(result));
         if (!result.error.includes("Cannot find contract")) {
@@ -300,29 +295,20 @@ const side: FeatureDriver = {
 
     const jobs: ContractJob[] = [];
     if (inspected.length > 0) {
-      const dataResult = pipelineData
-        ? { ok: true as const, value: pipelineData }
-        : await featureDodge(
-        ctx,
-        "side",
-        `${CLAIM_ID}:data`,
-        ["codingcontract.getData"],
-        (stubNs: NS) => inspected.map((contract): ContractDataResult => {
+      let dataResult = pipelineData;
+      if (!dataResult) {
+        dataResult = [];
+        for (const contract of inspected) {
           try {
-            return { ...contract, data: stubNs.codingcontract.getData(contract.file, contract.host) };
+            dataResult.push({ ...contract, data: await ctx.nsp("codingcontract.getData", contract.file, contract.host) });
           } catch (error) {
-            return { ...contract, error: String(error) };
+            if (isScriptDeath(error)) throw error;
+            dataResult.push({ ...contract, error: String(error) });
           }
-        }),
-      );
-      if (!dataResult.ok) {
-        if (dataResult.queued) return;
-        clearContractPipeline();
-        merge(ctx.state, "side", { lastResult: record(false, dataResult.reason) });
-        return;
+        }
+        pipelineData = dataResult;
       }
-      pipelineData = dataResult.value;
-      for (const result of dataResult.value) {
+      for (const result of dataResult) {
         if ("error" in result) {
           finished.add(contractKey(result));
           if (!result.error.includes("Cannot find contract")) {
@@ -343,24 +329,16 @@ const side: FeatureDriver = {
     const solvedByOrigin: Record<ContractOrigin, number> = { network: 0, darknet: 0 };
     let unreadable = 0;
     if (jobs.length > 0) {
-      const attemptResult = await featureDodge(
-        ctx,
-        "side",
-        `${CLAIM_ID}:attempt`,
-        ["codingcontract.attempt"],
-        (stubNs: NS) => jobs.map((job): ContractAttemptResult => {
-          try {
-            return { key: contractKey(job), reward: stubNs.codingcontract.attempt(job.answer as never, job.file, job.host) };
-          } catch (error) {
-            return { key: contractKey(job), error: String(error) };
-          }
-        }),
-      );
-      if (!attemptResult.ok) {
-        if (attemptResult.queued) return;
-        clearContractPipeline();
-        merge(ctx.state, "side", { lastResult: record(false, attemptResult.reason) });
-        return;
+      // Per-job isolation, not RAM: one contract the game refuses to answer
+      // must not cost the rest of the batch their submissions.
+      const attemptResult: ContractAttemptResult[] = [];
+      for (const job of jobs) {
+        try {
+          attemptResult.push({ key: contractKey(job), reward: await ctx.nsp("codingcontract.attempt", job.answer, job.file, job.host) });
+        } catch (error) {
+          if (isScriptDeath(error)) throw error;
+          attemptResult.push({ key: contractKey(job), error: String(error) });
+        }
       }
       // The attempts have been SUBMITTED, so resuming this pipeline is never
       // correct again — release it before anything below can throw. The
@@ -370,7 +348,7 @@ const side: FeatureDriver = {
       // Array Jumping Game. Everything from here on uses locals and ctx.state.
       clearContractPipeline();
       const byKey = new Map(jobs.map((job) => [contractKey(job), job]));
-      for (const result of attemptResult.value) {
+      for (const result of attemptResult) {
         const job = byKey.get(result.key)!;
         const origin = contractOrigin(job);
         const totals = ledgerFor(ctx, origin);
@@ -462,7 +440,4 @@ export const sideModule: FeatureModule = {
     delete state.contractLedger;
     clearContractPipeline();
   },
-  claims: (ctx) => (ctx.state.contractQueue?.length ?? ctx.state.topics.side?.contracts?.length)
-    ? [actionRamClaim(ctx, "side", CLAIM_ID, ["codingcontract.attempt"])]
-    : [],
 };

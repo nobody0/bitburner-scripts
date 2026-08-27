@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Server } from "@ns";
 import { canRoot, isUseful, reapStrayScripts, reclaimFleet } from "../../game/lib/net.ts";
+import type { NsProxy } from "../../game/lib/ns-proxy.ts";
 
 function server(overrides: Partial<Server> = {}): Server {
   return {
@@ -42,29 +43,32 @@ describe("isUseful", () => {
   });
 });
 
-/** Minimal ns double for the dodged closures: they only use bracket-notation
- * calls, so a plain object with the right methods is enough. */
-function stubNs(
+/** Minimal proxy double: these functions only reach the game through dotted
+ * string paths, so a lookup table keyed by path is a complete stand-in. `self`
+ * is what the reclaim uses to find the resident it must not kill. */
+function proxy(
   processes: Record<string, { pid: number; filename: string; args: (string | number)[] }[]>,
-  pid = 1,
+  self = { pid: 1, server: "home" },
 ) {
   const killed: number[] = [];
   const cleared: string[] = [];
+  const impl: Record<string, (...args: never[]) => unknown> = {
+    self: () => self,
+    ps: (host: string) => processes[host] ?? [],
+    kill: (target: number) => {
+      killed.push(target);
+      return true;
+    },
+    killall: (host: string) => {
+      cleared.push(host);
+      return true;
+    },
+  } as unknown as Record<string, (...args: never[]) => unknown>;
   return {
     killed,
     cleared,
-    ns: {
-      pid,
-      ps: (host: string) => processes[host] ?? [],
-      kill: (target: number) => {
-        killed.push(target);
-        return true;
-      },
-      killall: (host: string) => {
-        cleared.push(host);
-        return true;
-      },
-    } as unknown as Parameters<typeof reclaimFleet>[0],
+    call: ((path: string, ...args: unknown[]) =>
+      Promise.resolve((impl[path] as (...a: unknown[]) => unknown)(...args))) as NsProxy,
   };
 }
 
@@ -73,56 +77,55 @@ function rooted(hostname: string, ramUsed: number): Server {
 }
 
 describe("reclaimFleet", () => {
-  test("clears busy hosts but never kills the controller or its dodge stub", () => {
-    const stub = stubNs(
+  test("clears busy hosts but never kills the controller or the resident", async () => {
+    const stub = proxy(
       {
         home: [
           { pid: 1, filename: "start.js", args: [] },
-          { pid: 2, filename: "lib/dodge-stub.js", args: [] },
+          { pid: 2, filename: "lib/ns-resident.js", args: [] },
           { pid: 3, filename: "worker/starter.js", args: ["n00dles"] },
         ],
       },
-      2, // the stub's own pid
+      { pid: 2, server: "home" }, // the resident doing the killing
     );
     const servers = {
       home: rooted("home", 100),
       "pserv-0": rooted("pserv-0", 8191),
       idle: rooted("idle", 0),
     };
-    const reclaimed = reclaimFleet(stub.ns, servers, 1, "home");
+    const reclaimed = await reclaimFleet(stub.call, servers, 1);
 
     expect(stub.killed).toEqual([3]); // only the orphan
     expect(stub.cleared).toEqual(["pserv-0"]); // idle host untouched
     expect(reclaimed.sort()).toEqual(["home", "pserv-0"]);
   });
 
-  test("skips servers we do not own", () => {
-    const stub = stubNs({});
+  test("skips servers we do not own", async () => {
+    const stub = proxy({});
     const servers = { locked: { hostname: "locked", hasAdminRights: false, ramUsed: 32, maxRam: 64 } as Server };
-    expect(reclaimFleet(stub.ns, servers, 1)).toEqual([]);
+    expect(await reclaimFleet(stub.call, servers, 1)).toEqual([]);
     expect(stub.cleared).toEqual([]);
   });
 
-  test("never killalls the host the stub is running on", () => {
-    // Since dodges can be placed on the fleet, this reclaim may be executing
-    // on a client. A blanket killall there would kill the very stub doing the
-    // killing, and the dodge would hang until its 10s watchdog fired — every
-    // cold boot, non-deterministically, depending only on where placement
-    // happened to put it.
-    const stub = stubNs(
+  test("never killalls the host the resident is running on", async () => {
+    // Residents are placed wherever the broker has room, so this reclaim may
+    // be executing on a client. A blanket killall there would kill the very
+    // process doing the killing, and the awaited call would never settle —
+    // every cold boot, non-deterministically, depending only on placement.
+    const stub = proxy(
       {
         home: [{ pid: 1, filename: "start.js", args: [] }],
         "pserv-0": [
-          { pid: 7, filename: "lib/dodge-stub.js", args: [] }, // us
+          { pid: 7, filename: "lib/ns-resident.js", args: [] }, // us
           { pid: 8, filename: "worker/worker.js", args: [42] }, // a real orphan
         ],
       },
-      7,
+      { pid: 7, server: "pserv-0" },
     );
     const servers = { home: rooted("home", 4), "pserv-0": rooted("pserv-0", 40), other: rooted("other", 12) };
-    const reclaimed = reclaimFleet(stub.ns, servers, 1, "pserv-0");
+    const reclaimed = await reclaimFleet(stub.call, servers, 1);
 
-    // pserv-0 is cleared per-process, sparing the stub; only `other` is nuked.
+    // pserv-0 is cleared per-process, sparing the resident; only `other` is nuked.
     expect(stub.cleared).toEqual(["other"]);
     expect(stub.killed).toEqual([8]);
     expect(reclaimed.sort()).toEqual(["other", "pserv-0"]);
@@ -130,29 +133,29 @@ describe("reclaimFleet", () => {
 });
 
 describe("reapStrayScripts", () => {
-  test("kills unregistered workers and spares the rest", () => {
-    const stub = stubNs({
+  test("kills unregistered workers and spares the rest", async () => {
+    const stub = proxy({
       "pserv-0": [
         { pid: 10, filename: "worker/worker.js", args: [7] }, // registered
         { pid: 11, filename: "worker/worker.js", args: [99] }, // unreachable
         { pid: 13, filename: "something-else.js", args: [] }, // not ours
       ],
     });
-    const reaped = reapStrayScripts(stub.ns, ["pserv-0"], "worker/worker.js", new Set([10]));
+    const reaped = await reapStrayScripts(stub.call, ["pserv-0"], "worker/worker.js", new Set([10]));
     expect(reaped).toBe(1);
     expect(stub.killed).toEqual([11]);
   });
 
-  test("registered workers survive a build handoff", () => {
+  test("registered workers survive a build handoff", async () => {
     // After a handoff the dispatcher ledger is fresh but the realm registry
     // still holds every live op, so nothing may be killed.
-    const stub = stubNs({
+    const stub = proxy({
       "pserv-0": [
         { pid: 20, filename: "worker/worker.js", args: [1] },
         { pid: 21, filename: "worker/worker.js", args: [2] },
       ],
     });
-    const reaped = reapStrayScripts(stub.ns, ["pserv-0"], "worker/worker.js", new Set([20, 21]));
+    const reaped = await reapStrayScripts(stub.call, ["pserv-0"], "worker/worker.js", new Set([20, 21]));
     expect(reaped).toBe(0);
     expect(stub.killed).toEqual([]);
   });

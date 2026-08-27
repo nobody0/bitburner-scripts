@@ -166,7 +166,7 @@ function unknownNode(path: string, host: SimNsHost, process: SimProcess): unknow
     get(_t, prop): unknown {
       if (typeof prop !== "string") return undefined;
       // `await ns.foo` must reject rather than hang, and instanceof checks in
-      // game/lib/dodge-stub.ts must not be fooled into treating this as a
+      // game/lib/ns-resident.ts must not be fooled into treating this as a
       // thenable.
       if (prop === "then" || prop === "constructor" || prop === "catch" || prop === "finally") return undefined;
       return unknownNode(`${path}.${prop}`, host, process);
@@ -501,6 +501,21 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       host.processes.killall(requireServer(host, hostname, process.host).hostname, process.pid) > 0,
     ps: (hostname: unknown = process.host) =>
       host.processes.ps(requireServer(host, hostname, process.host).hostname),
+    /** The calling process's own RunningScript. `reclaimFleet` uses it to spare
+     * the ns resident it is calling through: a resident killed mid-call leaves
+     * the awaited promise unresolved, so the caller HANGS rather than stalls
+     * (see spec/ns-proxy.md). Only the fields the engine guarantees and our
+     * code reads are modelled.
+     * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L1738-L1745 */
+    self: () => ({
+      pid: process.pid,
+      filename: process.filename,
+      server: process.host,
+      args: [...process.args],
+      threads: process.threads,
+      temporary: process.temporary,
+      ramUsage: process.threads > 0 ? process.ramGb / process.threads : process.ramGb,
+    }),
     getFunctionRamCost: (name: unknown): number => {
       if (typeof name !== "string" && typeof name !== "number") {
         throw new Error("getFunctionRamCost: 'name' must be a string");

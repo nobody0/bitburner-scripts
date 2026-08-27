@@ -29,7 +29,7 @@ This is a clean-sheet Bitburner automation project. The predecessor scripts
   only move data (build a WorldView, execute Actions). Anything decided in the
   game must be A/B-testable in the simulator.
 - Telemetry rule: telemetry may only **send** state the script already holds.
-  Every getter, dodge and probe runs unconditionally and writes to the
+  Every getter, proxied call and probe runs unconditionally and writes to the
   game-state store (`game/lib/state.ts`); `TELEMETRY: if (__TELEMETRY__)` wraps
   the send and nothing else. A `--perf` build must be behaviourally identical
   to a telemetry build — only quieter. Concretely: every reference to `tel`,
@@ -47,3 +47,4 @@ This is a clean-sheet Bitburner automation project. The predecessor scripts
   `game/restore.ts` may touch the game's IndexedDB, and it stays a separate
   entrypoint so the controller can never reach it — `tests/ram-budget.test.ts`
   pins that.
+- never commit a console.log. They are a option for temproary debugging but must be cleaned up after this debugging is done.

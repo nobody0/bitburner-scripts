@@ -236,7 +236,7 @@ export function makeSink(tel: Telemetry): TelemetrySink {
         const signature = batch.ids.join(",");
         if (signature !== sentBatch) {
           sentBatch = signature;
-          tel.debug("probe.batch", { ids: batch.ids, cost: batch.cost, budget: batch.budget });
+          tel.debug("probe.batch", { ids: batch.ids });
         }
       }
     },

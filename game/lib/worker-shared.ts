@@ -1,7 +1,8 @@
 import type { ScriptLaunch } from "./launch-shared.ts";
 
 /** Rendezvous between the dispatcher and its puppet workers (same JS realm,
- * same trick as dodge-shared.ts). Type-only module: nothing exists at runtime.
+ * same trick as ns-proxy-shared.ts). Type-only module: nothing exists at
+ * runtime.
  *
  * The descriptor is written BEFORE ns.exec, so a worker can never observe a
  * missing entry; the worker registers ns.atExit before awaiting its op, so

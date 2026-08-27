@@ -32,8 +32,7 @@ import { lane } from "../../tests/support/lanes.ts";
  * 0.2 GB stock account probe never ran until the farm happened to free RAM at
  * ~200 s — by which time progression's route marginals had made RAM claims the
  * only priced bidders and the grant was gone in ten seconds. The runner now
- * falls through to the next due probe that can actually place (the blocked
- * head's broker request stays queued, feeding the arena's starvation growth).
+ * falls through to the next due probe that can actually place.
  *
  * BN8 bring-up realities this smoke deliberately does NOT assert, and the
  * full leg must watch for:

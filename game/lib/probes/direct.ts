@@ -47,11 +47,11 @@ const goCore: DirectProbe = {
 /** The three darknet facts only HOME can read, and the whole reason they are
  * here rather than in a RAM dodge: every one is 0 GB
  * (`RamCostGenerator.ts` — getStasisLinkLimit/getStasisLinkedServers/
- * getDarknetInstability all cost nothing), so a dodge stub bought nothing but
- * latency. They are home-owned facts, so home reads them inline and ships them
+ * getDarknetInstability all cost nothing), so a resident round trip would buy
+ * nothing but latency. They are home-owned facts, so home reads them inline and ships them
  * over the order channel.
  *
- * Everything ELSE the old `dnet.core` dodge read — darkweb's own details, its
+ * Everything ELSE the old `dnet.core` probe read — darkweb's own details, its
  * neighbours, its RAM — was redundant: the resident standing on darkweb runs
  * `ns.dnet.probe()` + `getServerDetails` every mutation and drains the result
  * home. Home re-reading the same host from a stub was a second, slower,

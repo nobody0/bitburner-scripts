@@ -682,9 +682,6 @@ describe("arbiter shape", () => {
 
   test("every named priority is distinct enough to order and resolvable", () => {
     expect(priorityOf("factions:aug-fund")).toBe(PRIORITY["factions:aug-fund"]);
-    // Acquisition outranks spending: a decision on stale state is worse than
-    // a decision deferred.
-    expect(PRIORITY["probe:core"]).toBeGreaterThan(PRIORITY["hacknet:upgrade"]);
     // The aug fund outranks the upgrades that would otherwise always win by
     // being cheaper and always ready.
     expect(PRIORITY["factions:aug-fund"]).toBeGreaterThan(PRIORITY["hacknet:upgrade"]);

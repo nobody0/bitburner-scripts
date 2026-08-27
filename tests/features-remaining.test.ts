@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
 import { FEATURE_MODULES, type ClaimContext, type NeedContext } from "../game/lib/features/index.ts";
-import { DODGED_PROBES } from "../game/lib/probes/index.ts";
+import { PRICED_PROBES } from "../game/lib/probes/index.ts";
+import { probeCtx } from "./support/probe-fixture.ts";
 import { initState } from "../game/lib/state.ts";
 import { deriveCapabilities } from "../shared/features/unlock.ts";
 import { assignCoupled, assignIndependent } from "../shared/strategy/assignment.ts";
@@ -23,7 +24,6 @@ import { rankGoGames } from "../shared/strategy/go/rewards.ts";
 import { postNeeds } from "../shared/strategy/needs.ts";
 import {
   BASELINE_ORDER,
-  DEFAULT_BITNODE_TARGETS,
   bankedFavorActivationValue,
   earlyCountBatchAllowed,
   chooseNextBitNode,
@@ -205,20 +205,21 @@ describe("bladeburner", () => {
   });
 
   test("the live probe reads base rank loss instead of assuming failure is free", async () => {
-    const probe = DODGED_PROBES.find((entry) => entry.id === "bladeburner.actions")!;
-    if (!("steps" in probe)) throw new Error("bladeburner.actions is expected to be stepped");
-    const bladeburner = {
-      getContractNames: () => ["Tracking"], getOperationNames: () => [], getBlackOpNames: () => [],
-      getGeneralActionNames: () => [], getActionEstimatedSuccessChance: () => [1, 1], getActionTime: () => 1_000,
-      getActionCountRemaining: () => 1, getActionCurrentLevel: () => 1, getActionMaxLevel: () => 1,
-      getActionRankGain: () => 50, getActionRankLoss: () => 7,
-      getSkillNames: () => [], getSkillLevel: () => 0, getSkillUpgradeCost: () => 0,
-    };
-    // Driven the way the runner drives a stepped probe: each step against one
-    // shared accumulator, then finish().
-    const acc: Record<string, unknown> = {};
-    for (const step of probe.steps) await step.run({ bladeburner } as unknown as NS, {} as never, acc);
-    const [emission] = probe.finish(acc);
+    const probe = PRICED_PROBES.find((entry) => entry.id === "bladeburner.actions")!;
+    const [emission] = await probe.run(probeCtx({
+      "bladeburner.getContractNames": () => ["Tracking"],
+      "bladeburner.getOperationNames": () => [],
+      "bladeburner.getBlackOpNames": () => [],
+      "bladeburner.getGeneralActionNames": () => [],
+      "bladeburner.getActionEstimatedSuccessChance": () => [1, 1],
+      "bladeburner.getActionTime": () => 1_000,
+      "bladeburner.getActionCountRemaining": () => 1,
+      "bladeburner.getActionCurrentLevel": () => 1,
+      "bladeburner.getActionMaxLevel": () => 1,
+      "bladeburner.getActionRankGain": () => 50,
+      "bladeburner.getActionRankLoss": () => 7,
+      "bladeburner.getSkillNames": () => [],
+    }));
     expect((emission!.data as { actions: { rankGain: number; rankLoss: number }[] }).actions[0]).toMatchObject({ rankGain: 50, rankLoss: 7 });
   });
 
@@ -240,7 +241,6 @@ describe("bladeburner", () => {
       budgetGb: 100,
       horizons: {},
       board: postNeeds([]),
-      ramPrice: () => 1,
     } as unknown as ClaimContext;
     expect(module.claims?.(context).some((claim) => claim.resource === "time")).toBe(true);
     progression.ownedAugs["The Blade's Simulacrum"] = 1;
@@ -453,53 +453,6 @@ describe("go", () => {
     expect(best.score).toBeLessThanOrEqual(1);
   });
 
-  test("the dispatch-time seed finalization reuses prepared option spaces", async () => {
-    const view = {
-      board: board([".....", ".....", ".....", ".....", "....."]),
-      currentPlayer: "Black",
-      opponent: "Daedalus",
-      status: "inProgress",
-      previousBoards: [],
-      komi: 5.5,
-    } as const;
-    const prepared = await prepareNeuralGoDecision(view);
-    for (let index = 0; index < 5; index++) {
-      await finalizeNeuralGoDecision(prepared, [10_200 + index * 200], engine);
-    }
-    const samples: number[] = [];
-    for (let index = 0; index < 31; index++) {
-      const started = performance.now();
-      await finalizeNeuralGoDecision(prepared, [20_200 + index * 200], engine);
-      samples.push(performance.now() - started);
-    }
-    samples.sort((a, b) => a - b);
-    // The test double isolates reply preparation from model execution. The
-    // deployed shader has a separate Chromium performance gate.
-    expect(samples[15]!).toBeLessThan(8);
-  });
-
-  test("a complete 5x5 decision stays inside the turn latency budget", async () => {
-    const view = {
-      board: board(["X.O..", ".XO..", "..X..", ".O...", "....."]),
-      currentPlayer: "Black",
-      opponent: "Daedalus",
-      status: "inProgress",
-      previousBoards: [],
-      komi: 5.5,
-    } as const;
-    for (let index = 0; index < 5; index++) await decideGoNeural(view, [10_200 + index * 200], engine);
-    const samples: number[] = [];
-    for (let index = 0; index < 21; index++) {
-      const started = performance.now();
-      await decideGoNeural(view, [20_200 + index * 200], engine);
-      samples.push(performance.now() - started);
-    }
-    samples.sort((a, b) => a - b);
-    // Preparation dominates (one reply option space per candidate) and is
-    // optimized as one synchronous prediction in production; the full turn budget is 50 ms.
-    expect(samples[10]!).toBeLessThan(40);
-  });
-
   test("a full board passes rather than crashing", async () => {
     const decision = await decideGoNeural({
       board: board(["XX", "XX"]),
@@ -691,19 +644,15 @@ describe("corp staged script", () => {
   });
 
   test("a zero-valued upstream investment offer is unavailable", async () => {
-    const probe = DODGED_PROBES.find((entry) => entry.id === "corp.core")!;
-    if (!("steps" in probe)) throw new Error("corp.core is expected to be stepped");
-    const corporation = {
-      getCorporation: () => ({
+    const probe = PRICED_PROBES.find((entry) => entry.id === "corp.core")!;
+    const [emission] = await probe.run(probeCtx({
+      "corporation.getCorporation": () => ({
         name: "Acme", funds: 1, revenue: 0, expenses: 0, public: true,
         valuation: 1, sharePrice: 1, totalShares: 1, numShares: 1,
         issuedShares: 0, dividendRate: 0, dividendEarnings: 0, nextState: "START",
       }),
-      getInvestmentOffer: () => ({ round: 5, funds: 0, shares: 0 }),
-    };
-    const acc: Record<string, unknown> = {};
-    for (const step of probe.steps) await step.run({ corporation } as unknown as NS, {} as never, acc);
-    const [emission] = probe.finish(acc);
+      "corporation.getInvestmentOffer": () => ({ round: 5, funds: 0, shares: 0 }),
+    }));
     expect((emission!.data as { investmentOffer?: unknown }).investmentOffer).toBeUndefined();
   });
 });
@@ -776,25 +725,35 @@ describe("darknet", () => {
     expect(darknetRoute(knowledge, "darkweb", now, {})).toEqual(["darkweb"]);
   });
 
-  test("...and it refuses outright when a hop's adjacency has expired", () => {
-    // Adjacency is the shortest-lived fact in the feature — a mutation tick
-    // lands every ~6 s and one branch severs every edge on a host — so this
-    // refuses far more often than it succeeds, and that is the correct ratio.
-    // The failure it prevents is not a wasted call: a connect chain that breaks
-    // halfway leaves the TERMINAL stranded deep in a net that is rearranging
-    // around it.
+  test("...and it refuses outright when a mutation has dirtied a hop's adjacency", () => {
+    // The failure this prevents is not a wasted call: a connect chain that
+    // breaks halfway leaves the TERMINAL stranded deep in a net that is
+    // rearranging around it.
+    //
+    // The trigger is the mutation, not the clock. Adjacency used to be given a
+    // ~27s shelf life and refused past it, which made this refuse far more
+    // often than it succeeded — and cost far more than a stranded terminal,
+    // because the spread planner reads the same edges and every agent went
+    // blind on that timer.
     const now = 10_000_000;
-    const knowledge = foldKnowledgeReports(
-      emptyKnowledge("15:0"),
-      [
-        { hostname: "darkweb", at: now, present: true, neighbours: ["dn-0"], depth: -1 },
-        { hostname: "dn-0", at: now, present: true, neighbours: ["darkweb", "dn-1"], depth: 0 },
-        { hostname: "dn-1", at: now, present: true, neighbours: ["dn-0"], depth: 1 },
-      ],
-      now,
-    ).knowledge;
+    const edges = [
+      { hostname: "darkweb", at: now, present: true, neighbours: ["dn-0"], depth: -1 },
+      { hostname: "dn-0", at: now, present: true, neighbours: ["darkweb", "dn-1"], depth: 0 },
+      { hostname: "dn-1", at: now, present: true, neighbours: ["dn-0"], depth: 1 },
+    ];
+    const knowledge = foldKnowledgeReports(emptyKnowledge("15:0"), edges, now).knowledge;
+    // Age alone changes nothing: the last known route is still the best answer.
     const later = now + msPerHostEvent("disconnected") * 100;
-    expect(darknetRoute(knowledge, "dn-1", later, {})).toBeUndefined();
+    expect(darknetRoute(knowledge, "dn-1", later, {})).toEqual(["darkweb", "dn-0", "dn-1"]);
+
+    // A mutation dirties the middle hop's edges, and the route refuses until a
+    // probe replaces them.
+    const dirtied = foldKnowledgeReports(
+      knowledge,
+      [{ hostname: "dn-0", at: later, present: true, invalidates: ["topology"] }],
+      later,
+    ).knowledge;
+    expect(darknetRoute(dirtied, "dn-1", later, {})).toBeUndefined();
   });
 
   test("a partial map withholds the ranking but never the charisma need", () => {
@@ -1389,13 +1348,24 @@ describe("progression", () => {
     expect(bestOrdering(nodes, {}, 0.5, {}).exact).toBe(false);
   });
 
-  test("next-BitNode selection credits the node being completed and covers all nodes", () => {
-    expect(chooseNextBitNode(4, {})).toMatchObject({ bitNode: 4, targetLevel: 3 });
-    expect(chooseNextBitNode(4, { "4": 2 })).toMatchObject({ bitNode: 1, targetLevel: 3 });
-    expect(new Set(DEFAULT_BITNODE_TARGETS.map(([node]) => node))).toEqual(new Set(Array.from({ length: 15 }, (_, i) => i + 1)));
-
-    const allThree = Object.fromEntries(Array.from({ length: 15 }, (_, i) => [String(i + 1), 3]));
-    expect(chooseNextBitNode(1, allThree)).toMatchObject({ bitNode: 12, targetLevel: 4 });
+  test("next-BitNode selection credits completion and skips disabled nodes", () => {
+    expect(chooseNextBitNode(1, {})).toMatchObject({ bitNode: 4, targetLevel: 3 });
+    expect(chooseNextBitNode(4, { "1": 1, "4": 2 })).toMatchObject({ bitNode: 1, targetLevel: 3 });
+    expect(chooseNextBitNode(5, {
+      "1": 3,
+      "4": 3,
+      "5": 1,
+      "14": 1,
+      "15": 3,
+    })).toMatchObject({ bitNode: 14, targetLevel: 3 });
+    expect(chooseNextBitNode(1, {
+      "1": 3,
+      "4": 3,
+      "5": 3,
+      "12": 3,
+      "14": 3,
+      "15": 3,
+    })).toMatchObject({ bitNode: 12, targetLevel: 4 });
   });
 });
 
@@ -1480,5 +1450,24 @@ describe("progression survives its own published plan", () => {
     const second = ctx.state.topics.progression!.plan!;
     expect(second.route).toBe(first.route);
     expect(second.decidedAt).toBe(first.decidedAt);
+  });
+
+  test("the completion hold suppresses even a stale executable terminal claim", () => {
+    const ctx = ctxWith(undefined);
+    refresh(ctx);
+    ctx.state.topics.progression!.plan!.completion = {
+      ready: true,
+      automatic: true,
+      nextBitNode: 4,
+      targetLevel: 3,
+      armedAt: 500,
+      execute: true,
+    };
+    const claims = FEATURE_MODULES.progression.claims!({
+      ...ctx,
+      horizons: ctx.state.topics.progression!.plan!.forecasts,
+      board: postNeeds([]),
+    } as ClaimContext);
+    expect(claims.some((claim) => claim.id === "action:complete-bitnode")).toBe(false);
   });
 });

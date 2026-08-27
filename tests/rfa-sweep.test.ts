@@ -4,8 +4,8 @@ import type { RfaSession } from "../tools/rfa-session.ts";
 import { planSweep, sweepStaleFiles } from "../tools/rfa-sweep.ts";
 import { selectSweepHosts } from "../tools/sync.ts";
 
-const OWNED = ownedDirectories(["start.js", "lib/dodge-stub.js", "worker/worker.js"]);
-const KEEP = new Set(["worker/worker.js", "lib/dodge-stub.js"]);
+const OWNED = ownedDirectories(["start.js", "lib/ns-resident.js", "worker/worker.js"]);
+const KEEP = new Set(["worker/worker.js", "lib/ns-resident.js"]);
 
 /** Transcribed from a real `ls -l` on home: every category of file the game
  * generates, a player-authored file, the run-lineage file the controller writes
@@ -38,7 +38,7 @@ const HOME_LISTING = [
   "worker/worker.js",
   "worker/unused.js",
   "worker/diagnostic.js",
-  "lib/dodge-stub.js",
+  "lib/ns-resident.js",
   "lib/obsolete.js",
 ];
 

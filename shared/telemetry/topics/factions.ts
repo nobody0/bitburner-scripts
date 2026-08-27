@@ -184,6 +184,7 @@ export interface FactionPlan {
    *  Published so `progression`'s install barrier tests the same money the drain
    *  is willing to spend — fresh income beyond it must not hold the install. */
   drainCeiling?: number;
+  drainCosts?: { purchase: number; donation: number; residualDonation: number; total: number };
 }
 
 /** What one favor event buys at a joined faction, in work-seconds — the

@@ -112,7 +112,7 @@ other buyer. `career:progress-lock` 120 (hard, bounded by the in-flight unit's b
 - **Progress work is a transaction.** Crime and grafting bank only at completion, so the lock must be bounded
   by the computed bank time — an unarmed watcher once held the slot for a whole run, and re-committing the
   longest crime at each boundary renewed it forever (`schedule.ts:52-88`).
-- **A cold menu is not an empty menu.** The crime table comes from a five-minute dodged probe, so an option
+- **A cold menu is not an empty menu.** The crime table comes from a five-minute priced probe, so an option
   that must occupy the slot waits while `menuComplete` is false; and `Player.currentWork` survives a reload,
   so career needs an explicit `stop` path (`decide.ts:653-716`).
 - **A combat need is met by the weakest of four stats**, so a crime or gym session scores on the minimum;
@@ -148,7 +148,7 @@ input, a boundary that holds even at BN11's ×2.5.
 | Concern | File |
 |---|---|
 | strategy | `shared/strategy/career/` — `crimes`, `company`, `programs`, `training`, `schedule`, `decide` |
-| driver · probes | `game/lib/features/career.ts` · `game/lib/probes/dodged.ts` (`career.work`, `career.crimes`) |
+| driver · probes | `game/lib/features/career.ts` · `game/lib/probes/priced.ts` (`career.work`, `career.crimes`) |
 | telemetry · tab | `shared/telemetry/topics/career.ts` · `ui/app/tabs/career.ts` |
 | sim · vendored | `sim/features/` (`crime`, `companies`, `education`, `programs`) · `sim/vendor/bitburner/src/` (`Crime/CrimeTable.ts`, `Company/CompanyTable.ts`, `Constants.ts`) |
 

@@ -1618,7 +1618,7 @@ export const hackingTab: Tab = {
               // dispatcher rather than an unmeasured one.
               [
                 `<span title="${esc(
-                  "RAM reservations the broker could not place, split by the phase that asked. The parts sum to the " +
+                  "Farm allocations the heap could not place, split by the phase that asked. The parts sum to the " +
                     "whole, exactly like the skip causes below.",
                 )}">alloc failures</span>`,
                 farm.allocFails === undefined ? NONE : `${fmtNum(farm.allocFails)}${causes(farm.allocFailsByPhase)}`,

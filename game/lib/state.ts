@@ -23,8 +23,6 @@ export type Topics = { [K in StateKey]?: StateMap[K] };
 
 export interface ProbeBatch {
   ids: string[];
-  cost: number;
-  budget: number;
 }
 
 export interface GameState {

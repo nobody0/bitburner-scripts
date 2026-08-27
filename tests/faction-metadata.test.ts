@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { buildFactionsView } from "../game/lib/features/factions.ts";
 import { emptyBoard, noGrants, type DriverContext } from "../game/lib/features/index.ts";
-import { DODGED_PROBES, isStepped, type ProbeAcc } from "../game/lib/probes/index.ts";
+import { PRICED_PROBES } from "../game/lib/probes/index.ts";
+import { probeCtx } from "./support/probe-fixture.ts";
 import { initState } from "../game/lib/state.ts";
 import { deriveCapabilities } from "../shared/features/unlock.ts";
 import { unknownForecast } from "../shared/strategy/progression/forecast.ts";
@@ -39,22 +40,22 @@ function metadataView(factionPatch: Partial<FactionsState> = {}, stockPatch?: un
 }
 
 describe("full faction catalogue metadata", () => {
-  test("the stepped probe queries every enum value, not only members", async () => {
-    const probe = DODGED_PROBES.find((entry) => entry.id === "factions.standings")!;
-    expect(isStepped(probe)).toBe(true);
-    if (!isStepped(probe)) return;
+  test("the standings probe queries every enum value, not only members", async () => {
+    const probe = PRICED_PROBES.find((entry) => entry.id === "factions.standings")!;
     const queried = { work: [] as string[], enemies: [] as string[] };
-    const stub = {
-      enums: { FactionName: { Tetrads: "Tetrads", Sector12: "Sector-12" } },
-      singularity: {
-        getFactionWorkTypes: (name: string) => { queried.work.push(name); return name === "Tetrads" ? ["field", "security"] : ["hacking"]; },
-        getFactionEnemies: (name: string) => { queried.enemies.push(name); return name === "Sector-12" ? ["Chongqing"] : []; },
+    const ctx = probeCtx({
+      "getFavorToDonate": () => 150,
+      "singularity.checkFactionInvitations": () => [],
+      "singularity.getFactionWorkTypes": (name: never) => {
+        queried.work.push(name);
+        return name === "Tetrads" ? ["field", "security"] : ["hacking"];
       },
-    };
-    const acc: ProbeAcc = {};
-    await probe.steps.find((step) => step.id === "workTypes")!.run(stub as never, {} as never, acc);
-    await probe.steps.find((step) => step.id === "enemies")!.run(stub as never, {} as never, acc);
-    const data = probe.finish(acc)[0]!.data as FactionsState;
+      "singularity.getFactionEnemies": (name: never) => {
+        queried.enemies.push(name);
+        return name === "Sector-12" ? ["Chongqing"] : [];
+      },
+    }, { factionNames: { Tetrads: "Tetrads", Sector12: "Sector-12" } });
+    const data = (await probe.run(ctx))[0]!.data as FactionsState;
     expect(queried.work).toEqual(["Tetrads", "Sector-12"]);
     expect(queried.enemies).toEqual(["Tetrads", "Sector-12"]);
     expect(data.workTypes?.Tetrads).toEqual(["field", "security"]);
@@ -77,20 +78,20 @@ describe("full faction catalogue metadata", () => {
   });
 
   test("the live catalogue keeps repeatable NeuroFlux after one level is owned", async () => {
-    const probe = DODGED_PROBES.find((entry) => entry.id === "factions.augs")!;
-    expect(isStepped(probe)).toBe(true);
-    if (!isStepped(probe)) return;
-    const stub = {
-      enums: { FactionName: { CyberSec: "CyberSec" } },
-      singularity: {
-        getOwnedAugmentations: () => ["BitWire", "NeuroFlux Governor"],
-        getAugmentationsFromFaction: () => ["BitWire", "NeuroFlux Governor"],
-      },
-    };
-    const acc: ProbeAcc = {};
-    await probe.steps.find((step) => step.id === "owned")!.run(stub as never, {} as never, acc);
-    await probe.steps.find((step) => step.id === "catalog")!.run(stub as never, {} as never, acc);
-    expect(acc.byFaction).toEqual({ CyberSec: ["NeuroFlux Governor"] });
+    const probe = PRICED_PROBES.find((entry) => entry.id === "factions.augs")!;
+    const ctx = probeCtx({
+      "singularity.getOwnedAugmentations": () => ["BitWire", "NeuroFlux Governor"],
+      "singularity.getAugmentationsFromFaction": () => ["BitWire", "NeuroFlux Governor"],
+      "singularity.getAugmentationPrice": () => 1e6,
+      "singularity.getAugmentationRepReq": () => 1e3,
+      "singularity.getAugmentationPrereq": () => [],
+      "singularity.getAugmentationStats": () => ({ hacking: 1.1 }),
+    }, { factionNames: { CyberSec: "CyberSec" } });
+    const data = (await probe.run(ctx))[0]!.data as FactionsState;
+    // BitWire is owned and drops out; NeuroFlux is repeatable and must not.
+    expect(data.offers?.map((offer) => [offer.faction, offer.name]))
+      .toEqual([["CyberSec", "NeuroFlux Governor"]]);
+    expect(data.augTotal).toBe(1);
   });
 
   test("only a Shadows of Anarchy invitation or membership proves an infiltration", () => {

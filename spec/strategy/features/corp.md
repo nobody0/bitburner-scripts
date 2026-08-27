@@ -108,7 +108,7 @@ payout    = dividends ** (1 - tributeModifier)
 - **Probing is expensive.** `CorporationInfo` calls are 10 GB, actions 20 GB
   (`src/Netscript/RamCostGenerator.ts:13-14`). `corp.core` splits two independent
   10 GB reads to avoid a 21.6 GB contiguous block
-  (`game/lib/probes/dodged.ts:1100-1108`); `corp.divisions` runs at half cadence
+  (`game/lib/probes/priced.ts:1100-1108`); `corp.divisions` runs at half cadence
   and owns `divisions` alone, since topic merges are shallow
   (`shared/telemetry/topics/corp.ts`). `sim/` has no corporation model at all, so
   its ns calls report `unmodeled()` (`sim/game-run.ts:373`,
@@ -144,7 +144,7 @@ gracefully in both.
 |---|---|
 | strategy | `shared/strategy/corp/stages.ts` |
 | driver | `game/lib/features/remaining.ts:319-370`, `corpModule` at `:3621` |
-| probes | `game/lib/probes/gates.ts` · `game/lib/probes/dodged.ts:1100` (`corp.core`), `:1219` (`corp.divisions`) |
+| probes | `game/lib/probes/gates.ts` · `game/lib/probes/priced.ts:1100` (`corp.core`), `:1219` (`corp.divisions`) |
 | telemetry topic | `shared/telemetry/topics/corp.ts` |
 | tab | `ui/app/tabs/corp.ts` |
 | arbiter bands | `shared/strategy/arbiter.ts:340-342` |

@@ -27,9 +27,9 @@ import type { MeasuredMarginal } from "./progression/marginal.ts";
  *    stops whatever was running). That makes pre-emption a correctness
  *    concern, not a fairness one.
  *
- * Dodge RAM is not a fungible pool: placement is contiguous, host-local and
- * changes as workers land. It is admitted continuously by shared/ram/broker.ts
- * and deliberately is not represented by this arbiter.
+ * Host RAM is not a fungible pool: placement is contiguous, host-local and
+ * changes as workers land. It is reserved by shared/ram/broker.ts and
+ * deliberately is not represented by this arbiter.
  *
  * Pure and deterministic: no Math.random, no clock read (the caller passes
  * `now`), and every ordering is fully specified down to a tie-break on claim
@@ -281,10 +281,10 @@ export const PRIORITY = {
    *  band at all: it announces `produces: { reputation }` and is scored on
    *  what that rate is worth (see `./income.ts`). */
   "factions:work": 60,
-  /** RAM for reputation work on the selected faction-acquisition route.
-   * Player time and the dodge that STARTS that work are one atomic action, so
-   * the RAM half is banded to match the policy weight of the time half. The
-   * time half itself is priced, not banded. */
+  /** The policy weight of reputation work on the selected faction-acquisition
+   * route. Currently unposted — the work slot itself is priced rather than
+   * banded (see `factions:work`) — and kept as the ordering anchor the lattice
+   * tests measure `career:progress-lock` against. */
   "factions:route-work": 91,
   /** Route mechanics require the current install and the route-weighted
    * augmentation package is the remaining pre-reset work. This is deliberately
@@ -349,25 +349,11 @@ export const PRIORITY = {
    *  ordinary upgrades post at income:investment; only milestone-clearing
    *  ones escalate to the hacknet:*-need bands. */
   "hacknet:upgrade": 25,
-  /** A blocking server-access dodge (backdoor install) whose measured
-   *  BN-seconds-per-second value beats the farm income of the RAM it needs.
-   *  The high band wins broker queue order and arena growth, but still cannot
-   *  kill active farm work: reclamation is limited to share and idle pooled
-   *  workers. The escalation is CONDITIONAL — claims() only posts this band
-   *  when the need is blocking AND the value comparison holds; everything
-   *  else stays at probe:detail. */
-  "hacking:critical-access": 111,
   /** Port openers and TOR that unblock requested rooting/backdoors. They must
    *  remain fundable through the imminent-install reserve: until the backdoor
    *  clears, the faction sweep that forecast is waiting on cannot finish.
    *  Home/cloud RAM posts at income:investment so ROI decides. */
   "hacking:blocking-prerequisite": 65,
-  /** Probe RAM. Acquisition outranks spending, because a decision made on
-   *  stale state is worse than a decision deferred. */
-  "probe:gate": 100,
-  "probe:core": 75,
-  "probe:detail": 50,
-  "probe:background": 40,
 } as const;
 
 export type PriorityKey = keyof typeof PRIORITY;

@@ -318,6 +318,7 @@ export const overviewTab: Tab = {
       || name === "start.respawn_failed"
       || name === "feature.failed"
       || name === "ram.starvation"
+      || name === "proxy.slow"
       || name === "telemetry.dropped"
       || name.startsWith("probe.")
       || name.startsWith("contract.");

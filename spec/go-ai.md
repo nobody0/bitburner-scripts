@@ -133,10 +133,10 @@ repeats the worker-cache request
 for the new seed set until the intended tick is observed. A bounded failure aborts the
 turn instead of knowingly dispatching with the wrong forecast.
 
-Anchoring runs in its own dodge because it may wait most of a cycle: it costs
-`getPlayer` only, rather than holding the 4 GB `go.makeMove` grant while
-waiting. It runs only when the phase is unknown, with a cooldown so a paused
-game cannot re-poll every turn.
+Anchoring runs on `nspLong`, the same resident as the turn itself: the anchor
+establishes the phase the dispatch verifies against, so the two must queue
+behind the same calls. It runs only when the phase is unknown, with a cooldown
+so a paused game cannot re-poll every turn.
 
 ## Larger boards
 

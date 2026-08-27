@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import type { NS } from "@ns";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { changedMultipliers, DEFAULT_BITNODE_MULTIPLIERS } from "../shared/features/bitnode.ts";
@@ -19,17 +18,13 @@ import { NEUROFLUX } from "../shared/strategy/factions/augs.ts";
 import {
   ALL_PROBES,
   DIRECT_PROBES,
-  DODGED_PROBES,
-  GATE_PROBE,
-  isStepped,
+  PRICED_PROBES,
   LOCAL_PROBES,
   probeCadenceMs,
-  probeMethods,
-  type ProbeAcc,
 } from "../game/lib/probes/index.ts";
+import { probeCtx } from "./support/probe-fixture.ts";
 import { TABS } from "../ui/app/tabs/index.ts";
 import type { GameState } from "../game/lib/state.ts";
-import { getFunctionRamCost } from "../sim/ns/ram-costs.ts";
 
 const root = resolve(import.meta.dir, "..");
 const nsDefs = readFileSync(resolve(root, "types/NetscriptDefinitions.d.ts"), "utf8");
@@ -198,6 +193,12 @@ const probeContext = {
   },
   caps: deriveCapabilities({ bitNode: 1 }),
   state: freshState(),
+  // Every priced read a probe makes goes through here, so the universal proxy
+  // answers the whole table at once. `enums` carries one real faction: the
+  // loops that walk FactionName must actually iterate, or the probes that
+  // depend on them would pass by emitting nothing.
+  nsp: async () => universal(),
+  enums: { FactionName: { CyberSec: "CyberSec" } },
 } as never;
 
 async function runAllProbes(): Promise<{
@@ -206,7 +207,7 @@ async function runAllProbes(): Promise<{
 }> {
   const emissions = new Map<string, { key: string; data: unknown }[]>();
   const threw: string[] = [];
-  for (const probe of [...LOCAL_PROBES, ...DIRECT_PROBES, ...DODGED_PROBES]) {
+  for (const probe of [...LOCAL_PROBES, ...DIRECT_PROBES, ...PRICED_PROBES]) {
     try {
       let emitted: { key: string; data: unknown }[];
       // The Go probe intentionally validates the game's finite board sizes;
@@ -218,15 +219,8 @@ async function runAllProbes(): Promise<{
         emitted = probe.run(probeContext);
       } else if (probe.kind === "direct") {
         emitted = probe.run(stubNs, probeContext);
-      } else if (isStepped(probe)) {
-        // A stepped probe is exercised the way the runner drives it: every
-        // step against the shared accumulator, then finish(). That also
-        // covers the rule that finish() must tolerate whatever the steps left.
-        const acc: ProbeAcc = {};
-        for (const step of probe.steps) await step.run(stubNs, probeContext, acc);
-        emitted = probe.finish(acc);
       } else {
-        emitted = await probe.run(stubNs, probeContext);
+        emitted = await probe.run(probeContext);
       }
       emissions.set(probe.id, emitted);
     } catch (error) {
@@ -237,18 +231,21 @@ async function runAllProbes(): Promise<{
 }
 
 describe("probe table", () => {
-  const allProbes = [...LOCAL_PROBES, ...DIRECT_PROBES, ...DODGED_PROBES];
+  const allProbes = [...LOCAL_PROBES, ...DIRECT_PROBES, ...PRICED_PROBES];
 
   test("probe ids are unique", () => {
     expect(new Set(allProbes.map((p) => p.id)).size).toBe(allProbes.length);
   });
 
-  test("every ns method a probe declares exists in the type definitions", () => {
-    // A typo here is silent at runtime: getFunctionRamCost throws, the runner
-    // falls back to a guessed price, and the probe may never run. Both halves
-    // of a dotted name are checked — the namespace must be a real property of
-    // the NS interface, and the leaf must be a declared method somewhere.
-    const names = [...DIRECT_PROBES.flatMap((probe) => probe.methods), ...DODGED_PROBES.flatMap(probeMethods), ...GATE_PROBE.methods];
+  test("every ns method a direct probe declares exists in the type definitions", () => {
+    // Priced probes name their members as typed `ctx.nsp` paths, so a typo
+    // there is a compile error. A DIRECT probe still declares a `methods` list
+    // — the runner re-prices it against the live API and refuses the call if
+    // anything in it stopped being free — and a typo in THAT is silent: the
+    // price lookup throws, the runner reports drift, and the probe never runs.
+    // Both halves of a dotted name are checked: the namespace must be a real
+    // property of the NS interface, and the leaf a declared method somewhere.
+    const names = DIRECT_PROBES.flatMap((probe) => probe.methods);
     const missing: string[] = [];
     for (const name of names) {
       const segments = name.split(".");
@@ -261,35 +258,6 @@ describe("probe table", () => {
       if (!new RegExp(`(^|\\s)${leaf}\\s*[(<]`, "m").test(nsDefs)) missing.push(`${name} (no such method)`);
     }
     expect(missing).toEqual([]);
-  });
-
-  test("no dodged probe demands an unplaceable contiguous block", () => {
-    // A stub's RAM bill is the SUM of every distinct ns method its closure
-    // references, and the game must find that much CONTIGUOUS free RAM on one
-    // host. A probe that sums half a dozen 10 GB corporation reads into a single
-    // closure is not "expensive", it is unschedulable on a busy fleet — and it
-    // fails silently, by never being placed.
-    //
-    // For a stepped probe the launch cost is the LARGEST STEP, not the sum, so
-    // this is the assertion that keeps a split from quietly being merged back.
-    // Allocation = STUB_BASE_GB + priceMethods (probes carry no price margin).
-    const STUB_BASE_GB = 1.6;
-    // Set just above the largest per-call floor we cannot split below: the
-    // 10 GB CorporationInfo/codingcontract reads, plus the stub base.
-    const CEILING_GB = 14;
-    // Priced at SF4 level 3, where the singularity multiplier is 1. The
-    // multiplier is a property of the save, not of how a probe is grouped, and
-    // pricing at level 0 would flag probes that no split can fix while hiding
-    // whether their SHAPE is sound.
-    const ctx = { sf4Level: 3 };
-    const oversized = DODGED_PROBES.map((probe) => {
-      const peak = isStepped(probe)
-        ? probe.steps.reduce((most, step) =>
-          Math.max(most, step.methods.reduce((sum, m) => sum + getFunctionRamCost(m, ctx), 0)), 0)
-        : probe.methods.reduce((sum, m) => sum + getFunctionRamCost(m, ctx), 0);
-      return { id: probe.id, gb: STUB_BASE_GB + peak };
-    }).filter((entry) => entry.gb > CEILING_GB);
-    expect(oversized).toEqual([]);
   });
 
   test("the Go score has exactly one producer", () => {
@@ -340,24 +308,6 @@ describe("probe table", () => {
     expect(PROBE_EVERY_TICKS).toBeGreaterThanOrEqual(1);
   });
 
-  test("a fast probe is cheap, because it is paid for every time it runs", () => {
-    // A probe declaring a fast cadence is making a claim about its SUBJECT having
-    // a clock. It also commits to being affordable at that rate — the dodge budget
-    // stays near a few GB for most of a run, and an expensive probe asking to be
-    // read every couple of seconds would simply be skipped forever while starving
-    // the batch it shares a stub with.
-    const budgetish = 14; // roughly what a mid-game reserve can place in one stub
-    for (const probe of DODGED_PROBES) {
-      if (probe.everyMs > 10_000) continue;
-      const methods = new Set(probeMethods(probe));
-      expect(methods.size, `${probe.id} names no methods`).toBeGreaterThan(0);
-      // Counted as distinct functions, which is how Bitburner charges a stub.
-      expect(methods.size, `${probe.id} is too broad for a ${probe.everyMs}ms cadence`).toBeLessThanOrEqual(
-        budgetish / 2,
-      );
-    }
-  });
-
   test("every probe body runs and emits at least one topic", async () => {
     const { emissions, threw } = await runAllProbes();
     expect(threw).toEqual([]);
@@ -396,28 +346,14 @@ describe("probe table", () => {
   });
 });
 
-function singleProbe(id: string) {
-  const found = DODGED_PROBES.find((entry) => entry.id === id);
-  if (!found || "steps" in found) throw new Error(`missing single-step probe ${id}`);
+function pricedProbe(id: string) {
+  const found = PRICED_PROBES.find((entry) => entry.id === id);
+  if (!found) throw new Error(`missing priced probe ${id}`);
   return found;
-}
-
-function steppedProbe(id: string) {
-  const found = DODGED_PROBES.find((entry) => entry.id === id);
-  if (!found || !isStepped(found)) throw new Error(`missing stepped probe ${id}`);
-  return found;
-}
-
-/** Drive a stepped probe the way the runner does: every step against one shared
- * accumulator, then finish(). */
-async function runStepped(probe: ReturnType<typeof steppedProbe>, stubNs: NS) {
-  const acc: ProbeAcc = {};
-  for (const step of probe.steps) await step.run(stubNs, {} as never, acc);
-  return probe.finish(acc);
 }
 
 describe("v3.0.1 feature observation contracts", () => {
-  test("the fast fleet probe preserves cloud limits between dodged observations", () => {
+  test("the fast fleet probe preserves cloud limits between priced observations", () => {
     const state = freshState();
     state.topics.fleet = {
       rootedHosts: 1,
@@ -446,7 +382,7 @@ describe("v3.0.1 feature observation contracts", () => {
       state,
       player: {} as never,
       caps: unknownCapabilities(),
-    });
+    } as never);
 
     expect((emission.data as { purchased: unknown }).purchased).toEqual({
       count: 0,
@@ -457,57 +393,63 @@ describe("v3.0.1 feature observation contracts", () => {
   });
 
   test("Bladeburner reads exact rank gain and Black Op rank gates", async () => {
-    const probe = steppedProbe("bladeburner.actions");
-    const methods = probe.steps.flatMap((step) => step.methods);
-    expect(methods).toContain("bladeburner.getActionRankGain");
-    expect(methods).toContain("bladeburner.getActionRankLoss");
-    expect(methods).toContain("bladeburner.getBlackOpRank");
-    const bladeburner = {
-      getContractNames: () => [], getOperationNames: () => [], getBlackOpNames: () => ["Operation Typhoon"],
-      getGeneralActionNames: () => [], getActionEstimatedSuccessChance: () => [1, 1], getActionTime: () => 1_000,
-      getActionCountRemaining: () => 1, getActionCurrentLevel: () => 1, getActionMaxLevel: () => 1,
-      getActionRankGain: () => 50, getActionRankLoss: () => 7, getBlackOpRank: () => 2_500,
-      getSkillNames: () => [], getSkillLevel: () => 0, getSkillUpgradeCost: () => 0,
-    };
-    const [emission] = await runStepped(probe, { bladeburner } as unknown as NS);
+    const probe = pricedProbe("bladeburner.actions");
+    const [emission] = await probe.run(probeCtx({
+      "bladeburner.getContractNames": () => [],
+      "bladeburner.getOperationNames": () => [],
+      "bladeburner.getBlackOpNames": () => ["Operation Typhoon"],
+      "bladeburner.getGeneralActionNames": () => [],
+      "bladeburner.getActionEstimatedSuccessChance": () => [1, 1],
+      "bladeburner.getActionTime": () => 1_000,
+      "bladeburner.getActionCountRemaining": () => 1,
+      "bladeburner.getActionCurrentLevel": () => 1,
+      "bladeburner.getActionMaxLevel": () => 1,
+      "bladeburner.getActionRankGain": () => 50,
+      "bladeburner.getActionRankLoss": () => 7,
+      "bladeburner.getBlackOpRank": () => 2_500,
+      "bladeburner.getSkillNames": () => [],
+    }));
     expect((emission!.data as { actions: { rankGain: number; rankLoss: number; rankNeeded?: number }[] }).actions[0])
       .toMatchObject({ rankGain: 50, rankLoss: 7, rankNeeded: 2_500 });
   });
 
   test("gang publishes only observed current-task rates and usable ascension gain", async () => {
-    const probe = singleProbe("gang.core");
+    const probe = pricedProbe("gang.core");
     const gang = {
-      getGangInformation: () => ({
+      "gang.getGangInformation": () => ({
         faction: "Slum Snakes", isHacking: false, respect: 1, respectGainRate: 0, wantedLevel: 1,
         wantedLevelGainRate: 0, wantedPenalty: 1, moneyGainRate: 0, power: 1, territory: 0.1,
         territoryClashChance: 0, territoryWarfareEngaged: false, respectForNextRecruit: 5,
       }),
-      getMemberNames: () => ["m"],
-      getMemberInformation: () => ({
+      "gang.getMemberNames": () => ["m"],
+      "gang.getMemberInformation": () => ({
         name: "m", task: "Mug People", earnedRespect: 0, respectGain: 2, wantedLevelGain: 0.5, moneyGain: 3,
         hack: 1, str: 2, def: 3, dex: 4, agi: 5, cha: 6,
         hack_asc_mult: 1, str_asc_mult: 1, def_asc_mult: 1, dex_asc_mult: 1, agi_asc_mult: 1, cha_asc_mult: 1,
         upgrades: [], augmentations: [],
       }),
-      getAscensionResult: () => ({ respect: 0, hack: 2, str: 1.4, def: 1.3, dex: 1.2, agi: 1.1, cha: 1.5 }),
-      getRecruitsAvailable: () => 0, canRecruitMember: () => false,
+      "gang.getAscensionResult": () => ({ respect: 0, hack: 2, str: 1.4, def: 1.3, dex: 1.2, agi: 1.1, cha: 1.5 }),
+      "gang.getRecruitsAvailable": () => 0,
+      "gang.canRecruitMember": () => false,
     };
-    const [emission] = await probe.run({ gang } as unknown as NS, {} as never);
+    const [emission] = await probe.run(probeCtx(gang));
     const data = emission.data as { taskRates: Record<string, unknown[]>; ascensionGain: Record<string, number> };
     expect(data.taskRates.m).toEqual([{ name: "Mug People", respect: 2, money: 3, wanted: 0.5 }]);
     expect(data.ascensionGain.m).toBe(1.1);
   });
 
   test("Stanek keeps definition shapes and rotates occupied cells", async () => {
-    const probe = singleProbe("stanek.core");
+    const probe = pricedProbe("stanek.core");
     const fragment = {
       id: 7, type: 1, x: 3, y: 4, rotation: 1, power: 2, limit: 1, effect: "x",
       numCharge: 0, highestCharge: 0, chargedEffect: 0, shape: [[true, false], [true, true]],
     };
-    const stanek = {
-      giftWidth: () => 5, giftHeight: () => 5, activeFragments: () => [fragment], fragmentDefinitions: () => [fragment],
-    };
-    const [emission] = await probe.run({ stanek } as unknown as NS, {} as never);
+    const [emission] = await probe.run(probeCtx({
+      "stanek.giftWidth": () => 5,
+      "stanek.giftHeight": () => 5,
+      "stanek.activeFragments": () => [fragment],
+      "stanek.fragmentDefinitions": () => [fragment],
+    }));
     const data = emission.data as { occupied: Record<string, number>; availableTypes: { shape: { x: number; y: number }[] }[] };
     expect(data.occupied).toEqual({ "3,4": 7, "4,4": 7, "3,5": 7 });
     expect(data.availableTypes[0]!.shape).toEqual([{ x: 0, y: 0 }, { x: 0, y: 1 }, { x: 1, y: 1 }]);
@@ -853,21 +795,13 @@ describe("capability deltas", () => {
 });
 
 describe("feature dodges are centralised and priced", () => {
-  test("no feature driver calls dodge directly", () => {
-    // A REAL BUG this pins, found by running in the actual game: a hardcoded
-    // 2.5 GB budget for `singularity.joinFaction` produced a 4.10 GB
-    // allocation against 4.60 GB of dynamic usage, and the game killed the
-    // stub with "RAM USAGE ERROR ... Dynamic RAM usage calculated to be
-    // greater than RAM allocation".
-    //
-    // `joinFaction` is SingularityFn2 = 3.0 GB, so the guessed 2.5 was short
-    // even at SF4 level 3 where the multiplier is 1x — wrong at EVERY level,
-    // not just the expensive ones. `priceCalls` asks `ns.getFunctionRamCost`,
-    // which is free and already folds the multiplier in.
-    //
-    // The simulator cannot catch this class of bug: it does not enforce
-    // dynamic RAM, so an under-allocated stub runs there quite happily. Only
-    // the real game rejects it.
+  test("no feature driver reaches the game except through the ns proxy", () => {
+    // start.js is ONE bundle. Bitburner's static analyser charges home for
+    // every ns member NAMED anywhere in it, regardless of the receiver — so a
+    // dotted `ns.singularity.*` in any driver would bill the whole automation
+    // for it whether or not the call ever runs. The proxy's path is a string
+    // literal, which the analyser cannot see; that indirection IS the budget,
+    // and a driver that steps around it silently blows the 3.6 GB allocation.
     const files = [
       "game/lib/features/factions.ts",
       "game/lib/features/career.ts",
@@ -879,17 +813,11 @@ describe("feature dodges are centralised and priced", () => {
     ];
     for (const file of files) {
       const source = readFileSync(resolve(root, file), "utf8");
-      expect(source, `${file} bypasses featureDodge`).not.toMatch(/\bdodge\s*\(/);
-      expect(source, `${file} bypasses the heap lease`).not.toMatch(/\bdodgeHost\s*\(/);
+      // `ctx.ns.exec` is the one exception, and it is deliberate: start.js has
+      // already paid for `exec` statically, and it is the only ns in the realm
+      // that can reach `darkweb` (see tests/dnet-seed-unpinned.test.ts).
+      const reaches = source.replace(/ctx\.ns\.exec\b/g, "");
+      expect(reaches, `${file} calls ns directly`).not.toMatch(/\bctx\.ns\.[a-z]/);
     }
-  });
-
-  test("the one feature dodge helper prices calls and asks the broker for a keyed lease", () => {
-    const source = readFileSync(resolve(root, "game/lib/features/dodge.ts"), "utf8");
-    expect(source).toContain("priceCalls(ctx.ns, methods)");
-    expect(source).not.toContain("grantFor(ctx.grants.result");
-    expect(source).toContain("ctx.acquireDodge(budgetGb, {");
-    expect(source).toContain("lease.status === 'queued'");
-    expect(source).toContain("lease.release()");
   });
 });

@@ -17,7 +17,7 @@ and `purchaseAugmentation` 5 GB, so 48–80 GB per call at SF4.1. Installing is 
 SF4 factions are joinable by hand but the reset loop cannot be automated. None of the seven `BitNodeBooleanOptions`
 fields touch factions (`NetscriptDefinitions.d.ts:1897`). Grafting is a **separate** gate: `ns.grafting` needs BN10 or
 SF10 (`NetscriptDefinitions.d.ts:6020`) and **throws** rather than returning empty, so its probe step is split out
-(`game/lib/probes/dodged.ts:455`).
+(`game/lib/probes/priced.ts:455`).
 
 ## Rules
 
@@ -115,6 +115,18 @@ a cheaper one is permanent: the skipped item costs 1.9x more forever. Reputation
 settlement date fall through instead, and the run's **first** purchase is never held, because the book is only
 liquidated once the install queue is non-empty (`decide.ts:1159`).
 
+**Donation-aware final liquidation.** The final batch prices augmentation
+purchases and reputation donations as one transaction. A faction is charged
+once at the highest reputation target assigned to it, so the same donation can
+unlock several lower offers; multi-seller augmentations are assigned jointly
+rather than to the cheapest seller in isolation. The mandatory banked/route
+closure is proven affordable first, optional value cannot displace it, and the
+frozen seller plus purchase order is executed without scanning ahead to a
+cheaper rep-met item. After the last purchase, the remaining cash is snapshotted
+once and split over useful integer-favor breakpoints; any fractional remainder
+uses the best marginal faction, breaking a zero-value tie by current reputation.
+Pure-favor liquidation is skipped when the run is ending by BitNode destruction.
+
 **Grafting** costs `baseCost * 3` (`Constants.ts:97`) and can only start in New Tokyo (`sim/features/grafting.ts:48`);
 money is taken at start and never refunded, and cancelling loses all progress (`grafting.ts:9`). Completing one graft
 adds one entropy stack, unless the violet Congruity Implant is owned — grafting that implant sets entropy to 0
@@ -195,12 +207,13 @@ SF11 makes company favor multiply salary by `1 + favor/100` as well as reputatio
 | requirement interpreter | `shared/strategy/factions/requirements.ts` |
 | rep / favor / donation math | `shared/strategy/factions/rep.ts` |
 | valuation, pricing, ordering | `shared/strategy/factions/augs.ts` |
+| donation-aware liquidation | `shared/strategy/factions/liquidation.ts` |
 | package frontier | `shared/strategy/factions/packages.ts` |
 | set solver · cycle budget | `shared/strategy/factions/portfolio.ts` |
 | rate pacing | `shared/strategy/factions/pace.ts` |
 | decision | `shared/strategy/factions/decide.ts` |
 | static augmentation table | `shared/features/augmentations.ts` |
-| driver · probes | `game/lib/features/factions.ts` · `game/lib/probes/dodged.ts`, `local.ts` |
+| driver · probes | `game/lib/features/factions.ts` · `game/lib/probes/priced.ts`, `local.ts` |
 | telemetry topic · tab | `shared/telemetry/topics/factions.ts` · `ui/app/tabs/factions.ts`, `factions-aug.ts` |
 | sim model | `sim/features/factions.ts`, `requirements.ts`, `grafting.ts` |
 | vendored rules | `sim/vendor/bitburner/src/Faction/`, `Augmentation/AugmentationTable.ts`, `Constants.ts` |

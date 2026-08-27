@@ -102,7 +102,7 @@ GB-second and preps a cold target to batch. Price movement survives too: the inf
 **Needs** `file` — port openers, bought or written · `skill` — hacking skill, for `chance`, `percent`, time ·
 money, for fleet RAM. **Gives** money · `root` and `backdoor`, the access and four faction invites `factions`
 waits on · hacking exp, read as skill by `factions` and `progression` · the rooted fleet every feature's
-dodges run on. **Contends** fleet RAM, against dodges and probes, `share` and `stanek` · money, in
+the ns residents stand on. **Contends** fleet RAM, against the residents, `share` and `stanek` · money, in
 `income:investment` against `hacknet` and `stock` · target choice, against `stock` in BN8.
 
 **Port-opener policy** TOR and crackers have two independent payoffs. Darkscape buys TOR as part of
@@ -111,10 +111,10 @@ experience of newly available targets plus the worker RAM of every newly rootabl
 (`shared/strategy/access/openers.ts`). That economic claim competes with other income investments in
 `income:investment`. A posted root/backdoor need keeps the existing higher-priority blocking path.
 
-`shared/strategy/arbiter.ts:42` contends exactly `money` and `time`; RAM is brokered separately. The broker
-carves a dodge *arena* out of the rooted fleet — ladder `home` → `n00dles` → `foodnstuff`, growing further only
-for a request starved past `STARVATION_MS = 5 s` (`shared/ram/broker.ts:327-395`) — and the rest is the
-dispatcher’s. Reclamation may stop share or an idle pooled worker, but never an active HGW/prep/charge call;
+`shared/strategy/arbiter.ts:42` contends exactly `money` and `time`; RAM is reserved separately. `ramArena`
+(`shared/ram/broker.ts`) carves an *arena* out of the rooted fleet — home's standing reserve, the bootstrap
+host (`foodnstuff`, else `n00dles`), and each ns resident's own block at the size that resident asks for — and
+the rest is the dispatcher’s. Reclamation may stop share or an idle pooled worker, but never an active HGW/prep/charge call;
 elapsed worker time is sunk and killing it loses the investment. The fleet’s residual tenants are one-shot
 `charge` and freely evictable `share` (`shared/strategy/stanek/charge.ts`, `shared/strategy/share.ts`).
 

@@ -18,7 +18,7 @@ interface RecordBase {
 }
 
 /** Mirrored result of a state read. Reading state IS logging state: every
- * watched/dodged ns getter emits one of these. Last-write-wins per key. */
+ * watched/proxied ns getter emits one of these. Last-write-wins per key. */
 export interface StateRecord extends RecordBase {
   kind: "state";
   /** `<getter>` or `<getter>:<argKey>`, e.g. "getPlayer", "getServer:home". */

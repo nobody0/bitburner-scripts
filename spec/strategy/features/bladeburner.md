@@ -151,7 +151,7 @@ exp gains*, SF7 raises `bladeburner_max_stamina`, `_stamina_gain`, `_analysis` a
 |---|---|
 | strategy | `shared/strategy/bladeburner/decide.ts` |
 | driver | `game/lib/features/remaining.ts:374` |
-| probe | `game/lib/probes/dodged.ts:1327` |
+| probe | `game/lib/probes/priced.ts:1327` |
 | telemetry topic | `shared/telemetry/topics/bladeburner.ts` |
 | tab | `ui/app/tabs/bladeburner.ts` |
 | tests | `tests/features-remaining.test.ts` |

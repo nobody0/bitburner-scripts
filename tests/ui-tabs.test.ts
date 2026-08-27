@@ -469,7 +469,6 @@ describe("tab rendering", () => {
           },
         ],
       },
-      channel: { drained: 4, rejected: 1, forgotten: 0 },
       farm: {
         admitted: { phish: 1 },
         refused: { "cache-none": 2 },
@@ -624,7 +623,7 @@ describe("tab rendering", () => {
 
   test("the darknet panel survives a driver tick that no probe has preceded", () => {
     // `knowledge` comes from the DRIVER; `instability`, `stasisLinkLimit` and
-    // `stasisLinked` come only from the dodged probe. The panel guarded on the
+    // `stasisLinked` come only from the priced probe. The panel guarded on the
     // first and then dereferenced the other three, so the first tick of a run
     // whose probe had not landed threw a TypeError and took the whole panel
     // with it. Every other dnet fixture in this file supplies all four, which

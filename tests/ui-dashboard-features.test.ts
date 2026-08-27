@@ -82,17 +82,12 @@ describe("dashboard decision summaries", () => {
         inFlight: { hack: 1, grow: 1, weaken: 2 },
       }],
     } as StateMap["farm"];
-    state.topics.ramArena = {
-      starvation: [{ by: "factions", id: "singularity-probe", gb: 64, waitMs: 12_000 }],
-    } as StateMap["ramArena"];
-
     const html = TABS.overview.render(state);
     expect(html).toContain("Automation summary");
     expect(html).toContain("daedalus");
     expect(html).toContain("Career · company work");
     expect(html).toContain("farm n00dles");
     expect(html).toContain("The Red Pill");
-    expect(html).toContain("singularity probe needs 64GB");
   });
 
   test("Hacking keeps the server table but adds filters and honest selection evidence", () => {

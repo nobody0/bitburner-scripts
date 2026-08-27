@@ -1374,7 +1374,7 @@ export function requestShareStops(
 }
 
 /** Consume process-exit accounting without running a planning pass. The game
- * adapter uses this before a broker drain so newly real-free RAM is leased
+ * adapter uses this on a worker-exit wake so newly real-free RAM is leased
  * before the farm can count it again. Both release helpers are idempotent. */
 export function releaseWorkerExits(memory: DispatchMemory, workerIds: Iterable<number>): void {
   for (const workerId of workerIds) {

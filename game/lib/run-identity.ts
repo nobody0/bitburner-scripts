@@ -1,4 +1,4 @@
-import type { NS, ResetInfo } from "@ns";
+import type { NS } from "@ns";
 import {
   bitNodeRunId,
   installRunId,
@@ -6,7 +6,7 @@ import {
   type ArtifactIdentity,
   type LineageIdentity,
 } from "../../shared/run-identity.ts";
-import { dodge, priceCalls } from "./dodge.ts";
+import { nsp } from "./proxies.ts";
 import { gameGlobal } from "./globals.ts";
 
 /** Text files on home survive both augmentation and Source-File prestige in
@@ -64,8 +64,7 @@ export async function resolveRunIdentity(ns: NS, handoff = false): Promise<Artif
     await ns.write(SAVE_ID_FILE, JSON.stringify(saved), "w");
   }
 
-  const budget = priceCalls(ns, ["getResetInfo"]);
-  const reset = await dodge(ns, (stubNs) => stubNs["getResetInfo"](), budget) as ResetInfo;
+  const reset = await nsp("getResetInfo");
   const lineage = lineageFrom(saved);
   const nodeId = bitNodeRunId(lineage.id, reset.lastNodeReset);
   const identity: ArtifactIdentity = {

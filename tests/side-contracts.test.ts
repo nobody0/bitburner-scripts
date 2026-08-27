@@ -1,40 +1,36 @@
 import { describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
-import type { DodgeLaunch } from "../game/lib/dodge-shared.ts";
-import { captureLaunch } from "../game/lib/launch-shared.ts";
 import { sideModule } from "../game/lib/features/side.ts";
 import type { DriverContext } from "../game/lib/features/index.ts";
+import type { NsProxy } from "../game/lib/ns-proxy.ts";
 import type { GameState } from "../game/lib/state.ts";
 import { emptyArbitration } from "../shared/strategy/arbiter.ts";
 
+/** A stand-in for the ns proxy: the driver's only route to the game is a dotted
+ * path, so a fake is a table of paths. `killOnce` makes one path throw a
+ * ScriptDeath, which is how a killed resident reaches a driver mid-pipeline. */
 function harness(attempt: (answer: unknown) => string) {
-  let execs = 0;
-  const queueOnce = new Set<string>();
-  const stubNs = {
-    codingcontract: {
-      getContractType: () => "Array Jumping Game",
-      getNumTriesRemaining: () => 1,
-      getData: () => [2, 3, 1, 1, 4],
-      attempt,
-    },
-  } as unknown as NS;
-  const ns = {
-    getFunctionRamCost: () => 1,
-    sleep: async () => {},
-    exec: () => {
-      execs++;
-      queueMicrotask(async () => {
-        const launch = captureLaunch<DodgeLaunch>("dodge");
-        if (!launch) return;
-        try {
-          launch.resolve({ result: launch.func(stubNs) });
-        } catch (error) {
-          launch.reject(error);
-        }
-      });
-      return execs;
-    },
-  } as unknown as NS;
+  const calls: string[] = [];
+  const killOnce = new Set<string>();
+  const table: Record<string, (...args: never[]) => unknown> = {
+    "codingcontract.getContractType": () => "Array Jumping Game",
+    "codingcontract.getNumTriesRemaining": () => 1,
+    "codingcontract.getData": () => [2, 3, 1, 1, 4],
+    "codingcontract.attempt": ((answer: unknown) => attempt(answer)) as never,
+  };
+  const nsp = ((path: string, ...args: unknown[]) => {
+    calls.push(path);
+    if (killOnce.has(path)) {
+      killOnce.delete(path);
+      const death = new Error("script killed");
+      death.name = "ScriptDeath";
+      throw death;
+    }
+    const fn = table[path];
+    if (!fn) throw new Error(`unexpected proxy call ns.${path}`);
+    return Promise.resolve((fn as (...a: unknown[]) => unknown)(...args));
+  }) as unknown as NsProxy;
+  const ns = { getFunctionRamCost: () => 1, sleep: async () => {} } as unknown as NS;
   const state = {
     topics: {
       side: {
@@ -54,32 +50,25 @@ function harness(attempt: (answer: unknown) => string) {
   const result = emptyArbitration();
   const ctx = {
     ns,
+    nsp,
+    nspLong: nsp,
     state,
     caps: { unlocked: {} },
     grants: {
       money: 0,
-      ramClaims: new Map([["action:contract", {
-        by: "side", id: "action:contract", resource: "ram", amount: 10.5, priority: 50,
-      }]]),
       slot: false,
       result,
     },
-    // `queueOnce` lets a test make ONE stage's lease come back queued, which is
-    // how the broker reports "no RAM yet" and the only way to exercise the
-    // pipeline resume path.
-    acquireDodge: (_gb: number, request: { id: string }) => {
-      if (queueOnce.has(request.id)) {
-        queueOnce.delete(request.id);
-        return { status: "queued" };
-      }
-      return { host: "home", release: () => {} };
-    },
   } as unknown as DriverContext;
-  return { ctx, state, execs: () => execs, queueOnce };
+  return { ctx, state, calls, killOnce };
+}
+
+function callsTo(calls: readonly string[], path: string): number {
+  return calls.filter((seen) => seen === path).length;
 }
 
 describe("Side contract execution", () => {
-  test("inspection, data, and attempt are separate low-RAM batch stages", async () => {
+  test("a contract is inspected, read, and attempted exactly once", async () => {
     const submitted: unknown[] = [];
     // A real reward string. The game always prefixes "Gained "; a bare "$1m" is
     // a shape it never emits, and the parser rejects it on purpose.
@@ -87,8 +76,8 @@ describe("Side contract execution", () => {
     await sideModule.driver.tick(h.ctx);
 
     expect(submitted).toEqual([1]);
-    expect(h.execs()).toBe(3);
-    expect(sideModule).not.toHaveProperty('peakStepGb');
+    expect(callsTo(h.calls, "codingcontract.getData")).toBe(1);
+    expect(callsTo(h.calls, "codingcontract.attempt")).toBe(1);
     expect(h.state.topics.side?.contracts).toEqual([]);
     expect(h.state.topics.side?.contractTotal).toBe(0);
     expect(h.state.topics.side?.contractsByOrigin.network).toEqual({ observed: 0, solvable: 0 });
@@ -123,7 +112,6 @@ describe("Side contract execution", () => {
     h.state.topics.side!.contracts = [{ host: "n00dles", file: "jump.cct" }];
     await sideModule.driver.tick(h.ctx);
     expect(attempts).toBe(1);
-    expect(h.execs()).toBe(3);
   });
 
   test("a solved darknet contract retires exactly the observation that was attempted", async () => {
@@ -218,20 +206,25 @@ describe("Side contract execution", () => {
     expect(Object.values(h.state.contractQuarantine ?? {})[0]).toMatchObject({ origin: "network" });
   });
 
-  test("a queued attempt lease resumes without re-attempting or double counting", async () => {
+  test("a pipeline aborted before the attempt resumes without double counting", async () => {
     // The regression this guards: the attempt stage has no resume cache, so if
     // the pipeline is not released once the attempts are submitted, the next
-    // tick re-runs them and burns a try on a one-try contract.
+    // tick re-runs them and burns a try on a one-try contract. A ScriptDeath on
+    // the attempt call is how the run reaches that state — the resident died
+    // between reading the contract and answering it.
     let attempts = 0;
     const h = harness(() => { attempts++; return "Gained $1.000m"; });
-    h.queueOnce.add("action:contract:attempt");
+    h.killOnce.add("codingcontract.attempt");
 
-    await sideModule.driver.tick(h.ctx);
+    await expect(sideModule.driver.tick(h.ctx)).rejects.toThrow("script killed");
     expect(attempts).toBe(0);
     expect(h.state.topics.side?.rewards).toBeUndefined();
+    // The two read stages are cached: resuming re-answers, it does not re-read.
+    const readsBefore = callsTo(h.calls, "codingcontract.getData");
 
     await sideModule.driver.tick(h.ctx);
     expect(attempts).toBe(1);
+    expect(callsTo(h.calls, "codingcontract.getData")).toBe(readsBefore);
     expect(h.state.topics.side?.rewards?.network).toMatchObject({ attempted: 1, solved: 1, moneyApprox: 1e6 });
 
     // A third tick must find nothing left to do rather than re-attempt.

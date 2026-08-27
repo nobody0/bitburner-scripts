@@ -112,6 +112,9 @@ export interface FactionsView extends RepProfileView {
   installFundedAugmentations?: readonly string[];
   /** The selected high-level route itself requires this reset now. */
   routeInstallRequired?: boolean;
+  /** The run will destroy the BitNode instead of installing augmentations;
+   * install-lifetime donations have no surviving value in that mode. */
+  endingByDestroy?: boolean;
   /** Money the arbiter granted the AUGMENTATION FUND this tick — the per-claim
    * amount, never the feature's summed grants (a travel grant must not top up
    * a purchase). */

@@ -64,8 +64,8 @@ because the two on disk are strong in different areas.
   branch, and the reference for everything *except* the batcher: the
   faction/augmentation planner (`src/_lib/factions.ts`, `augmentations.ts`),
   progression, stock, and the `stubCall` RAM-dodger design
-  (`src/_lib/stub-call.ts`) ported with credit into `game/lib/dodge.ts` — see
-  [spec/dodging.md](spec/dodging.md). Its production hacking path was
+  (`src/_lib/stub-call.ts`), ported with credit and since **replaced** by the
+  ns proxy — see [spec/ns-proxy.md](spec/ns-proxy.md). Its production hacking path was
   `shotgun`+`prepare`+`filler`; **`src/_lib/batchers/jit.ts` on this branch is
   unwired work-in-progress and must not be cited as proven.**
 - **an earlier rewrite** — `nobody0/bitburner`, which this project briefly
@@ -150,7 +150,7 @@ the controller decides from — and telemetry is the optional step that also
 sends it over the wire. So `--perf` buys no WebSocket, no serialization, no
 ring buffer and a smaller bundle, at identical game behaviour and identical
 static RAM. The tests pin this: both bundles must contain the same set of
-dodged ns call sites and cost the same 3.6 GB.
+proxied ns call sites and cost the same 2.9 GB.
 
 ## Simulation / A-B testing
 

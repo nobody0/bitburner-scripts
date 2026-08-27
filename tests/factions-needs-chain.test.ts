@@ -123,20 +123,22 @@ describe("non-objective gates", () => {
               invalidation: [],
               recommendInstall: { augmentations: [] },
               nextBuy: { name: "NeuroFlux Governor", price: 9e14 },
+              drainCosts: { purchase: 75, donation: 25, residualDonation: 0, total: 100 },
             },
           },
+          player: { money: 40 },
           progression: { plan: endingByDestroy ? { endingByDestroy: true } : {} },
         },
       },
       caps: { sourceFiles: {}, bitNode: 12 },
       now: 0,
       grants: { money: 0, slot: false, result: undefined },
-      ramPrice: () => 4,
     }) as never;
     const releasing = factionsModule.claims!(fixture(true));
     expect(releasing.some((claim) => claim.id === "aug-fund")).toBe(false);
     const holding = factionsModule.claims!(fixture(false));
     expect(holding.some((claim) => claim.id === "aug-fund")).toBe(true);
+    expect(holding.find((claim) => claim.id === "aug-fund")?.amount).toBe(40);
   });
 
   test("a gate with an unreachable blocker posts nothing", () => {

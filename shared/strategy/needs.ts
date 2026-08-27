@@ -3,8 +3,8 @@ import type { FeatureId } from "../features/ids.ts";
 /** The needs board: outcome-level communication between features.
  *
  * This is deliberately NOT the arbiter (./arbiter.ts). The arbiter allocates a
- * contended resource — money, the player's single work slot, dodge RAM — and
- * answers "who gets it". The board answers a different question: *"factions
+ * contended resource — money, the player's single work slot — and answers
+ * "who gets it". The board answers a different question: *"factions
  * needs karma <= -45; who can deliver that, and is it worth their time?"*
  *
  * A Need therefore states a desired OUTCOME and its worth, never a method.

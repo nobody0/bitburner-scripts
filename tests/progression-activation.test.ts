@@ -1,13 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
-  activationCatalog,
   countClosureAffordable,
   countSlotValueFor,
   fundedActivationBatch,
   routeCountVerdict,
-  type ActivationOffer,
 } from "../shared/strategy/progression/activation.ts";
-import { NEUROFLUX, scoreAug, totalCost, weightsFromMarginals, type PriceContext } from "../shared/strategy/factions/augs.ts";
+import { NEUROFLUX, totalCost, weightsFromMarginals, type PriceContext } from "../shared/strategy/factions/augs.ts";
 import { AUGMENTATIONS } from "../shared/features/augmentations.ts";
 
 /** A measured route: reputation binds, hacking is the climb behind it. */
@@ -27,49 +25,40 @@ const SYNAPTIC = "Artificial Synaptic Potentiation";
 const CSP1 = "Cranial Signal Processors - Gen I";
 const CSP2 = "Cranial Signal Processors - Gen II";
 
-/** Every listed augmentation on offer from a joined faction at met rep. */
-function offersFor(names: readonly string[], faction = "CyberSec"): ActivationOffer[] {
-  return names.map((name) => ({ name, faction, affordableRep: true }));
-}
+const REP_MET = {
+  standings: [{ name: "NiteSec", joined: true, rep: Infinity, favor: 0 }],
+  favorToDonate: 150,
+  factionRepMult: 1,
+  factionWorkRepGain: 1,
+};
 
 describe("reset-activated bankroll value", () => {
-  test("the funded set starts with the highest augmentation value per dollar", () => {
+  test("the funded set ranks by value per dollar and pays the escalated queue price", () => {
     const names = [BITWIRE, SYNAPTIC, CSP1];
     const weights = weightsFromMarginals(WORTH);
-    const ranked = [...activationCatalog(names).values()].sort((a, b) =>
-      a.baseCost / Math.max(1e-9, scoreAug(a, weights))
-      - b.baseCost / Math.max(1e-9, scoreAug(b, weights)),
-    );
-    const best = ranked[0]!;
 
-    const batch = fundedActivationBatch({
+    const first = fundedActivationBatch({
       realizable: names,
-      offers: offersFor(names),
-      joined: new Set(["CyberSec"]),
       owned: new Set(),
       weights,
       countSlotValue: 0,
       ctx: CTX,
-      money: best.baseCost,
+      money: AUGMENTATIONS[BITWIRE]!.cost,
+      donation: REP_MET,
     });
 
-    expect(batch.map((candidate) => candidate.name)).toEqual([best.name]);
-  });
+    expect(first.map((candidate) => candidate.name)).toEqual([BITWIRE]);
 
-  test("the funded batch pays the queue escalation, not the sum of sticker prices", () => {
-    const names = [BITWIRE, SYNAPTIC, CSP1];
     const sticker = names.reduce((sum, name) => sum + AUGMENTATIONS[name]!.cost, 0);
     const money = sticker * 1.2;
-
     const batch = fundedActivationBatch({
       realizable: names,
-      offers: offersFor(names),
-      joined: new Set(["CyberSec"]),
       owned: new Set(),
       weights: weightsFromMarginals(WORTH),
       countSlotValue: 0,
       ctx: CTX,
       money,
+      donation: REP_MET,
     });
 
     // Comfortably over the sticker sum, but the second and later purchases pay
@@ -79,40 +68,49 @@ describe("reset-activated bankroll value", () => {
     expect(totalCost(batch, CTX)).toBeLessThanOrEqual(money);
   });
 
-  test("the funded batch only buys from joined factions at met reputation", () => {
-    const names = [BITWIRE, SYNAPTIC];
-    const plenty = 1e12;
+  test("a seller must be joined and either rep-met or donation-enabled, with the donation inside the budget", () => {
+    const aug = AUGMENTATIONS[BITWIRE]!;
+    const exact = aug.cost + aug.rep * 1e6;
     const base = {
-      realizable: names,
-      joined: new Set(["CyberSec"]),
+      realizable: [BITWIRE],
       owned: new Set<string>(),
       weights: weightsFromMarginals(WORTH),
       countSlotValue: 0,
       ctx: CTX,
-      money: plenty,
+      money: exact,
     };
-
-    expect(fundedActivationBatch({ ...base, offers: offersFor(names) })).toHaveLength(2);
     expect(fundedActivationBatch({
       ...base,
-      offers: offersFor(names, "NiteSec"),
+      donation: { ...REP_MET, standings: [{ name: "CyberSec", joined: false, rep: Infinity, favor: 150 }] },
     })).toHaveLength(0);
     expect(fundedActivationBatch({
       ...base,
-      offers: offersFor(names).map((offer) => ({ ...offer, affordableRep: false })),
+      donation: { ...REP_MET, standings: [{ name: "CyberSec", joined: true, rep: 0, favor: 149 }] },
     })).toHaveLength(0);
+    const eligible = { ...REP_MET, standings: [{ name: "CyberSec", joined: true, rep: 0, favor: 150 }] };
+    expect(fundedActivationBatch({ ...base, donation: eligible }).map((candidate) => candidate.name)).toEqual([BITWIRE]);
+    const closesCount = (money: number) => countClosureAffordable({
+      realizable: [BITWIRE],
+      owned: new Set(),
+      wanted: 1,
+      neurofluxCountable: false,
+      ctx: CTX,
+      money,
+      donation: eligible,
+    });
+    expect(closesCount(exact)).toBe(true);
+    expect(closesCount(exact - 1)).toBe(false);
   });
 
   test("the first countable NeuroFlux level can fill one funded route slot", () => {
     const base = {
       realizable: [NEUROFLUX],
-      offers: offersFor([NEUROFLUX]),
-      joined: new Set(["CyberSec"]),
       owned: new Set<string>(),
       weights: weightsFromMarginals(WORTH),
       countSlotValue: 1,
       ctx: CTX,
       money: 1e12,
+      donation: REP_MET,
     };
 
     // Off a finite-count route NFG remains excluded from the one-shot value
@@ -127,13 +125,12 @@ describe("reset-activated bankroll value", () => {
     const exact = AUGMENTATIONS[SYNAPTIC]!.cost + AUGMENTATIONS[BITWIRE]!.cost * 1.9;
     const ask = (money: number): boolean => countClosureAffordable({
       realizable: names,
-      offers: offersFor(names),
-      joined: new Set(["CyberSec"]),
       owned: new Set(),
       wanted: 2,
       neurofluxCountable: true,
       ctx: CTX,
       money,
+      donation: REP_MET,
     });
 
     expect(ask(exact)).toBe(true);
@@ -143,7 +140,6 @@ describe("reset-activated bankroll value", () => {
   });
 
   test("a prerequisite chain fills its slots together, and an unreachable one fills none", () => {
-    const joined = new Set(["CyberSec"]);
     const chain = [CSP1, CSP2];
     // The prerequisite has to be bought FIRST, so — unlike an unordered pair —
     // the dependant is the one that pays the escalated slot.
@@ -151,51 +147,35 @@ describe("reset-activated bankroll value", () => {
 
     expect(countClosureAffordable({
       realizable: chain,
-      offers: offersFor(chain),
-      joined,
       owned: new Set(),
       wanted: 2,
       neurofluxCountable: true,
       ctx: CTX,
       money: chainCost,
+      donation: REP_MET,
     })).toBe(true);
 
     // Gen II alone cannot be transacted: its prerequisite is not purchasable
     // this sweep, so it is not a cheaper way to fill the slot at any price.
     expect(countClosureAffordable({
       realizable: [CSP2],
-      offers: offersFor([CSP2]),
-      joined,
       owned: new Set(),
       wanted: 1,
       neurofluxCountable: true,
       ctx: CTX,
       money: 1e12,
+      donation: REP_MET,
     })).toBe(false);
 
     // With the prerequisite already owned it is reachable again.
     expect(countClosureAffordable({
       realizable: [CSP2],
-      offers: offersFor([CSP2]),
-      joined,
       owned: new Set([CSP1]),
       wanted: 1,
       neurofluxCountable: true,
       ctx: CTX,
       money: 1e12,
-    })).toBe(true);
-  });
-
-  test("wanting nothing is always affordable", () => {
-    expect(countClosureAffordable({
-      realizable: [],
-      offers: [],
-      joined: new Set(),
-      owned: new Set(),
-      wanted: 0,
-      neurofluxCountable: true,
-      ctx: CTX,
-      money: 0,
+      donation: REP_MET,
     })).toBe(true);
   });
 

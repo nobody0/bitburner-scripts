@@ -418,9 +418,7 @@ decoder does not yet retain the live board, history, scores, or stored cycles.
    probe behind it waited minutes for the farm to free RAM (measured on
    bn8-full: the market's first price sample at t=212 s, after the node grant
    had already been spent by then-priceable claims). The runner now falls
-   through to the next due probe that can actually place; the blocked head's
-   broker request stays queued so its starvation feedback still grows the
-   arena.
+   through to the next due probe that can actually place.
 2. **A 32 GB home stalls the dispatcher** (FIXED). `earn:1e6` was reached at 8,
    16 and 64 GB but not at 32 (30.2 m vs 20.7 m at 8 GB, planner driver,
    seed 1), with `allocFails` climbing while `inFlight` stayed at zero. Two

@@ -9,8 +9,8 @@
       "target": "start.js"
     },
     {
-      "source": "game/lib/dodge-stub.ts",
-      "target": "lib/dodge-stub.js"
+      "source": "game/lib/ns-resident.ts",
+      "target": "lib/ns-resident.js"
     },
     {
       "source": "game/worker/worker.ts",
@@ -27,6 +27,10 @@
     {
       "source": "game/dnet/prober.ts",
       "target": "dnet/prober.js"
+    },
+    {
+      "source": "game/dnet/hands.ts",
+      "target": "dnet/hands.js"
     }
   ],
   "restoreEntry": {

@@ -22,7 +22,7 @@ The repository has three deliberately separate layers:
    is running, falling back to a one-shot listener when none is.
 
 Runtime helpers are named with the build id already baked into the controller
-(`worker/worker.<build>.js`, `lib/dodge-stub.<build>.js`). A sync pushes those
+(`worker/worker.<build>.js`, `lib/ns-resident.<build>.js`). A sync pushes those
 immutable files before replacing `start.js`, then pushes `build-id.txt` last.
 The running controller therefore keeps using its own helpers until the complete
 new set exists. Build ids are timestamp-plus-random identities, not counters:

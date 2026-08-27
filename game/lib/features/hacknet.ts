@@ -1,4 +1,4 @@
-import type { NS } from "@ns";
+import type { HacknetServerHashUpgrade } from "@ns";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { formatMoney, formatNumber } from "../../../shared/format.ts";
 import { makeHackContext } from "../../../shared/formulas.ts";
@@ -31,8 +31,6 @@ import { isScriptDeath } from "../errors.ts";
 import { moneyRateValue } from "../income.ts";
 import type { HacknetNodeDigest } from "../../../shared/telemetry/topics/hacknet.ts";
 import { merge } from "../state.ts";
-import { actionRamClaim, featureDodge } from "./dodge.ts";
-import type { FeatureClaim } from "./claims.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "./index.ts";
 
 /** The hacknet driver.
@@ -337,37 +335,30 @@ export function buildView(
   };
 }
 
-async function execute(ctx: DriverContext, buy: UpgradeOption): Promise<void> {
-  const methods = hacknetMethods(buy.kind);
-  const at = Date.now();
-  const outcome = await featureDodge(
-    ctx,
-    "hacknet",
-    hacknetClaimId(buy.kind),
-    methods,
-    (stubNs: NS) => {
-      switch (buy.kind) {
-        case "node":
-          return stubNs["hacknet"]["purchaseNode"]() >= 0;
-        case "level":
-          return stubNs["hacknet"]["upgradeLevel"](buy.node!, 1);
-        case "ram":
-          return stubNs["hacknet"]["upgradeRam"](buy.node!, 1);
-        case "core":
-          return stubNs["hacknet"]["upgradeCore"](buy.node!, 1);
-        case "cache":
-          return stubNs["hacknet"]["upgradeCache"](buy.node!, 1);
-      }
-    },
-  );
-  if (!outcome.ok) {
-    lastResult = { action: buy.kind, ok: false, detail: outcome.reason, at };
-    return;
+/** The game's own answer to "did the purchase happen?". `purchaseNode` reports
+ * the new node's index and -1 for a refusal; the four upgrades report a plain
+ * boolean. */
+async function buyUpgrade(ctx: DriverContext, buy: UpgradeOption): Promise<boolean> {
+  switch (buy.kind) {
+    case "node":
+      return await ctx.nsp("hacknet.purchaseNode") >= 0;
+    case "level":
+      return await ctx.nsp("hacknet.upgradeLevel", buy.node!, 1);
+    case "ram":
+      return await ctx.nsp("hacknet.upgradeRam", buy.node!, 1);
+    case "core":
+      return await ctx.nsp("hacknet.upgradeCore", buy.node!, 1);
+    case "cache":
+      return await ctx.nsp("hacknet.upgradeCache", buy.node!, 1);
   }
-  const ok = outcome.value;
+}
+
+async function execute(ctx: DriverContext, buy: UpgradeOption): Promise<void> {
+  const at = Date.now();
+  const ok = await buyUpgrade(ctx, buy);
   lastResult = {
     action: buy.kind,
-    ok: Boolean(ok),
+    ok,
     detail: ok ? `bought ${buy.kind} for ${formatMoney(buy.cost)}` : "purchase refused",
     at,
   };
@@ -381,26 +372,21 @@ async function execute(ctx: DriverContext, buy: UpgradeOption): Promise<void> {
   }
 }
 
-const HASH_SPEND_METHODS = ["hacknet.spendHashes"] as const;
-
 async function spendHashes(ctx: DriverContext, decision: HashDecision): Promise<void> {
   const hashes = ctx.state.topics.hacknet?.hashes;
   const spend = decision.spend;
   if (!hashes || !spend) return;
   const at = Date.now();
-  const outcome = await featureDodge(ctx, "hacknet", "action:spend-hashes", HASH_SPEND_METHODS, (stubNs: NS) =>
-    stubNs["hacknet"]["spendHashes"](spend.name as never, spend.target ?? "", spend.count),
-  );
-  const ok = outcome.ok && Boolean(outcome.value);
+  const ok = await ctx.nsp("hacknet.spendHashes", spend.name as HacknetServerHashUpgrade, spend.target ?? "", spend.count);
   lastHashResult = {
     action: spend.name,
     ok,
     detail: ok
       ? `spent ${formatNumber(spend.cost)} hashes on ${spend.name}${spend.target ? ` for ${spend.target}` : ""}`
-      : outcome.ok ? "hash spend refused" : outcome.reason,
+      : "hash spend refused",
     at,
   };
-  if (outcome.ok && outcome.value) {
+  if (ok) {
     // Both the balance and every escalating quote are stale after a spend.
     merge(ctx.state, "hacknet", {
       hashes: { ...hashes, current: Math.max(0, hashes.current - spend.cost) },
@@ -542,7 +528,7 @@ const driver: FeatureDriver = {
   },
 };
 
-function claims(ctx: ClaimContext): FeatureClaim[] {
+function claims(ctx: ClaimContext): Claim[] {
   const basis = hacknetBasis(ctx);
   if (!basis) return [];
   // One hash decision, shared with the view below — see the note in `tick`.
@@ -550,10 +536,7 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
   const view = buildView(ctx, Infinity, basis, hashes);
   const decision = view ? stepHacknet(view) : undefined;
   const best = decision?.buy;
-  const out: FeatureClaim[] = [];
-  if (best) {
-    out.push(actionRamClaim(ctx, "hacknet", hacknetClaimId(best.kind), hacknetMethods(best.kind)));
-  }
+  const out: Claim[] = [];
   if (best) {
     const scored = scoreInvestment(
       { cost: best.cost, incomePerSec: best.deltaProduction },
@@ -576,9 +559,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
       returnPerDollarSec: scored.returnPerDollarSec,
     });
   }
-  if (hashes?.spend) {
-    out.push(actionRamClaim(ctx, "hacknet", "action:spend-hashes", HASH_SPEND_METHODS));
-  }
   return out;
 }
 
@@ -597,18 +577,6 @@ function valueCurve(claim: Claim, ctx: ClaimContext): ClaimValueCurve | undefine
   const value = moneyRateValue(ctx.state, (claim.ratePerSec ?? 0) / claim.amount, ctx.now);
   if (value.state === "unknown") return undefined;
   return value.value > 0 ? linearValueCurve(value.value, claim.amount) : { demandAt: () => 0 };
-}
-
-function hacknetClaimId(kind: string): string { return `action:${kind}`; }
-function hacknetMethods(kind: string): readonly string[] {
-  switch (kind) {
-    case "node": return ["hacknet.purchaseNode"];
-    case "level": return ["hacknet.upgradeLevel"];
-    case "ram": return ["hacknet.upgradeRam"];
-    case "core": return ["hacknet.upgradeCore"];
-    case "cache": return ["hacknet.upgradeCache"];
-    default: return [];
-  }
 }
 
 export const hacknetModule: FeatureModule = {

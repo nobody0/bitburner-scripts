@@ -4,11 +4,11 @@ The historical target to beat is the predecessor script's **17d 21:17** run
 from a fresh BN1.1 start through every Source-File that existed at the time.
 It predates BN14, BN15, and the Darknet victory route.
 
-This is a reference measurement, not the live allowlist. The runtime order is
-`BITNODE_SPEEDRUN_PLAN` in
-`shared/strategy/progression/bitnode-order.ts`, which lists only the milestones
-whose feature controllers are ready. The full intended route lives in this
-document; add an entry there as each controller lands.
+This is a reference measurement, not the live allowlist. The complete current
+order is `BITNODE_SPEEDRUN_PLAN` in
+`shared/strategy/progression/bitnode-order.ts`. Nodes whose controllers are not
+ready remain in that list at their intended positions and are suppressed by
+`DISABLED_BITNODES`; remove a node from that set to enable all its milestones.
 
 It is also **not claimed to be the optimal route**. It is a coherent measured
 starting point that the new planner must first reproduce and then beat. Order
@@ -79,43 +79,20 @@ optimal place.
    complete BN3. SF3 contributes no value after the final node, so nothing is
    lost by postponing it until the end.
 
-## Provisional route with BN14 and BN15
+## Configured route with BN14 and BN15
 
-The intended starting order for the current game is:
+The complete intended order for the current game is:
 
-`4.3, 1.3, 5.1, 15.1, 2.3, 14.3, 5.3, 12.3, 15.3, 8.3, 10.3, 9.3, 13.3, 7.1, 6.3, 7.3, 11.3, 3.3`.
+`1.1, 4.3, 1.3, 15.3, 14.1, 5.1, 2.3, 14.3, 5.3, 12.3, 8.3, 10.3, 9.3, 13.3, 6.3, 7.3, 11.3, 3.3`.
 
-BN15 is split around the core power nodes, while all three BN14 levels are
-taken early:
+The initial `1.1` is explicit because the selector projects the Source-File
+awarded by the node currently being destroyed. A fresh run completing BN1.1
+therefore recognizes that milestone as satisfied and enters BN4 next.
 
-1. **SF15.1 after SF5.1** — first expose Intelligence, then take BN15's largest
-   structural reward early: permanent TOR/Darkscape, full darknet access, and a
-   portable labyrinth Red Pill route in every node except BN8. That route can
-   help most of the remaining campaign. SF15.1 is the early unlock; it is not a
-   claim that all three BN15 runs belong this early.
-2. **SF2.3 before BN14** — SF2 unlocks gangs in other nodes and gives +42% crime
-   success, crime money, and charisma at level 3. BN14 severely nerfs normal
-   hacking, hacknet, crime success, and reputation income, but its gang
-   multipliers remain usable (`GangSoftcap` 0.7 and `GangUniqueAugs` 0.4). A
-   gang therefore supplies the strong, persistent income source needed to make
-   an early BN14 practical.
-3. **SF14.3 immediately after SF2.3** — take all three levels while the gang
-   economy is available. SF14.1 doubles all Go Node Power stat multipliers;
-   SF14.2 unlocks `go.cheat`; and SF14.3 improves cheat success and faction-favor
-   rewards. Completing the set here lets those hacking, reputation, crime,
-   hacknet, and combat buffs pay back across almost the entire remaining run.
-4. **SF15.3 after SF12.3** — use gangs, the remaining SF5 levels, Recursion, and
-   the now-stronger Go bonuses to make the two repeat runs cheaper. SF15.2/3
-   then improve darknet work and charisma-driven company/faction work for the
-   specialized hacking nodes that remain.
-
-This placement is a hypothesis to benchmark, not a settled optimum. In
-particular, early BN14 must be compared against the previous late/split option
-using identical post-SF2.3 checkpoints, and the portable labyrinth route still
-needs timings. `BITNODE_SPEEDRUN_PLAN` carries only the milestones that are
-live today, so the route above — including BN14 and BN15 — is restored from
-here as each controller becomes ready. If every listed milestone is complete,
-the live selector still falls back to repeatable BN12.
+BN2, BN3, BN6, BN7, BN8, BN9, BN10, BN11, and BN13 remain in the complete route
+but are currently disabled while their automation is being prepared. Runtime
+selection skips every milestone for those nodes. Once every enabled finite
+milestone is complete, the selector falls back to repeatable BN12.
 
 ## Historical order and times
 

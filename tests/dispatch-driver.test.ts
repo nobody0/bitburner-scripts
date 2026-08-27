@@ -5,10 +5,7 @@ import type { WorkerGlobalThis } from "../game/lib/worker-shared.ts";
 import { reportFailed } from "../shared/strategy/farm-planner.ts";
 import { trackOp } from "../shared/strategy/dispatch.ts";
 
-import { settleBrokerShareExits } from '../game/lib/dispatch-driver.ts';
-
-import type { NS } from '@ns';
-import { reclaimForDodge } from '../game/lib/dispatch-driver.ts';
+import { settleArenaShareExits } from '../game/lib/dispatch-driver.ts';
 
 function driver(): DriverState {
   return {
@@ -105,8 +102,8 @@ describe("dispatcher heap reconciliation", () => {
     expect(resyncHeap(state, { foodnstuff: server(2) })).toEqual([]);
     expect(memory.heap.host("foodnstuff")?.used).toBe(9.2);
 
-    expect(settleBrokerShareExits(state)).toEqual([9]);
-    expect(settleBrokerShareExits(state)).toEqual([]);
+    expect(settleArenaShareExits(state)).toEqual([9]);
+    expect(settleArenaShareExits(state)).toEqual([]);
     expect(memory.heap.host("foodnstuff")?.used).toBeCloseTo(2, 12);
     expect(memory.segmentGb.share).toBe(0);
   });
@@ -134,45 +131,5 @@ describe("dispatcher heap reconciliation", () => {
     expect(memory.shareWorkers.size).toBe(0);
     expect(memory.heap.host("foodnstuff")?.used).toBeCloseTo(2, 12);
     expect(memory.segmentGb.share).toBe(0);
-  });
-});
-
-describe('broker farm preemption adapter', () => {
-  test('leaves an active process and its invested reservation intact', () => {
-    const state = driver();
-    const memory = state.memory.dispatch;
-    memory.heap.upsert('foodnstuff', 16, 0);
-    const allocation = memory.heap.allocate({ blockSize: 1.75, threads: 4, policy: 'contiguous' });
-    expect(allocation.ok).toBe(true);
-    memory.pool.workers.set(9, {
-      workerId: 9, hostname: 'foodnstuff', kind: 'grow', threads: 4,
-      effectThreads: 4, gb: 7, busy: true, idleSince: 0,
-    });
-    trackOp(memory, 10, {
-      hostname: 'foodnstuff', target: 'n00dles', kind: 'grow',
-      segment: 'farm', gb: 7, wave: false, workerId: 9, landing: 2_000,
-    });
-    memory.inFlight.grow = 1;
-    memory.segmentGb.farm = 7;
-    state.globals.worker_info!.set(9, {
-      kind: 'grow', target: 'n00dles', threads: 4, mode: 'serve', pid: 123,
-    });
-
-    const killed: number[] = [];
-    const result = reclaimForDodge({ kill: (pid: number) => (killed.push(pid), true) } as NS, state, {
-      by: 'progression', id: 'action:install', gb: 5, priority: 110,
-      class: 'deferrable',
-    }, [{
-      hostname: 'foodnstuff', maxRam: 16, freeGb: 0, rooted: true, deployed: true,
-    }]);
-
-    expect(result).toMatchObject({
-      preempted: false,
-      plan: { action: 'wait', reason: 'no-single-victim-unblocks' },
-    });
-    expect(killed).toEqual([]);
-    expect(memory.pool.workers.size).toBe(1);
-    expect(memory.tracked.size).toBe(1);
-    expect(memory.heap.freeOn('foodnstuff', true)).toBe(9);
   });
 });

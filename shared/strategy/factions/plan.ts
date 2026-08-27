@@ -206,6 +206,8 @@ export interface FactionDecision {
    *  fast farm: the barrier sees the next NeuroFlux affordable out of fresh
    *  income the drain has already declined to spend. */
   drainCeiling?: number;
+  /** Remaining liquidation obligation, split between purchases and donations. */
+  drainCosts?: { purchase: number; donation: number; residualDonation: number; total: number };
   /** Set when the feature genuinely cannot act — reported, never spun on. */
   blocked?: true;
 }
@@ -270,6 +272,14 @@ export interface FactionMemory {
    * NeuroFlux names are finite, pre-funded levels interleaved at their
    * price-minimising positions. */
   drainOrder?: string[];
+  /** Seller frozen for each one-shot name in drainOrder. NeuroFlux uses the
+   * same seller for every repeated occurrence in one drain. */
+  drainSources?: Record<string, string>;
+  /** Final pure-favor allocation, snapshotted once after the last purchase so
+   * newly arriving income cannot reopen the drain forever. Undefined means it
+   * has not been planned; an empty array is a completed plan with no eligible
+   * donation. */
+  drainResidualDonations?: { faction: string; repTarget: number; amount: number }[];
   /** NFG level when drainOrder was frozen, used to consume repeated NFG
    * entries only after the game confirms each purchase. */
   drainStartNeurofluxLevel?: number;

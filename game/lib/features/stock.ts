@@ -1,4 +1,3 @@
-import type { NS } from "@ns";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
 import { SYMBOL_BY_HOST } from "../../../shared/features/stocks.ts";
@@ -25,8 +24,6 @@ import { isScriptDeath } from "../errors.ts";
 import { gameGlobal, type StockFlows } from "../globals.ts";
 import { moneyRateValue, moneyStepValue } from "../income.ts";
 import { merge } from "../state.ts";
-import { actionRamClaim, featureDodge } from "./dodge.ts";
-import type { FeatureClaim } from "./claims.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "./index.ts";
 
 /** The stock driver.
@@ -56,21 +53,6 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "
  * that plan, and only then does `fundedActions` cut it to what was granted.
  * Deriving the plan from the grant is circular — no plan, no claim, no grant, no
  * plan — and that circle is why the previous version never placed a trade. */
-
-/** Worst single dodge step this feature needs, priced from the ns costs rather
- * than guessed (`GetStock` 2 GB, `BuySellStock` 2.5 GB):
- *
- *  - the ACTION batch, at 12.1 GB: `getPosition` 2 (read inside the trade, so a
- *    buy is idempotent) + `sellStock` 2.5 + `sellShort` 2.5 + one of
- *    `buyStock`/`buyShort` 2.5 + one unlock purchase 2.5. Only one entry side and
- *    one unlock can appear in a plan, which is what bounds it here, plus the
- *    0.1 GB cash read that keeps wealth coherent;
- *  - `stock.tick`, at 10.1 GB: `getSymbols` + `getAskPrice` + `getBidPrice` +
- *    `getPosition` + `getMaxShares` + the same cash read;
- *  - `stock.forecast`, at 7 GB, and `stock.account` at 0.2 GB.
- *
- * The old declaration was 8 GB, which under-priced the 11.5 GB forecast probe of
- * the time — a home reserve too small for the step it was reserving for. */
 
 let memory: StockMemory = initStockMemory();
 let lastPlan: StockPlan | undefined;
@@ -289,104 +271,89 @@ function measuredStockIncomePerSec(portfolioCost: number): number | undefined {
   return elapsedSec > 0 ? contributed / elapsedSec : undefined;
 }
 
-async function execute(ctx: DriverContext, actions: StockAction[], claimId: string): Promise<void> {
+async function execute(ctx: DriverContext, actions: StockAction[]): Promise<void> {
   if (actions.length === 0) return;
-  const methods = stockMethods(actions);
   const at = Date.now();
-  // Every action in ONE stub, and `getPosition` inside it: each trade changes
-  // both the money and the position the next one sees, and the position topic is
-  // up to 30 s stale. Reading it here is what makes a buy idempotent — without
-  // it the 4 s driver re-bought the same symbol until the probe caught up,
-  // paying a fresh $100k entry commission each time.
+  // `getPosition` is read HERE rather than taken from the topic: each trade
+  // changes both the money and the position the next one sees, and the position
+  // topic is up to 30 s stale. Reading it live is what makes a buy idempotent —
+  // without it the 4 s driver re-bought the same symbol until the probe caught
+  // up, paying a fresh $100k entry commission each time. Cash is read before
+  // and after each trade for the same reason: the whole batch runs on one
+  // resident, so the two reads bracket exactly this batch's own movement.
   // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/data/Constants.ts#L3-L12
-  //
-  // `claimId` is built from the full PLANNED set, not the funded subset:
-  // claims() posted the RAM claim under the planned set's id and featureDodge
-  // looks the grant up by exact id, so an id derived from `actions` would miss
-  // the grant whenever funding trimmed the batch.
-  const outcome = await featureDodge(ctx, "stock", claimId, methods, (stubNs: NS) => {
-    const out: string[] = [];
-    const touched = new Set<string>();
-    const access: Partial<Pick<StockState, "hasWseAccount" | "hasTixApiAccess" | "has4SDataApi">> = {};
-    const cashBefore = stubNs["getServerMoneyAvailable"]("home");
-    // Trade-only cash movement, measured around each buy/sell inside the same
-    // stub. Gating the whole batch on "no unlock present" instead dropped the
-    // trade's cost from the cashflow while the position's cost basis still
-    // entered portfolioCost — a PERMANENT +cost skew in earnedSinceInstall for
-    // every mixed unlock+trade batch, not the "one lost sample" it looked like.
-    let tradeDelta = 0;
-    for (const action of actions) {
-      switch (action.type) {
-        case "buyWse": {
-          const bought = stubNs["stock"]["purchaseWseAccount"]();
-          if (bought) access.hasWseAccount = true;
-          out.push(bought ? "bought WSE account" : "WSE refused");
+  const out: string[] = [];
+  const touched = new Set<string>();
+  const access: Partial<Pick<StockState, "hasWseAccount" | "hasTixApiAccess" | "has4SDataApi">> = {};
+  const cashBefore = await ctx.nsp("getServerMoneyAvailable", "home");
+  // Trade-only cash movement, measured around each buy/sell. Gating the whole
+  // batch on "no unlock present" instead dropped the trade's cost from the
+  // cashflow while the position's cost basis still entered portfolioCost — a
+  // PERMANENT +cost skew in earnedSinceInstall for every mixed unlock+trade
+  // batch, not the "one lost sample" it looked like.
+  let tradeDelta = 0;
+  for (const action of actions) {
+    switch (action.type) {
+      case "buyWse": {
+        const bought = await ctx.nsp("stock.purchaseWseAccount");
+        if (bought) access.hasWseAccount = true;
+        out.push(bought ? "bought WSE account" : "WSE refused");
+        break;
+      }
+      case "buyTix": {
+        const bought = await ctx.nsp("stock.purchaseTixApi");
+        if (bought) access.hasTixApiAccess = true;
+        out.push(bought ? "bought TIX API" : "TIX refused");
+        break;
+      }
+      case "buy4SApi": {
+        const bought = await ctx.nsp("stock.purchase4SMarketDataTixApi");
+        if (bought) access.has4SDataApi = true;
+        out.push(bought ? "bought 4S API" : "4S API refused");
+        break;
+      }
+      case "buy": {
+        touched.add(action.sym);
+        const [long, , short] = await ctx.nsp("stock.getPosition", action.sym);
+        const held = action.short ? short : long;
+        if (held > 0) {
+          out.push(`already holding ${action.sym}`);
           break;
         }
-        case "buyTix": {
-          const bought = stubNs["stock"]["purchaseTixApi"]();
-          if (bought) access.hasTixApiAccess = true;
-          out.push(bought ? "bought TIX API" : "TIX refused");
+        const before = await ctx.nsp("getServerMoneyAvailable", "home");
+        const price = action.short
+          ? await ctx.nsp("stock.buyShort", action.sym, action.shares)
+          : await ctx.nsp("stock.buyStock", action.sym, action.shares);
+        tradeDelta += await ctx.nsp("getServerMoneyAvailable", "home") - before;
+        out.push(price > 0 ? `bought ${action.shares} ${action.sym}` : `buy ${action.sym} refused`);
+        break;
+      }
+      case "sell": {
+        touched.add(action.sym);
+        // Sell what is actually there: the plan was formed against a stale
+        // snapshot. Upstream clamps an oversized sale to the live holding and
+        // refuses a zero-share sale; reading the holding here also lets us
+        // distinguish "already flat" from a generic refusal.
+        // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/BuyingAndSelling.tsx#L139-L168 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/BuyingAndSelling.tsx#L316-L344
+        const [long, , short] = await ctx.nsp("stock.getPosition", action.sym);
+        const held = Math.min(action.shares, action.short ? short : long);
+        if (held <= 0) {
+          out.push(`${action.sym} already flat`);
           break;
         }
-        case "buy4SApi": {
-          const bought = stubNs["stock"]["purchase4SMarketDataTixApi"]();
-          if (bought) access.has4SDataApi = true;
-          out.push(bought ? "bought 4S API" : "4S API refused");
-          break;
-        }
-        case "buy": {
-          touched.add(action.sym);
-          const [long, , short] = stubNs["stock"]["getPosition"](action.sym as never);
-          const held = action.short ? short : long;
-          if (held > 0) {
-            out.push(`already holding ${action.sym}`);
-            break;
-          }
-          const before = stubNs["getServerMoneyAvailable"]("home");
-          const price = action.short
-            ? stubNs["stock"]["buyShort"](action.sym as never, action.shares)
-            : stubNs["stock"]["buyStock"](action.sym as never, action.shares);
-          tradeDelta += stubNs["getServerMoneyAvailable"]("home") - before;
-          out.push(price > 0 ? `bought ${action.shares} ${action.sym}` : `buy ${action.sym} refused`);
-          break;
-        }
-        case "sell": {
-          touched.add(action.sym);
-          // Sell what is actually there: the plan was formed against a stale
-          // snapshot. Upstream clamps an oversized sale to the live holding and
-          // refuses a zero-share sale; reading the holding here also lets us
-          // distinguish "already flat" from a generic refusal.
-          // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/BuyingAndSelling.tsx#L139-L168 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/BuyingAndSelling.tsx#L316-L344
-          const [long, , short] = stubNs["stock"]["getPosition"](action.sym as never);
-          const held = Math.min(action.shares, action.short ? short : long);
-          if (held <= 0) {
-            out.push(`${action.sym} already flat`);
-            break;
-          }
-          const before = stubNs["getServerMoneyAvailable"]("home");
-          const price = action.short
-            ? stubNs["stock"]["sellShort"](action.sym as never, held)
-            : stubNs["stock"]["sellStock"](action.sym as never, held);
-          tradeDelta += stubNs["getServerMoneyAvailable"]("home") - before;
-          out.push(price > 0 ? `sold ${held} ${action.sym}` : `sell ${action.sym} refused`);
-          break;
-        }
+        const before = await ctx.nsp("getServerMoneyAvailable", "home");
+        const price = action.short
+          ? await ctx.nsp("stock.sellShort", action.sym, held)
+          : await ctx.nsp("stock.sellStock", action.sym, held);
+        tradeDelta += await ctx.nsp("getServerMoneyAvailable", "home") - before;
+        out.push(price > 0 ? `sold ${held} ${action.sym}` : `sell ${action.sym} refused`);
+        break;
       }
     }
-    return {
-      detail: out,
-      access,
-      holdings: Object.fromEntries([...touched].map((sym) => [sym, stubNs["stock"]["getPosition"](sym as never)])),
-      cashBefore,
-      tradeDelta,
-      cash: stubNs["getServerMoneyAvailable"]("home"),
-    };
-  });
-  if (!outcome.ok) {
-    lastResult = { action: actions[0]!.type, ok: false, detail: outcome.reason, at };
-    return;
   }
+  const holdings: Record<string, [number, number, number, number]> = {};
+  for (const sym of touched) holdings[sym] = await ctx.nsp("stock.getPosition", sym);
+  const cash = await ctx.nsp("getServerMoneyAvailable", "home");
   // Advance the held balance now, exactly as executeInfrastructure does after
   // a purchase: the stub read the REAL post-trade cash, and the player topic's
   // sweep sample is up to seconds stale. Without this, a sale's proceeds land
@@ -396,10 +363,10 @@ async function execute(ctx: DriverContext, actions: StockAction[], claimId: stri
   // for another feature's standing claim to spend the entire bankroll
   // (measured: a $390m liquidation scooped by a $318m home-RAM rung).
   if (ctx.state.topics.player) {
-    merge(ctx.state, "player", { money: outcome.value.cash });
+    merge(ctx.state, "player", { money: cash });
   }
-  // Unlock purchases (WSE/TIX/4S) are spends, not trading cashflow. The stub
-  // measured the trade-only delta around each buy/sell, so a mixed batch
+  // Unlock purchases (WSE/TIX/4S) are spends, not trading cashflow. The
+  // trade-only delta was measured around each buy/sell, so a mixed batch
   // (fundedActions concatenates the funded claims) records its trades exactly
   // and the remainder of the batch's cash movement is the unlock spend —
   // which earnedSinceInstall must still count, because the game's own ledger
@@ -408,19 +375,14 @@ async function execute(ctx: DriverContext, actions: StockAction[], claimId: stri
   const unlocked = actions.some(
     (action) => action.type === "buyWse" || action.type === "buyTix" || action.type === "buy4SApi",
   );
-  const tradeDelta = outcome.value.tradeDelta as number;
   const ledger = flows();
   if (traded) {
     ledger.tradeCashFlow += tradeDelta;
     ledger.tradeFlowSince ??= at;
   }
   if (unlocked) {
-    ledger.unlockSpend += Math.max(
-      0,
-      (outcome.value.cashBefore as number) - outcome.value.cash + tradeDelta,
-    );
+    ledger.unlockSpend += Math.max(0, cashBefore - cash + tradeDelta);
   }
-  const holdings = outcome.value.holdings as Record<string, [number, number, number, number]>;
   const positions = (ctx.state.topics.stock?.positions ?? []).map((position) => {
     const current = holdings[position.sym];
     if (!current) return position;
@@ -437,17 +399,17 @@ async function execute(ctx: DriverContext, actions: StockAction[], claimId: stri
   });
   const portfolioValue = positions.reduce((sum, position) => sum + position.value, 0);
   merge(ctx.state, "stock", {
-    ...outcome.value.access,
+    ...access,
     tradeCashFlow: ledger.tradeCashFlow,
     unlockSpend: ledger.unlockSpend,
-    wealth: outcome.value.cash + portfolioValue,
+    wealth: cash + portfolioValue,
     ...(Object.keys(holdings).length > 0 ? {
       positions,
       portfolioValue,
       portfolioCost: positions.reduce((sum, position) => sum + position.costBasis, 0),
     } : {}),
   });
-  lastResult = { action: actions[0]!.type, ok: true, detail: outcome.value.detail.join("; "), at };
+  lastResult = { action: actions[0]!.type, ok: true, detail: out.join("; "), at };
 }
 
 const driver: FeatureDriver = {
@@ -474,7 +436,7 @@ const driver: FeatureDriver = {
     });
 
     try {
-      await execute(ctx, actions, stockClaimId(wantedActions(decision.plan)));
+      await execute(ctx, actions);
     } catch (error) {
       if (isScriptDeath(error)) throw error;
       lastResult = { action: "trade", ok: false, detail: String(error), at: Date.now() };
@@ -559,28 +521,10 @@ function planDigest(
  * pass. That is the whole fix for the deadlock: `stepStock` sizes an entry with
  * no reference to the grant, so a claim exists on the very first pass and the
  * grant it wins funds the same entry on the next one. */
-/** The full planned action set — what claims() prices the RAM claim from, and
- * therefore the set execute()'s claim id must be derived from too. */
-function wantedActions(plan: StockPlan): StockAction[] {
-  return [
-    ...plan.exits,
-    ...(plan.unlock ? [plan.unlock.action] : []),
-    ...(plan.entry
-      ? [{ type: "buy" as const, sym: plan.entry.sym, shares: plan.entry.shares, short: plan.entry.side === "short" }]
-      : []),
-  ];
-}
-
-function claims(ctx: ClaimContext): FeatureClaim[] {
+function claims(ctx: ClaimContext): Claim[] {
   const plan = lastPlan;
-  const out: FeatureClaim[] = [];
+  const out: Claim[] = [];
   if (!plan) return out;
-
-  const wanted = wantedActions(plan);
-  const methods = stockMethods(wanted);
-  if (methods.length > 0) {
-    out.push(actionRamClaim(ctx, "stock", stockClaimId(wanted), methods));
-  }
 
   if (plan.unlock) {
     out.push({
@@ -698,39 +642,6 @@ function valueCurve(claim: Claim, ctx: ClaimContext): ClaimValueCurve | undefine
     }
   }
   return linearValueCurve(value.value, claim.amount);
-}
-
-function stockClaimId(actions: readonly StockAction[]): string {
-  return `action:${[...new Set(actions.map((action) =>
-    action.type === "buy" || action.type === "sell" ? `${action.type}:${action.short ? "short" : "long"}` : action.type,
-  ))].sort().join("+")}`;
-}
-
-function stockMethods(actions: readonly StockAction[]): readonly string[] {
-  const methods = new Set<string>();
-  if (actions.length > 0) methods.add("getServerMoneyAvailable");
-  for (const action of actions) {
-    switch (action.type) {
-      case "buyWse":
-        methods.add("stock.purchaseWseAccount");
-        break;
-      case "buyTix":
-        methods.add("stock.purchaseTixApi");
-        break;
-      case "buy4SApi":
-        methods.add("stock.purchase4SMarketDataTixApi");
-        break;
-      case "buy":
-        methods.add("stock.getPosition");
-        methods.add(action.short ? "stock.buyShort" : "stock.buyStock");
-        break;
-      case "sell":
-        methods.add("stock.getPosition");
-        methods.add(action.short ? "stock.sellShort" : "stock.sellStock");
-        break;
-    }
-  }
-  return [...methods];
 }
 
 export const stockModule: FeatureModule = {

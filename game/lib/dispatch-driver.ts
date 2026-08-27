@@ -7,16 +7,10 @@ import { initFarm, planFarm, reportFailed, type FarmMemory } from "../../shared/
 import type { ChargeAction, CompletionEvent, HgwAction, ServerView, ShareAction, StockInfluence, WorldView } from "../../shared/world.ts";
 import { WORKER_RAM } from "../../shared/world.ts";
 import { handoffLaunch, temporaryRunOptions } from "./launch-shared.ts";
+import { nsp } from "./proxies.ts";
 import { workerGlobals, type WorkerGlobalThis } from "./worker-shared.ts";
 
-import {
-  planReclamation,
-  type BrokerHost,
-  type BrokerRequest,
-  type PreemptibleFarmWorker,
-  type ReclamationPlan,
-} from '../../shared/ram/broker.ts';
-import { MAX_LIVE_WORKERS, releaseWorkerExits, requestShareStops, type Tracked } from '../../shared/strategy/dispatch.ts';
+import { MAX_LIVE_WORKERS, releaseWorkerExits } from '../../shared/strategy/dispatch.ts';
 
 /** Game-side driver for the pure HWGW engine. It only moves data: builds a
  * WorldView from the cached scan plus live reads of the hot targets, hands
@@ -82,12 +76,27 @@ export function drainCompletions(state: DriverState, target?: string): Completio
   return events;
 }
 
-/** Build the planner's view: static fields from the last dodged scan, live
- * security/money for the hot targets (two cheap direct getters — the hot path
- * never dodges), live used RAM from our own ledger.
+/** Build the planner's view: static fields from the last probed scan, live
+ * security/money for the hot targets, live used RAM from our own ledger.
+ *
+ * The two live getters go through the PROXY, and that is why this function is
+ * async even though it is on the batcher's hot path. The old rule ("never
+ * dodge inside a timing-critical window") was about the DODGER's cost: every
+ * dodged call exec'd a throwaway stub, tens of milliseconds. A proxy call on a
+ * warm resident is an in-realm function call behind a microtask, so the rule
+ * does not carry over and start.js gets its 0.2 GB back.
+ *
+ * The one residual risk: a proxied call can force a resident RESPAWN — a real
+ * process spawn — when the resident's budget is full. Both members here are
+ * 0.1 GB and memoised permanently after first use, so they only ever pay that
+ * on the very first hot pump of a resident's life, and never again unless
+ * something else recycles it.
+ *
+ * Only the `hot` set is read live (the farm and prep targets, or the one woken
+ * target); every other server comes from the sweep snapshot, so this is two
+ * awaits per pump, not two per server.
  * Source getters: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L989-L1002 */
-export function buildView(
-  ns: NS,
+export async function buildView(
   state: DriverState,
   servers: Record<string, Server>,
   player: Player,
@@ -107,8 +116,9 @@ export function buildView(
   /** Measured hacking exp/sec (the driver's EMA), for the evaluator's
    *  skill-growth prep discount. */
   hackingExpRate?: number,
-): WorldView {
+): Promise<WorldView> {
   const hot = new Set(hotHosts);
+  const call = nsp;
   const views: ServerView[] = [];
   for (const server of Object.values(servers)) {
     const live = hot.has(server.hostname);
@@ -117,9 +127,13 @@ export function buildView(
       hostname: server.hostname,
       hasAdminRights: server.hasAdminRights,
       purchasedByPlayer: server.purchasedByPlayer,
-      moneyAvailable: live ? ns.getServerMoneyAvailable(server.hostname) : (server.moneyAvailable ?? 0),
+      moneyAvailable: live
+        ? await call("getServerMoneyAvailable", server.hostname)
+        : (server.moneyAvailable ?? 0),
       moneyMax: server.moneyMax ?? 0,
-      hackDifficulty: live ? ns.getServerSecurityLevel(server.hostname) : (server.hackDifficulty ?? 100),
+      hackDifficulty: live
+        ? await call("getServerSecurityLevel", server.hostname)
+        : (server.hackDifficulty ?? 100),
       minDifficulty: server.minDifficulty ?? 1,
       baseDifficulty: server.baseDifficulty ?? 1,
       requiredHackingSkill: server.requiredHackingSkill ?? 1e9,
@@ -165,7 +179,7 @@ export async function pump(
   view: WorldView,
   completions: CompletionEvent[],
   /** Planning options, passed straight through to planFarm.
-   *  - arenaReserves: broker-owned per-host executable headroom.
+   *  - arenaReserves: per-host executable headroom the farm may not have.
    *  - horizonMs: expected remaining run time (endgame route decision).
    *  `goalRemaining` is deliberately NOT named here: the game has no money
    *  goal — that is the sim's device, and the sim sets it on planFarm
@@ -399,7 +413,7 @@ async function startCharge(ns: NS, state: DriverState, action: ChargeAction): Pr
 
 async function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number, plannedAt: number): Promise<boolean> {
   const host = action.source;
-  // Deployment is done by the dodged sweep; an undeployed host is simply not
+  // Deployment is done by the fleet sweep; an undeployed host is simply not
   // usable this pass (keeping ns.scp out of the controller's static RAM).
   // Source (imports participate in static dependency/RAM analysis): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Script/RamCalculations.ts#L448-L480
   if (!state.deployed.has(host)) return false;
@@ -498,93 +512,73 @@ async function startOp(ns: NS, state: DriverState, action: HgwAction, opId: numb
   return true;
 }
 
-export interface ReclamationExecution {
-  plan: ReclamationPlan;
-  preempted: boolean;
-}
-
-/** Execute the broker's pure ladder through the dispatcher's existing
- * cooperative-stop and failure/worker-exit paths. */
-export function reclaimForDodge(
-  ns: NS,
-  state: DriverState,
-  request: BrokerRequest,
-  hosts: readonly BrokerHost[],
-): ReclamationExecution {
+/** Emergency RAM for a world-ending call — installAugmentations or
+ * destroyW0r1dD43m0n. These are the absolute highest priority: the run is
+ * about to end anyway, so unlike every cooperative path this may kill ANY
+ * worker — active HGW ops included — on the chosen host. Picks the smallest
+ * host whose maxRam fits the request and whose free-plus-killable RAM covers
+ * it, kills every worker there, routes the dispatch ledger (reportFailed /
+ * workerExit) so the heap frees synchronously, and returns the hostname.
+ *
+ * The obfuscated member access is deliberate: naming the kill API statically
+ * would bill start.js for it in every build, for a call made once per run. */
+export function killWorkersForCritical(ns: NS, state: DriverState, neededGb: number): string | undefined {
   const dispatch = state.memory.dispatch;
-  const shares = [...dispatch.shareWorkers.values()];
-  const farmWorkers = preemptibleWorkers(state);
-  const plan = planReclamation(request, hosts, shares, farmWorkers);
-  if (plan.action === 'wait') return { plan, preempted: false };
-
-  const actions: import('../../shared/world.ts').Action[] = [];
-  requestShareStops(dispatch, actions, plan.shareGb, new Set(plan.shareWorkerIds));
-  for (const action of actions) {
-    if (action.type === 'stopShare') executeShareStop(state, action.opId);
-  }
-  if (plan.action !== 'preempt') return { plan, preempted: false };
-
-  const info = state.globals.worker_info?.get(plan.victim.workerId);
-  const kill = Reflect.get(ns, ['ki', 'll'].join('')) as ((pid: number) => boolean) | undefined;
-  const killed = info?.pid !== undefined && kill?.(info.pid) === true;
-  if (!killed) return { plan, preempted: false };
-  if (plan.victim.opId !== undefined) reportFailed(state.memory, [plan.victim.opId]);
-  releaseWorkerExits(dispatch, [plan.victim.workerId]);
-  return { plan, preempted: true };
-}
-
-function preemptibleWorkers(state: DriverState): PreemptibleFarmWorker[] {
-  const dispatch = state.memory.dispatch;
-  // One pass over the ledger, not two: pooled ops index their resident worker,
-  // non-pooled ops are candidates in their own right. The candidate list is
-  // inherently one entry per preemptible op — that is the broker's contract,
-  // not an accident of this loop.
-  const activeByWorker = new Map<number, { opId: number; tracked: Tracked }>();
-  const oneShot: PreemptibleFarmWorker[] = [];
+  const info = state.globals.worker_info;
+  interface Victim { workerId: number; opIds: number[]; gb: number; pid: number }
+  const byHost = new Map<string, Victim[]>();
+  const push = (host: string, victim: Victim): void => {
+    const list = byHost.get(host) ?? [];
+    list.push(victim);
+    byHost.set(host, list);
+  };
+  const activeByWorker = new Map<number, number>();
   for (const [opId, tracked] of dispatch.tracked) {
     if (tracked.workerId !== undefined) {
-      activeByWorker.set(tracked.workerId, { opId, tracked });
+      activeByWorker.set(tracked.workerId, opId);
       continue;
     }
-    if (tracked.segment === 'share' || tracked.segment === 'charge') continue;
-    if (state.globals.worker_info?.get(opId)?.pid === undefined) continue;
-    oneShot.push({
-      workerId: opId,
-      opId,
-      hostname: tracked.hostname,
-      kind: tracked.kind,
-      segment: tracked.segment,
-      gb: tracked.gb,
-      ...(tracked.landing !== undefined ? { landing: tracked.landing } : {}),
-      active: true,
-    });
+    const pid = info?.get(opId)?.pid;
+    if (pid === undefined) continue;
+    push(tracked.hostname, { workerId: opId, opIds: [opId], gb: tracked.gb, pid });
   }
-
-  const workers: PreemptibleFarmWorker[] = [];
   for (const worker of dispatch.pool.workers.values()) {
-    if (state.globals.worker_info?.get(worker.workerId)?.pid === undefined) continue;
-    const active = activeByWorker.get(worker.workerId);
-    workers.push({
-      workerId: worker.workerId,
-      ...(active ? { opId: active.opId } : {}),
-      hostname: worker.hostname,
-      kind: worker.kind,
-      segment: active?.tracked.segment === 'prep' ? 'prep' : 'farm',
-      gb: worker.gb,
-      ...(active?.tracked.landing !== undefined ? { landing: active.tracked.landing } : {}),
-      active: active !== undefined,
-    });
+    const pid = info?.get(worker.workerId)?.pid;
+    if (pid === undefined) continue;
+    const opId = activeByWorker.get(worker.workerId);
+    push(worker.hostname, { workerId: worker.workerId, opIds: opId === undefined ? [] : [opId], gb: worker.gb, pid });
   }
-  // Appended one by one, never spread: this list is one entry per in-flight op
-  // and a spread of tens of thousands would exceed the argument limit.
-  for (const worker of oneShot) workers.push(worker);
-  return workers;
+  for (const share of dispatch.shareWorkers.values()) {
+    const pid = info?.get(share.workerId)?.pid;
+    if (pid === undefined) continue;
+    push(share.hostname, { workerId: share.workerId, opIds: [], gb: share.gb, pid });
+  }
+  let chosen: { hostname: string; maxRam: number } | undefined;
+  for (const host of dispatch.heap.hosts()) {
+    if (host.maxRam < neededGb) continue;
+    const killable = (byHost.get(host.hostname) ?? []).reduce((sum, victim) => sum + victim.gb, 0);
+    if (dispatch.heap.freeOn(host.hostname, true) + killable < neededGb) continue;
+    if (!chosen || host.maxRam < chosen.maxRam) chosen = { hostname: host.hostname, maxRam: host.maxRam };
+  }
+  if (!chosen) return undefined;
+  const kill = Reflect.get(ns, ['ki', 'll'].join('')) as ((pid: number) => boolean) | undefined;
+  const failedOps: number[] = [];
+  const exits: number[] = [];
+  for (const victim of byHost.get(chosen.hostname) ?? []) {
+    kill?.(victim.pid);
+    failedOps.push(...victim.opIds);
+    exits.push(victim.workerId);
+  }
+  if (failedOps.length > 0) reportFailed(state.memory, failedOps);
+  releaseWorkerExits(dispatch, exits);
+  return chosen.hostname;
 }
 
-/** Consume only broker-requested share exits, leaving every ordinary farm
- * completion on the original pump-first wake path. This is resyncHeap's
- * ordering barrier narrowed to the RAM the queued dodge is reclaiming. */
-export function settleBrokerShareExits(state: DriverState): number[] {
+/** Consume only the share exits the ARENA asked for — a share worker the farm
+ * planner cooperatively stopped because a reserve outgrew free RAM — leaving
+ * every ordinary farm completion on the original pump-first wake path. This is
+ * resyncHeap's ordering barrier narrowed to the RAM the arena is reclaiming. */
+export function settleArenaShareExits(state: DriverState): number[] {
   const done = state.globals.dispatch_done;
   if (!done || done.length === 0) return [];
   const workerIds: number[] = [];

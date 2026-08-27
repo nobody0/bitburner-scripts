@@ -57,6 +57,7 @@ import {
 import type { ExperimentIdentity } from "../shared/experiment.ts";
 import { AUGMENTATION_TABLE } from "./vendor/bitburner/src/Augmentation/AugmentationTable.ts";
 import type { GameState } from "../game/lib/state.ts";
+import { START_SCRIPT_GB } from "../game/lib/proxies.ts";
 import { gameGlobal } from "../game/lib/globals.ts";
 import { setGoNeuralRuntimeForTest } from "../game/lib/features/remaining.ts";
 
@@ -73,7 +74,7 @@ import { setGoNeuralRuntimeForTest } from "../game/lib/features/remaining.ts";
  * process-level (sim/run.ts). */
 
 const WORKER_SCRIPT = "worker/worker.js";
-const DODGE_STUB = "lib/dodge-stub.js";
+const NS_RESIDENT = "lib/ns-resident.js";
 /** The darknet payloads. Registered like any other artifact so the controller's
  * seed really places a process and the agents really run — without them the
  * seed would `exec` a filename the sim has no main() for, the process would
@@ -254,8 +255,7 @@ export interface GameRunResult {
  * hosts more than one (tests) cannot leak a controller epoch or a live worker
  * registry into the next. */
 const REALM_SLOTS = [
-  "spawning_script",
-  "script_launch_tail",
+  "spawning_scripts",
   "controllerEpoch",
   "artifactIdentity",
   "state",
@@ -270,7 +270,12 @@ const REALM_SLOTS = [
   "dispatch_weaken_timer",
   "dispatch_jit_timers",
   "charge_context_pending",
-  "dodge_tail",
+  // The ns residents. A run leaves its handles published; the next run's realm
+  // is fresh, so adopting them would call through an `ns` whose process died
+  // with the previous realm.
+  "nsMain",
+  "ns_proxy",
+  "ns_proxy_long",
 ] as const;
 
 function clearRealm(): void {
@@ -414,8 +419,8 @@ async function runGameInstalled(
   const terminal = { host: save?.currentServer ?? "home" };
   const initialHomeFiles = new Set(
     save
-      ? [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, DNET_CONTROLLER, DNET_AGENT, DNET_PROBER, "build-id.txt", ...save.homeFiles, ...(options.homeFiles ?? [])]
-      : [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, DNET_CONTROLLER, DNET_AGENT, DNET_PROBER, "build-id.txt", "NUKE.exe", "hackers-starting-handbook.lit", ...(options.homeFiles ?? [])],
+      ? [START_SCRIPT, NS_RESIDENT, WORKER_SCRIPT, DNET_CONTROLLER, DNET_AGENT, DNET_PROBER, "build-id.txt", ...save.homeFiles, ...(options.homeFiles ?? [])]
+      : [START_SCRIPT, NS_RESIDENT, WORKER_SCRIPT, DNET_CONTROLLER, DNET_AGENT, DNET_PROBER, "build-id.txt", "NUKE.exe", "hackers-starting-handbook.lit", ...(options.homeFiles ?? [])],
   );
   const permanentDarknetAccess = (): boolean => bitnode === 15 || (world.player.sourceFiles["15"] ?? 0) > 0;
   if (permanentDarknetAccess()) initialHomeFiles.add("DarkscapeNavigator.exe");
@@ -771,7 +776,7 @@ async function runGameInstalled(
     { main: startMain },
     { resetAllFeatures },
     { initState },
-    dodgeStub,
+    nsResident,
     worker,
     dnetController,
     dnetAgent,
@@ -780,7 +785,7 @@ async function runGameInstalled(
     import("../game/start.ts"),
     import("../game/lib/features/index.ts"),
     import("../game/lib/state.ts"),
-    import("../game/lib/dodge-stub.ts"),
+    import("../game/lib/ns-resident.ts"),
     import("../game/worker/worker.ts"),
     import("../game/dnet/controller.ts"),
     import("../game/dnet/agent.ts"),
@@ -904,7 +909,7 @@ async function runGameInstalled(
         host: "home",
         args: [],
         threads: 1,
-        ramPerThreadGb: 3.6,
+        ramPerThreadGb: START_SCRIPT_GB,
         temporary: false,
       });
       if (process) launch(host, process);
@@ -938,7 +943,7 @@ async function runGameInstalled(
     }
   }
 
-  host.scripts.set(DODGE_STUB, dodgeStub.main as ScriptMain);
+  host.scripts.set(NS_RESIDENT, nsResident.main as ScriptMain);
   host.scripts.set(WORKER_SCRIPT, worker.main as ScriptMain);
   host.scripts.set(DNET_CONTROLLER, dnetController.main as ScriptMain);
   host.scripts.set(DNET_AGENT, dnetAgent.main as ScriptMain);
@@ -1055,7 +1060,7 @@ async function runGameInstalled(
     args: [],
     threads: 1,
     // start.js's declared allocation, matching its first-statement ramOverride.
-    ramPerThreadGb: 3.6,
+    ramPerThreadGb: START_SCRIPT_GB,
     temporary: false,
   });
   if (!controller) throw new Error("home has too little RAM to start the controller");

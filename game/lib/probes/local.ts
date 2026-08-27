@@ -11,7 +11,7 @@ import { emit, type LocalProbe, type ProbeContext } from "./index.ts";
  * Anything that can be computed from state we already paid for should be, and
  * the Career / Fleet / joined-factions panels are never empty as a result. */
 
-/** Fleet aggregates from the sweep snapshot. Exported so the dodged
+/** Fleet aggregates from the sweep snapshot. Exported so the priced
  * `hacking.cloud` probe can republish a complete FleetRollup rather than a
  * fragment. */
 export function fleetFrom(
@@ -60,7 +60,7 @@ export function fleetFrom(
     maxRam,
     usedRam,
     portOpeners,
-    // `limit` and `maxRamPerServer` come from the slower dodged cloud probe.
+    // `limit` and `maxRamPerServer` come from the slower priced cloud probe.
     // The server map is also sweep-cadenced, while a successful action advances
     // these totals immediately. Preserve that newer observation until the next
     // complete cloud probe instead of rewinding it every local-probe pass.

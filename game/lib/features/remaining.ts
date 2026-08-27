@@ -17,6 +17,7 @@ import {
   stepDarkscape,
 } from "../../../shared/strategy/dnet/unlock.ts";
 import {
+  augCost,
   isSoA,
   NEUROFLUX,
   nextPurchasableAugmentation,
@@ -68,6 +69,7 @@ import {
   routeCountVerdict,
 } from "../../../shared/strategy/progression/activation.ts";
 import { bankedFavorActivationValue, chooseNextBitNode, dwellInstallVerdict, INSTALL_VERDICT_OVERHEAD_SEC, installCadencePushRate, installCadenceRemainingSec, installVerdict, stepProgression } from "../../../shared/strategy/progression/decide.ts";
+import { STALL_BITNODE_COMPLETION } from "../../../shared/strategy/progression/bitnode-order.ts";
 import {
   DAEDALUS_COMBAT,
   daedalusAugsRequired,
@@ -118,13 +120,13 @@ import type { ProgressionPlan, RouteEtaDigest } from "../../../shared/telemetry/
 import { isScriptDeath } from "../errors.ts";
 import { goNeuralWorkerRuntime, resetGoNeuralWorkerRuntime, type GoNeuralRuntime } from "../go-neural-worker.ts";
 import { runGoNeuralSeedDispatch } from "../go-neural.ts";
+import { priceCall } from "../ns-proxy.ts";
+import { RESIDENT_BASE_GB } from "../../../shared/ram/broker.ts";
 import { resetGateSignal, signalGateRecheck } from "../gate-signal.ts";
 import { resetInstallSignal, takeInstallSignal } from "../install-signal.ts";
 import { armSleeveCompletion, consumeSleeveCompletion, pendingSleeveCompletions, resetSleeveCompletions } from "../sleeve-completion.ts";
 import { merge, set, type GameState } from "../state.ts";
 import type { WorkTaskLike } from "../work-completion.ts";
-import type { FeatureClaim } from "./claims.ts";
-import { actionRamClaim, featureDodge } from "./dodge.ts";
 import { dnetLabCacheDeferral } from "./dnet.ts";
 import { liquidatableValue } from "./factions.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
@@ -134,7 +136,7 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedCon
  *
  * They share a file because they share a SHAPE, not because they are small:
  * build a view from the store, call one pure `step*`, execute at most one
- * action per tick inside one dodge, and write the decision digest back. Any
+ * action per tick through the ns proxy, and write the decision digest back. Any
  * one of them can move to its own file the moment it needs more than that —
  * `factions`, `career`, `hacknet`, `stock` and `dnet` already have. */
 
@@ -152,6 +154,10 @@ const GO_FILLER_MARGIN = 1.25;
 /** Reset dispatch plus first-turn planning allowance for a filler game. */
 const GO_FILLER_OVERHEAD_SEC = 10;
 const BLADES_SIMULACRUM = "The Blade's Simulacrum";
+/** Slack over base + the priced call when clearing room for a world-ender, so
+ * a rounding difference between our sum and the engine's does not leave the
+ * cleared host one decimal short of the resident it was cleared for. */
+const CRITICAL_HEADROOM_GB = 1;
 
 type Result = { action: string; ok: boolean; detail: string; at: number } | undefined;
 const results: Record<string, Result> = {};
@@ -166,45 +172,28 @@ function requireResult(id: string): NonNullable<Result> {
   return result;
 }
 
-/** One dodged call, placed on the fleet, with its outcome recorded. A `false`
- * return is an OUTCOME, never an exception. */
-async function act<T>(
-  ctx: DriverContext,
-  id: string,
-  action: string,
-  /** The ns functions the closure will call. PRICED, never guessed — a
-   *  constant budget below the sum of the call costs kills the stub with a RAM
-   *  USAGE ERROR (see dodge.ts#priceCalls). */
-  methods: readonly string[],
-  body: (stubNs: NS) => T | Promise<T>,
-  describe: (value: T) => { ok: boolean; detail: string },
-): Promise<T | undefined> {
-  try {
-    const outcome = await featureDodge(
-      ctx,
-      id as Claim["by"],
-      id === "go" ? goActionClaimId(action) : actionClaimId(action),
-      methods,
-      body,
-    );
-    if (!outcome.ok) {
-      record(id, action, false, outcome.reason);
-      return;
-    }
-    const value = outcome.value;
-    const { ok, detail } = describe(value);
-    record(id, action, ok, detail);
-    return value;
-  } catch (error) {
-    if (isScriptDeath(error)) throw error;
-    record(id, action, false, String(error));
-  }
+/** Clear room for a world-ender before the proxy asks for it.
+ *
+ * `installAugmentations` and `destroyW0r1dD43m0n` are the two calls priced far
+ * above the resident's standing budget, so each forces a respawn onto a host
+ * that fits base + the call. If the fleet has no such block the resident just
+ * retries, and the run would sit there for ever waiting on a hacking farm that
+ * is about to be soft-reset out of existence anyway. Killing workers to make
+ * the room costs nothing at this exact moment, which is what `critical` meant
+ * on the dodge this replaced. Best effort: the controller may not have
+ * supplied the escape hatch, and the placer is free to find room elsewhere. */
+function clearForCritical(ctx: DriverContext, path: string): void {
+  ctx.freeCriticalRam?.(RESIDENT_BASE_GB + priceCall(path) + CRITICAL_HEADROOM_GB);
 }
 
-/** Record controller-side orchestration. Netscript calls inside `body` must be
- * individual synchronous dodges; awaiting their returned promises happens
- * here, after each stub and heap lease have already been released. */
-async function actController<T>(
+/** Run one feature action and record its outcome.
+ *
+ * The body reaches the game through `ctx.nsp` / `ctx.nspLong`, which price
+ * and bill themselves (game/lib/ns-proxy.ts) — there is no budget to declare
+ * here and nothing that can drift from the calls actually made. A `false`
+ * return is an OUTCOME, never an exception; a throw is recorded as a failed
+ * action so one refused call cannot take the controller down with it. */
+async function act<T>(
   id: string,
   action: string,
   body: () => Promise<T>,
@@ -219,39 +208,6 @@ async function actController<T>(
     if (isScriptDeath(error)) throw error;
     record(id, action, false, String(error));
   }
-}
-
-function actionClaimId(action: string): string { return `action:${action}`; }
-
-/** Move, pass, resume and the tick-anchoring probe share one turn-sized RAM
- * grant: anchoring always runs immediately before the turn it aligns, and its
- * own dodge is far smaller than the grant already reserved for that turn. */
-function goActionClaimId(action: string): string {
-  return action === "move" || action === "pass" || action === "resume" || action === "align"
-    || action.startsWith("cheat")
-    ? "action:turn"
-    : actionClaimId(action);
-}
-
-async function goDodgeValue<T>(
-  ctx: DriverContext,
-  action: string,
-  methods: readonly string[],
-  body: (stubNs: NS) => T | Promise<T>,
-): Promise<T> {
-  const outcome = await featureDodge(ctx, "go", goActionClaimId(action), methods, body);
-  if (!outcome.ok) throw new Error(outcome.reason);
-  return outcome.value;
-}
-
-function maybeActionClaim(
-  by: Claim["by"],
-  ctx: ClaimContext,
-  action: string | undefined,
-  methods: readonly string[],
-): FeatureClaim[] {
-  if (!action || methods.length === 0) return [];
-  return [actionRamClaim(ctx, by, actionClaimId(action), methods)];
 }
 
 // --- gang -------------------------------------------------------------------
@@ -330,20 +286,18 @@ const gang: FeatureDriver = {
     const next = decision.actions.find((action) => action.type !== "idle");
     if (!next) return;
     await act(
-      ctx,
       "gang",
       next.type,
-      gangMethods(next.type),
-      (stubNs: NS) => {
+      async () => {
         switch (next.type) {
           case "recruit":
-            return stubNs["gang"]["recruitMember"](`m-${Date.now() % 100000}`);
+            return await ctx.nsp("gang.recruitMember", `m-${Date.now() % 100000}`);
           case "assign":
-            return stubNs["gang"]["setMemberTask"](next.member, next.task);
+            return await ctx.nsp("gang.setMemberTask", next.member, next.task);
           case "ascend":
-            return stubNs["gang"]["ascendMember"](next.member) !== undefined;
+            return await ctx.nsp("gang.ascendMember", next.member) !== undefined;
           case "warfare":
-            stubNs["gang"]["setTerritoryWarfare"](next.engage);
+            await ctx.nsp("gang.setTerritoryWarfare", next.engage);
             return true;
           default:
             return false;
@@ -469,22 +423,20 @@ const bladeburner: FeatureDriver = {
       return;
     }
     await act(
-      ctx,
       "bladeburner",
       decision.action.type,
-      bladeMethods(decision.action.type),
-      (stubNs: NS) => {
+      async () => {
         const action = decision.action;
         if (action.type === "stop") {
           // Stopping is a separate API call; merely declining to start a new
           // action leaves the current Bladeburner action running.
           // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Bladeburner.ts#L108-L124
-          stubNs["bladeburner"]["stopBladeburnerAction"]();
+          await ctx.nsp("bladeburner.stopBladeburnerAction");
           return true;
         }
-        if (action.type === "upgrade") return stubNs["bladeburner"]["upgradeSkill"](action.skill as never, 1);
+        if (action.type === "upgrade") return await ctx.nsp("bladeburner.upgradeSkill", action.skill as never, 1);
         if (action.type === "act") {
-          return stubNs["bladeburner"]["startAction"](action.actionType as never, action.name as never);
+          return await ctx.nsp("bladeburner.startAction", action.actionType as never, action.name as never);
         }
         return false;
       },
@@ -693,99 +645,64 @@ const sleeves: FeatureDriver = {
     const completed = [...pendingSleeveCompletions()];
     if (decision.assignments.length === 0 && completed.length === 0) return;
 
-    // ONE DODGE PER TASK TYPE, then one to read back.
+    // Plain sequential setters. These used to be grouped by task type and
+    // split across one dodge per group, because a stub had to be allocated for
+    // the SUM of its calls and a six-type batch demanded 4x(6+1) + 2.1 =
+    // 30.1 GB of contiguous RAM on one host. The resident prices each call for
+    // itself and recycles when it must, so the peak is one sleeve call and the
+    // grouping bought nothing.
     //
-    // Every sleeve API method costs SleeveBase (4 GB), and the batch used to
-    // union getTask with one setter per DISTINCT task type — so a six-type
-    // batch demanded 4x(6+1) + 2.1 = 30.1 GB of CONTIGUOUS RAM on one host.
-    // Split, the peak is the 6.1 GB floor of any single sleeve call.
-    //
-    // The setters are independent writes on distinct sleeve indices: no shared
-    // stub state, no live handle crossing the boundary, and nothing here is
-    // read-then-write. The getTask pass is a read-back that arms completions —
-    // sleeves.core performs the identical read every 30 s — not an atomicity
-    // requirement, which is why it can be its own stub too.
-    const byType = new Map<string, typeof decision.assignments>();
-    for (const next of decision.assignments) {
-      const group = byType.get(next.task.type);
-      if (group) group.push(next);
-      else byType.set(next.task.type, [next]);
-    }
+    // The setters are independent writes on distinct sleeve indices; the
+    // getTask pass is a read-back that arms completions — sleeves.core performs
+    // the identical read every 30 s — not an atomicity requirement.
     const changed: number[] = [];
-    let anyRefused = false;
-    for (const [type, group] of byType) {
-      const applied = await featureDodge(
-        ctx,
-        "sleeves",
-        `action:set-${type}`,
-        sleeveMethods(type),
-        (stubNs: NS) => {
-          const set: number[] = [];
-          for (const next of group) {
-            let ok = false;
-            if (next.task.type === "recovery") ok = stubNs["sleeve"]["setToShockRecovery"](next.index);
-            else if (next.task.type === "synchro") ok = stubNs["sleeve"]["setToSynchronize"](next.index);
-            else if (next.task.type === "crime") ok = stubNs["sleeve"]["setToCommitCrime"](next.index, next.task.detail as never);
-            else if (next.task.type === "gym") ok = stubNs["sleeve"]["setToGymWorkout"](next.index, "Powerhouse Gym" as never, next.task.detail as never);
-            else if (next.task.type === "class") ok = stubNs["sleeve"]["setToUniversityCourse"](next.index, "Rothman University" as never, next.task.detail as never);
-            else if (next.task.type === "faction") {
-              ok = Boolean(stubNs["sleeve"]["setToFactionWork"](next.index, next.task.detail as never, next.task.workType as never));
-            }
-            if (ok) set.push(next.index);
-          }
-          return set;
-        },
-      );
-      // A refused group leaves those sleeves on their previous task and retries
-      // next pass; the groups that did land are still worth reading back.
-      if (applied.ok) changed.push(...applied.value);
-      else anyRefused = true;
+    for (const next of decision.assignments) {
+      let ok = false;
+      if (next.task.type === "recovery") ok = await ctx.nsp("sleeve.setToShockRecovery", next.index);
+      else if (next.task.type === "synchro") ok = await ctx.nsp("sleeve.setToSynchronize", next.index);
+      else if (next.task.type === "crime") ok = await ctx.nsp("sleeve.setToCommitCrime", next.index, next.task.detail as never);
+      else if (next.task.type === "gym") {
+        ok = await ctx.nsp("sleeve.setToGymWorkout", next.index, "Powerhouse Gym" as never, next.task.detail as never);
+      } else if (next.task.type === "class") {
+        ok = await ctx.nsp("sleeve.setToUniversityCourse", next.index, "Rothman University" as never, next.task.detail as never);
+      } else if (next.task.type === "faction") {
+        ok = Boolean(await ctx.nsp("sleeve.setToFactionWork", next.index, next.task.detail as never, next.task.workType as never));
+      }
+      if (ok) changed.push(next.index);
     }
+    // A sleeve the game refused stays on its previous task and is retried next
+    // pass; the ones that did land are still worth reading back.
+    const refused = decision.assignments.length - changed.length;
 
-    const outcome = await featureDodge(
-      ctx,
-      "sleeves",
-      "action:observe",
-      ["sleeve.getTask"],
-      (stubNs: NS) => {
-        const observed: { index: number; task?: { type: string; detail?: string; workType?: string } }[] = [];
-        for (const sleeve of topic.sleeves ?? []) {
-          const task = stubNs["sleeve"]["getTask"](sleeve.index) as (WorkTaskLike & Record<string, unknown>) | null;
-          armSleeveCompletion(sleeve.index, task);
-          if (!task) observed.push({ index: sleeve.index });
-          else {
-            const detail = task.factionName ?? task.companyName ?? task.crimeType ?? task.classType;
-            observed.push({
-              index: sleeve.index,
-              task: {
-                type: String(task.type),
-                ...(detail !== undefined ? { detail: String(detail) } : {}),
-                ...(task.factionWorkType !== undefined ? { workType: String(task.factionWorkType) } : {}),
-              },
-            });
-          }
-        }
-        return { changed, observed };
-      },
-    );
-    if (outcome.ok) {
-      for (const index of completed) consumeSleeveCompletion(index);
-      const observed = new Map(outcome.value.observed.map((entry) => [entry.index, entry.task]));
-      merge(ctx.state, "sleeves", {
-        sleeves: (topic.sleeves ?? []).map((sleeve) => {
-          const task = observed.get(sleeve.index);
-          return task === undefined ? { ...sleeve, task: undefined } : { ...sleeve, task };
-        }),
-      });
-      results["sleeves"] = {
-        action: "batch",
-        ok: !anyRefused,
-        detail: anyRefused
-          ? `updated ${outcome.value.changed.length} sleeves; some assignments were refused RAM`
-          : `updated ${outcome.value.changed.length} sleeves`,
-        at: Date.now(),
-      };
+    const observed = new Map<number, { type: string; detail?: string; workType?: string } | undefined>();
+    for (const sleeve of topic.sleeves ?? []) {
+      const task = await ctx.nsp("sleeve.getTask", sleeve.index) as (WorkTaskLike & Record<string, unknown>) | null;
+      armSleeveCompletion(sleeve.index, task);
+      if (!task) observed.set(sleeve.index, undefined);
+      else {
+        const detail = task.factionName ?? task.companyName ?? task.crimeType ?? task.classType;
+        observed.set(sleeve.index, {
+          type: String(task.type),
+          ...(detail !== undefined ? { detail: String(detail) } : {}),
+          ...(task.factionWorkType !== undefined ? { workType: String(task.factionWorkType) } : {}),
+        });
+      }
     }
+    for (const index of completed) consumeSleeveCompletion(index);
+    merge(ctx.state, "sleeves", {
+      sleeves: (topic.sleeves ?? []).map((sleeve) => {
+        const task = observed.get(sleeve.index);
+        return task === undefined ? { ...sleeve, task: undefined } : { ...sleeve, task };
+      }),
+    });
+    results["sleeves"] = {
+      action: "batch",
+      ok: refused === 0,
+      detail: refused === 0
+        ? `updated ${changed.length} sleeves`
+        : `updated ${changed.length} sleeves; the game refused ${refused} assignments`,
+      at: Date.now(),
+    };
   },
 };
 
@@ -1054,9 +971,9 @@ function goBlackTurnIndex(view: GoView): number {
  * SET AT DISPATCH, cleared only by proof (the post-turn verification), a
  * rebuild (hydrate), or an authoritative rows return (resetBoardState). That
  * ordering is the whole design: every way a turn can fail after the call was
- * issued — a refusal, a rules-drift throw, an unsettled lane promise, a stub
- * killed after makeMove already resolved in-game — leaves this set, so the next
- * pass rebuilds. None of them is classified by its error text, because the last
+ * issued — a refusal, a rules-drift throw, an unsettled lane promise, a
+ * resident recycled after makeMove already resolved in-game — leaves this set,
+ * so the next pass rebuilds. None of them is classified by its error text, because the last
  * of them records no text at all. */
 let goRehydrate = false;
 let goRehydrateReason: string | undefined;
@@ -1112,18 +1029,16 @@ let goTickPhase: GoTickPhase | undefined;
 export const GO_ANCHOR_POLL_MS = 2;
 
 /** A game that is paused or hard-throttled never rolls over, and retrying a
- * full-cycle poll every turn would waste a dodge each time. */
+ * full-cycle poll every turn would spend most of a cycle on it each time. */
 const GO_ANCHOR_RETRY_MS = 30_000;
 let goAnchorFailedAt = 0;
 
 /** Observe one engine-cycle rollover.
  *
- * This is deliberately its own dodge: it may wait most of a 200 ms cycle, and
- * the turn dodge that follows must reserve `go.makeMove` at 4 GB. Polling here
- * costs only `getPlayer` (0.5 GB) plus the stub base, so the large grant is
- * never held while merely waiting for the clock. Netscript prices RAM per
- * distinct function used rather than per call, so the poll loop itself is
- * free. */
+ * Nothing but `getPlayer` is called: the reads are cheap, and the resident
+ * pays for that member once however many times the loop polls. All the waiting
+ * is realm timer, never `ns.sleep`, so a poll that spans most of a 200 ms
+ * cycle holds no Netscript call open while it waits. */
 async function observeGoTickPhase(
   readPlayer: () => Promise<ReturnType<NS["getPlayer"]>>,
 ): Promise<GoTickPhase | undefined> {
@@ -1145,15 +1060,18 @@ function sameGoPosition(plan: GoPlan | undefined, topic: NonNullable<GameState["
     && plan.input.board.every((column, index) => column === topic.board?.[index]);
 }
 
-/** Claims are collected before tick() computes the next plan. Derive lifecycle
- * transitions from the current public board so a freshly completed promise can
- * act immediately even though the stored plan describes the preceding turn. */
 function goCheatUnlocked(caps: DriverContext["caps"]): boolean {
   const level = sfLevel(caps.sourceFiles, 14);
   return level > 1 || (caps.bitNode === 14 && level === 1);
 }
 
-function goClaimAction(state: GameState, caps: DriverContext["caps"]): GoAction["type"] | "hydrate" | undefined {
+/** The lifecycle transition the CURRENT public board calls for, independent of
+ * the stored plan — so a freshly completed promise can act immediately even
+ * though `topic.plan` still describes the preceding turn.
+ *
+ * Exported for tests: it is pure, and the alternative is asserting on it
+ * through a whole detached turn. */
+export function goClaimAction(state: GameState, caps: DriverContext["caps"]): GoAction["type"] | "hydrate" | undefined {
   const topic = state.topics.go;
   if (!topic?.status || !topic.currentPlayer) return undefined;
   // goRehydrate first: an unproven mirror must be rebuilt before it is
@@ -1169,8 +1087,9 @@ function goClaimAction(state: GameState, caps: DriverContext["caps"]): GoAction[
 }
 
 /** Finish active games, but start Go only when its fixed RAM cost is small
- * relative to the fleet. GoPower and SF14 scale the admission threshold. */
-function goActionAdmitted(state: GameState, caps: DriverContext["caps"]): boolean {
+ * relative to the fleet. GoPower and SF14 scale the admission threshold.
+ * Exported for tests, as `goClaimAction` is. */
+export function goActionAdmitted(state: GameState, caps: DriverContext["caps"]): boolean {
   const topic = state.topics.go;
   if ((topic?.previousBoards?.length ?? 0) > 0 && topic?.status !== "gameOver") return true;
   const pie = state.topics.farm?.ramPie;
@@ -1182,15 +1101,15 @@ function goActionAdmitted(state: GameState, caps: DriverContext["caps"]): boolea
     state.topics.progression?.multipliers,
   );
   const rewardScale = (nodeMults?.GoPower ?? 1) * (sfLevel(caps.sourceFiles, 14) > 0 ? 2 : 1);
-  // Same displacement pricing as goGamePaysForRam: a dodge the free arena can
-  // absorb outright costs the fleet nothing, so admission never blocks it.
+  // Same displacement pricing as goGamePaysForRam: a resident the free arena
+  // can absorb outright costs the fleet nothing, so admission never blocks it.
   const displacedGb = Math.max(0, GO_ESTIMATED_GB - pie.free);
   return usableGb > 0 && displacedGb / usableGb <= GO_MAX_FLEET_SHARE * rewardScale;
 }
 
 /** A Go candidate reports route-seconds saved per second spent playing. Its
- * opportunity cost is the fraction of productive fleet RAM the fixed Go dodge
- * actually DISPLACES: RAM the farm was going to use. Free arena RAM displaces
+ * opportunity cost is the fraction of productive fleet RAM the fixed Go
+ * allocation actually DISPLACES: RAM the farm was going to use. Free arena RAM displaces
  * nothing, so with idle capacity any positive utility plays — pricing idle
  * gigabytes at full farm throughput zeroed Go out in exactly the windows
  * (node tail, saturated farm) where a marginal 0.5s was still free money.
@@ -1255,20 +1174,25 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
     if (goRehydrate || !topic.board || !topic.boardSize || !topic.previousBoards
       || (cheatUnlocked && (!topic.cheat || !goCheatSuccessByCount))) {
       const hydrated = await act(
-        ctx,
         "go",
         "hydrate",
-        goMethods("hydrate", cheatUnlocked),
-        (stubNs: NS) => ({
-          board: stubNs["go"]["getBoardState"](),
-          history: stubNs["go"]["getMoveHistory"](),
-          cheat: cheatUnlocked ? {
-            unlocked: true,
-            count: stubNs["go"]["cheat"]["getCheatCount"](),
-            successByCount: Array.from({ length: GO_CHEAT_CHANCE_SAMPLES }, (_, count) =>
-              stubNs["go"]["cheat"]["getCheatSuccessChance"](count)),
-          } : undefined,
-        }),
+        async () => {
+          const board = await ctx.nsp("go.getBoardState");
+          const history = await ctx.nsp("go.getMoveHistory");
+          if (!cheatUnlocked) return { board, history, cheat: undefined };
+          // The whole chance curve is sampled once per hydration. Every sample
+          // is a repeat of one memoised member on the resident, so the 1024
+          // reads cost one price and settle without yielding to the engine.
+          const successByCount: number[] = [];
+          for (let count = 0; count < GO_CHEAT_CHANCE_SAMPLES; count++) {
+            successByCount.push(await ctx.nsp("go.cheat.getCheatSuccessChance", count));
+          }
+          return {
+            board,
+            history,
+            cheat: { unlocked: true, count: await ctx.nsp("go.cheat.getCheatCount"), successByCount },
+          };
+        },
         (value) => ({ ok: value.board.length > 0, detail: `read ${value.board.length}x${value.board.length} Go board` }),
       );
       if (generation !== goGeneration) return;
@@ -1475,8 +1399,8 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       },
     };
     // Re-anchor the engine-cycle phase before planning when it is unknown or
-    // has drifted. This runs in its own small-RAM dodge and only when needed;
-    // once anchored, the wall clock carries the phase across turns.
+    // has drifted. Nothing but clock reads, and only when needed; once
+    // anchored, the wall clock carries the phase across turns.
     const playerPlaytime = ctx.state.topics.player?.totalPlaytime;
     if (
       playerPlaytime !== undefined
@@ -1490,11 +1414,13 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       && (claimedAction === "move" || claimedAction === "pass")
       && Date.now() - goAnchorFailedAt > GO_ANCHOR_RETRY_MS
     ) {
-      const anchored = await actController(
+      const anchored = await act(
         "go",
         "align",
-        () => observeGoTickPhase(() =>
-          goDodgeValue(ctx, "align", ["getPlayer"], (stubNs) => stubNs["getPlayer"]())),
+        // On the LONG resident, like the turn it anchors: the phase these
+        // polls establish is the one the dispatch below verifies against, so
+        // both must queue behind the same calls.
+        () => observeGoTickPhase(() => ctx.nspLong("getPlayer")),
         (value) => ({
           ok: value !== undefined,
           detail: value ? `anchored engine tick ${value.playtime}` : "no engine tick observed",
@@ -1507,8 +1433,8 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
 
     let decision: GoDecision;
     // Candidate enumeration and reply option spaces are seed-independent. The
-    // exact seed-dependent half runs inside the dodge immediately before the
-    // Go call. Preparation never waits for a chosen seed; only dispatch inside
+    // exact seed-dependent half runs immediately before the Go call, between
+    // the verified clock read and the dispatch. Preparation never waits for a chosen seed; only dispatch inside
     // the rollover guard may target the next tick and wait its short remainder.
     // This decision is provisional: it uses the last observed playtime only to
     // fix the action type for RAM pricing and publish a plan digest.
@@ -1655,8 +1581,8 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       // entry: hold on the ordinary 5 s cadence without consuming the
       // makeMove-sized grant.
       if (schedule.kind === "hold") return;
-      // Positive but vanishing Go power is not free: the dodge occupies RAM
-      // the income engine could use. Decided above so the refusal is published
+      // Positive but vanishing Go power is not free: playing occupies RAM the
+      // income engine could use. Decided above so the refusal is published
       // rather than a silent return.
       if (!ramGate.pays) return;
       const newGameAction = action;
@@ -1693,30 +1619,27 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       }
       const alignedEntry = goPlaybookEntry;
       const actionStartedAt = Date.now();
-      const reset = await actController(
+      const reset = await act(
         "go",
         action.type,
         async () => {
-          // A reset that lands in-game but whose stub then dies is a desync
-          // source like any other dispatch, so invalidate before either call.
+          // A reset that lands in-game but whose result never comes back is a
+          // desync source like any other dispatch, so invalidate before either
+          // call.
           invalidateGoMirror("a board reset was dispatched and its result never merged");
           if (!alignedEntry || !goTickPhase) {
-            return goDodgeValue(ctx, action.type, ["go.resetBoardState"], (stubNs) =>
-              stubNs["go"]["resetBoardState"](newGameAction.opponent, newGameAction.boardSize));
+            return await ctx.nspLong("go.resetBoardState", newGameAction.opponent, newGameAction.boardSize);
           }
           const seeded = await runGoNeuralSeedDispatch({
             phase: goTickPhase,
             notBeforePlaytime: alignedEntry.entryPlaytime,
             clock: {
               now: Date.now,
-              player: () => goDodgeValue(
-                ctx, action.type, ["getPlayer"], (stubNs) => stubNs["getPlayer"](),
-              ),
+              player: () => ctx.nspLong("getPlayer"),
               sleep: async (ms) => { await realmSleep(ms); },
             },
             infer: async () => undefined,
-            dispatch: () => goDodgeValue(ctx, action.type, ["go.resetBoardState"], (stubNs) =>
-              stubNs["go"]["resetBoardState"](newGameAction.opponent, newGameAction.boardSize)),
+            dispatch: () => ctx.nspLong("go.resetBoardState", newGameAction.opponent, newGameAction.boardSize),
           });
           goTickPhase = seeded.phase;
           return seeded.response;
@@ -1792,48 +1715,35 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
     let continueImmediately = false;
     const runTurn = async (): Promise<void> => {
       const actionStartedAt = Date.now();
-      const turnDodge = async <T>(
-        methods: readonly string[],
-        body: (stubNs: NS) => T | Promise<T>,
-      ): Promise<T> => goDodgeValue(ctx, action.type, methods, body);
-      const readPlayer = (): Promise<ReturnType<NS["getPlayer"]>> =>
-        turnDodge(["getPlayer"], (stubNs) => stubNs["getPlayer"]());
-      const goActionMethod = (candidate: GoPlayingAction): string => {
-        switch (candidate.type) {
-          case "move": return "go.makeMove";
-          case "pass": return "go.passTurn";
-          case "cheatTwoMoves": return "go.cheat.playTwoMoves";
-          case "cheatRemoveRouter": return "go.cheat.removeRouter";
-          case "cheatDestroyNode": return "go.cheat.destroyNode";
-          case "cheatRepairNode": return "go.cheat.repairOfflineNode";
-        }
-      };
-      const invokeGo = (stubNs: NS, candidate: GoPlayingAction): Promise<RawGoResponse> => {
+      // The whole turn runs on the LONG resident: the Go call's promise
+      // resolves only when the engine's AI has replied, and holding the
+      // general-purpose resident for that would stall every other read in the
+      // automation. Keeping the clock reads on the same resident is what makes
+      // the verified read and the dispatch below adjacent — they queue in the
+      // order they are issued, with nothing else interleaved.
+      const readPlayer = (): Promise<ReturnType<NS["getPlayer"]>> => ctx.nspLong("getPlayer");
+      const dispatchGo = (candidate: GoPlayingAction): Promise<RawGoResponse> => {
         switch (candidate.type) {
           case "move":
-            return stubNs["go"]["makeMove"](candidate.x, candidate.y);
+            return ctx.nspLong("go.makeMove", candidate.x, candidate.y);
           case "pass":
-            return stubNs["go"]["passTurn"]();
+            return ctx.nspLong("go.passTurn");
           case "cheatTwoMoves":
-            return stubNs["go"]["cheat"]["playTwoMoves"](
-              candidate.x1, candidate.y1, candidate.x2, candidate.y2,
-            );
+            return ctx.nspLong("go.cheat.playTwoMoves", candidate.x1, candidate.y1, candidate.x2, candidate.y2);
           case "cheatRemoveRouter":
-            return stubNs["go"]["cheat"]["removeRouter"](candidate.x, candidate.y);
+            return ctx.nspLong("go.cheat.removeRouter", candidate.x, candidate.y);
           case "cheatDestroyNode":
-            return stubNs["go"]["cheat"]["destroyNode"](candidate.x, candidate.y);
+            return ctx.nspLong("go.cheat.destroyNode", candidate.x, candidate.y);
           case "cheatRepairNode":
-            return stubNs["go"]["cheat"]["repairOfflineNode"](candidate.x, candidate.y);
+            return ctx.nspLong("go.cheat.repairOfflineNode", candidate.x, candidate.y);
         }
       };
-      const dispatchGo = (candidate: GoPlayingAction): Promise<RawGoResponse> =>
-        turnDodge([goActionMethod(candidate)], (stubNs) => invokeGo(stubNs, candidate));
-      const rawOutcome = await actController(
+      const rawOutcome = await act(
         "go",
         action.type,
         async (): Promise<GoActionOutcome> => {
           // Prediction and timing are controller/web-worker work. Only each
-          // immediate Netscript invocation below enters the generic dodge FIFO.
+          // immediate Netscript invocation below queues on the resident.
           const stubEnteredAt = Date.now();
           let finalizeMs = 0;
           let dispatchPlayer: ReturnType<NS["getPlayer"]> | undefined;
@@ -1952,25 +1862,26 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
               },
               infer: finalizeForSlot,
               dispatch: (finalized): Promise<RawGoResponse> => dispatchGo(finalized.action),
-              verifyAndDispatch: (finalized, accept) => turnDodge(
-                ["getPlayer", goActionMethod(finalized.action)],
-                (stubNs) => {
-                  const player = stubNs["getPlayer"]();
-                  const observedAt = Date.now();
-                  if (!accept(player, observedAt)) return { player, observedAt, dispatched: false as const };
-                  // Check at the last possible instant, after inference and
-                  // seed assurance but before the irreversible Go call.
-                  if (generation !== goGeneration) throw new Error("Go generation changed before dispatch");
-                  moveDispatchedAt = observedAt;
-                  invalidateGoMirror(GO_DISPATCH_UNMERGED);
-                  return {
-                    player,
-                    observedAt,
-                    dispatched: true as const,
-                    response: invokeGo(stubNs, finalized.action),
-                  };
-                },
-              ),
+              // The verified read and the Go call are consecutive calls on the
+              // one resident with nothing but this closure's own synchronous
+              // work between them: no macrotask runs, so the engine cannot
+              // advance a tick between proving the slot and using it.
+              verifyAndDispatch: async (finalized, accept) => {
+                const player = await readPlayer();
+                const observedAt = Date.now();
+                if (!accept(player, observedAt)) return { player, observedAt, dispatched: false as const };
+                // Check at the last possible instant, after inference and
+                // seed assurance but before the irreversible Go call.
+                if (generation !== goGeneration) throw new Error("Go generation changed before dispatch");
+                moveDispatchedAt = observedAt;
+                invalidateGoMirror(GO_DISPATCH_UNMERGED);
+                return {
+                  player,
+                  observedAt,
+                  dispatched: true as const,
+                  response: dispatchGo(finalized.action),
+                };
+              },
               onDispatched: (finalized, dispatchWallAt) => {
                 // The game promise is now sleeping through White's response.
                 // Start likely successor evaluations without awaiting them.
@@ -2052,8 +1963,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
             } else if (action.type === "resume") {
               // makeMove/passTurn already await this same promise. This branch only
               // reattaches after a restart interrupted an in-flight white turn.
-              response = await turnDodge(["go.opponentNextTurn"], (stubNs) =>
-                stubNs["go"]["opponentNextTurn"](false, false));
+              response = await ctx.nspLong("go.opponentNextTurn", false, false);
             } else {
               response = await dispatchGo({ type: "pass" });
             }
@@ -2149,7 +2059,6 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       // bookkeeping off the next move's critical path.
       const settledPromise = observeGoSettledState(
         ctx,
-        action.type,
         rawOutcome.predictionParentId !== undefined || (response.type === "gameOver" && action.type !== "resume"),
         response.type === "gameOver" ? undefined : { board: board.rows, history: previousBoards },
       );
@@ -2269,10 +2178,9 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       if (goRehydrate) resetGoPlaybookLine();
       goTurnReadyAt = response.type === "gameOver" ? undefined : rawOutcome.responseReadyAt;
       // The other half of the publish above, not merely a backstop for it. A
-      // game that ends on a RESUME has no getPlayer in its grant on purpose
-      // (see goMethods), so this is the only way that path learns its
-      // multipliers moved; it also covers a move/pass turn whose snapshot was
-      // lost. Either way the Node Power effect is already applied to the real
+      // game that ends on a RESUME never reads the player, so this is the only
+      // way that path learns its multipliers moved; it also covers a move/pass
+      // turn whose snapshot was lost. Either way the Node Power effect is already applied to the real
       // player, so the held one is wrong until the controller re-reads it.
       if (response.type === "gameOver" && !responsePlayer) ctx.state.playerDirty = true;
       turnCompleted = true;
@@ -2990,12 +2898,18 @@ function progressionRefresh(ctx: NeedContext): void {
   // cycle with nothing joined and deadlocked it (installRequested stops the
   // very faction work that would have made something realizable).
   const joinedSet = new Set(factions?.joined ?? []);
+  const favorDonateAt = factions?.favorToDonate ?? 150;
+  const donationEligible = new Set(
+    (factions?.standings ?? [])
+      .filter((standing) => joinedSet.has(standing.name) && standing.favor >= favorDonateAt)
+      .map((standing) => standing.name),
+  );
   const ownedOrQueued = new Set<string>(pending);
   for (const offer of factions?.offers ?? []) if (offer.owned) ownedOrQueued.add(offer.name);
   const affordable: string[] = [];
   for (const offer of factions?.offers ?? []) {
     if (offer.owned || !joinedSet.has(offer.faction)) continue;
-    if (!offer.affordableRep || offer.price > sweepBudget) continue;
+    if ((!offer.affordableRep && !donationEligible.has(offer.faction)) || offer.price > sweepBudget) continue;
     affordable.push(offer.name);
   }
   // Prereq closure: every real purchase path skips a prereq-unmet aug
@@ -3030,29 +2944,37 @@ function progressionRefresh(ctx: NeedContext): void {
     ? daedalusAugsRequired(view.bitNode, view.sf12Level ?? view.sourceFiles["12"] ?? 0)
     : undefined;
   const activationOwned = new Set([...ownedOrQueued, ...pending]);
-  const activationOffers = factions?.offers ?? [];
+  const activationNodeMults = effectiveBitNodeMultipliers(
+    view.bitNode,
+    view.sf12Level ?? view.sourceFiles["12"] ?? 0,
+    prog?.multipliers,
+  );
   const activationPriceContext = {
     queuedNonSoA: pending.filter((name) => !isSoA(name)).length,
     ownedSoA: Object.keys(installed).filter(isSoA).length,
     neurofluxLevel: (installed[NEUROFLUX] ?? 0) + pending.filter((name) => name === NEUROFLUX).length,
     sf11Level: view.sourceFiles["11"] ?? 0,
-    augMoneyCost: effectiveBitNodeMultipliers(
-      view.bitNode,
-      view.sf12Level ?? view.sourceFiles["12"] ?? 0,
-      prog?.multipliers,
-    )?.AugmentationMoneyCost ?? 1,
-    augRepCost: 1,
+    augMoneyCost: activationNodeMults?.AugmentationMoneyCost ?? 1,
+    augRepCost: activationNodeMults?.AugmentationRepCost ?? 1,
+  };
+  const activationDonation = {
+    standings: (factions?.standings ?? []).map((standing) => ({
+      ...standing,
+      joined: joinedSet.has(standing.name),
+    })),
+    favorToDonate: favorDonateAt,
+    factionRepMult: player.mults?.faction_rep ?? 1,
+    factionWorkRepGain: activationNodeMults?.FactionWorkRepGain ?? 1,
   };
   const fundedActivation = fundedActivationBatch({
     realizable,
-    offers: activationOffers,
-    joined: joinedSet,
     owned: activationOwned,
     weights: verdictWeights,
     countSlotValue: countSlotValueFor(publishedWorth, daedalusRequired ?? Infinity, view.augCount),
     neurofluxCountable: daedalusRequired !== undefined && !activationOwned.has(NEUROFLUX),
     ctx: activationPriceContext,
     money: sweepBudget,
+    donation: activationDonation,
   });
 
   if (daedalusRequired !== undefined && view.augCount < daedalusRequired) {
@@ -3062,13 +2984,12 @@ function progressionRefresh(ctx: NeedContext): void {
     );
     routeRequiresInstall = routeRequiresInstall || countClosureAffordable({
       realizable,
-      offers: activationOffers,
-      joined: joinedSet,
       owned: ownedOrQueued,
       wanted: Math.max(0, daedalusRequired - view.augCount - queuedCountable.size),
       neurofluxCountable: !installedNames.has(NEUROFLUX),
       ctx: activationPriceContext,
       money: sweepBudget,
+      donation: activationDonation,
     });
   }
   // Banked-but-unrealized favor, priced with packageValue's OWN favor terms
@@ -3076,9 +2997,15 @@ function progressionRefresh(ctx: NeedContext): void {
   // packages accrue value that only an install banks — without this term the
   // push stream counts that value as income while the reset side never sees
   // it, and a favor-purpose objective can never conclude.
-  const favorDonateAt = factions?.favorToDonate ?? 150;
+  const plannedRep = new Map<string, number>();
+  for (const candidate of fundedActivation) {
+    const target = augCost(candidate.aug, activationPriceContext).repCost;
+    plannedRep.set(candidate.faction, Math.max(plannedRep.get(candidate.faction) ?? 0, target));
+  }
   const bankedFavorValue = bankedFavorActivationValue({
-    standings: (factions?.standings ?? []).filter((standing) => joinedSet.has(standing.name)),
+    standings: (factions?.standings ?? [])
+      .filter((standing) => joinedSet.has(standing.name))
+      .map((standing) => ({ ...standing, rep: Math.max(standing.rep, plannedRep.get(standing.name) ?? 0) })),
     offers: factions?.offers ?? [],
     favorToDonate: favorDonateAt,
     reputationWorthSec: publishedWorth.get("reputation") ?? 0,
@@ -3355,7 +3282,9 @@ function progressionRefresh(ctx: NeedContext): void {
             faction: view.gangCreateFaction,
           }
         : undefined;
-  if (!selectedEta?.complete) progressionMemory.nodeCompletionArmedAt = undefined;
+  if (!selectedEta?.complete || STALL_BITNODE_COMPLETION) {
+    progressionMemory.nodeCompletionArmedAt = undefined;
+  }
   // "About to install" and "about to destroy the BitNode" are DIFFERENT
   // terminal modes with opposite money policies. An install preserves augs,
   // favor, and cash, so hoarding for the final sweep is right. A destroy
@@ -3436,10 +3365,14 @@ function progressionRefresh(ctx: NeedContext): void {
               automatic: canAutomateNodeCompletion,
               nextBitNode: nextBitNode.bitNode,
               targetLevel: nextBitNode.targetLevel,
+              ...(STALL_BITNODE_COMPLETION ? { stalled: true } : {}),
               ...(progressionMemory.nodeCompletionArmedAt !== undefined
                 ? { armedAt: progressionMemory.nodeCompletionArmedAt }
                 : {}),
-              execute: canAutomateNodeCompletion && progressionMemory.nodeCompletionArmedAt !== undefined,
+              execute:
+                canAutomateNodeCompletion
+                && !STALL_BITNODE_COMPLETION
+                && progressionMemory.nodeCompletionArmedAt !== undefined,
             },
           }
         : {}),
@@ -3487,7 +3420,7 @@ const progression: FeatureDriver = {
     || takeInstallSignal(),
   async tick(ctx: DriverContext) {
     const plan = readablePlan(ctx.state);
-    if (plan?.completion?.ready && plan.completion.automatic) {
+    if (plan?.completion?.ready && plan.completion.automatic && !STALL_BITNODE_COMPLETION) {
       if (progressionMemory.nodeCompletionArmedAt === undefined) {
         progressionMemory.nodeCompletionArmedAt = Date.now();
         merge(ctx.state, "progression", {
@@ -3504,50 +3437,27 @@ const progression: FeatureDriver = {
       }
       if (!plan.completion.execute || plan.completion.armedAt !== progressionMemory.nodeCompletionArmedAt) return;
 
-      const outcome = await featureDodge(
-        ctx,
-        "progression",
-        "action:complete-bitnode",
-        ["singularity.destroyW0r1dD43m0n"],
-        (stubNs) => {
-          stubNs["singularity"]["destroyW0r1dD43m0n"](plan.completion!.nextBitNode, "/start.js");
-          return true;
-        },
-      );
-      if (!outcome.ok && !outcome.queued) progressionMemory.nodeCompletionArmedAt = undefined;
+      clearForCritical(ctx, "singularity.destroyW0r1dD43m0n");
+      await ctx.nsp("singularity.destroyW0r1dD43m0n", plan.completion.nextBitNode, "/start.js");
       return;
     }
     if (plan?.routeAction?.type === "joinBladeburner") {
-      await featureDodge(
-        ctx,
-        "progression",
-        "action:join-bladeburner",
-        ["bladeburner.joinBladeburnerDivision"],
-        (stubNs) => stubNs["bladeburner"]["joinBladeburnerDivision"](),
-      );
+      await ctx.nsp("bladeburner.joinBladeburnerDivision");
       return;
     }
 
     if (shouldBuyDarkscape(ctx) && darkscapeGrantedAt !== progressionMemory.cycleResetAt) {
-      const outcome = await featureDodge(
-        ctx,
-        "progression",
-        "unlock:darkscape",
-        // TOR first: purchaseProgram fails without it, and purchaseTor is
-        // idempotent, so this is cheaper than probing for something the player
-        // snapshot does not expose.
-        ["singularity.purchaseTor", "singularity.purchaseProgram"],
-        (stubNs) => {
-          stubNs["singularity"]["purchaseTor"]();
-          // `purchaseProgram` returns TRUE for an already-owned program
-          // (Singularity.ts logs "You already have..." and returns true), so a
-          // true return means owned-or-bought and the latch below is safe on it.
-          // False is a genuine refusal — no TOR, or the money moved between the
-          // decision and this call — which retries next pass.
-          return stubNs["singularity"]["purchaseProgram"]("DarkscapeNavigator.exe");
-        },
-      );
-      if (outcome.ok && outcome.value === true) {
+      // TOR first: purchaseProgram fails without it, and purchaseTor is
+      // idempotent, so this is cheaper than probing for something the player
+      // snapshot does not expose.
+      await ctx.nsp("singularity.purchaseTor");
+      // `purchaseProgram` returns TRUE for an already-owned program
+      // (Singularity.ts logs "You already have..." and returns true), so a
+      // true return means owned-or-bought and the latch below is safe on it.
+      // False is a genuine refusal — no TOR, or the money moved between the
+      // decision and this call — which retries next pass.
+      const bought = await ctx.nsp("singularity.purchaseProgram", "DarkscapeNavigator.exe");
+      if (bought) {
         // Latched because the gate probe only re-reads the file on its 30 s
         // sweep — without this the next few passes would re-attempt a purchase
         // that has already happened.
@@ -3556,20 +3466,14 @@ const progression: FeatureDriver = {
         // beachhead waits out the 30 s sweep (game/lib/gate-signal.ts).
         signalGateRecheck();
         record("progression", "unlock:darkscape", true, `bought for ${DARKSCAPE_TOTAL_COST}`);
-      } else if (outcome.ok) {
+      } else {
         record("progression", "unlock:darkscape", false, "purchase refused; retrying next pass");
       }
       return;
     }
     if (plan?.routeAction?.type === "createGang") {
       const faction = plan.routeAction.faction;
-      await featureDodge(
-        ctx,
-        "progression",
-        "action:create-gang",
-        ["gang.createGang"],
-        (stubNs) => stubNs["gang"]["createGang"](faction as never),
-      );
+      await ctx.nsp("gang.createGang", faction as never);
       return;
     }
     if (!plan?.installReady) {
@@ -3589,25 +3493,9 @@ const progression: FeatureDriver = {
     if (!plan.install || progressionMemory.installQueueKey !== queueKey) return;
 
     // The rooted callback is deliberate: relative "start.js" would resolve
-    // beside the dodge stub as lib/start.js.
-    const outcome = await featureDodge(
-      ctx,
-      "progression",
-      "action:install",
-      ["singularity.installAugmentations"],
-      (stubNs) => {
-        stubNs["singularity"]["installAugmentations"]("/start.js");
-        return true;
-      },
-    );
-    if (!outcome.ok && !outcome.queued) {
-      progressionMemory.installArmedAt = undefined;
-      progressionMemory.installQueueKey = undefined;
-      const { installArmedAt: _armed, ...disarmed } = plan;
-      merge(ctx.state, "progression", {
-        plan: { ...disarmed, install: false },
-      });
-    }
+    // beside the resident as lib/start.js.
+    clearForCritical(ctx, "singularity.installAugmentations");
+    await ctx.nsp("singularity.installAugmentations", "/start.js");
     return;
   },
 };
@@ -3632,10 +3520,6 @@ const resetWithTopic =
 export const gangModule: FeatureModule = {
   driver: gang,
   reset: resetWithTopic("gang"),
-  claims: (ctx) => {
-    const action = ctx.state.topics.gang?.plan?.actions.find((entry) => entry.type !== "idle")?.type;
-    return maybeActionClaim("gang", ctx, action, gangMethods(action));
-  },
 };
 
 export const corpModule: FeatureModule = {
@@ -3657,7 +3541,7 @@ export const bladeburnerModule: FeatureModule = {
   reset: resetWithTopic("bladeburner"),
   claims: (ctx) => {
     const action = ctx.state.topics.bladeburner?.plan?.action.type;
-    const claims = maybeActionClaim("bladeburner", ctx, action, bladeMethods(action));
+    const claims: Claim[] = [];
     const hasSimulacrum = (ctx.state.topics.progression?.ownedAugs?.[BLADES_SIMULACRUM] ?? 0) > 0;
     if (action === "act" && !hasSimulacrum) {
       // ANNOUNCE THE RATE. A time claim with no `produces` is a HARD claim, and
@@ -3710,16 +3594,6 @@ export const sleevesModule: FeatureModule = {
     resetSleeveCompletions();
     delete state.topics.sleeves;
   },
-  claims: (ctx) => {
-    const view = sleeveView(ctx.state);
-    if (!view) return [];
-    const decision = stepSleeves(view, ctx.board);
-    // The batch now runs as one stub per task type plus a read-back, so the RAM
-    // the arbiter must find at once is the LARGEST of those, not their sum.
-    const methods = sleeveBatchPeakMethods(decision.assignments.map((entry) => entry.task.type));
-    if (methods.length === 0 && pendingSleeveCompletions().size === 0) return [];
-    return [actionRamClaim(ctx, "sleeves", "action:batch", methods.length > 0 ? methods : ["sleeve.getTask"])];
-  },
 };
 
 export const goModule: FeatureModule = {
@@ -3750,14 +3624,6 @@ export const goModule: FeatureModule = {
     goAnchorFailedAt = 0;
     delete state.topics.go;
   },
-  claims: (ctx) => {
-    if (goTurnRunning || (goCompletionReady && !goContinuationReady)) return [];
-    if (!goActionAdmitted(ctx.state, ctx.caps)) return [];
-    const action = goClaimAction(ctx.state, ctx.caps);
-    const methods = goMethods(action, goCheatUnlocked(ctx.caps));
-    if (!action || methods.length === 0) return [];
-    return [actionRamClaim(ctx, "go", goActionClaimId(action), methods)];
-  },
 };
 
 export const stanekModule: FeatureModule = {
@@ -3765,35 +3631,6 @@ export const stanekModule: FeatureModule = {
   reset: resetWithTopic("stanek"),
 };
 
-
-function gangMethods(action: string | undefined): readonly string[] {
-  switch (action) {
-    case "recruit": return ["gang.recruitMember"];
-    case "assign": return ["gang.setMemberTask"];
-    case "ascend": return ["gang.ascendMember"];
-    case "warfare": return ["gang.setTerritoryWarfare"];
-    default: return [];
-  }
-}
-
-function bladeMethods(action: string | undefined): readonly string[] {
-  if (action === "stop") return ["bladeburner.stopBladeburnerAction"];
-  if (action === "upgrade") return ["bladeburner.upgradeSkill"];
-  if (action === "act") return ["bladeburner.startAction"];
-  return [];
-}
-
-function sleeveMethods(action: string | undefined): readonly string[] {
-  switch (action) {
-    case "recovery": return ["sleeve.setToShockRecovery"];
-    case "synchro": return ["sleeve.setToSynchronize"];
-    case "crime": return ["sleeve.setToCommitCrime"];
-    case "gym": return ["sleeve.setToGymWorkout"];
-    case "class": return ["sleeve.setToUniversityCourse"];
-    case "faction": return ["sleeve.setToFactionWork"];
-    default: return [];
-  }
-}
 
 /** Positional-superko history equality. Both sides are newest-first lists of
  * board rows: the game's own `previousBoards` (go.getMoveHistory returns it
@@ -3820,43 +3657,31 @@ type GoSettledObservation = {
   verification: GoVerification;
 };
 
-/** Observe everything needed after White replies in one synchronous dodge.
- * An ordinary turn already reserves 4.5 GB for makeMove + getPlayer; the
- * settled read has the same 4.5 GB peak for getBoardState + getPlayer. */
+/** Observe everything needed after White replies: the bonus-cycle count, the
+ * player when a prediction or a finished game needs it, and the game's own
+ * board and history when the local mirror is to be verified. */
 async function observeGoSettledState(
   ctx: DriverContext,
-  action: string,
   observePlayer: boolean,
   expected?: { board: readonly string[]; history: readonly string[][] },
 ): Promise<GoSettledObservation> {
   const startedAt = Date.now();
   const verifyMirror = expected !== undefined;
+  // These are the general resident's reads, not the turn's: the move has
+  // already settled, so nothing here is on the next turn's critical path.
   // getMoveHistory is free and is the authoritative check of the local
   // positional-superko history; keep it in the same settled observation.
-  const outcome = await featureDodge(
-    ctx,
-    "go",
-    goActionClaimId(action),
-    [
-      "go.getGameState",
-      ...(observePlayer ? ["getPlayer"] : []),
-      ...(verifyMirror ? ["go.getBoardState", "go.getMoveHistory"] : []),
-    ],
-    (stubNs: NS) => {
-      const player = observePlayer ? stubNs["getPlayer"]() : undefined;
-      return {
-        bonusCycles: stubNs["go"]["getGameState"]().bonusCycles,
-        ...(player ? { player, playerObservedAt: Date.now() } : {}),
-        ...(verifyMirror ? {
-          board: stubNs["go"]["getBoardState"](),
-          history: stubNs["go"]["getMoveHistory"](),
-        } : {}),
-      };
-    },
-  );
+  const player = observePlayer ? await ctx.nsp("getPlayer") : undefined;
+  const playerObservedAt = player ? Date.now() : undefined;
+  const live = {
+    bonusCycles: (await ctx.nsp("go.getGameState")).bonusCycles,
+    ...(player && playerObservedAt !== undefined ? { player, playerObservedAt } : {}),
+    ...(verifyMirror ? {
+      board: await ctx.nsp("go.getBoardState"),
+      history: await ctx.nsp("go.getMoveHistory"),
+    } : {}),
+  };
   const ms = Date.now() - startedAt;
-  if (!outcome.ok) return { verification: { result: verifyMirror ? "unavailable" : "skipped", ms } };
-  const live = outcome.value;
   const observed = {
     bonusCycles: live.bonusCycles,
     ...(live.player && live.playerObservedAt !== undefined
@@ -3873,62 +3698,6 @@ async function observeGoSettledState(
   }
   return { ...observed, verification: { result: "match", ms } };
 }
-
-function goMethods(
-  action: string | undefined,
-  cheatUnlocked = false,
-  /** A phase-aligned certified start waits for its exact engine tick inside
-   * the dodge, which needs the same cheap clock reads a Black turn prices. */
-  alignedStart = false,
-): readonly string[] {
-  if (action === "hydrate") return [
-    "go.getBoardState",
-    "go.getMoveHistory",
-    ...(cheatUnlocked ? ["go.cheat.getCheatCount", "go.cheat.getCheatSuccessChance"] : []),
-  ];
-  // Seed anchoring is split out precisely because it is cheap: 0.5 GB of
-  // getPlayer instead of the 4 GB go.makeMove grant, which must not be held
-  // while waiting for an engine tick.
-  // All Go timing waits use the realm timer, so `sleep` is never priced.
-  if (action === "align") return ["getPlayer"];
-  // A dispatch-time seed change can legitimately flip the V9 decision between
-  // move and pass. Price both calls for every Black turn so the exact action is
-  // always executable. passTurn is zero-RAM in v3.0.1, so this does not enlarge
-  // the 4 GB move grant.
-  if (action === "move" || action === "pass" || action?.startsWith("cheat")) {
-    // Every cheat action costs the same 8 GB and exactly one is called. Pricing
-    // one representative method reserves the exact maximum dynamic-RAM path
-    // without incorrectly summing four mutually exclusive calls.
-    return cheatUnlocked
-      ? ["getPlayer", "go.getGameState", "go.cheat.playTwoMoves"]
-      : ["getPlayer", "go.getGameState", "go.makeMove", "go.passTurn"];
-  }
-  // Deliberately still free. A resume reattaches to White's turn, and White
-  // passing second DOES end the game and apply the Node Power multipliers — but
-  // both calls here cost zero dynamic RAM, and adding getPlayer would turn the
-  // one Go action the broker can always admit into a 0.5 GB request. The
-  // game-over branch in goTick raises `playerDirty` instead, which buys the
-  // same refreshed multipliers one controller tick later for nothing.
-  if (action === "resume") return ["go.getGameState", "go.opponentNextTurn"];
-  if (action === "newGame") {
-    return alignedStart
-      ? ["getPlayer", "go.resetBoardState"]
-      : ["go.resetBoardState"];
-  }
-  return [];
-}
-
-/** The peak single-stub cost of a batch: every sleeve method is SleeveBase, so
- * the largest step is one setter (or the getTask read-back). Reserving the sum
- * would re-create the 30 GB contiguous demand the split exists to remove. */
-function sleeveBatchPeakMethods(actions: readonly string[]): readonly string[] {
-  for (const action of actions) {
-    const methods = sleeveMethods(action);
-    if (methods.length > 0) return methods;
-  }
-  return ["sleeve.getTask"];
-}
-
 
 /** A dollar held through the install transaction advances the binding money
  * clock by 1 / measuredIncome seconds. Scale by how much of the install clock
@@ -4028,36 +3797,15 @@ export const progressionModule: FeatureModule = {
   },
   claims: (ctx) => {
     const plan = readablePlan(ctx.state);
-    if (plan?.completion?.execute) {
-      return [actionRamClaim(
-        ctx,
-        "progression",
-        "action:complete-bitnode",
-        ["singularity.destroyW0r1dD43m0n"],
-        PRIORITY["progression:terminal-action"],
-      )];
-    }
+    // The terminal destroy asks the arbiter for nothing — no money, no work
+    // slot — so once it is armed progression stops bidding rather than holding
+    // the install brakes on a run that is about to end.
+    if (plan?.completion?.execute && !STALL_BITNODE_COMPLETION) return [];
     // A pending route action is additive: it does NOT excuse the bankroll
     // reservations below. An unfunded createGang/joinBladeburner can stay
     // pending for many arbitration passes, and leaving the install brakes off
     // for that window lets investments spend cash the armed reset would wipe.
-    const routeClaims: FeatureClaim[] = [];
-    if (plan?.routeAction?.type === "createGang") {
-      routeClaims.push(actionRamClaim(
-        ctx,
-        "progression",
-        "action:create-gang",
-        ["gang.createGang"],
-      ));
-    }
-    if (plan?.routeAction?.type === "joinBladeburner") {
-      routeClaims.push(actionRamClaim(
-        ctx,
-        "progression",
-        "action:join-bladeburner",
-        ["bladeburner.joinBladeburnerDivision"],
-      ));
-    }
+    const routeClaims: Claim[] = [];
     // Darknet access. Posted from routeClaims so it survives the imminent-install
     // reserve check below only when it should: the program is wiped by the very
     // install that reserve is protecting, so buying it minutes beforehand throws
@@ -4099,7 +3847,7 @@ export const progressionModule: FeatureModule = {
       }
       return routeClaims;
     }
-    const claims: FeatureClaim[] = [...routeClaims, {
+    const claims: Claim[] = [...routeClaims, {
       by: "progression",
       id: "install-freeze",
       resource: "money",
@@ -4108,15 +3856,6 @@ export const progressionModule: FeatureModule = {
       mode: "reserve",
       shape: "continuous",
     }];
-    if (plan.install) {
-      claims.push(actionRamClaim(
-        ctx,
-        "progression",
-        "action:install",
-        ["singularity.installAugmentations"],
-        PRIORITY["progression:terminal-action"],
-      ));
-    }
     return claims;
   },
   valueCurve: progressionReserveValueCurve,

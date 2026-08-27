@@ -8,7 +8,6 @@ describe("economic opener claim", () => {
       now: 1_000,
       activeFeatures: new Set(["hacking"]),
       board: postNeeds([]),
-      ramPrice: () => 2,
       horizons: {
         node: { state: "unknown", evaluatedAt: 1_000, nextRecalibrationAt: 2_000, basis: "test", reason: "test" },
         install: { state: "unknown", evaluatedAt: 1_000, nextRecalibrationAt: 2_000, basis: "test", reason: "test" },
@@ -45,10 +44,6 @@ describe("economic opener claim", () => {
       shape: "step",
       pricing: "economic",
       returnPerDollarSec: 3_000 / 700_000,
-    }));
-    expect(claims).toContainEqual(expect.objectContaining({
-      id: "action:port-opener",
-      resource: "ram",
     }));
   });
 });

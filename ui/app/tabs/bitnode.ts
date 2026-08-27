@@ -17,6 +17,11 @@ import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
 import { forecastAt, type EstimatedForecast, type TimeForecast } from "../../../shared/strategy/progression/forecast.ts";
 import type { MarginalResource } from "../../../shared/strategy/progression/marginal.ts";
+import {
+  BITNODE_SPEEDRUN_PLAN,
+  DISABLED_BITNODES,
+  STALL_BITNODE_COMPLETION,
+} from "../../../shared/strategy/progression/bitnode-order.ts";
 
 /** BitNode tab: where we are, what we have finished, and exactly what this
  * node changes. Source-file level doubles as the completion count — SF n at
@@ -88,6 +93,51 @@ function multiplierGrid(changed: ChangedMultiplier[]): string {
         `<div class="mults">${byGroup.get(group)!.map(multiplierEntry).join("")}</div></div>`,
     )
     .join("");
+}
+
+/** The configured cross-node route, rendered from the same policy data the
+ * controller consumes. Disabled nodes stay in-place and current progress is
+ * derived from Source-File levels rather than duplicated telemetry. */
+function bitNodeRoute(
+  currentNode: number | undefined,
+  sourceFiles: Readonly<Record<string, number>>,
+): string {
+  const nextIndex = BITNODE_SPEEDRUN_PLAN.findIndex(
+    ({ node, level }) => !DISABLED_BITNODES.has(node) && (sourceFiles[String(node)] ?? 0) < level,
+  );
+  return (
+    `<div class="bnroute-heading"><span>Automation order</span>` +
+    (STALL_BITNODE_COMPLETION
+      ? `<span class="chip off" title="current controller policy will not dispatch destroyW0r1dD43m0n">completion stalled</span>`
+      : "") +
+    `</div>` +
+    `<div class="bnroute" aria-label="configured BitNode automation order">` +
+    BITNODE_SPEEDRUN_PLAN.map(({ node, level }, index) => {
+      const held = sourceFiles[String(node)] ?? 0;
+      const disabled = DISABLED_BITNODES.has(node);
+      const complete = held >= level;
+      const current = currentNode === node && !complete;
+      const classes = [
+        "bnroute-step",
+        disabled ? "disabled" : complete ? "complete" : "pending",
+        current ? "current" : "",
+        index === nextIndex ? "next" : "",
+      ].filter(Boolean).join(" ");
+      const status = disabled
+        ? "disabled in automation"
+        : complete
+          ? `complete at SF${node}.${held}`
+          : current
+            ? `current BitNode; targeting SF${node}.${level}`
+            : index === nextIndex
+              ? "next configured milestone"
+              : "pending";
+      return `<span class="${classes}" title="${esc(`BN${node} to SF${node}.${level} — ${status}`)}">${node}.${level}</span>`;
+    }).join("") +
+    `</div>` +
+    `<div class="bnroute-key"><span class="complete">complete</span><span class="current">current</span>` +
+    `<span class="next">next</span><span class="disabled">disabled</span></div>`
+  );
 }
 
 function forecastCard(forecast: TimeForecast, now: number): string {
@@ -296,40 +346,19 @@ function routeCard(plan: Plan, now: number): string {
   return header + rows + parts;
 }
 
-/** The dodge arena: how much RAM is held back from the batcher, which hosts
- * carry it, and who is waiting. Reports the broker's own numbers — the split
- * between the guaranteed floor (a request at or under it never queues) and
- * growth that only a genuinely starved request can summon. Anything waiting
- * past five seconds is the signal that the arena is too small for what the
- * run is actually asking for. */
+/** The arena: how much RAM is held back from the batcher and which hosts
+ * carry it. `largest block` is the biggest reservation, so `largest single
+ * call` is the most expensive ns member a resident could currently be given
+ * room for — the number to look at when a singularity read is stalling. */
 function arenaBody(arena: RamArena | undefined): string {
-  if (!arena) return note("the RAM broker has not reported yet");
-  const starved = new Set(arena.starvation.map((request) => `${request.by}\0${request.id}`));
-  const summary = definitions([
+  if (!arena) return note("the RAM arena has not reported yet");
+  return definitions([
     ["hosts", arena.hosts.length ? arena.hosts.map((host: string) => esc(host)).join(", ") : "—"],
     ["arena", `${fmtNum(arena.arenaGb, 1)} GB`],
-    ["instant up to", `${fmtNum(arena.guaranteedDynamicGb, 1)} GB`],
-    ["largest measured", `${fmtNum(arena.measuredDynamicGb, 1)} GB`],
-    ["foodnstuff promoted", arena.promoted ? "yes" : "no"],
+    ["largest block", `${fmtNum(arena.targetGb, 1)} GB`],
+    ["largest single call", `${fmtNum(arena.guaranteedDynamicGb, 1)} GB`],
     ["farm opportunity cost", `${fmtMoney(arena.farmCostPerSec)}/sec`],
   ]);
-  const queued = arena.waits.length
-    ? table(
-        ["waiting", "request", "GB", "class", "waited"],
-        arena.waits.map((request: RamArena["waits"][number]) => [
-          starved.has(`${request.by}\0${request.id}`) ? "starved" : "queued",
-          esc(`${request.by}:${request.id}`),
-          fmtNum(request.gb, 1),
-          esc(request.class),
-          fmtTime(request.waitMs),
-        ]),
-        { left: [0, 1, 3] },
-      )
-    : note("nothing waiting for RAM");
-  const shortfall = arena.queueDepth > 0
-    ? note(`largest waiter needs ${fmtNum(arena.neededForLargestWaitingGb, 1)} GB contiguous`)
-    : "";
-  return summary + queued + shortfall;
 }
 
 /** The install-vs-push cadence: what has accrued, what it must clear, and
@@ -567,13 +596,15 @@ export const bitnodeTab: Tab = {
           label: "planned next BitNode",
           value: html`${dot(completion.execute ? "good" : "ready")} BN${completion.nextBitNode}`,
           sub:
-            (completion.execute
-              ? "destroying node — destroyW0r1dD43m0n dispatched"
-              : completion.armedAt !== undefined
-                ? `route complete — armed ${ago(state, completion.armedAt)}`
-                : completion.automatic
-                  ? "route complete — arming"
-                  : "route complete — destroyW0r1dD43m0n needs a human (no SF4)")
+            (completion.stalled === true
+              ? "route complete — automatic BitNode completion is stalled"
+              : completion.execute
+                ? "destroying node — destroyW0r1dD43m0n dispatched"
+                : completion.armedAt !== undefined
+                  ? `route complete — armed ${ago(state, completion.armedAt)}`
+                  : completion.automatic
+                    ? "route complete — arming"
+                    : "route complete — destroyW0r1dD43m0n needs a human (no SF4)")
             + ` · to SF${completion.nextBitNode} level ${completion.targetLevel}`,
         }
       : { label: "planned next BitNode", value: NONE, sub: "central speedrun plan" };
@@ -657,7 +688,7 @@ export const bitnodeTab: Tab = {
 
     return (
       `<div class="col wide">` +
-      card("Progression", summary + grid) +
+      card("Progression", summary + bitNodeRoute(p.bitNode, p.sourceFiles) + grid) +
       route +
       cadence +
       installLifecycle +

@@ -1,8 +1,11 @@
-import type { NS, Server } from "@ns";
+import type { Server } from "@ns";
+import type { NsProxy } from "./ns-proxy.ts";
 
-/** Network bootstrap closures — every function here runs INSIDE a dodge stub
- * (bracket-notation ns calls, so importing bundles pay nothing). Budgets are
- * noted per closure; keep them under the dodge budget you pass. */
+/** Network bootstrap: crackers, rooting, payload deployment and the two kill
+ * sweeps. Every ns call goes through the proxy's string path, so none of these
+ * member names is charged to the bundle that imports them; the resident pays
+ * for each once and every later sweep reuses it. The pure predicates
+ * (`canRoot`, `isUseful`) take a plain `Server` and stay synchronous. */
 
 /** Cracker programs in the order the game exposes their port operations.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L549-L622 */
@@ -14,9 +17,9 @@ const CRACKERS = [
   { file: "SQLInject.exe", portFlag: "sqlPortOpen" },
 ] as const;
 
-/** Budget: ls 0.2. Returns the cracker files present on home, in game order. */
-export function listPortOpeners(stubNs: NS): string[] {
-  const files = new Set(stubNs["ls"]("home", ".exe"));
+/** The cracker files present on home, in game order. */
+export async function listPortOpeners(call: NsProxy): Promise<string[]> {
+  const files = new Set(await call("ls", "home", ".exe"));
   return CRACKERS.filter((c) => files.has(c.file)).map((c) => c.file);
 }
 
@@ -31,19 +34,19 @@ export function canRoot(server: Server, openers: string[]): boolean {
   return openable + (server.openPortCount ?? 0) >= (server.numOpenPortsRequired ?? 5);
 }
 
-/** Budget: 5 crackers x 0.05 + nuke 0.05 = 0.3. Runs every available cracker
- * on every host, then nukes. Returns the hosts now rooted. */
-export function rootServers(stubNs: NS, hosts: string[], openers: string[]): string[] {
+/** Runs every available cracker on every host, then nukes. Returns the hosts
+ * now rooted. */
+export async function rootServers(call: NsProxy, hosts: string[], openers: string[]): Promise<string[]> {
   const have = new Set(openers);
   const rooted: string[] = [];
   for (const host of hosts) {
-    if (have.has("BruteSSH.exe")) stubNs["brutessh"](host);
-    if (have.has("FTPCrack.exe")) stubNs["ftpcrack"](host);
-    if (have.has("relaySMTP.exe")) stubNs["relaysmtp"](host);
-    if (have.has("HTTPWorm.exe")) stubNs["httpworm"](host);
-    if (have.has("SQLInject.exe")) stubNs["sqlinject"](host);
+    if (have.has("BruteSSH.exe")) await call("brutessh", host);
+    if (have.has("FTPCrack.exe")) await call("ftpcrack", host);
+    if (have.has("relaySMTP.exe")) await call("relaysmtp", host);
+    if (have.has("HTTPWorm.exe")) await call("httpworm", host);
+    if (have.has("SQLInject.exe")) await call("sqlinject", host);
     try {
-      if (stubNs["nuke"](host)) rooted.push(host);
+      if (await call("nuke", host)) rooted.push(host);
     } catch {
       /* not enough open ports after all — skip */
     }
@@ -59,88 +62,99 @@ export function isUseful(server: Server): boolean {
   return server.hasAdminRights && server.maxRam >= 2;
 }
 
-/** Budget: scp 0.6. Copies the fleet payload — the dispatcher's puppet worker
- * AND the dodge stub — to every useful rooted host. Runs on the dodged sweep so
- * the controller never pays for scp. Returns the hosts that now hold them.
+/** Copies the fleet payload to every useful rooted host. Returns the hosts
+ * that now hold it.
  *
- * The stub ships alongside the worker because a dodge can be placed on any
- * rooted host (shared/ram/placement.ts), and `ns.exec` of a file that is not
- * there returns 0 — indistinguishable from "the host is full", so a missing
- * stub would burn every retry and look like a RAM shortage. One `scp` call
- * takes an array, so carrying the stub costs nothing extra.
+ * The payload carries the ns resident alongside the dispatcher's puppet worker,
+ * because any of them can be placed on any rooted host
+ * (shared/ram/broker.ts) and `ns.exec` of a file that is not there returns 0 —
+ * indistinguishable from "the host is full", so a missing payload file would
+ * burn every retry and look like a RAM shortage. One `scp` call takes an
+ * array, so carrying them costs nothing extra.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L634-L651 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L766-L825 */
-export function deployFleet(stubNs: NS, scripts: string[], servers: Record<string, Server>): string[] {
+export async function deployFleet(
+  call: NsProxy,
+  scripts: string[],
+  servers: Record<string, Server>,
+): Promise<string[]> {
   const deployed: string[] = ["home"];
   for (const server of Object.values(servers)) {
     if (server.hostname === "home" || !isUseful(server)) continue;
-    if (stubNs["scp"](scripts, server.hostname, "home")) deployed.push(server.hostname);
+    if (await call("scp", scripts, server.hostname, "home")) deployed.push(server.hostname);
   }
   return deployed;
 }
 
-/** Budget: ps 0.2 + kill 0.5 + killall 0.5 = 1.2 (pid is free).
- *
- * Cold-boot fleet reclaim. Our controller owns the fleet, so anything still
+/** Cold-boot fleet reclaim. Our controller owns the fleet, so anything still
  * running when a fresh realm starts is an orphan: workers from a previous
  * session can never report completion (their descriptor map died with the old
  * realm), so their RAM would be held forever and the dispatcher would starve.
  *
- * Two hosts are handled PER-PROCESS rather than wholesale:
+ * Some hosts are handled PER-PROCESS rather than by `killall`:
  *  - **home**, so we never kill the controller itself;
- *  - **whichever host this stub is running on**, so the survivor set is
- *    explicit. `killall`'s default safety guard also protects its caller; the
- *    per-process path is retained because it handles home and the remote stub
- *    uniformly.
+ *  - **every host holding an ns resident**, so no resident is killed by a
+ *    sweep it is not even making. That is not hypothetical: residents are
+ *    placed wherever the broker has room, and killing one mid-call leaves the
+ *    awaited promise unresolved — the caller HANGS, not merely stalls, which
+ *    is worse than the dodger's failure mode (a stub had a ten-second
+ *    watchdog).
+ *
+ * The ACTING resident reads its own identity, because it is the only process
+ * that knows where it is and it can migrate between calls as the fleet grows.
+ * The others cannot be read that way and are passed in by the caller, which
+ * holds their handles.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L742-L759
  *
  * Returns the hosts that had something to reclaim. */
-export function reclaimFleet(
-  stubNs: NS,
+export async function reclaimFleet(
+  call: NsProxy,
   servers: Record<string, Server>,
   controllerPid: number,
-  stubHost = "home",
-): string[] {
+  residents: readonly { pid: number; host: string }[] = [],
+): Promise<string[]> {
+  const me = await call("self");
   const reclaimed: string[] = [];
-  const survivors = new Set([controllerPid, stubNs["pid"]]);
+  const survivors = new Set([controllerPid, me.pid, ...residents.map((r) => r.pid)]);
+  const perProcess = new Set(["home", me.server, ...residents.map((r) => r.host)]);
   for (const server of Object.values(servers)) {
     if (!server.hasAdminRights) continue;
-    if (server.hostname === "home" || server.hostname === stubHost) {
+    if (perProcess.has(server.hostname)) {
       let killed = 0;
-      for (const process of stubNs["ps"](server.hostname)) {
+      for (const process of await call("ps", server.hostname)) {
         if (survivors.has(process.pid)) continue;
-        if (stubNs["kill"](process.pid)) killed++;
+        if (await call("kill", process.pid)) killed++;
       }
       if (killed > 0) reclaimed.push(server.hostname);
       continue;
     }
     if (server.ramUsed > 0) {
-      stubNs["killall"](server.hostname);
+      await call("killall", server.hostname);
       reclaimed.push(server.hostname);
     }
   }
   return reclaimed;
 }
 
-/** Budget: ps 0.2 + kill 0.5 = 0.7. Continuous safety net run every sweep:
- * kills workers whose process is no longer registered.
+/** Continuous safety net run every sweep: kills workers whose process is no
+ * longer registered.
  *
  * Liveness is tested against the realm-level worker registry, NOT the
  * dispatcher's own ledger: a build handoff gives the new controller a fresh
  * ledger while its workers keep running, so using the ledger here would kill
  * the whole in-flight fleet on every push. The registry dies only with the
  * realm, which is exactly when those workers really are unreachable. */
-export function reapStrayScripts(
-  stubNs: NS,
+export async function reapStrayScripts(
+  call: NsProxy,
   hosts: string[],
   workerBaseScript: string,
   registeredPids: Set<number>,
-): number {
+): Promise<number> {
   let workers = 0;
   for (const host of hosts) {
-    for (const process of stubNs["ps"](host)) {
+    for (const process of await call("ps", host)) {
       if (process.filename !== workerBaseScript) continue;
       if (registeredPids.has(process.pid)) continue;
-      if (stubNs["kill"](process.pid)) workers++;
+      if (await call("kill", process.pid)) workers++;
     }
   }
   return workers;

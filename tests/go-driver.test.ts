@@ -1,9 +1,23 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
-import type { DodgeLaunch } from "../game/lib/dodge-shared.ts";
-import { captureLaunch } from "../game/lib/launch-shared.ts";
+import type { NsProxy } from "../game/lib/ns-proxy.ts";
+
+/** Stand in for a resident: resolve the dotted path against a stub ns object
+ * and call it, which is the whole of what the real proxy does once a member is
+ * paid for. Awaiting flattens the engine's own promise exactly as it does in
+ * game/lib/ns-proxy.ts, so an async `go.makeMove` stub behaves like the game. */
+function stubProxy(target: NS): NsProxy {
+  return (async (path: string, ...args: unknown[]) => {
+    const parts = path.split(".");
+    let current: unknown = target;
+    for (const part of parts.slice(0, -1)) current = (current as Record<string, unknown>)[part];
+    const member = (current as Record<string, unknown> | undefined)?.[parts[parts.length - 1]!];
+    if (typeof member !== "function") throw new Error(`the stub has no ns.${path}`);
+    return await (member as (...rest: unknown[]) => unknown)(...args);
+  }) as NsProxy;
+}
 import { emptyBoard, type DriverContext } from "../game/lib/features/index.ts";
-import { GO_ANCHOR_POLL_MS, goModule, setGoCheatSuccessTableForTest, setGoNeuralRuntimeForTest, setGoPlaybookCheatSeedForTest } from "../game/lib/features/remaining.ts";
+import { GO_ANCHOR_POLL_MS, goActionAdmitted, goClaimAction, goModule, setGoCheatSuccessTableForTest, setGoNeuralRuntimeForTest, setGoPlaybookCheatSeedForTest } from "../game/lib/features/remaining.ts";
 import { GO_ENGINE_CYCLE_MS } from "../shared/strategy/go/rng.ts";
 import { GO_DISPATCH_GUARD_MS } from "../shared/strategy/go/tick.ts";
 import { StubGoValueBackend } from "./support/go-value-backend.ts";
@@ -46,6 +60,11 @@ function goState(): GameState {
 
 const unknown = unknownForecast(0, "test", "test fixture");
 
+/** The clock reads the tick anchor makes before any Go call is attempted. */
+const clockOnlyNs = (): NS => ({
+  getPlayer: () => ({ totalPlaytime: 10_000, money: 0 }),
+} as unknown as NS);
+
 beforeEach(() => {
   setGoNeuralRuntimeForTest(new TestGoNeuralRuntime((weights) => new StubGoValueBackend(weights)));
   goModule.reset?.(goState(), "bitnode");
@@ -62,11 +81,10 @@ async function runGrantedTurn(
   caps: DriverContext["caps"] = {
     bitNode: 14, sourceFiles: {}, unlocked: {}, reason: {}, restrictions: {},
   } as DriverContext["caps"],
-  ramOverrides: number[] = [],
 ): Promise<void> {
-  let dodgedPlaytime = 10_000;
+  let residentPlaytime = 10_000;
   let clockRead = 0;
-  const dodgedNs = {
+  const residentNs = {
     ...stubNs,
     go: Object.assign({
       getGameState: () => ({ bonusCycles: 0 }),
@@ -77,59 +95,35 @@ async function runGrantedTurn(
       getMoveHistory: () => state.topics.go?.previousBoards ?? [],
     }, stubNs.go),
     getPlayer: () => ({
-      totalPlaytime: clock?.playtimes[Math.min(clockRead++, clock.playtimes.length - 1)] ?? dodgedPlaytime,
+      totalPlaytime: clock?.playtimes[Math.min(clockRead++, clock.playtimes.length - 1)] ?? residentPlaytime,
       money: 0,
     }),
     sleep: async (ms: number) => {
       if (clock) clock.sleeps.push(ms);
-      else dodgedPlaytime += 200;
+      else residentPlaytime += 200;
     },
   } as unknown as NS;
-  const ns = {
-    getPlayer: () => ({ totalPlaytime: 10_000, money: 0 }),
-    sleep: async () => {},
-    getFunctionRamCost: (method: string) => method === "go.cheat.playTwoMoves"
-      ? 8 : method === "go.makeMove" || method === "go.getBoardState" ? 4
-        : method === "getPlayer" ? 0.5 : 0,
-    // Every launch carries one unique scalar process key. There is one generic
-    // FIFO; the detached Go lifecycle retains a pending API promise after its
-    // stub has handed the promise over and exited.
-    exec: (_script: string, _host: string, options: { ramOverride?: number }) => {
-      if (options.ramOverride !== undefined) ramOverrides.push(options.ramOverride);
-      queueMicrotask(async () => {
-        const launch = captureLaunch<DodgeLaunch>("dodge");
-        if (!launch) return;
-        try {
-          launch.resolve({ result: launch.func(dodgedNs) });
-        } catch (error) {
-          launch.reject(error);
-        }
-      });
-      return 1;
-    },
-  } as unknown as NS;
+  // One resident serves both surfaces here: the split exists to keep a
+  // minutes-long Go await off the general reads, and nothing else is running.
+  const call = stubProxy(residentNs);
   const result = emptyArbitration();
   await goModule.driver.tick({
-    ns,
+    nsp: call,
+    nspLong: call,
     state,
     caps,
     board: emptyBoard(),
     grants: {
       money: 0,
-      ramClaims: new Map([["action:turn", {
-        by: "go", id: "action:turn", resource: "ram", amount: 10, priority: 50,
-      }]]),
       slot: false,
       result,
     },
     horizons: { node: unknown, install: unknown },
-    acquireDodge: () => ({ host: "home", release: () => {} }),
   } as unknown as DriverContext);
   // Go intentionally finishes outside the controller's serial driver loop so
   // neither neural planning nor the opponent's wait can stall HWGW dispatch.
   // Wait for that detached lifecycle here; the production loop observes the
-  // same completion via wake(). Use a wall deadline rather than a microtask
-  // count: WebGPU/backend work is intentionally outside this call stack.
+  // same completion via wake().
   const deadline = Date.now() + 2_000;
   while (!state.topics.go?.lastTurn && Date.now() < deadline) {
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -172,20 +166,18 @@ describe("Go live seed observation", () => {
     const state = goState();
     const result = emptyArbitration();
     const tickResult = goModule.driver.tick({
-      ns: {} as NS,
+      // Nothing gets as far as a Go call: the worker install never resolves.
+      nsp: stubProxy(clockOnlyNs()),
+      nspLong: stubProxy(clockOnlyNs()),
       state,
       caps: { bitNode: 14, sourceFiles: {}, unlocked: {}, reason: {}, restrictions: {} },
       board: emptyBoard(),
       grants: {
         money: 0,
-        ramClaims: new Map([["action:turn", {
-          by: "go", id: "action:turn", resource: "ram", amount: 10, priority: 50,
-        }]]),
         slot: false,
         result,
       },
       horizons: { node: unknown, install: unknown },
-      acquireDodge: () => ({ host: "home", release: () => {} }),
     } as unknown as DriverContext);
 
     await installStarted;
@@ -295,42 +287,26 @@ describe("Go live seed observation", () => {
     expect(state.topics.go?.plan).toBeDefined();
   });
 
-  test("claims the current lifecycle action before a prior plan exists", () => {
+  test("reads the lifecycle action off the live board, not the stored plan", () => {
     const state = goState();
-    const context = {
-      state,
-      caps: { bitNode: 14, sourceFiles: {}, unlocked: {}, reason: {}, restrictions: {} },
-      now: 0,
-      budgetGb: 10,
-      board: emptyBoard(),
-      horizons: { node: unknown, install: unknown },
-      ramPrice: () => 4.5,
-    } as never;
-    expect(goModule.claims?.(context)[0]?.id).toBe("action:turn");
+    const caps = { bitNode: 14, sourceFiles: {}, unlocked: {}, reason: {}, restrictions: {} } as never;
+    expect(goClaimAction(state, caps)).toBe("move");
     state.topics.go!.status = "waitingOnAI";
     state.topics.go!.currentPlayer = "White";
-    expect(goModule.claims?.(context)[0]?.id).toBe("action:turn");
+    expect(goClaimAction(state, caps)).toBe("resume");
     state.topics.go!.status = "gameOver";
     state.topics.go!.currentPlayer = "None";
-    expect(goModule.claims?.(context)[0]?.id).toBe("action:newGame");
+    expect(goClaimAction(state, caps)).toBe("newGame");
   });
 
-  test("does not reserve the bootstrap fleet until Go is a small fixed share", () => {
+  test("does not start a game on the bootstrap fleet until Go is a small fixed share", () => {
     const state = goState();
     state.topics.go!.previousBoards = [];
     state.topics.farm!.ramPie = { farm: 100, prep: 0, share: 0, free: 0, reserve: 0 };
-    const context = {
-      state,
-      caps: { bitNode: 1, sourceFiles: {}, unlocked: {}, reason: {}, restrictions: {} },
-      now: 0,
-      budgetGb: 10,
-      board: emptyBoard(),
-      horizons: { node: unknown, install: unknown },
-      ramPrice: () => 4.5,
-    } as never;
-    expect(goModule.claims?.(context)).toEqual([]);
+    const caps = { bitNode: 1, sourceFiles: {}, unlocked: {}, reason: {}, restrictions: {} } as never;
+    expect(goActionAdmitted(state, caps)).toBe(false);
     state.topics.farm!.ramPie.farm = 400;
-    expect(goModule.claims?.(context)[0]?.id).toBe("action:turn");
+    expect(goActionAdmitted(state, caps)).toBe(true);
   });
 
   test("a crossed engine boundary replans once against the tick actually in force", async () => {
@@ -443,7 +419,6 @@ describe("Go live seed observation", () => {
     state.topics.go!.cheat = { unlocked: true, count: 0, successChance: 1 };
     setGoCheatSuccessTableForTest([1, 1]);
     const calls: number[][] = [];
-    const ramOverrides: number[] = [];
     await runGrantedTurn(state, {
       go: {
         getGameState: () => ({ bonusCycles: 17 }),
@@ -458,21 +433,16 @@ describe("Go live seed observation", () => {
       bitNode: 1,
       sourceFiles: { "14": 2 },
       unlocked: {}, reason: {}, restrictions: {},
-    } as unknown as DriverContext["caps"], ramOverrides);
+    } as unknown as DriverContext["caps"]);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toHaveLength(4);
     expect(state.topics.go?.lastTurn?.action.type).toBe("cheatTwoMoves");
     expect(state.topics.go?.cheat?.count).toBe(1);
     expect(state.topics.go?.bonusCycles).toBe(17);
-    // 1.6 GB stub + 8 GB cheat + 0.5 GB player read + pricing margin.
-    // This catches execution accidentally resizing the granted cheat dodge to
-    // the cheaper ordinary-move method list. Not `.at(-1)`: the settled-state
-    // observation runs its own smaller stub after the turn, so the cheat grant
-    // is no longer necessarily the last exec.
-    expect(ramOverrides.some((gb) => gb > 10)).toBe(true);
-    // This turn ends the game, where the post-turn verification is skipped by
-    // design (newGame's resetBoardState returns the game's own rows next).
-    expect(ramOverrides).not.toContain(6.1);
+    // Nothing is reserved for the cheat any more: the resident prices
+    // go.cheat.playTwoMoves when it is called, so the size of the grant can no
+    // longer disagree with the call. `calls` above IS the assertion that the
+    // dispatched action was the cheat and not the cheaper ordinary move.
   });
 
   test("a reset discards an in-flight planning result before dispatch", async () => {
@@ -505,47 +475,28 @@ describe("Go live seed observation", () => {
     goModule.reset?.({ ...goState(), topics: {} } as GameState, "bitnode");
     let makeMoves = 0;
     let playtimeRead = 0;
-    const dodgedNs = {
+    const call = stubProxy({
       getPlayer: () => ({ totalPlaytime: playtimeRead++ ? 10_000 : 9_800, money: 0 }),
-      sleep: async () => {},
       go: {
         makeMove: async () => {
           makeMoves++;
           return { type: "gameOver", x: null, y: null };
         },
       },
-    } as unknown as NS;
-    const ns = {
-      getFunctionRamCost: () => 1,
-      exec: () => {
-        queueMicrotask(async () => {
-          const launch = captureLaunch<DodgeLaunch>("dodge");
-          if (!launch) return;
-          try {
-            launch.resolve({ result: launch.func(dodgedNs) });
-          } catch (error) {
-            launch.reject(error);
-          }
-        });
-        return 1;
-      },
-    } as unknown as NS;
+    } as unknown as NS);
     const result = emptyArbitration();
     const tick = goModule.driver.tick({
-      ns,
+      nsp: call,
+      nspLong: call,
       state,
       caps: { bitNode: 14, sourceFiles: {}, unlocked: {}, reason: {}, restrictions: {} },
       board: emptyBoard(),
       grants: {
         money: 0,
-        ramClaims: new Map([["action:turn", {
-          by: "go", id: "action:turn", resource: "ram", amount: 10, priority: 50,
-        }]]),
         slot: false,
         result,
       },
       horizons: { node: unknown, install: unknown },
-      acquireDodge: () => ({ host: "home", release: () => {} }),
     } as unknown as DriverContext);
 
     await batchStarted;
@@ -770,32 +721,6 @@ describe("Go certified playbook integration", () => {
     expect(moves[1]?.[0]).toBe(2);
     expect(moves[2]?.[0]).toBe(2);
     expect(state.topics.go?.lastTurn?.prediction?.playbook).toBeUndefined();
-    goModule.reset?.(state, "bitnode");
-  });
-
-  test("a certified align entry holds the turn instead of dispatching", async () => {
-    setGoNeuralRuntimeForTest({
-      install: async () => ({ positionId: "align", preparationMs: 0, cached: true }),
-      evaluate: async () => evaluation(neuralMove),
-      playbook: async () => ({ action: { kind: "align" }, alignmentCredit: 0, alignmentBoards: 12 }),
-      playbookRoute: async () => undefined,
-      commit: () => "align:test",
-      confirm() {},
-      async reset() {},
-      dispose() {},
-    });
-    const state = playbookState();
-    let moves = 0;
-    const stubNs = {
-      go: { makeMove: async () => { moves++; return { type: "gameOver", x: null, y: null }; } },
-    } as unknown as NS;
-    await expect(runGrantedTurn(
-      state, stubNs, { playtimes: [...ANCHOR_READS, 10_000, 10_000, 10_000], sleeps: [] },
-    )).rejects.toThrow("detached Go action did not complete");
-    expect(moves).toBe(0);
-    expect(state.topics.go?.lastTurn).toBeUndefined();
-    // The hold waits on the engine clock, so the driver asks to be re-run.
-    expect(goModule.driver.wake?.()).toBe(true);
     goModule.reset?.(state, "bitnode");
   });
 

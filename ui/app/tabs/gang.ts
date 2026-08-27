@@ -74,7 +74,7 @@ export const gangTab: Tab = {
     // The scalar the ascension decision is taken on, and the reason the column
     // label names the reduction: the probe reduces the per-stat result to ONE
     // number differently per gang — `result.hack` for a hacking gang,
-    // `min(str, def, dex, agi)` for a combat one (game/lib/probes/dodged.ts).
+    // `min(str, def, dex, agi)` for a combat one (game/lib/probes/priced.ts).
     //
     // Three distinct states collapse onto 0 on the way here — the record has no
     // `ascensionGain` at all, the probe wrote 0 because the game returned no

@@ -155,10 +155,9 @@ export interface CareerView {
   holdsWorkSlot: boolean;
   /** False while an input the menu depends on has not arrived yet.
    *
-   * The crime table comes from a dodged probe on a five-minute cadence, and the
-   * runner admits ONE dodged probe per pass, so at a cold start every crime is
-   * missing for the first passes — which is exactly when career makes its first
-   * commitment. An option that must OCCUPY the slot cannot be judged against a
+   * The crime table comes from a priced probe on a five-minute cadence, so at
+   * a cold start every crime is missing for the first passes — which is
+   * exactly when career makes its first commitment. An option that must OCCUPY the slot cannot be judged against a
    * menu that is still filling: "nothing else is worth anything" and "nothing
    * else has been measured yet" are not the same statement. */
   menuComplete?: boolean;

@@ -110,15 +110,19 @@ From these, offline:
    Linked to calibration but independent of it: making augs cheaper changes
    the game; fixing the aug-rate estimate changes the guess.
 
-Live next-node selection follows `BITNODE_SPEEDRUN_PLAN`
-(`shared/strategy/progression/bitnode-order.ts`), which `decide.ts` consumes as
-`ACTIVE_BITNODE_TARGETS` — the default `targets` of `chooseNextBitNode`. Its
-`BASELINE_ORDER` and `DEFAULT_BITNODE_TARGETS` lists, like the small-set
-`orderingCost`/`bestOrdering` helpers, are analytical and policy data rather
-than the runtime policy; the full intended route lives in
-`spec/strategy/speedrun-benchmark.md` and is restored into the live plan as each
-feature controller lands. Any future measured reordering should update the
-explicit target list rather than silently changing completion execution.
+Live next-node selection follows the complete `BITNODE_SPEEDRUN_PLAN`
+(`shared/strategy/progression/bitnode-order.ts`). `decide.ts` filters
+`DISABLED_BITNODES` to derive `ACTIVE_BITNODE_TARGETS`, the default `targets` of
+`chooseNextBitNode`. A node is enabled by removing it from that set; its
+milestones retain their intended positions. `BASELINE_ORDER` and the small-set
+`orderingCost`/`bestOrdering` helpers remain historical analysis rather than
+runtime policy. Any future measured reordering should update the explicit
+complete route rather than silently changing completion execution.
+
+`STALL_BITNODE_COMPLETION` is the operator hold at the irreversible boundary.
+While enabled, the controller still publishes a completed route and its next
+BitNode but neither arms nor dispatches `destroyW0r1dD43m0n`. The BitNode tab
+shows the hold; set the constant to `false` to resume automatic completion.
 
 ## How features consume the decision
 

@@ -20,11 +20,7 @@ function featureLink(id: FeatureId): string {
   return `<a href="#/${esc(id)}">${esc(featureLabel(id))}</a>`;
 }
 
-/** The digest bound on the starvation list. The unabridged view is the BitNode
- * tab's RAM arena card, which renders every waiter with its starved marker, so
- * this one only has to say that it stopped. */
-const STARVING_SHOWN = 4;
-/** Same for the needs list: the BitNode tab's coordination card carries all of
+/** The digest bound on the needs list: the BitNode tab's coordination card carries all of
  * them, with the arbiter's weights beside each. */
 const NEEDS_SHOWN = 6;
 
@@ -108,7 +104,7 @@ function nextRows(state: ProjectedState): { rows: Markup[][]; total: number } {
   };
 }
 
-function blockerRows(state: ProjectedState): { rows: Markup[][]; starving: number } {
+function blockerRows(state: ProjectedState): Markup[][] {
   const rows: Markup[][] = [];
   for (const blocker of state.topics.progression?.plan?.installBlockers ?? []) {
     rows.push(["install", esc(words(blocker))]);
@@ -120,13 +116,6 @@ function blockerRows(state: ProjectedState): { rows: Markup[][]; starving: numbe
       esc(`Singularity call needs ${fmtRam(factions.callRamGb)} in BN${factions.bitNode} at SF4.${factions.sf4Level}`),
     ]);
   }
-  const starvation = state.topics.ramArena?.starvation ?? [];
-  for (const wait of starvation.slice(0, STARVING_SHOWN)) {
-    rows.push([
-      esc(wait.by),
-      esc(`${words(wait.id)} needs ${fmtRam(wait.gb)}; waiting ${(wait.waitMs / 1_000).toFixed(1)}s`),
-    ]);
-  }
   // Warnings are NOT capped. They are programming-error class (an invalid next
   // step, the step-loop cap) and arrive in single digits by construction, this
   // is the only place in the viewer that renders them at all, and a truncation
@@ -134,7 +123,7 @@ function blockerRows(state: ProjectedState): { rows: Markup[][]; starving: numbe
   for (const warning of state.topics.arbitration?.warnings ?? []) {
     rows.push(["arbiter", esc(warning)]);
   }
-  return { rows, starving: starvation.length };
+  return rows;
 }
 
 /** Cross-feature digest for the Overview. It reports controller decisions
@@ -149,14 +138,6 @@ export function automationSummary(state: ProjectedState): string {
     next.total > next.rows.length
       ? shownOf(next.rows.length, next.total, "unmet needs — the BitNode tab's coordination card lists every one")
       : "";
-  const starvingNote =
-    blockers.starving > STARVING_SHOWN
-      ? shownOf(
-          STARVING_SHOWN,
-          blockers.starving,
-          "starving RAM requests — the BitNode tab's RAM arena card lists every waiter",
-        )
-      : "";
   return (
     `<div class="summary-section"><h3>Now</h3>${nowTiles(state)}</div>` +
     `<div class="summary-section"><h3>Next</h3>${
@@ -165,8 +146,8 @@ export function automationSummary(state: ProjectedState): string {
         : note("no unmet cross-feature needs are posted")
     }</div>` +
     `<div class="summary-section"><h3>Blocked</h3>${
-      blockers.rows.length
-        ? table(["owner", "barrier"], blockers.rows, { left: [0, 1], wrap: [1] }) + starvingNote
+      blockers.length
+        ? table(["owner", "barrier"], blockers, { left: [0, 1], wrap: [1] })
         : note("nothing is explicitly blocked")
     }</div>`
   );

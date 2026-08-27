@@ -2,28 +2,34 @@ import type { NS, Player, Server } from "@ns";
 import type { FeatureId } from "../../../shared/features/ids.ts";
 import type { Capabilities } from "../../../shared/features/unlock.ts";
 import type { StateKey, StateMap } from "../../../shared/telemetry/state-map.ts";
+import type { NsProxy } from "../ns-proxy.ts";
 import type { GameState, Topics } from "../state.ts";
-import { DODGED_PROBES } from "./dodged.ts";
+import { PRICED_PROBES } from "./priced.ts";
 import { DIRECT_PROBES } from "./direct.ts";
 import { LOCAL_PROBES } from "./local.ts";
 
 /** Feature probes: the read half of the feature axis. One probe collects the
  * state for one feature and returns typed topic emissions; the runner
- * (../probe-runner.ts) decides when it can afford to call it.
+ * (../probe-runner.ts) decides when to call it.
  *
- * Cost tiers, because home RAM is the binding constraint:
- *  - LOCAL   — derived from the sweep snapshot (player, servers). No ns call,
- *              no dodge, always runs. Karma, skills, joined factions, fleet
- *              totals all live here, so those panels are never empty.
- *  - DODGED  — runs inside a dodge stub, priced with ns.getFunctionRamCost.
- *              The runner packs what fits the current budget and leaves the
- *              rest queued in the broker, which reports `ram.starvation` once
- *              one has genuinely waited.
+ * Three tiers, by what a body is allowed to touch:
+ *  - LOCAL   — derived from the sweep snapshot (player, servers). No ns call
+ *              at all, so it always runs. Karma, skills, joined factions and
+ *              fleet totals live here, so those panels are never empty.
+ *  - DIRECT  — synchronous reads on start.js's own `ns`, every one of them
+ *              re-verified 0 GB by the runner before it calls them.
+ *  - PRICED  — everything with a price. The body awaits `ctx.nsp(path, ...)`,
+ *              which runs the member on a resident script sized for it
+ *              (../ns-proxy.ts), so nothing here is billed to start.js.
  *
- * A dodged probe body must call ns through BRACKET NOTATION on its own stub
- * ns (`stubNs["gang"]["getGangInformation"]()`); a dotted call would be seen
- * by the static RAM parser and charged to start.js, which is exactly what the
- * dodge exists to avoid (spec/dodging.md).
+ * A priced body names the member as a STRING PATH and never as a property.
+ * Bitburner charges by member NAME across the whole bundle regardless of the
+ * receiver, so `stubNs["gang"]["getGangInformation"]` billed start.js exactly
+ * as a dotted call would have; only the string escapes the static parser. The
+ * path is typed (`AutoPath`), so a wrong one is a compile error rather than a
+ * probe that silently never runs — which is why probes no longer carry a
+ * `methods` table for the runner to price against. The call IS the price now,
+ * and the two cannot drift apart.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Script/RamCalculations.ts#L405-L440 */
 
 export interface ProbeContext {
@@ -31,6 +37,17 @@ export interface ProbeContext {
   servers: Record<string, Server>;
   caps: Capabilities;
   state: GameState;
+  /** The general-purpose ns resident. Every priced read a probe makes goes
+   *  through here: the resident pays for each distinct member once, memoises
+   *  it, and respawns into a bigger allocation when its budget fills — so a
+   *  body may await as many members as the feature needs, in plain sequential
+   *  code, without anything to declare or split. */
+  nsp: NsProxy;
+  /** `ns.enums`, the one ns PROPERTY a probe needs and the one thing the proxy
+   *  cannot serve (it calls functions). It is 0 GB, so the runner reads it off
+   *  start.js's own ns and hands it down. `FactionName` is what lets the
+   *  planner reason about factions it has not been invited to yet. */
+  enums: NS["enums"];
 }
 
 /** A typed topic write. The mapped type keeps `key` and `data` in agreement,
@@ -99,69 +116,27 @@ export interface DirectProbe extends ProbeBase {
   run(ns: NS, ctx: ProbeContext): Emission[];
 }
 
-/** A dodged probe that reads everything in one stub launch. */
-export interface SingleStepProbe extends ProbeBase {
-  kind: "dodged";
-  /** Fully-qualified ns methods called by `run`, exactly as
-   *  ns.getFunctionRamCost expects them ("gang.getMemberInformation").
-   *  Bitburner charges each distinct function once per script, so the probe's
-   *  cost is the sum over this list however many times each is called.
-   *  tests/features.test.ts checks every name against the type definitions.
-   *  Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L434-L448 */
-  methods: string[];
-  run(stubNs: NS, ctx: ProbeContext): Emission[];
-}
-
-/** Whatever a stepped probe carries between its steps. Deliberately untyped at
- * this layer — each probe owns its own shape and casts once, because typing it
- * generically would force the probe TABLE to become generic and every consumer
- * with it. */
-export type ProbeAcc = Record<string, unknown>;
-
-export interface DodgeStep {
-  /** Reported when this step is the one that did not fit, so the UI can say
-   *  WHICH half of a probe is unaffordable rather than just "the probe". */
-  id: string;
-  methods: string[];
-  run(stubNs: NS, ctx: ProbeContext, acc: ProbeAcc): void;
-}
-
-/** A dodged probe split across several stub launches.
+/** A probe with a price: its body reads through `ctx.nsp` and may await as
+ * many distinct members as the feature needs.
  *
- * The reason this shape exists: a stub's RAM bill is the sum of every distinct
- * ns function it references, so nine singularity methods in one closure cost
- * ~33.5 GB even in BN4 — against a dodge budget pinned near 2.4 GB by the home
- * reserve. Split into one method per step, the PEAK cost becomes the largest
- * single step (~5 GB) instead of the sum, and the probe becomes affordable on
- * hardware where it never could have run.
- *
- * Steps run sequentially, each in its own dodge, accumulating into a shared
- * bag. What it cannot fix is one indivisible expensive call — a single
- * `SingularityFn3` at SF4 level 1 is 80 GB and no amount of splitting helps.
- * That is reported as an explicit blocker instead. */
-export interface SteppedProbe extends ProbeBase {
-  kind: "dodged";
-  steps: DodgeStep[];
-  /** Turn the accumulator into emissions.
-   *
-   *  MUST tolerate a PARTIAL accumulator: when a later step cannot be afforded
-   *  the earlier ones have already run, and emitting what we learned beats
-   *  discarding it. The skipped step is reported separately. */
-  finish(acc: ProbeAcc): Emission[];
+ * This used to come in two shapes. Expensive probes were hand-split into
+ * `steps`, one dodge stub each, accumulating into a shared bag that `finish`
+ * had to be able to read half-filled — because a stub's bill was the SUM of
+ * every distinct member its closure named, and the game had to place that sum
+ * as one CONTIGUOUS block (the augmentation sweep summed to 33.5 GB against a
+ * dodge budget pinned near 2.4 GB by the home reserve). The resident is billed
+ * the same way, but it spends its budget over its own lifetime and respawns
+ * larger when it fills, so the peak a probe must fit into is ONE member — and
+ * the split, the accumulator and the partial-result contract had nothing left
+ * to buy. What neither shape can fix is one indivisible expensive call: a
+ * `SingularityFn3` at SF4 level 1 is 80 GB, and that simply raises the floor
+ * the resident's placer must satisfy before the call runs. */
+export interface PricedProbe extends ProbeBase {
+  kind: "priced";
+  run(ctx: ProbeContext): Promise<Emission[]>;
 }
 
-export type DodgedProbe = SingleStepProbe | SteppedProbe;
-
-export function isStepped(probe: DodgedProbe): probe is SteppedProbe {
-  return "steps" in probe;
-}
-
-/** Every ns method a probe can reach, whichever shape it has. */
-export function probeMethods(probe: DodgedProbe): string[] {
-  return isStepped(probe) ? probe.steps.flatMap((step) => step.methods) : probe.methods;
-}
-
-export type Probe = LocalProbe | DirectProbe | DodgedProbe;
+export type Probe = LocalProbe | DirectProbe | PricedProbe;
 
 /** The fastest cadence anything in the table asks for.
  *
@@ -176,8 +151,8 @@ export function probeCadenceMs(probes: readonly Probe[]): number {
 }
 
 export { GATE_PROBE, type GateResult } from "./gates.ts";
-export { LOCAL_PROBES, DIRECT_PROBES, DODGED_PROBES };
+export { LOCAL_PROBES, DIRECT_PROBES, PRICED_PROBES };
 
 /** Every scheduled probe, both tiers. The one list `probeCadenceMs` is derived
  *  from, so the controller's acquisition interval cannot drift from the table. */
-export const ALL_PROBES: readonly Probe[] = [...LOCAL_PROBES, ...DIRECT_PROBES, ...DODGED_PROBES];
+export const ALL_PROBES: readonly Probe[] = [...LOCAL_PROBES, ...DIRECT_PROBES, ...PRICED_PROBES];

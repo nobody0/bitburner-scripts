@@ -149,7 +149,7 @@ Values from `sim/vendor/bitburner/src/BitNode/BitNodeMults.ts`:
 |---|---|
 | strategy | `shared/strategy/sleeves/decide.ts`, `shared/strategy/assignment.ts` |
 | driver, task menu, claims | `game/lib/features/remaining.ts` (`sleeveView`, `sleevesModule`) |
-| probe, completion arming | `game/lib/probes/dodged.ts` (`sleeves.core`), `game/lib/sleeve-completion.ts` |
+| probe, completion arming | `game/lib/probes/priced.ts` (`sleeves.core`), `game/lib/sleeve-completion.ts` |
 | telemetry topic, tab | `shared/telemetry/topics/sleeves.ts`, `ui/app/tabs/sleeves.ts` |
 | sim | none — `sim/fidelity.ts:43` says `unmodeled`; `sim/engine.ts:243` drains stored cycles (min 5, max 15) |
 

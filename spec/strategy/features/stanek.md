@@ -145,7 +145,7 @@ Gift, you must do that before calling this API."
 |---|---|
 | strategy | `shared/strategy/stanek/pack.ts`, `shared/strategy/stanek/charge.ts` |
 | driver | `game/lib/features/remaining.ts` (packing), `game/lib/features/hacking.ts` and `game/worker/worker.ts` (charging) |
-| probe | `game/lib/probes/dodged.ts` (`stanek.core`, line 1685) |
+| probe | `game/lib/probes/priced.ts` (`stanek.core`, line 1685) |
 | telemetry topic | `shared/telemetry/topics/stanek.ts` |
 | tab | `ui/app/tabs/stanek.ts` |
 | sim model | `sim/features/stanek.ts`, `sim/ns/stanek.ts`, `sim/tests/stanek-parity.test.ts` |

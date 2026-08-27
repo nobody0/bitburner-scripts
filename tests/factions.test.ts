@@ -2128,6 +2128,30 @@ describe("the last-chance drain", () => {
     expect(decision.nextBuy!.price).toBeGreaterThan(0);
   });
 
+  test("donates the residual snapshot once, then releases the install", () => {
+    const eligible = { ...standing("CyberSec", { hacking: true, field: true, security: true }), favor: 150 };
+    const emptySweep = {
+      factions: [eligible],
+      catalog: new Map<string, AugInfo>(),
+      moneyAvailable: 1e9,
+    };
+    const first = drainStep(emptySweep, {
+      ...initFactionMemory(),
+      drainCeiling: 1e9,
+      drainOrder: [],
+      drainSources: {},
+    });
+    expect(first.decision.action).toMatchObject({ type: "donate", faction: "CyberSec", amount: 1e9 });
+    expect(first.decision.drainCosts).toMatchObject({ residualDonation: 1e9, total: 1e9 });
+
+    const second = drainStep({
+      ...emptySweep,
+      factions: [{ ...eligible, rep: 1_000 }],
+      moneyAvailable: 0,
+    }, first.memory);
+    expect(second.decision.recommendInstall).toBeDefined();
+  });
+
   test("the published price is what the purchase will actually cost", () => {
     const decision = drained();
     const expected = augCost(nfg, priceCtx()).moneyCost;

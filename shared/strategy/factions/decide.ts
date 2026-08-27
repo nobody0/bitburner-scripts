@@ -5,12 +5,10 @@ import {
   closePrereqs,
   countSlotWeight,
   entropyCost,
-  estimatedCost,
   NEUROFLUX,
   orderPurchases,
   orderPurchasesWithNeurofluxByLevel,
   scoreAug,
-  selectAffordableBatch,
   totalCost,
   type PurchaseCandidate,
 } from "./augs.ts";
@@ -51,6 +49,13 @@ import {
 } from "../income.ts";
 import { evaluateAll, type Blocker } from "./requirements.ts";
 import { settlingMoney, type FactionStanding, type FactionsView, type RepProfileView } from "./state.ts";
+import {
+  allocateResidualDonations,
+  assignDonationSellers,
+  selectDonationAwareBatch,
+  selectDonationAwareCountClosure,
+} from "./liquidation.ts";
+import { factionFavorPointValues } from "./favorValue.ts";
 
 /** Once the planned package is banked, opportunistic work may extend this
  * cycle by at most one percent. Purchases themselves remain end-loaded and do
@@ -323,8 +328,8 @@ export function stepFactions(
   // pile and deliberately withholds an intent the pile cannot cover.
   //
   // There is no objective-derived fallback here. The only names the objective
-  // could contribute beyond the frozen order are the ones `selectAffordableBatch`
-  // already dropped for cost, and publishing one of those is a deadlock: the
+  // could contribute beyond the frozen order are the ones the final batch
+  // selector already dropped for cost, and publishing one is a deadlock: the
   // driver hands `nextBuy.name` to progression as `purchasableAugmentation`,
   // which raises the `augmentations` install blocker, while the drain — latched
   // out of all faction work — will never buy a name outside `drainOrder`. The
@@ -654,6 +659,8 @@ function decideFactions(
   const {
     drainCeiling: _staleCeiling,
     drainOrder: _staleOrder,
+    drainSources: _staleSources,
+    drainResidualDonations: _staleResidualDonations,
     drainStartNeurofluxLevel: _staleDrainNfg,
     intentKey: _ik,
     intentRepSeen: _irs,
@@ -895,7 +902,9 @@ function decideFactions(
     // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/Augmentations.ts#L1159-L1209
     // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/AugmentationHelpers.ts#L24-L38
     const proposedCeiling = recommendation
-      ? memory.drainCeiling ?? view.moneyAvailable + view.pendingProceeds
+      ? memory.drainCeiling
+        ?? view.moneyAvailable
+          + (view.queued.size === 0 || view.proceedsSettling ? view.pendingProceeds : 0)
       : undefined;
     // The spend-down bound applies to the NEUROFLUX LADDER ONLY: it is the
     // repeatable item whose price escalation can race income forever. It
@@ -908,13 +917,14 @@ function decideFactions(
       : (view.installFundedAugmentations ?? []).filter(
           (name) => name !== NEUROFLUX && !view.owned.has(name),
         );
-    const proposedSweep = recommendation
+    const proposedSweepPlan = recommendation
       ? finalSweepWanted(
           view,
           proposedCeiling ?? Infinity,
           [...terminalRequired, ...cadenceRequired],
         )
-      : [];
+      : { order: [], sources: {}, requiredFunded: true };
+    const proposedSweep = proposedSweepPlan.order;
     const startNfgLevel = memory.drainStartNeurofluxLevel ?? view.priceContext.neurofluxLevel;
     let consumedNfg = Math.max(0, view.priceContext.neurofluxLevel - startNfgLevel);
     const frozenRemaining = memory.drainOrder?.filter((name) => {
@@ -923,6 +933,7 @@ function decideFactions(
       return false;
     });
     const sweepAll = frozenRemaining ?? proposedSweep;
+    const sweepSources = memory.drainSources ?? proposedSweepPlan.sources;
     const drainBudget = proposedCeiling !== undefined ? Math.min(proposedCeiling, view.moneyAvailable) : 0;
     // The payback filter is part of SET selection. Once the first purchase
     // freezes a proven order, changing horizon estimates may not remove an NFG
@@ -954,17 +965,22 @@ function decideFactions(
       || projectedDistinctCount >= view.targetAugCount;
     const recommend = recommendation !== undefined
       && fundedRouteCount
+      && (memory.drainOrder !== undefined || proposedSweepPlan.requiredFunded)
       && (wanted.length > 0 || view.queued.size > 0)
       ? recommendation
       : undefined;
     const ceiling = recommend ? proposedCeiling : undefined;
     const drainOrder = recommend ? memory.drainOrder ?? wanted : undefined;
+    const drainSources = recommend ? sweepSources : undefined;
     const drainStartNeurofluxLevel = recommend ? startNfgLevel : undefined;
-    const ceilingDigest = ceiling !== undefined ? { drainCeiling: ceiling } : {};
-    const drainMemory = {
+    let drainMemory = {
       ...next,
       ...(ceiling !== undefined ? { drainCeiling: ceiling } : {}),
       ...(drainOrder !== undefined ? { drainOrder } : {}),
+      ...(drainSources !== undefined ? { drainSources } : {}),
+      ...(memory.drainResidualDonations !== undefined
+        ? { drainResidualDonations: memory.drainResidualDonations }
+        : {}),
       ...(drainStartNeurofluxLevel !== undefined ? { drainStartNeurofluxLevel } : {}),
     };
     // What the drain would buy if money were no object. Published on the decision
@@ -975,18 +991,27 @@ function decideFactions(
     // blink out between buys.
     // Publish only an intent the frozen drain pile can really fund. Infinity
     // is appropriate before the boundary (it bootstraps a claim), but here it
-    // resurrects a candidate selectAffordableBatch deliberately dropped and
+    // resurrects a candidate the batch selector deliberately dropped and
     // leaves progression waiting on an impossible purchase forever.
-    const drainIntent = recommend ? nextPurchase(view, wanted, ceiling ?? Infinity) : undefined;
-    const nextBuyDigest = drainIntent ? { nextBuy: { name: drainIntent.name, price: drainIntent.price } } : {};
+    const nextName = recommend
+      ? wanted.find((name) => name === NEUROFLUX || !view.owned.has(name))
+      : undefined;
+    const nextAug = nextName ? view.catalog.get(nextName) : undefined;
+    const nextBuyDigest = nextName && nextAug
+      ? { nextBuy: { name: nextName, price: augCost(nextAug, view.priceContext).moneyCost } }
+      : {};
+    let drainCosts = recommend && nextName !== undefined
+      ? remainingSweepCosts(view, wanted, sweepSources)
+      : { purchase: 0, donation: 0, residualDonation: 0, total: 0 };
     // Decide from the frozen cash pile, then let the driver enforce the
     // current-pass arbiter grant. Deciding from moneyGranted is circular: the
     // claim comes from the published decision, so a purchase can remain idle
     // even while the arbiter is granting both its exact fund and RAM.
     const sweep = recommend
-      ? nextSweepAction({ ...view, moneyGranted: drainBudget }, wanted)
+      ? nextSweepAction({ ...view, moneyGranted: drainBudget }, wanted, sweepSources)
       : undefined;
     if (sweep) {
+      const ceilingDigest = { drainCeiling: ceiling!, drainCosts };
       return {
         memory: {
           ...drainMemory,
@@ -995,6 +1020,65 @@ function decideFactions(
         decision: { objective, action: sweep, alternatives, blockers: allBlockers, needOwners, invalidation, ...nextBuyDigest, ...ceilingDigest },
       };
     }
+
+    // Once every frozen purchase has landed, snapshot the remaining cash once
+    // and turn it into useful post-install favor. The snapshot is part of the
+    // transaction memory: income arriving after it cannot reopen the drain.
+    if (recommend && nextName === undefined) {
+      const pointValues = factionFavorPointValues(view);
+      const futureWorkSec = Object.fromEntries(
+        [...pointValues].map(([faction, value]) => [faction, value.remainingWorkSec]),
+      );
+      const residual = memory.drainResidualDonations
+        ?? (view.endingByDestroy === true
+          ? []
+          : allocateResidualDonations({
+            money: view.moneyAvailable,
+            standings: view.factions,
+            favorToDonate: view.favorToDonate,
+            factionRepMult: view.person.mults.faction_rep,
+            factionWorkRepGain: view.repContext.factionWorkRepGain,
+            futureWorkSec,
+          }));
+      const pendingResidual: { standing: FactionStanding; amount: number }[] = [];
+      for (const entry of residual) {
+        const standing = view.factions.find((candidate) => candidate.name === entry.faction);
+        if (!standing || standing.rep + 1e-9 >= entry.repTarget) continue;
+        pendingResidual.push({
+          standing,
+          amount: donationForRep(
+            entry.repTarget - standing.rep,
+            view.person.mults.faction_rep,
+            view.repContext.factionWorkRepGain,
+          ),
+        });
+      }
+      const residualDonation = pendingResidual.reduce((sum, entry) => sum + entry.amount, 0);
+      drainCosts = { purchase: 0, donation: 0, residualDonation, total: residualDonation };
+      drainMemory = { ...drainMemory, drainResidualDonations: residual };
+      const pending = pendingResidual[0];
+      if (pending) {
+        const action: FactionAction = {
+          type: "donate",
+          faction: pending.standing.name,
+          amount: pending.amount,
+        };
+        return {
+          memory: { ...drainMemory, lastAction: action },
+          decision: {
+            objective,
+            action,
+            alternatives,
+            blockers: allBlockers,
+            needOwners,
+            invalidation,
+            drainCeiling: ceiling!,
+            drainCosts,
+          },
+        };
+      }
+    }
+    const ceilingDigest = ceiling !== undefined ? { drainCeiling: ceiling, drainCosts } : {};
     const action: FactionAction = {
       type: "idle",
       reason: allBlockers.length > 0 ? "blocked" : "waiting",
@@ -1343,8 +1427,7 @@ function nextPurchase(
 /** All joined-faction purchases worth attempting before an install, in the order
  * to BUY them.
  *
- * Selection is by value, execution is by price — see
- * {@link selectAffordableBatch}. Ordering is not cosmetic: buying a $1m
+ * Selection is by value, execution is by price. Ordering is not cosmetic: buying a $1m
  * augmentation before a $500m one pays the 1.9x queue escalation on the $500m
  * instead of on the $1m, and the batch that was affordable as a plan stops being
  * affordable as a sequence. The drain freezes this list before its first
@@ -1353,11 +1436,17 @@ function nextPurchase(
  * NeuroFlux is selected as a residual sink, then jointly reordered with the
  * accepted one-shot set; it is not forced to the expensive end of the ladder.
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/AugmentationHelpers.ts#L24-L38 */
+interface FinalSweepPlan {
+  order: string[];
+  sources: Record<string, string>;
+  requiredFunded: boolean;
+}
+
 function finalSweepWanted(
   view: FactionsView,
   budgetCap = Infinity,
   requiredNames: readonly string[] = [],
-): string[] {
+): FinalSweepPlan {
   const joined = new Set(view.factions.filter((standing) => standing.joined).map((standing) => standing.name));
   const countSlotsRemaining = Number.isFinite(view.targetAugCount)
     ? Math.max(0, view.targetAugCount - view.owned.size)
@@ -1386,80 +1475,26 @@ function finalSweepWanted(
 
   const budget = Math.min(plannedBudget(view), budgetCap);
 
-  // A route-mandatory finite count transaction has a lexicographic objective:
-  // prove the cheapest reputation-ready distinct closure first, then spend the
-  // residual bankroll on multiplier quality. A single combined value ordering
-  // can otherwise accept six attractive expensive items and reject the cheap
-  // seventh slot, leaving a mechanically completable node waiting for more
-  // money. This greedy marginal-closure solve is bounded by the small joined
-  // augmentation catalog and uses the same queue-aware cost estimate as the
-  // final selector. Prerequisites count as useful distinct slots themselves.
-  const countClosure: string[] = [];
-  if (view.routeInstallRequired === true && countSlotsRemaining > 0) {
-    const sellerOf = new Map<string, string>();
-    for (const aug of view.catalog.values()) {
-      if (aug.name === NEUROFLUX || view.owned.has(aug.name)) continue;
-      const repCost = augCost(aug, view.priceContext).repCost;
-      const seller = view.factions.find(
-        (standing) => standing.joined && standing.rep >= repCost && aug.factions.includes(standing.name),
-      );
-      if (seller) sellerOf.set(aug.name, seller.name);
-    }
-    const selected = new Set<string>();
-    const closure = (name: string): Set<string> | undefined => {
-      const adding = new Set<string>();
-      const visiting = new Set<string>();
-      const visit = (candidate: string): boolean => {
-        if (view.owned.has(candidate) || selected.has(candidate) || adding.has(candidate)) return true;
-        if (visiting.has(candidate) || !sellerOf.has(candidate)) return false;
-        visiting.add(candidate);
-        const aug = view.catalog.get(candidate)!;
-        for (const prereq of aug.prereqs) if (!visit(prereq)) return false;
-        visiting.delete(candidate);
-        adding.add(candidate);
-        return true;
-      };
-      return visit(name) ? adding : undefined;
-    };
-    while (selected.size < countSlotsRemaining) {
-      let best: Set<string> | undefined;
-      let bestCost = Infinity;
-      let bestQuality = -Infinity;
-      for (const name of sellerOf.keys()) {
-        if (selected.has(name)) continue;
-        const adding = closure(name);
-        if (!adding) continue;
-        const trial = new Set([...selected, ...adding]);
-        const trialCandidates: PurchaseCandidate[] = [...trial].map((candidate) => ({
-          name: candidate,
-          aug: view.catalog.get(candidate)!,
-          faction: sellerOf.get(candidate)!,
-        }));
-        const cost = estimatedCost(trialCandidates, view.priceContext);
-        const quality = [...adding].reduce((sum, candidate) => sum + scoreAug(view.catalog.get(candidate)!, view.weights, view.rates?.worth), 0);
-        if (cost < bestCost || (cost === bestCost && quality > bestQuality)) {
-          best = adding;
-          bestCost = cost;
-          bestQuality = quality;
-        }
-      }
-      if (!best) break;
-      for (const name of best) selected.add(name);
-    }
-    const selectedCandidates: PurchaseCandidate[] = [...selected].map((name) => ({
-      name,
-      aug: view.catalog.get(name)!,
-      faction: sellerOf.get(name)!,
-    }));
-    if (selected.size >= countSlotsRemaining && estimatedCost(selectedCandidates, view.priceContext) <= budget) {
-      countClosure.push(...closePrereqs([...selected], view.catalog, view.owned));
-    }
-  }
+  // A route-mandatory count transaction first proves the cheapest distinct
+  // closure, including donation costs, then spends the residual on quality.
+  const countClosure = view.routeInstallRequired === true && countSlotsRemaining > 0
+    ? selectDonationAwareCountClosure({
+      catalog: new Map([...view.catalog].filter(([name]) => name !== NEUROFLUX)),
+      standings: view.factions,
+      owned: view.owned,
+      wanted: countSlotsRemaining,
+      ctx: view.priceContext,
+      money: budget,
+      favorToDonate: view.favorToDonate,
+      factionRepMult: view.person.mults.faction_rep,
+      factionWorkRepGain: view.repContext.factionWorkRepGain,
+      tieValue: (aug) => scoreAug(aug, view.weights, view.rates?.worth),
+    }).order.map((candidate) => candidate.name)
+    : [];
 
-  // Required route items lead the VALUE order. selectAffordableBatch accepts
-  // greedily in this order and only the returned set is later cost-reordered,
-  // so this guarantees an affordable terminal closure cannot be displaced by
-  // an attractive optional item. De-duplicate after closing both lists because
+  // The selector proves the required closure before accepting optional value,
+  // so an attractive optional item cannot displace a route requirement.
+  // De-duplicate after closing both lists because
   // an optional augmentation may share a prerequisite with the required one.
   const required = closePrereqs(requiredNames, view.catalog, view.owned);
   const candidateNames = [
@@ -1468,14 +1503,8 @@ function finalSweepWanted(
     ...closePrereqs(byValue, view.catalog, new Set([...view.owned, ...required, ...countClosure])),
   ];
   const seen = new Set<string>();
-  const candidates: PurchaseCandidate[] = [];
-  for (const name of candidateNames) {
-    if (seen.has(name)) continue;
-    seen.add(name);
-    const aug = view.catalog.get(name);
-    const faction = aug?.factions.find((candidate) => joined.has(candidate));
-    if (aug && faction) candidates.push({ name, aug, faction });
-  }
+  const valueOrder: string[] = [];
+  for (const name of candidateNames) if (!seen.has(name)) { seen.add(name); valueOrder.push(name); }
   // The whole bankroll, not the granted slice, and not cash alone: this decides
   // which SET is worth planning, and at this boundary the market book is about to
   // become cash while the cash itself is about to be deleted by the install.
@@ -1483,11 +1512,17 @@ function finalSweepWanted(
   // income-over-horizon slack there names items the pile can never cover, and
   // the driver's priority-90 reserve for an uncoverable nextBuy starves every
   // lower band with no timeout.
-  const plan = selectAffordableBatch({
-    candidates,
+  const plan = selectDonationAwareBatch({
+    valueOrder,
+    required: [...required, ...countClosure],
+    catalog: view.catalog,
+    standings: view.factions,
     owned: view.owned,
     ctx: view.priceContext,
     money: budget,
+    favorToDonate: view.favorToDonate,
+    factionRepMult: view.person.mults.faction_rep,
+    factionWorkRepGain: view.repContext.factionWorkRepGain,
   });
 
   let order = plan.order;
@@ -1504,7 +1539,7 @@ function finalSweepWanted(
     const source = [...sellers]
       .sort((a, b) => b.rep - a.rep || b.favor - a.favor || (a.name < b.name ? -1 : 1))[0]?.name;
     if (source) {
-      const nfgCandidate: PurchaseCandidate = { name: NEUROFLUX, aug: neuroflux, faction: source };
+      let nfgCandidate: PurchaseCandidate = { name: NEUROFLUX, aug: neuroflux, faction: source };
       let bestOrder = order;
       // Prices grow by at least 1.9x per level, so this terminates in a handful
       // of iterations in real data. The cap is only a corruption guard.
@@ -1526,78 +1561,106 @@ function finalSweepWanted(
         if (ladderCost > budget) break;
         maxLevels++;
       }
-      const trials = orderPurchasesWithNeurofluxByLevel(plan.order, nfgCandidate, maxLevels, view.priceContext);
       for (let count = 1; count <= maxLevels; count++) {
         const repCost = augCost(
           neuroflux,
           { ...view.priceContext, neurofluxLevel: view.priceContext.neurofluxLevel + count - 1 },
         ).repCost;
-        let donationCost = Infinity;
-        for (const standing of sellers) {
-          if (standing.rep >= repCost) donationCost = 0;
-          else if (standing.favor >= view.favorToDonate) {
-            donationCost = Math.min(
-              donationCost,
-              donationForRep(
-                repCost - standing.rep,
-                view.person.mults.faction_rep,
-                view.repContext.factionWorkRepGain,
-              ),
-            );
-          }
-        }
-        if (!Number.isFinite(donationCost)) break;
-        const trial = trials[count]!;
-        if (totalCost(trial, view.priceContext) + donationCost > budget) break;
+        // Re-solve seller assignment with the highest NFG reputation target as
+        // one synthetic requirement. This captures the important shared-cost
+        // case: a donation made for NFG also unlocks every lower one-shot sold
+        // by that faction, rather than being charged twice.
+        const synthetic = {
+          ...neuroflux,
+          name: `${NEUROFLUX}#${count}`,
+          baseRepRequirement: repCost / Math.max(1e-12, view.priceContext.augRepCost),
+          prereqs: [],
+        };
+        const assignment = assignDonationSellers({
+          augs: [...plan.order.map((candidate) => candidate.aug), synthetic],
+          standings: view.factions,
+          favorToDonate: view.favorToDonate,
+          factionRepMult: view.person.mults.faction_rep,
+          factionWorkRepGain: view.repContext.factionWorkRepGain,
+          ctx: view.priceContext,
+        });
+        if (!assignment) break;
+        const nfgSource = assignment.candidates.find((candidate) => candidate.name === synthetic.name)?.faction;
+        if (!nfgSource) break;
+        const oneShots = assignment.candidates.filter((candidate) => candidate.name !== synthetic.name);
+        nfgCandidate = { name: NEUROFLUX, aug: neuroflux, faction: nfgSource };
+        const trial = orderPurchasesWithNeurofluxByLevel(oneShots, nfgCandidate, count, view.priceContext)[count]!;
+        const trialTotal = totalCost(trial, view.priceContext) + assignment.cost;
+        if (trialTotal > budget) break;
         bestOrder = trial;
       }
       order = bestOrder;
     }
   }
-  return order.map((candidate) => candidate.name);
+  return {
+    order: order.map((candidate) => candidate.name),
+    sources: Object.fromEntries(order.map((candidate) => [candidate.name, candidate.faction])),
+    requiredFunded: plan.requiredFunded,
+  };
 }
 
-function nextSweepAction(view: FactionsView, wanted: readonly string[]): FactionAction | undefined {
-  const purchase = nextPurchase(view, wanted);
-  if (purchase) return purchase.action;
+/** Remaining obligation of the frozen order at today's queue depth and rep. */
+function remainingSweepCosts(
+  view: FactionsView,
+  wanted: readonly string[],
+  sources: Readonly<Record<string, string>>,
+): NonNullable<FactionDecision["drainCosts"]> {
+  const candidates: PurchaseCandidate[] = [];
+  const repTargets = new Map<string, number>();
+  let neurofluxLevel = view.priceContext.neurofluxLevel;
+  for (const name of wanted) {
+    const aug = view.catalog.get(name)!;
+    const faction = sources[name]!;
+    const repCost = augCost(aug, name === NEUROFLUX
+      ? { ...view.priceContext, neurofluxLevel: neurofluxLevel++ }
+      : view.priceContext).repCost;
+    candidates.push({ name, aug, faction });
+    repTargets.set(faction, Math.max(repTargets.get(faction) ?? 0, repCost));
+  }
+  const purchase = totalCost(candidates, view.priceContext);
+  const donation = [...repTargets].reduce((sum, [faction, target]) => {
+    const standing = view.factions.find((entry) => entry.name === faction)!;
+    return sum + donationForRep(
+      Math.max(0, target - standing.rep),
+      view.person.mults.faction_rep,
+      view.repContext.factionWorkRepGain,
+    );
+  }, 0);
+  return { purchase, donation, residualDonation: 0, total: purchase + donation };
+}
 
-  // A high-priority item may be cash-affordable but reputation-locked. At the
-  // last-chance boundary donations are not compared with work time: there is
-  // no more work time. Reserve the donation and purchase together so the
-  // donation can never consume the dollars needed for its augmentation.
+function nextSweepAction(
+  view: FactionsView,
+  wanted: readonly string[],
+  sources: Readonly<Record<string, string>>,
+): FactionAction | undefined {
+  // The batch solver already proved this exact order and seller assignment.
+  // Never scan ahead for a rep-met cheaper item: doing so charges its queue
+  // multiplier to the donation-gated expensive item and invalidates the proof.
   for (const name of wanted) {
     const aug = view.catalog.get(name);
     if (!aug || (name !== NEUROFLUX && view.owned.has(name))) continue;
     if (aug.prereqs.some((prereq) => !view.owned.has(prereq))) continue;
     const { moneyCost, repCost } = augCost(aug, view.priceContext);
-    const source = view.factions
-      .filter(
-        (standing) =>
-          standing.joined &&
-          standing.favor >= view.favorToDonate &&
-          aug.factions.includes(standing.name) &&
-          standing.rep < repCost,
-      )
-      .map((standing) => ({
-        standing,
-        donation: donationForRep(
-          repCost - standing.rep,
-          view.person.mults.faction_rep,
-          view.repContext.factionWorkRepGain,
-        ),
-      }))
-      .filter(({ donation }) => view.moneyAvailable >= donation + moneyCost)
-      .sort((a, b) =>
-        a.donation - b.donation
-        || b.standing.favor - a.standing.favor
-        || (a.standing.name < b.standing.name ? -1 : 1))[0];
-    if (!source) continue;
-    return {
-      type: "donate",
-      faction: source.standing.name,
-      amount: source.donation,
-      purchaseCost: moneyCost,
-    };
+    const source = view.factions.find((standing) => standing.name === sources[name]);
+    if (!source || !source.joined || !aug.factions.includes(source.name)) return undefined;
+    if (source.rep < repCost) {
+      if (source.favor < view.favorToDonate) return undefined;
+      const donation = donationForRep(
+        repCost - source.rep,
+        view.person.mults.faction_rep,
+        view.repContext.factionWorkRepGain,
+      );
+      if (view.moneyAvailable < donation + moneyCost) return undefined;
+      return { type: "donate", faction: source.name, amount: donation, purchaseCost: moneyCost };
+    }
+    if (view.moneyGranted < moneyCost || view.moneyAvailable < moneyCost) return undefined;
+    return { type: "purchaseAugmentation", faction: source.name, augmentation: name };
   }
   return undefined;
 }

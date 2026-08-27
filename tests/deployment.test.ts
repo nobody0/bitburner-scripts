@@ -14,7 +14,7 @@ const config: BitburnerConfig = {
   // Stable first on purpose: the returned push order must still put the
   // immutable helper before it.
   entries: [
-    { source: "game/lib/dodge-stub.ts", target: "lib/dodge-stub.js" },
+    { source: "game/lib/ns-resident.ts", target: "lib/ns-resident.js" },
     { source: "game/worker/worker.ts", target: "worker/worker.js" },
   ],
   restoreEntry: { source: "game/restore.ts", target: "restore.js" },
@@ -27,7 +27,7 @@ describe("stable deployment artifacts", () => {
     const artifacts = await buildScripts(config);
     const buildId = artifacts.at(-1)!.content;
     expect(artifacts.map((artifact) => artifact.filename)).toEqual([
-      "lib/dodge-stub.js",
+      "lib/ns-resident.js",
       "worker/worker.js",
       BUILD_ID_FILE,
     ]);
@@ -52,7 +52,7 @@ describe("stable deployment artifacts", () => {
 
   test("sweeps only stale .js files inside owned directories", () => {
     const owned = new Set(["lib/", "worker/"]);
-    const keep = new Set(["worker/worker.js", "lib/dodge-stub.js"]);
+    const keep = new Set(["worker/worker.js", "lib/ns-resident.js"]);
 
     expect(isSweepableFile("worker/unused.js", owned, keep)).toBe(true);
     expect(isSweepableFile("lib/obsolete.js", owned, keep)).toBe(true);

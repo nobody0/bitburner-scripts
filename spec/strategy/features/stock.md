@@ -168,7 +168,7 @@ volatility, spread, commission or `maxShares`. [BN8](../bitnodes/bn08.md) is the
 | Concern | File |
 |---|---|
 | model · recovery · solver | `shared/strategy/stock/market.ts`, `history.ts`, `decide.ts`; symbol data `shared/features/stocks.ts` |
-| driver · probes | `game/lib/features/stock.ts` · `game/lib/probes/dodged.ts` (`stock.account`, `stock.tick`, `stock.forecast`, `stock.orders`) |
+| driver · probes | `game/lib/features/stock.ts` · `game/lib/probes/priced.ts` (`stock.account`, `stock.tick`, `stock.forecast`, `stock.orders`) |
 | topic · tab · sim | `shared/telemetry/topics/stock.ts` · `ui/app/tabs/stock.ts` · `sim/features/stock.ts` |
 | capital/earnings curves | `ui/app/project.ts` (`foldStockSeries`, `StockSeries`) · `ui/app/lib/chart.ts` |
 | tests | `sim/tests/stock-parity.test.ts`, `stock-market.test.ts`, `stock-strategy.test.ts`, `stock-ladder-profile.test.ts`; viewer fold `tests/ui-stock-series.test.ts` |

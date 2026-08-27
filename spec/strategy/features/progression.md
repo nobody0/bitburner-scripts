@@ -148,7 +148,7 @@ reset, which returns the only reward that carries between nodes — a Source-Fil
 | ETA, forecasts, regrow curves | `shared/strategy/progression/eta.ts`, `forecast.ts`, `regrowth.ts` |
 | favor activation, money marginals | `shared/strategy/progression/activation.ts`, `marginal.ts` |
 | driver, install/gate rendezvous | `game/lib/features/remaining.ts`, `game/lib/install-signal.ts`, `game/lib/gate-signal.ts` |
-| probes · telemetry topic · tab | `game/lib/probes/gates.ts`, `dodged.ts` · `shared/telemetry/topics/progression.ts` · `ui/app/tabs/bitnode.ts` |
+| probes · telemetry topic · tab | `game/lib/probes/gates.ts`, `priced.ts` · `shared/telemetry/topics/progression.ts` · `ui/app/tabs/bitnode.ts` |
 | aug pricing and order · node multipliers, `worldDaemonSkill` | `shared/strategy/factions/augs.ts` · `shared/features/bitnode.ts` |
 | sim prestige · vendored rules | `sim/world.ts` · `sim/vendor/bitburner/src/Constants.ts`, `.../Faction/formulas/` |
 

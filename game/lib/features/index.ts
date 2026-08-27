@@ -1,4 +1,5 @@
 import type { NS } from "@ns";
+import type { NsProxy } from "../ns-proxy.ts";
 import type { PrestigeKind } from "../../../shared/reset.ts";
 import { FEATURE_IDS, type FeatureId } from "../../../shared/features/ids.ts";
 import type { Capabilities } from "../../../shared/features/unlock.ts";
@@ -9,9 +10,7 @@ import { emptyBoard } from "../../../shared/strategy/needs.ts";
 import type { RouteId } from "../../../shared/strategy/progression/endgame.ts";
 import type { PlanningHorizons } from "../../../shared/strategy/progression/forecast.ts";
 import type { GameState } from "../state.ts";
-import type { DodgeAcquire } from "../ram.ts";
-import type { ArenaPlan, BrokerRequest } from '../../../shared/ram/broker.ts';
-import type { FeatureClaim, RamClaim } from "./claims.ts";
+import type { ArenaPlan } from '../../../shared/ram/broker.ts';
 import { careerModule } from "./career.ts";
 import { dnetModule } from "./dnet.ts";
 import { factionsModule } from "./factions.ts";
@@ -47,6 +46,18 @@ import { hackingModule } from "./hacking.ts";
 
 export interface DriverContext {
   ns: NS;
+  /** The ns proxy: `await ctx.nsp("singularity.joinFaction", faction)`.
+   *
+   * The ONE way a driver reaches the game. It costs the bundle nothing — the
+   * path is a string, so the static analyser never sees the member — and the
+   * resident behind it prices each call itself, so there is no budget to
+   * declare and nothing to keep in sync. See game/lib/ns-proxy.ts. */
+  nsp: NsProxy;
+  /** The same surface on a resident of its own, for calls that AWAIT for a
+   * long time — a backdoor walk, a Go turn, grafting. Bitburner allows one
+   * Netscript call per script at a time, so a minutes-long await on `nsp`
+   * would hold every read behind it. */
+  nspLong: NsProxy;
   state: GameState;
   caps: Capabilities;
   /** Features whose drivers can actually run in this pass. This includes a
@@ -55,7 +66,7 @@ export interface DriverContext {
    * isolation profile cannot leave a request that no enabled consumer can
    * satisfy. */
   activeFeatures: ReadonlySet<FeatureId>;
-  /** Current broker arena and its guaranteed dynamic boundary. */
+  /** Current RAM arena and the largest single ns call it can serve. */
   arena: ArenaPlan;
   /** Controller tick counter, for drivers that want a phase offset. */
   tick: number;
@@ -72,19 +83,17 @@ export interface DriverContext {
    *  to bias priorities (bladeburner when it IS the route, combat stats for
    *  the Daedalus combat branch) — never to gate its whole tick. */
   route?: RouteId;
-  /** Atomically choose a host and reserve its RAM in the dispatcher's heap. */
-  acquireDodge(
-    budgetGb: number,
-    request: Omit<BrokerRequest, 'gb' | 'class'>,
-  ): DodgeAcquire;
+  /** World-ender escape hatch: kill whatever workers it takes to clear
+   * `neededGb` on one host and return its name. Only the two run-enders
+   * (installAugmentations, destroyW0r1dD43m0n) may use it — see
+   * `clearForCritical` in ./remaining.ts. */
+  freeCriticalRam?(neededGb: number): string | undefined;
 }
 
 /** The arbiter's answer, pre-narrowed to one feature so a driver cannot
  * accidentally read another's grant. */
 export interface FeatureGrants {
   money: number;
-  /** Broker priorities declared by this feature for the current pass. */
-  ramClaims: ReadonlyMap<string, RamClaim>;
   /** True when this feature holds Player.currentWork this tick. A driver that
    *  does not hold it must not start player work — the game would silently
    *  cancel whatever is running. */
@@ -107,9 +116,6 @@ export interface NeedContext {
 export interface ClaimContext extends NeedContext {
   /** Same typed payoff windows later handed to the drivers. */
   horizons: PlanningHorizons;
-  /** Runtime dynamic-RAM price supplied by the controller. The claim remains
-   * decision-only: it receives the priced observation, never an ns handle. */
-  ramPrice(methods: readonly string[]): number;
   /** The board is complete before any claim is collected, so a feature can bid
    *  harder BECAUSE something else is blocked on it — that is how `career`
    *  outbids `factions` for the work slot when a karma need is blocking. */
@@ -151,7 +157,7 @@ export interface FeatureModule {
    *  route and horizon in their context. */
   refresh?(ctx: NeedContext): void;
   /** PURE. Called for every due module BEFORE any tick(). */
-  claims?(ctx: ClaimContext): FeatureClaim[];
+  claims?(ctx: ClaimContext): Claim[];
   /** PURE. Fresh BN-seconds economics for one of this module's standing
    * claims. It is evaluated after the contribution cache is assembled, so a
    * cached claim never carries a stale closure across feature cadences. */
@@ -194,16 +200,9 @@ export function resetAllFeatures(state: GameState, kind: PrestigeKind): void {
 }
 
 /** Narrow a whole arbitration to one feature's share. */
-export function grantsFor(
-  result: ArbiterResult,
-  id: FeatureId,
-  ramClaims: readonly RamClaim[] = [],
-): FeatureGrants {
+export function grantsFor(result: ArbiterResult, id: FeatureId): FeatureGrants {
   return {
     money: grantedAmount(result, id, "money"),
-    ramClaims: new Map(
-      ramClaims.filter((claim) => claim.by === id).map((claim) => [claim.id, claim]),
-    ),
     slot: holdsSlot(result, id),
     result,
   };
@@ -211,7 +210,7 @@ export function grantsFor(
 
 /** The grants a driver sees before any claim has been resolved. */
 export function noGrants(): FeatureGrants {
-  return { money: 0, ramClaims: new Map(), slot: false, result: emptyArbitration() };
+  return { money: 0, slot: false, result: emptyArbitration() };
 }
 
 export { emptyBoard };
@@ -220,8 +219,8 @@ export { emptyBoard };
  * rather than inferred from live behaviour.
  *
  * "unknown" never runs a driver: not having looked is not the same as being
- * unlocked, and acting on a feature we cannot see would spend a stub launch
- * discovering an API that throws. */
+ * unlocked, and acting on a feature we cannot see would mean calling an API
+ * that throws. */
 export function selectDue(
   drivers: readonly FeatureDriver[],
   lastRun: Record<string, number>,

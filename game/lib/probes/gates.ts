@@ -1,4 +1,4 @@
-import type { NS } from "@ns";
+import type { NsProxy } from "../ns-proxy.ts";
 import { deriveCapabilities, type Capabilities, type GateReadings } from "../../../shared/features/unlock.ts";
 import type { Progression } from "../../../shared/telemetry/topics/progression.ts";
 
@@ -18,17 +18,6 @@ import type { Progression } from "../../../shared/telemetry/topics/progression.t
  * A field left undefined becomes "unknown", which the UI renders differently
  * from "locked". */
 
-export const GATE_COST_GB = 1.6;
-
-export const GATE_METHODS = [
-  "getResetInfo",
-  "gang.inGang",
-  "bladeburner.inBladeburner",
-  "corporation.hasCorporation",
-  "go.getGameState",
-  "fileExists",
-] as const;
-
 export interface GateResult {
   caps: Capabilities;
   progression?: Progression;
@@ -36,9 +25,11 @@ export interface GateResult {
   failures: string[];
 }
 
-function attempt<T>(failures: string[], id: string, fn: () => T): T | undefined {
+/** Each reading is guarded on its own, so one unavailable subsystem costs
+ * this batch a single field rather than every field after it. */
+async function attempt<T>(failures: string[], id: string, fn: () => Promise<T>): Promise<T | undefined> {
   try {
-    return fn();
+    return await fn();
   } catch {
     failures.push(id);
     return undefined;
@@ -54,12 +45,14 @@ function fromMap<K extends string | number>(map: Map<K, number> | undefined): Re
   return out;
 }
 
-/** Runs inside a dodge stub. Budget: GATE_COST_GB. */
-export function runGates(stubNs: NS): GateResult {
+/** Reads every gate through the ns resident. Nothing to budget: the resident
+ * prices each member as it first calls it, and these are all free or nearly so
+ * — ns.getResetInfo at 1 GB is the batch's only real cost. */
+export async function runGates(nsp: NsProxy): Promise<GateResult> {
   const failures: string[] = [];
   const readings: GateReadings = {};
 
-  const reset = attempt(failures, "getResetInfo", () => stubNs["getResetInfo"]());
+  const reset = await attempt(failures, "getResetInfo", () => nsp("getResetInfo"));
   let progression: Progression | undefined;
   if (reset) {
     // ownedSF is already the active-level map with per-run overrides folded
@@ -102,32 +95,30 @@ export function runGates(stubNs: NS): GateResult {
     };
   }
 
-  readings.inGang = attempt(failures, "gang.inGang", () => stubNs["gang"]["inGang"]());
-  readings.inBladeburner = attempt(failures, "bladeburner.inBladeburner", () =>
-    stubNs["bladeburner"]["inBladeburner"](),
+  readings.inGang = await attempt(failures, "gang.inGang", () => nsp("gang.inGang"));
+  readings.inBladeburner = await attempt(failures, "bladeburner.inBladeburner", () =>
+    nsp("bladeburner.inBladeburner"),
   );
-  readings.hasCorporation = attempt(failures, "corporation.hasCorporation", () =>
-    stubNs["corporation"]["hasCorporation"](),
+  readings.hasCorporation = await attempt(failures, "corporation.hasCorporation", () =>
+    nsp("corporation.hasCorporation"),
   );
   // No boolean form exists: reaching a game state at all means IPvGO is there.
   // v3.0.1 exposes this getter without a BN/SF access check.
   // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Go.ts#L69-L77
-  readings.goPlayable = attempt(failures, "go.getGameState", () => {
-    stubNs["go"]["getGameState"]();
+  readings.goPlayable = await attempt(failures, "go.getGameState", async () => {
+    await nsp("go.getGameState");
     return true;
   });
   // Player.hasProgram checks home's program list; fileExists(home) observes
   // the same thing through Netscript.
   // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Player/PlayerObjectGeneralMethods.ts#L203-L206
-  readings.hasDarknetProgram = attempt(failures, "fileExists:DarkscapeNavigator.exe", () =>
-    stubNs["fileExists"]("DarkscapeNavigator.exe", "home"));
+  readings.hasDarknetProgram = await attempt(failures, "fileExists:DarkscapeNavigator.exe", () =>
+    nsp("fileExists", "DarkscapeNavigator.exe", "home"));
 
   return { caps: deriveCapabilities(readings), progression, failures };
 }
 
 export const GATE_PROBE = {
   id: "gates",
-  methods: GATE_METHODS as readonly string[],
-  cost: GATE_COST_GB,
   run: runGates,
 };

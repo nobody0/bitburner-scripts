@@ -20,7 +20,7 @@ branch's unwired `src/_lib/batchers/jit.ts`.
 | Dispatcher pass | every 200 ms heartbeat plus exact deadline/completion wakes | ≤10 ms | 0.01–0.03 ms |
 | Evaluator slice | ≥2 s, `clamp(ceil(N/10),1,8)` targets | ≤2 ms | 0.1–0.9 ms / 8 targets |
 | Decision gate | ≥5 s, or invalidation | ≤200 ms | 3–21 ms / 100 targets |
-| Sweep | 30 s, dodged | — | scan + root + deploy + heap resync |
+| Sweep | 30 s, proxied | — | scan + root + deploy + heap resync |
 
 Enforced by `tests/heap.test.ts`, `sim/tests/targeting.test.ts` (bench),
 `sim/tests/dispatch.test.ts` (bench), and `dispatch.slow` telemetry at runtime.
@@ -480,12 +480,21 @@ at scale that would be ~3 events per 16 ms.
 
 ## Static RAM (`tests/ram-budget.test.ts`)
 
-`start.js` = 3.60 GB: base 1.6 + `getPlayer` 0.5 + `exec` 1.3 +
-`getServerSecurityLevel` 0.1 + `getServerMoneyAvailable` 0.1. The last two are
-the hot-target live reads — **the hot path never dodges**. Everything else
-(scan, scp, ls, nuke) lives inside dodge closures with bracket notation; the
-test fails if any of them leaks into the controller's bill. Peak on a fresh
-8 GB home: 3.6 + 4.1 (transient dodge stub) = 7.7 GB.
+`start.js` = base 1.6 + `exec` 1.3 = **2.90 GB**, and that is the whole list.
+`exec` is the one member the bundle owns on purpose: every ns resident is
+launched through it and every proxied `exec` routes back to it, so the bundle
+pays for it once (see `spec/ns-proxy.md`). Everything else — the scan, `scp`,
+`ls`, `nuke`, and the hot-target live reads `getServerSecurityLevel` /
+`getServerMoneyAvailable` — is a proxied string path billed to a resident; the
+test fails if any of them leaks back into the controller's bill.
+
+The hot-target reads were the last exception, held out by a rule inherited
+from the RAM dodger: *never dodge inside a timing-critical hack/grow/weaken
+window*. That rule was about the dodger's cost — a whole throwaway stub
+process per call, tens of milliseconds. A proxy call on a warm resident is an
+in-realm function call behind a microtask, so `buildView` is simply async now.
+The residual risk is a resident RESPAWN mid-pump when its budget is full;
+both reads are 0.1 GB and permanently memoised, so it is a first-pump event.
 
 ## Sim A/B results (baseline = the old naive planner)
 

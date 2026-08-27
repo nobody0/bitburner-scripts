@@ -1,20 +1,23 @@
-import type { NS } from "@ns";
+import type { NsProxy } from "./ns-proxy.ts";
 import type { StateMap } from "../../shared/telemetry/state-map.ts";
 
-/** Full-network snapshot, built to run INSIDE a dodge closure: every ns call
- * uses bracket notation on the stub's ns, so the importing bundle is charged
- * nothing (dynamic cost in the stub: scan 0.2 + getServer 2.0 < 2.5 budget).
- * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/RamCostGenerator.ts#L22-L29 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/RamCostGenerator.ts#L607-L609
- * Return type flows from ns.getServer — this is the source of truth that
- * types the telemetry topic, the global cache, and the UI reduction. */
-export function collectServers(stubNs: NS): StateMap["servers"] {
+/** Full-network snapshot: a breadth-first `scan` walk from home, reading each
+ * host once with `getServer`.
+ *
+ * Both calls go through the ns proxy, so neither member name appears dotted in
+ * this bundle and the walk is billed to the resident — which pays for `scan`
+ * and `getServer` once and then serves every later sweep for free.
+ *
+ * Return type flows from ns.getServer — this is the source of truth that types
+ * the telemetry topic, the global cache, and the UI reduction. */
+export async function collectServers(call: NsProxy): Promise<StateMap["servers"]> {
   const servers: StateMap["servers"] = {};
   const queue = ["home"];
   while (queue.length > 0) {
     const host = queue.pop()!;
     if (servers[host]) continue;
-    servers[host] = stubNs["getServer"](host);
-    for (const neighbor of stubNs["scan"](host)) {
+    servers[host] = await call("getServer", host);
+    for (const neighbor of await call("scan", host)) {
       if (!servers[neighbor]) queue.push(neighbor);
     }
   }

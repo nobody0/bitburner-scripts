@@ -148,7 +148,7 @@ purchasable RAM there, capped at 20 × 8192 GB, every GB the farm occupies costi
 | Concern | File |
 |---|---|
 | strategy | `shared/strategy/hacknet/decide.ts`, `formulas.ts`, `hashes.ts` |
-| driver · probe | `game/lib/features/hacknet.ts` · `game/lib/probes/dodged.ts:706-814` |
+| driver · probe | `game/lib/features/hacknet.ts` · `game/lib/probes/priced.ts:706-814` |
 | topic · tab | `shared/telemetry/topics/hacknet.ts` · `ui/app/tabs/hacknet.ts` |
 | sim | `sim/features/hacknet.ts` · `sim/tests/hacknet-strategy-parity.test.ts` |
 | vendored rules | `sim/vendor/bitburner/src/Hacknet/` |

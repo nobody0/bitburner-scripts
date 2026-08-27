@@ -1,7 +1,7 @@
 import type { ChannelWorth } from "../income.ts";
 import { countSlotWeight } from "../factions/augs.ts";
 import { addRepToFavor } from "../factions/rep.ts";
-import { BITNODE_SPEEDRUN_PLAN } from "./bitnode-order.ts";
+import { BITNODE_FALLBACK, BITNODE_SPEEDRUN_PLAN, DISABLED_BITNODES } from "./bitnode-order.ts";
 import { DAEDALUS_EARLY_BATCH_PROGRESS_FRACTION } from "./endgame.ts";
 import { INSTALL_OVERHEAD_SEC } from "./eta.ts";
 
@@ -463,20 +463,12 @@ export const BASELINE_ORDER: [number, number][] = [
   [9, 3], [13, 3], [7, 1], [6, 3], [7, 3], [11, 3], [3, 3],
 ];
 
-/** Tuple form consumed by the existing selector. */
+/** Runtime route. Disabled nodes stay in BITNODE_SPEEDRUN_PLAN at their
+ * intended positions and become live by removing their number from the set. */
 export const ACTIVE_BITNODE_TARGETS: readonly [number, number][] =
-  BITNODE_SPEEDRUN_PLAN.map(({ node, level }) => [node, level]);
-
-/** Default account progression after the predecessor baseline. The first
- * entries preserve its staged prerequisites; BN14/15 are appended so the
- * policy covers every finite Source-File rather than silently stopping at 13.
- * This is policy data, separate from the mechanism below and replaceable by a
- * future measured ordering without touching node-completion execution. */
-export const DEFAULT_BITNODE_TARGETS: readonly [number, number][] = [
-  ...BASELINE_ORDER,
-  [14, 3],
-  [15, 3],
-];
+  BITNODE_SPEEDRUN_PLAN
+    .filter(({ node }) => !DISABLED_BITNODES.has(node))
+    .map(({ node, level }) => [node, level]);
 
 export interface NextBitNodeDecision {
   bitNode: number;
@@ -616,9 +608,8 @@ export function installCadencePushRate(view: {
 }
 
 /** Choose the next node after crediting the Source-File the current destroy
- * will award. Duplicate staged entries (SF5.1 before SF5.3, SF7.1 before
- * SF7.3) are intentional. Once every finite target is met, BN12 remains the
- * repeatable scaling destination. */
+ * will award. Duplicate staged entries are intentional. Once every enabled
+ * finite target is met, BN12 remains the repeatable scaling destination. */
 export function chooseNextBitNode(
   currentBitNode: number,
   sourceFiles: Readonly<Record<string, number>>,
@@ -632,7 +623,10 @@ export function chooseNextBitNode(
       return { bitNode, targetLevel };
     }
   }
-  return { bitNode: 12, targetLevel: (projected["12"] ?? 0) + 1 };
+  return {
+    bitNode: BITNODE_FALLBACK,
+    targetLevel: (projected[String(BITNODE_FALLBACK)] ?? 0) + 1,
+  };
 }
 
 /** Total hours for an ordering, given measured per-node times and the

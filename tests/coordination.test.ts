@@ -237,20 +237,12 @@ describe("standing feature contributions", () => {
       activeFeatures: new Set(),
       board: emptyBoard(),
       horizons: {} as ClaimContext["horizons"],
-      ramPrice: () => 3.5,
     });
 
     expect(claims).toContainEqual(expect.objectContaining({
       id: "work:Slum Snakes",
       resource: "time",
     }));
-    expect(claims).toContainEqual(expect.objectContaining({
-      id: "action:workForFaction",
-      resource: "ram",
-      amount: 3.5,
-      priority: PRIORITY["probe:detail"],
-    }));
-
     state.topics.factions!.plan!.context.route = "daedalus";
     state.topics.factions!.plan!.objective!.intent = {
       faction: "Slum Snakes",
@@ -264,12 +256,10 @@ describe("standing feature contributions", () => {
       activeFeatures: new Set(),
       board: emptyBoard(),
       horizons: {} as ClaimContext["horizons"],
-      ramPrice: () => 3.5,
     });
     expect(routeClaims).toContainEqual(expect.objectContaining({
-      id: "action:workForFaction",
-      resource: "ram",
-      priority: PRIORITY["factions:route-work"],
+      id: "work:Slum Snakes",
+      resource: "time",
     }));
   });
 
@@ -307,16 +297,14 @@ describe("standing feature contributions", () => {
     expect(cache.needs()).toEqual([]);
   });
 
-  test("reserves persist between cadences while spend and RAM claims are transient", () => {
+  test("reserves persist between cadences while spends are transient", () => {
     const cache = new ContributionCache();
     const transient = cache.replaceClaims("factions", [
       moneyClaim("factions", "aug-fund", 70, "reserve"),
       moneyClaim("factions", "buy-now", 10, "spend"),
-      { by: "factions", id: "action", resource: "ram", amount: 2, priority: 50 },
     ]);
-    expect(transient.map((claim) => claim.id)).toEqual(["buy-now", "action"]);
-    const dueClaims = cache.claims(transient).filter((claim): claim is Claim => claim.resource !== "ram");
-    const due = resolveClaims({ now: 1, pools: { money: 100 }, claims: dueClaims });
+    expect(transient.map((claim) => claim.id)).toEqual(["buy-now"]);
+    const due = resolveClaims({ now: 1, pools: { money: 100 }, claims: cache.claims(transient) });
     expect(due.remaining.money).toBe(20);
     const between = resolveClaims({ now: 2, pools: { money: 100 }, claims: cache.claims() as Claim[] });
     expect(between.remaining.money).toBe(30);

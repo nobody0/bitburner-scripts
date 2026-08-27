@@ -21,7 +21,7 @@ Defined in `shared/telemetry/schema.ts`. Three kinds, all carrying
   - *Typed topics* (`Telemetry.state`), keyed by
     `shared/telemetry/state-map.ts` (`player`, `servers`, …). The payload
     type is checked against StateMap at compile time, and the same StateMap
-    types the game-state store (`game/lib/state.ts`) — so a dodge batch like
+    types the game-state store (`game/lib/state.ts`) — so a proxied read like
     `collectServers` feeds the store, the UI and the log from one inferred
     type. New app-level state = one new StateMap entry.
 
@@ -175,10 +175,21 @@ the time since it happened to connect. Putting the open on the wire —
 `tradeFlowSince` on the `stock` topic — is the real repair.
 
 Feature probes add `probe.failed {id, error}` when a body throws; silence would
-read as "this feature has no data". A probe that cannot be PLACED is no longer a
-probe-level event at all — it stays queued in the broker, and
-`ram.starvation {by, id, gb, waitMs, lane}` reports it once it has genuinely
-waited, from the one component that knows whether the RAM is coming.
+read as "this feature has no data". A probe that cannot be PLACED is not a
+probe-level event at all: probes do not place anything any more, the resident
+they call through does, and its stall is `proxy.slow` below.
+
+An ns resident whose `exec` keeps returning 0 never throws — the retry is
+unbounded (see spec/ns-proxy.md). What surfaces instead is
+`proxy.slow {label, minGb, preferredGb, attempts, waitMs}` once the stall
+passes one second (re-emitted at 10 s, 60 s, then every minute) and
+`proxy.recovered {label, host, gb, attempts, waitMs}` when the exec finally
+lands, so a stall's depth and its end are both on the wire without any crash in
+between. A resident's own lifecycle is on the wire beside them:
+`proxy.spawn {label, host, gb, reason, pid}` — `reason` being `cold`, `full`
+(the budget filled and the memo reset) or `grow` (one call priced above the
+budget raised the floor) — and `proxy.undersized {label, grantedGb, minGb}`
+when the fleet could not meet a pending call's floor.
 
 Coding contracts split repeated state from forensic detail. The `side` topic
 carries totals, solver coverage, the front 20 rows of a private 100-contract
@@ -293,6 +304,11 @@ length). `intent` and `runnerUp` remain the head and second member, so consumers
 that predate the set read them unchanged. Standings, invitations, gates, offers,
 and ownership stay in the surrounding faction topic.
 
+During the final sweep, `factions.plan.drainCosts` separates the remaining
+augmentation purchases, reputation-unlock donations, and pure-favor donations.
+The total is the current transaction reserve, while `drainCeiling` remains the
+frozen starting budget.
+
 `progression.plan.pace` carries the fitted cycle-progress exponents and the
 measured reset overhead. It is a DIGEST for the same reason everything else here
 is: the samples it is fitted from are up to 240 `CyclePoint`s that stay in
@@ -333,7 +349,7 @@ gate the feature drivers — and telemetry is the optional extra step that also
 sends the store over the wire.
 
 The store is the single write target for every acquisition path: the sweep
-scan, `ns.getPlayer`, the gate batch, all local and dodged probes, the
+scan, `ns.getPlayer`, the gate batch, all local, direct and priced probes, the
 dispatcher rollup. `set` / `merge` mark keys dirty; `game/lib/telemetry-sink.ts`
 publishes the dirty set once per tick and is the only module that touches
 `Telemetry` at all. Probe failures and skips are recorded as store fields, not
@@ -346,15 +362,15 @@ probe reports once per *price* and a failing one once per *message*.
 with `--perf`) and drops `TELEMETRY`-labelled statements in performance
 builds. The hard rule, enforced by `tests/build-perf.test.ts`:
 
-> Telemetry may only **send** state the script already holds. Every getter,
-> dodge and probe runs unconditionally and writes to the game-state store;
+> Telemetry may only **send** state the script already holds. Every getter
+> and probe runs unconditionally and writes to the game-state store;
 > `TELEMETRY: if (__TELEMETRY__)` wraps the send and nothing else. A `--perf`
 > build must be behaviourally identical to a telemetry build — only quieter.
 
 esbuild drops the labelled branch — including payload construction — then
 tree-shakes the sink and the telemetry client out of the bundle. This avoids
-syntax minification, which would rewrite the dodger's bracket-notation ns calls
-and change RAM accounting. `shared/` code never references `__TELEMETRY__`;
+syntax minification, which would rewrite bracketed ns member access into dotted
+calls and change RAM accounting. `shared/` code never references `__TELEMETRY__`;
 the flag only exists in esbuild-processed game bundles.
 
 Compiling acquisition into perf builds is free because Bitburner charges for

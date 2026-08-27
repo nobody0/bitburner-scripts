@@ -17,29 +17,31 @@ import type { ChannelWorth } from "../income.ts";
 
 import { AUGMENTATIONS } from "../../features/augmentations.ts";
 import {
-  closePrereqs,
   countSlotWeight,
-  estimatedCost,
   NEUROFLUX,
   scoreAug,
-  selectAffordableBatch,
   type AugInfo,
   type ObjectiveWeights,
   type PriceContext,
   type PurchaseCandidate,
 } from "../factions/augs.ts";
+import {
+  selectDonationAwareBatch,
+  selectDonationAwareCountClosure,
+  type LiquidationStanding,
+} from "../factions/liquidation.ts";
 import { DAEDALUS_FINAL_BATCH_FRACTION } from "./endgame.ts";
 import { earlyCountBatchAllowed, routeCountInstallValue } from "./decide.ts";
 
-/** The part of a faction offer these searches read. */
-export interface ActivationOffer {
-  name: string;
-  faction: string;
-  affordableRep: boolean;
+interface ActivationDonationContext {
+  standings: readonly LiquidationStanding[];
+  favorToDonate: number;
+  factionRepMult: number;
+  factionWorkRepGain: number;
 }
 
 /** AugInfo view of the shared augmentation table for a set of names. */
-export function activationCatalog(
+function activationCatalog(
   names: Iterable<string>,
   options: { includeNeuroflux?: boolean } = {},
 ): Map<string, AugInfo> {
@@ -61,37 +63,6 @@ export function activationCatalog(
   return catalog;
 }
 
-/** A joined faction whose reputation requirement we already meet. */
-function sellerOf(
-  name: string,
-  offers: readonly ActivationOffer[],
-  joined: ReadonlySet<string>,
-): string | undefined {
-  return offers.find(
-    (offer) => offer.name === name && joined.has(offer.faction) && offer.affordableRep,
-  )?.faction;
-}
-
-/** Turn a closed name list into purchasable candidates, or `undefined` when
- * any member of the closure has no catalog entry or no reachable seller — a
- * chain that cannot be transacted is not a cheaper way to fill a slot. */
-function candidatesFor(
-  names: readonly string[],
-  catalog: ReadonlyMap<string, AugInfo>,
-  offers: readonly ActivationOffer[],
-  joined: ReadonlySet<string>,
-): PurchaseCandidate[] | undefined {
-  const out: PurchaseCandidate[] = [];
-  for (const name of names) {
-    const aug = catalog.get(name);
-    if (!aug) return undefined;
-    const faction = sellerOf(name, offers, joined);
-    if (!faction) return undefined;
-    out.push({ name, aug, faction });
-  }
-  return out;
-}
-
 /** The one-shot set this bankroll could actually convert at install.
  *
  * "Every item fits on its own" is not a funded set: the second and later
@@ -101,10 +72,8 @@ function candidatesFor(
  * same value-order / payment-order split as the transaction boundary, so the
  * value cadence sees is the value the sweep would really buy. */
 export function fundedActivationBatch(input: {
-  /** Offers that are rep-met, unowned and prerequisite-reachable this sweep. */
+  /** Unowned, prerequisite-reachable names sold by a joined faction. */
   realizable: Iterable<string>;
-  offers: readonly ActivationOffer[];
-  joined: ReadonlySet<string>;
   /** Owned, queued and already-pending names — the closure's base. */
   owned: ReadonlySet<string>;
   weights: ObjectiveWeights;
@@ -115,6 +84,7 @@ export function fundedActivationBatch(input: {
   neurofluxCountable?: boolean;
   ctx: PriceContext;
   money: number;
+  donation: ActivationDonationContext;
 }): PurchaseCandidate[] {
   const catalog = activationCatalog(input.realizable, {
     includeNeuroflux: input.neurofluxCountable === true,
@@ -131,16 +101,17 @@ export function fundedActivationBatch(input: {
         || (a.name < b.name ? -1 : 1);
     })
     .map((aug) => aug.name);
-  const candidates = closePrereqs(valueOrder, catalog, input.owned).flatMap((name) => {
-    const aug = catalog.get(name);
-    const faction = aug ? sellerOf(name, input.offers, input.joined) : undefined;
-    return aug && faction ? [{ name, aug, faction }] : [];
-  });
-  return selectAffordableBatch({
-    candidates,
+  return selectDonationAwareBatch({
+    valueOrder,
+    required: [],
+    catalog,
+    standings: input.donation.standings,
     owned: input.owned,
     ctx: input.ctx,
     money: input.money,
+    favorToDonate: input.donation.favorToDonate,
+    factionRepMult: input.donation.factionRepMult,
+    factionWorkRepGain: input.donation.factionWorkRepGain,
   }).order;
 }
 
@@ -159,8 +130,6 @@ export function fundedActivationBatch(input: {
  * honest. */
 export function countClosureAffordable(input: {
   realizable: Iterable<string>;
-  offers: readonly ActivationOffer[];
-  joined: ReadonlySet<string>;
   owned: ReadonlySet<string>;
   wanted: number;
   /** A repeatable NeuroFlux level fills a count slot as well as any one-shot,
@@ -168,36 +137,21 @@ export function countClosureAffordable(input: {
   neurofluxCountable: boolean;
   ctx: PriceContext;
   money: number;
+  donation: ActivationDonationContext;
 }): boolean {
   if (input.wanted <= 0) return true;
   const catalog = activationCatalog(input.realizable, { includeNeuroflux: input.neurofluxCountable });
-  const selected = new Map<string, PurchaseCandidate>();
-
-  while (selected.size < input.wanted) {
-    let best: PurchaseCandidate[] | undefined;
-    let bestCost = Infinity;
-    const base = new Set([...input.owned, ...selected.keys()]);
-    for (const name of catalog.keys()) {
-      if (selected.has(name)) continue;
-      const adding = candidatesFor(
-        closePrereqs([name], catalog, base),
-        catalog,
-        input.offers,
-        input.joined,
-      );
-      if (!adding || adding.length === 0) continue;
-      const cost = estimatedCost([...selected.values(), ...adding], input.ctx);
-      if (cost < bestCost) {
-        bestCost = cost;
-        best = adding;
-      }
-    }
-    if (!best) break;
-    for (const candidate of best) selected.set(candidate.name, candidate);
-  }
-
-  return selected.size >= input.wanted
-    && estimatedCost([...selected.values()], input.ctx) <= input.money;
+  return selectDonationAwareCountClosure({
+    catalog,
+    standings: input.donation.standings,
+    owned: input.owned,
+    wanted: input.wanted,
+    ctx: input.ctx,
+    money: input.money,
+    favorToDonate: input.donation.favorToDonate,
+    factionRepMult: input.donation.factionRepMult,
+    factionWorkRepGain: input.donation.factionWorkRepGain,
+  }).requiredFunded;
 }
 
 /** Whether a count-gated route may install now, and what the partial tranche

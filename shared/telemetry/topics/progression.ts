@@ -67,24 +67,15 @@ export interface Progression {
  * left. Moves on nearly every tick, because the money it divides does. */
 export interface ArbitrationTopic extends ArbitrationDigest {}
 
-/** Change-filtered digest of the pure RAM broker.
- *
- * `capped: true` on a wait is a real blocker — a feature's probe cannot be
- * afforded on this home no matter how long we wait, and the answer is more
- * home RAM (or a bigger rooted host to place the dodge on). */
+/** Change-filtered digest of the RAM the farm may not have: home's standing
+ * reserve, the bootstrap host, and each ns resident's own block
+ * (shared/ram/broker.ts). `guaranteedDynamicGb` is the largest single ns call
+ * the arena can currently serve. */
 export interface RamArenaDigest {
   hosts: string[];
   arenaGb: number;
   targetGb: number;
   guaranteedDynamicGb: number;
-  measuredDynamicGb: number;
-  queueDepth: number;
-  largestWaitingGb: number;
-  neededForLargestWaitingGb: number;
-  waits: { by: string; id: string; gb: number; waitMs: number; class: 'instant' | 'deferrable' }[];
-  starvation: { by: string; id: string; gb: number; waitMs: number }[];
-  demand: Record<string, number>;
-  promoted: boolean;
   farmCostPerSec: number;
 }
 
@@ -239,6 +230,8 @@ export interface ProgressionPlan {
     nextBitNode: number;
     targetLevel: number;
     armedAt?: number;
+    /** Deliberate policy hold before the irreversible destroy call. */
+    stalled?: boolean;
     execute: boolean;
   };
   /** Immediate, reversible route bootstrap owned by progression because it is

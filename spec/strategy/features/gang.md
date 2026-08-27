@@ -108,7 +108,7 @@ members on a task with negative `baseWanted` (`Gang.ts:130-136,161`).
   multiplies everyone's output, so per-member argmax optimises the wrong function;
   `shared/strategy/gang/decide.ts:107-131` scores the penalised total.
 - Nothing prices a task a member is *not* doing — `getMemberInformation` reports
-  only the current task's rates (`game/lib/probes/dodged.ts:1035-1044`), leaving
+  only the current task's rates (`game/lib/probes/priced.ts:1035-1044`), leaving
   one matrix column per member. `ns.formulas.gang.*`
   (`types/NetscriptDefinitions.d.ts:6444-6460`) prices any triple but throws
   without Formulas.exe (`src/NetscriptFunctions/Formulas.ts:61-63,368-392`), $5e9
@@ -149,7 +149,7 @@ faction's own; [BN13](../bitnodes/bn13.md)'s 0.3 is the harshest non-zero softca
 |---|---|
 | strategy · route | `shared/strategy/gang/decide.ts` · `shared/strategy/progression/endgame.ts:33,41,425-450` |
 | driver · unlock | `game/lib/features/remaining.ts:219-320` (module `:3612`) · `game/lib/probes/gates.ts:25,105` · `shared/features/unlock.ts:129,165` |
-| probes | `game/lib/probes/dodged.ts` — `gang.core` (`:987`), `gang.detail` (`:1078`) |
+| probes | `game/lib/probes/priced.ts` — `gang.core` (`:987`), `gang.detail` (`:1078`) |
 | topic · tab | `shared/telemetry/topics/gang.ts` · `ui/app/tabs/gang.ts` |
 | upstream rules | `src/Gang/` at `3162fd2` (not vendored) |
 

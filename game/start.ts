@@ -7,6 +7,9 @@ import { makeSink, type TelemetrySink } from "./lib/telemetry-sink.ts";
 import { initTelemetry, type Telemetry } from "./lib/telemetry.ts";
 import { resolveRunIdentity } from "./lib/run-identity.ts";
 import { captureLaunch, resetLaunchState, type StartLaunch } from "./lib/launch-shared.ts";
+import { nsMainGlobal } from "./lib/ns-proxy-shared.ts";
+import { initProxies } from "./lib/proxies.ts";
+import { bootstrapResidentHost } from "./lib/bootstrap.ts";
 
 export type StartMode = "cold" | "handoff";
 
@@ -58,19 +61,29 @@ export function shouldReportCrash(error: unknown): boolean {
  * This file is the startup script and nothing else; the loop lives in
  * lib/controller.ts. Both land in one bundle, so the split costs no RAM.
  *
- * Fresh-game RAM budget (8 GB home): start.js 3.6 GB static + transient
- * dodge stub <= 4.1 GB = 7.7 GB peak; handoff overlap 2 x 3.6 = 7.2 GB. Fits.
+ * Fresh-game RAM budget (8 GB home): this script is 2.9 GB — 1.6 GB base plus
+ * `ns.exec`, and NOTHING else is billable in the whole bundle. That is what
+ * leaves 5.1 GB for the bootstrap resident (game/lib/bootstrap.ts), and it is
+ * why the two numbers must move together. A build handoff briefly runs two
+ * instances: 2 x 2.9 = 5.8 GB, which also fits.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/RamCostGenerator.ts#L10-L29
  */
 export async function main(ns: NS, featureOverrides?: FeatureOverrides): Promise<void> {
   // Must be the first statement and a numeric literal: v3.0.1's static RAM
   // analyser recognises this syntax before launch. Dynamic RAM is independently
   // pinned below by tests against the controller's direct ns call surface.
-  ns.ramOverride(3.6);
+  ns.ramOverride(2.9);
   // HGW is deliberately high-frequency. Avoid constructing and retaining a
   // Netscript log entry for every scheduler getter and exec call.
   ns.disableLog("ALL");
-  const launch = captureLaunch<StartLaunch>("start");
+  // This process never returns (runController below loops for the whole run),
+  // so its `ns` is the one long-lived object in the realm — and the one that
+  // has statically paid for `exec`. Every ns resident is launched through it,
+  // and every proxied `exec` routes back to it, so the bundle pays that 1.3 GB
+  // exactly once. Home is also the only host holding the TOR edge to
+  // `darkweb`, which is why proxied execs need no pinning. See lib/ns-proxy.ts.
+  nsMainGlobal().nsMain = ns;
+  const launch = captureLaunch<StartLaunch>("start", ns.args[0]);
   if (launch && launch.buildId !== __BUILD_ID__) {
     throw new Error(`start handoff expected build ${launch.buildId}, loaded ${__BUILD_ID__}`);
   }
@@ -79,6 +92,25 @@ export async function main(ns: NS, featureOverrides?: FeatureOverrides): Promise
   }
   const mode: StartMode = launch ? "handoff" : "cold";
   if (mode === "cold") resetLaunchState();
+  // AFTER the cold-boot reset, which drops the previous realm's stale resident
+  // handles. Lazy: this creates no process — the residents boot on the first
+  // proxied call (the run identity's `getResetInfo`, just below), sized to
+  // what home can hold, and the controller hands them the fleet-wide placer
+  // once it has one. On a handoff nothing was reset, so this adopts the
+  // outgoing instance's residents instead of orphaning their RAM.
+  initProxies();
+  // Root and stock foodnstuff/n00dles through a temporary home resident, then
+  // move the residents there and kill the temporary one. Everything after this
+  // line is proxied; this script's own billable surface is `exec` and nothing
+  // else. See game/lib/bootstrap.ts.
+  const residentHost = await bootstrapResidentHost();
+  if (residentHost === undefined) {
+    // Not fatal — the residents keep working on home — but it is worth saying,
+    // because they then squat on home's 5.1 GB for the whole run and the farm
+    // never gets it back. Neither candidate being rootable on a fresh game is
+    // odd enough to look at.
+    ns.tprint("WARNING: could not secure foodnstuff or n00dles; ns residents stay on home");
+  }
   const epoch = claimControllerEpoch(gameGlobal);
   const identity = await resolveRunIdentity(ns, mode === "handoff");
 

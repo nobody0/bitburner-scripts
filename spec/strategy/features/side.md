@@ -60,7 +60,7 @@ compose into a payout is unvendored but readable from the checkout — see
 asserts set equality between the *deployed* registry and `CodingContractTypes`, then
 round-trips 20 generated instances per type through the official
 `generate`/`validateAnswer`/`solver`. The probe rechecks coverage at runtime from the
-live `getContractTypes()` (`game/lib/probes/dodged.ts:1885-1887`).
+live `getContractTypes()` (`game/lib/probes/priced.ts:1885-1887`).
 
 ## Needs · Gives · Contends
 
@@ -89,7 +89,7 @@ player-time auction (`shared/strategy/arbiter.ts:24`).
   means the file is already gone, not a failure (`side.ts:241-249`).
 - **The file list is unbounded.** A real BN12 save reached 8 557 contracts, 3 730
   unsolvable; publishing it made one `side` state record 1.66 MB and stalled the
-  viewer before first paint (`dodged.ts:1845-1850`). The queue caps at
+  viewer before first paint (`priced.ts:1845-1850`). The queue caps at
   `CONTRACT_QUEUE_LIMIT` 100; only a 20-file front batch plus counts ships
   (`contracts.ts:23-24`).
 - **Peak RAM, not total RAM, is the constraint.** Inspect (7 GB), `getData` (5 GB)
@@ -98,7 +98,7 @@ player-time auction (`shared/strategy/arbiter.ts:24`).
   batch whatever the file count, and a queued lease resumes its own stage rather
   than restarting (`:41-45`).
 - **Discovery must stay cheap.** The probe calls only `ls` (0.2 GB) and the free
-  `getContractTypes`, never a per-file getter, and reaps dead quarantine entries in that same sweep (`dodged.ts:1864`, `:1883`).
+  `getContractTypes`, never a per-file getter, and reaps dead quarantine entries in that same sweep (`priced.ts:1864`, `:1883`).
 
 ## Rewards
 
@@ -207,7 +207,7 @@ of the one required infiltration (`game/lib/features/factions.ts:244-248`).
 | solvers, limits, registry | `shared/strategy/side/contracts.ts` |
 | reward-string parser | `shared/strategy/side/rewards.ts` |
 | driver | `game/lib/features/side.ts` |
-| probe | `game/lib/probes/dodged.ts` (`side.contracts`, line 1858) |
+| probe | `game/lib/probes/priced.ts` (`side.contracts`, line 1858) |
 | telemetry topic | `shared/telemetry/topics/side.ts` |
 | tab | `ui/app/tabs/side.ts` |
 | sim ns surface, tests | `sim/ns/api.ts:872`, `sim/ns/ram-costs.ts:429`, `sim/tests/contracts-parity.test.ts`, `sim/tests/ns-contracts.test.ts` |

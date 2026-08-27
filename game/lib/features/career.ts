@@ -1,7 +1,7 @@
 import type { NS } from "@ns";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { formatMoney } from "../../../shared/format.ts";
-import { PRIORITY } from "../../../shared/strategy/arbiter.ts";
+import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
 import { stepCareer, TRAINING_FUND_WINDOW_SEC, type CareerDecision, type CareerPriorityBand, type CareerView } from "../../../shared/strategy/career/decide.ts";
 import type { CrimeStats } from "../../../shared/strategy/career/crimes.ts";
 import { trainingBackdoorSavedRate } from "../../../shared/strategy/access/value.ts";
@@ -35,8 +35,6 @@ import {
   type WorkCompletionNotice,
   type WorkTaskLike,
 } from "../work-completion.ts";
-import { actionRamClaim, featureDodge } from "./dodge.ts";
-import type { FeatureClaim } from "./claims.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
 
 /** The career driver.
@@ -68,7 +66,6 @@ const TRAVEL_COST = 200_000;
 
 let lastDecision: CareerDecision | undefined;
 let lastResult: { action: string; ok: boolean; detail: string; at: number } | undefined;
-let actionQueued = false;
 let lastReviewedAt: number | undefined;
 let lastWorkMode: CareerWorkMode | undefined;
 let lastCompletion: WorkCompletionNotice | undefined;
@@ -76,10 +73,10 @@ const companyRates = new Map<string, ActivityRateSample>();
 /** action key -> earliest retry time, latched when EXECUTING that action
  * THREW. The idle wake keeps this driver hot at frame rate so a freed slot is
  * consumed immediately — but the same heat turns one throwing call into five
- * stub spawns per second, forever (measured: 1,389 applyToCompany throws in
+ * proxy calls per second, forever (measured: 1,389 applyToCompany throws in
  * five minutes against a world that refuses the call). A throw is not a
- * refusal the next frame can cure; it gets a cool-down. Dodge refusals
- * (no grant, no host) are NOT backed off — the next pass may fund them. */
+ * refusal the next frame can cure; it gets a cool-down. A `false` return is
+ * not backed off: that is the game answering, and the next pass may succeed. */
 const executeBackoff = new Map<string, number>();
 export const EXECUTE_BACKOFF_MS = 30_000;
 /** The running course's $/sec, latched when the class/gym claim is first
@@ -248,8 +245,7 @@ function buildCareerView(
     })),
     holdsWorkSlot,
     // The crime table is the menu's other half and arrives from a five-minute
-    // dodged probe, one dodged probe per pass — so the first commitments of a
-    // run are made before it exists. Reporting its absence lets the planner
+    // probe, so the first commitments of a run are made before it exists. Reporting its absence lets the planner
     // hold off on anything that would occupy the slot, rather than concluding
     // from an empty menu that nothing else was worth doing.
     menuComplete: career?.crimes !== undefined,
@@ -374,12 +370,11 @@ function sampleCompanyRates(state: GameState, now: number): void {
   }
 }
 
-interface WorkStartResult<T> {
-  value: T;
-  currentWork: NonNullable<NonNullable<GameState["topics"]["career"]>["currentWork"]> | null;
-}
+/** The published shape of the work slot: what the planner reasons about next
+ * pass, and all that survives of a live task once this tick ends. */
+type WorkDigest = NonNullable<NonNullable<GameState["topics"]["career"]>["currentWork"]> | null;
 
-function taskDigest(task: ((Record<string, unknown> & WorkTaskLike) | null)): WorkStartResult<unknown>["currentWork"] {
+function taskDigest(task: ((Record<string, unknown> & WorkTaskLike) | null)): WorkDigest {
   if (!task) return null;
   return {
     type: String(task.type),
@@ -390,37 +385,31 @@ function taskDigest(task: ((Record<string, unknown> & WorkTaskLike) | null)): Wo
   };
 }
 
+/** Read the live work slot, re-arm the completion watcher on it, and publish
+ * the digest. Only the live task object carries a `nextCompletion` promise, so
+ * every path that starts, ends or merely inspects work comes through here. */
+async function observeWork(ctx: DriverContext): Promise<WorkDigest> {
+  const task = await ctx.nsp("singularity.getCurrentWork") as (Record<string, unknown> & WorkTaskLike) | null;
+  if (task) armWorkCompletion(task);
+  const digest = taskDigest(task);
+  merge(ctx.state, "career", { currentWork: digest });
+  return digest;
+}
+
 async function execute(_ns: NS, ctx: DriverContext, decision: CareerDecision): Promise<boolean> {
-  actionQueued = false;
   const at = Date.now();
   const record = (ok: boolean, detail: string): void => {
     lastResult = { action: decision.action.type, ok, detail, at };
   };
 
-  const refused = Symbol("feature dodge refused");
-  const run = async <T>(methods: readonly string[], body: (stubNs: NS) => T | Promise<T>): Promise<T | typeof refused> => {
-    const outcome = await featureDodge(ctx, "career", actionClaimId(decision.action.type), methods, body);
-    if (!outcome.ok) {
-      if (outcome.queued) actionQueued = true;
-      record(false, outcome.reason);
-      return refused;
-    }
-    return outcome.value;
-  };
-
-  const replaceWork = async <T>(
-    methods: readonly string[],
-    body: (stubNs: NS) => T,
-  ): Promise<WorkStartResult<T> | typeof refused> => {
-    const result = await run([...methods, "singularity.getCurrentWork"], (stubNs: NS) => {
-      disarmWorkCompletion();
-      const value = body(stubNs);
-      const task = stubNs["singularity"]["getCurrentWork"]() as (Record<string, unknown> & WorkTaskLike) | null;
-      if (task) armWorkCompletion(task);
-      return { value, currentWork: taskDigest(task) };
-    });
-    if (result !== refused) merge(ctx.state, "career", { currentWork: result.currentWork });
-    return result;
+  /** Start one activity and re-observe the slot it now holds. Disarming first
+   * is what stops a completion belonging to the work being REPLACED from being
+   * read as this one's. */
+  const replaceWork = async <T>(begin: () => Promise<T>): Promise<T> => {
+    disarmWorkCompletion();
+    const value = await begin();
+    await observeWork(ctx);
+    return value;
   };
 
   switch (decision.action.type) {
@@ -432,63 +421,47 @@ async function execute(_ns: NS, ctx: DriverContext, decision: CareerDecision): P
       // emit it to mean exactly that. Stopping is a different statement, and
       // it needs its own action or work the planner has abandoned runs until
       // the game itself ends it.
-      const result = await replaceWork(["singularity.stopAction"], (stubNs: NS) =>
-        stubNs["singularity"]["stopAction"](),
-      );
-      if (result === refused) return false;
-      record(Boolean(result.value), result.value ? `stopped ${decision.action.subject ?? "work"}` : "nothing was running");
+      const stopped = await replaceWork(() => ctx.nsp("singularity.stopAction"));
+      record(stopped, stopped ? `stopped ${decision.action.subject ?? "work"}` : "nothing was running");
       return true;
     }
     case "continue": {
-      const result = await run(["singularity.getCurrentWork"], (stubNs: NS) => {
-        const task = stubNs["singularity"]["getCurrentWork"]() as (Record<string, unknown> & WorkTaskLike) | null;
-        if (task) armWorkCompletion(task);
-        return taskDigest(task);
-      });
-      if (result === refused) return false;
-      merge(ctx.state, "career", { currentWork: result });
-      record(result !== null, result ? `continuing ${decision.action.subject}` : "work ended before it could be re-armed");
+      const work = await observeWork(ctx);
+      record(work !== null, work ? `continuing ${decision.action.subject}` : "work ended before it could be re-armed");
       return true;
     }
     case "crime": {
       // A valid crime starts unconditionally and returns its duration; invalid
       // enum input throws before this point.
       // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L1037-L1065
-      const result = await replaceWork(["singularity.commitCrime"], (stubNs: NS) =>
-        stubNs["singularity"]["commitCrime"](decision.action.subject as never, decision.action.focus),
+      const ms = await replaceWork(() =>
+        ctx.nsp("singularity.commitCrime", decision.action.subject as never, decision.action.focus),
       );
-      if (result === refused) return false;
-      const ms = result.value;
       record(Boolean(ms), ms ? `committing ${decision.action.subject}` : "crime refused");
       return true;
     }
     case "gym": {
-      const result = await replaceWork(["singularity.gymWorkout"], (stubNs: NS) =>
-        stubNs["singularity"]["gymWorkout"](decision.action.location as never, decision.action.subject as never, true),
+      const ok = await replaceWork(() =>
+        ctx.nsp("singularity.gymWorkout", decision.action.location as never, decision.action.subject as never, true),
       );
-      if (result === refused) return false;
-      const ok = result.value;
-      record(Boolean(ok), ok ? `training ${decision.action.subject}` : "training refused");
+      record(ok, ok ? `training ${decision.action.subject}` : "training refused");
       return true;
     }
     case "class": {
-      const result = await replaceWork(["singularity.universityCourse"], (stubNs: NS) =>
-        stubNs["singularity"]["universityCourse"](decision.action.location as never, decision.action.subject as never, true),
+      const ok = await replaceWork(() =>
+        ctx.nsp("singularity.universityCourse", decision.action.location as never, decision.action.subject as never, true),
       );
-      if (result === refused) return false;
-      const ok = result.value;
-      record(Boolean(ok), ok ? `studying ${decision.action.subject}` : "course refused");
+      record(ok, ok ? `studying ${decision.action.subject}` : "course refused");
       return true;
     }
     case "program": {
-      const result = await replaceWork(["singularity.createProgram", "ls"], (stubNs: NS) => {
-        const started = stubNs["singularity"]["createProgram"](decision.action.subject as never, decision.action.focus);
-        const files = new Set(stubNs["ls"]("home", ".exe"));
+      const result = await replaceWork(async () => {
+        const started = await ctx.nsp("singularity.createProgram", decision.action.subject as never, decision.action.focus);
+        const files = new Set(await ctx.nsp("ls", "home", ".exe"));
         return { started, openers: PORT_OPENER_PROGRAMS.filter((program) => files.has(program.name)).length };
       });
-      if (result === refused) return false;
-      merge(ctx.state, "fleet", { portOpeners: result.value.openers });
-      record(Boolean(result.value.started), result.value.started ? `writing ${decision.action.subject}` : "program already present or creation refused");
+      merge(ctx.state, "fleet", { portOpeners: result.openers });
+      record(result.started, result.started ? `writing ${decision.action.subject}` : "program already present or creation refused");
       return true;
     }
     case "travel": {
@@ -496,12 +469,10 @@ async function execute(_ns: NS, ctx: DriverContext, decision: CareerDecision): P
         record(false, `waiting for ${formatMoney(TRAVEL_COST)} travel grant`);
         return false;
       }
-      const result = await replaceWork(["singularity.travelToCity"], (stubNs: NS) =>
-        stubNs["singularity"]["travelToCity"](decision.action.subject as never),
+      const ok = await replaceWork(() =>
+        ctx.nsp("singularity.travelToCity", decision.action.subject as never),
       );
-      if (result === refused) return false;
-      const ok = result.value;
-      record(Boolean(ok), ok ? `travelled to ${decision.action.subject}` : "travel refused");
+      record(ok, ok ? `travelled to ${decision.action.subject}` : "travel refused");
       return true;
     }
     case "company": {
@@ -510,16 +481,11 @@ async function execute(_ns: NS, ctx: DriverContext, decision: CareerDecision): P
       // better position than the held one is qualified, re-apply before
       // starting the work. A null return (nothing better) is harmless.
       const promotion = promotionField(ctx.state, decision.action.subject);
-      const result = await replaceWork(
-        promotion ? ["singularity.applyToCompany", "singularity.workForCompany"] : ["singularity.workForCompany"],
-        (stubNs: NS) => {
-          if (promotion) stubNs["singularity"]["applyToCompany"](decision.action.subject as never, promotion as never);
-          return stubNs["singularity"]["workForCompany"](decision.action.subject as never, true);
-        },
-      );
-      if (result === refused) return false;
-      const ok = result.value;
-      record(Boolean(ok), ok ? `working for ${decision.action.subject}` : "company work refused");
+      const ok = await replaceWork(async () => {
+        if (promotion) await ctx.nsp("singularity.applyToCompany", decision.action.subject as never, promotion as never);
+        return await ctx.nsp("singularity.workForCompany", decision.action.subject as never, true);
+      });
+      record(ok, ok ? `working for ${decision.action.subject}` : "company work refused");
       return true;
     }
     case "apply": {
@@ -530,15 +496,14 @@ async function execute(_ns: NS, ctx: DriverContext, decision: CareerDecision): P
       // qualified track — the game is authoritative, so one last sweep is
       // cheaper than wrongly recording "no eligible position".
       const fields = applyFieldOrder(ctx.state, decision.action.subject, decision.action.field);
-      const result = await replaceWork(["singularity.applyToCompany"], (stubNs: NS) => {
+      const hired = await replaceWork(async () => {
         for (const field of fields) {
-          const job = stubNs["singularity"]["applyToCompany"](decision.action.subject as never, field as never);
+          const job = await ctx.nsp("singularity.applyToCompany", decision.action.subject as never, field as never);
           if (job) return String(job);
         }
         return "";
       });
-      if (result === refused) return false;
-      record(result.value !== "", result.value ? `hired as ${result.value} at ${decision.action.subject}` : "no eligible position");
+      record(hired !== "", hired ? `hired as ${hired} at ${decision.action.subject}` : "no eligible position");
       return true;
     }
     case "promote": {
@@ -546,11 +511,9 @@ async function execute(_ns: NS, ctx: DriverContext, decision: CareerDecision): P
       // work slot. Never turn a failed promotion into company work here: that
       // would silently cancel an in-progress crime even though the pure
       // strategy correctly classified `promote` as slot-free.
-      const result = await replaceWork(["singularity.applyToCompany"], (stubNs: NS) => ({
-        job: stubNs["singularity"]["applyToCompany"](decision.action.subject as never, decision.action.field as never),
-      }));
-      if (result === refused) return false;
-      const { job } = result.value;
+      const job = await replaceWork(() =>
+        ctx.nsp("singularity.applyToCompany", decision.action.subject as never, decision.action.field as never),
+      );
       record(
         Boolean(job),
         job
@@ -560,10 +523,7 @@ async function execute(_ns: NS, ctx: DriverContext, decision: CareerDecision): P
       return true;
     }
     case "quit": {
-      const result = await replaceWork(["singularity.quitJob"], (stubNs: NS) =>
-        stubNs["singularity"]["quitJob"](decision.action.subject as never),
-      );
-      if (result === refused) return false;
+      await replaceWork(() => ctx.nsp("singularity.quitJob", decision.action.subject as never));
       record(true, `left ${decision.action.subject}`);
       return true;
     }
@@ -602,8 +562,7 @@ const driver: FeatureDriver = {
     // detail, while completed one-shot work leaves the slot empty.
     let completionBoundary = false;
     if (completion) {
-      const observed = await observeAndArm(ctx);
-      if (!observed) return;
+      await observeWork(ctx);
       const current = ctx.state.topics.career?.currentWork;
       completionBoundary = current === null || (
         current !== undefined &&
@@ -678,20 +637,15 @@ const driver: FeatureDriver = {
     const actionKey = `${decision.action.type}:${decision.action.subject ?? ""}:${decision.action.field ?? ""}`;
     try {
       let handled = false;
-      // Per-PASS state, not per-execute: `execute` is skipped entirely on an
-      // idle decision or while the action is backed off, and a stale `true`
-      // left over from an earlier pass then blocks `consumeWorkCompletion`
-      // forever — career keeps re-deciding against a completion that already
-      // happened for as long as it stays idle.
-      actionQueued = false;
       if (!completion && decision.action.type === "idle" && needsCompletionWatcher(ctx.state) && !workCompletionArmed()) {
-        handled = await observeAndArm(ctx);
+        await observeWork(ctx);
+        handled = true;
       }
       if (decision.action.type !== "idle" && (executeBackoff.get(actionKey) ?? 0) <= now) {
         handled = (await execute(ctx.ns, ctx, decision)) || handled;
       }
       if (handled) lastWorkMode = careerWorkMode(ctx.state.topics.career?.currentWork?.type);
-      if (completion && !actionQueued && (handled || !ctx.grants.slot)) consumeWorkCompletion();
+      if (completion && (handled || !ctx.grants.slot)) consumeWorkCompletion();
     } catch (error) {
       if (isScriptDeath(error)) throw error;
       executeBackoff.set(actionKey, Date.now() + EXECUTE_BACKOFF_MS);
@@ -702,8 +656,8 @@ const driver: FeatureDriver = {
 
 /** Career posts no needs of its own — it consumes the requests other features
  * queue on the needs board. */
-function claims(ctx: ClaimContext): FeatureClaim[] {
-  const out: FeatureClaim[] = [];
+function claims(ctx: ClaimContext): Claim[] {
+  const out: Claim[] = [];
   const completion = peekWorkCompletion();
   const schedule = careerSchedule({
     now: ctx.now,
@@ -729,27 +683,13 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
   // another feature's claim — an eight-hour write would still outbid faction
   // reputation at full worth. Absent means 1; only a bounded option sets it.
   const candidateDelivery = candidate?.ranked[0]?.deliveryFraction;
-  // Money and dodge RAM are still banded — neither is auctioned on rates — and
-  // both take the urgency of the request career is serving. An income-fallback
-  // course scored into the blocking band would reserve tuition above
-  // `factions:aug-fund`, which is why this is the plain band and not the bid.
+  // Money claims are banded — they are not auctioned on rates — and take the
+  // urgency of the request career is serving. An income-fallback course scored
+  // into the blocking band would reserve tuition above `factions:aug-fund`,
+  // which is why this is the plain band and not the bid.
   const bandPriority = priorityForBand(candidate?.workPriority ?? "income");
 
   const actionType = schedule.due ? candidate?.action.type : undefined;
-  // The same signal the dodge uses, so the reservation matches what the stub
-  // can actually spend.
-  const methods = careerMethods(
-    actionType,
-    actionType === "company" && promotionField(ctx.state, candidate?.action.subject) !== undefined,
-  );
-  if (actionType && methods.length > 0) {
-    // Player time and the dodge that STARTS that work are one atomic action —
-    // the same rule factions applies to its work RAM. Left at the probe band,
-    // career could win the slot at `career:blocking-need` and then lose the RAM
-    // to factions' route work at 91, holding `Player.currentWork` without ever
-    // being able to call commitCrime/universityCourse.
-    out.push(actionRamClaim(ctx, "career", actionClaimId(actionType), methods, bandPriority));
-  }
   if (actionType === "travel") {
     out.push({
       by: "career",
@@ -805,10 +745,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
   // career ticks. Keep a separately-priced observation available even when
   // career also has a candidate action, so it records the replacement work
   // rather than retaining a stale CRIME digest until the 30-second probe.
-  if (needsCompletionWatcher(ctx.state) && !workCompletionArmed() && (completion !== undefined || methods.length === 0)) {
-    out.push(actionRamClaim(ctx, "career", "watch:completion", ["singularity.getCurrentWork"]));
-  }
-
   // A task with unbanked progress gets an administrative lock, bounded by the
   // moment that progress banks — see `progressLockUntil` for why an unbounded one
   // wedged the whole run. Before the boundary the lock is absolute: cancelling a
@@ -849,37 +785,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
         }),
   });
   return out;
-}
-
-function actionClaimId(type: string): string {
-  return `action:${type}`;
-}
-
-function careerMethods(type: string | undefined, promotion = false): readonly string[] {
-  switch (type) {
-    case "crime": return ["singularity.commitCrime", "singularity.getCurrentWork"];
-    case "gym": return ["singularity.gymWorkout", "singularity.getCurrentWork"];
-    case "class": return ["singularity.universityCourse", "singularity.getCurrentWork"];
-    // applyToCompany rides along ONLY when a promotion is actually due, exactly
-    // as the dodge decides it. Pricing it unconditionally over-reserved 3 GB on
-    // every ordinary work start — 12 GB at SF4 level 2, 48 at level 0, since the
-    // singularity multiplier scales it.
-    case "company": return promotion
-      ? ["singularity.workForCompany", "singularity.applyToCompany", "singularity.getCurrentWork"]
-      : ["singularity.workForCompany", "singularity.getCurrentWork"];
-    case "apply": return ["singularity.applyToCompany", "singularity.getCurrentWork"];
-    case "promote": return ["singularity.applyToCompany", "singularity.getCurrentWork"];
-    case "quit": return ["singularity.quitJob", "singularity.getCurrentWork"];
-    case "travel": return ["singularity.travelToCity", "singularity.getCurrentWork"];
-    case "continue": return ["singularity.getCurrentWork"];
-    // Giving the slot back is an action like any other and needs its RAM
-    // claimed the same way: without an entry here no claim is posted, the
-    // dodge is refused for want of a lease, and the work it was meant to end
-    // keeps running — the exact failure this action exists to fix.
-    case "stop": return ["singularity.stopAction", "singularity.getCurrentWork"];
-    case "program": return ["singularity.createProgram", "singularity.getCurrentWork", "ls"];
-    default: return [];
-  }
 }
 
 /** How long the progress task in flight runs for, from whichever table describes
@@ -925,23 +830,6 @@ function priorityForBand(band: CareerPriorityBand): number {
 
 function needsCompletionWatcher(state: GameState): boolean {
   return careerWorkMode(state.topics.career?.currentWork?.type) === "progress";
-}
-
-async function observeAndArm(ctx: DriverContext): Promise<boolean> {
-  const outcome = await featureDodge(
-    ctx,
-    "career",
-    "watch:completion",
-    ["singularity.getCurrentWork"],
-    (stubNs: NS) => {
-      const task = stubNs["singularity"]["getCurrentWork"]() as (Record<string, unknown> & WorkTaskLike) | null;
-      if (task) armWorkCompletion(task);
-      return taskDigest(task);
-    },
-  );
-  if (!outcome.ok) return false;
-  merge(ctx.state, "career", { currentWork: outcome.value });
-  return true;
 }
 
 export const careerModule: FeatureModule = {

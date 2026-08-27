@@ -721,9 +721,8 @@ describe("work the planner has abandoned", () => {
 
 // --- committing before the menu exists ---------------------------------------
 
-/** The crime table arrives from a five-minute dodged probe, and the runner
- *  admits one dodged probe per pass — so the first decisions of a run are made
- *  before any crime is known. An empty menu then reads as "nothing else is
+/** The crime table arrives from a five-minute priced probe, so the first
+ *  decisions of a run are made before any crime is known. An empty menu then reads as "nothing else is
  *  worth doing", which is not what it means. */
 describe("a menu that is still filling", () => {
   const opener = need({ kind: "file", subject: "FTPCrack.exe", target: 1, have: 0, weight: 8 });

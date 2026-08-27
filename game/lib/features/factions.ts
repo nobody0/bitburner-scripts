@@ -4,7 +4,7 @@ import { AUGMENTATIONS } from "../../../shared/features/augmentations.ts";
 import { formatMoney, formatNumber } from "../../../shared/format.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
 import { FEATURE_IDS } from "../../../shared/features/ids.ts";
-import { grantFor, PRIORITY } from "../../../shared/strategy/arbiter.ts";
+import { grantFor, PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
 import { REPUTATION_CHANNEL } from "../../../shared/strategy/income.ts";
 import { incomeShares, slotRates } from "../income.ts";
 import {
@@ -41,34 +41,28 @@ import { isScriptDeath } from "../errors.ts";
 import { merge, type GameState } from "../state.ts";
 import { signalInstallCheck } from "../install-signal.ts";
 import { armWorkCompletion, disarmWorkCompletion, peekWorkCompletion, workDetail, type WorkTaskLike } from "../work-completion.ts";
-import { actionRamClaim, featureDodge } from "./dodge.ts";
-import type { FeatureClaim } from "./claims.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
 
 /** The factions driver: build a view, decide, execute ONE action, report.
  *
  * Thin by design. Every decision lives in shared/strategy/factions/, which is
  * pure and unit-tested; this file only moves data and turns one `FactionAction`
- * into one dodged singularity call.
+ * into singularity calls on the ns proxy.
  *
  * Two rules that are specific to this feature and easy to get wrong:
  *
- *  - **One action per tick, in one dodge.** The only multi-call case is a
- *    purchase run, which loops the affordable prefix inside a single stub —
- *    because each purchase changes the price of the next, so they have to see
- *    each other's effects.
+ *  - **One action per tick.** The only multi-call case is a purchase run,
+ *    which walks the affordable prefix in order — because each purchase
+ *    changes the price of the next, so they have to see each other's effects.
  *  - **A `false` return is an OUTCOME, not an error.** Boolean mutation calls
  *    use false for ordinary refusals (funds, membership, prerequisites).
- *    Invalid enum input and grafting outside New Tokyo throw instead; both are
- *    reported without conflating a refusal with a stub failure.
+ *    Invalid enum input and grafting outside New Tokyo throw instead, and
+ *    those throws propagate rather than being recorded as a refusal.
  *
  * Pinned upstream Singularity action contracts:
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L771-L967
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Grafting.ts#L17-L103 */
 
-/** Largest single dodge step this feature needs, declared next to the driver
- * so it cannot drift from the probes. Two singularity methods in one step at
- * SF4 level 3 is ~10 GB; the augmentation probe's `rep` step is the widest. */
 const SHADOWS_OF_ANARCHY = "Shadows of Anarchy";
 /** These factions are joined/progressed through their own mechanics, not by
  * satisfying the ordinary invitation/work loop.
@@ -580,6 +574,9 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
     ...(ctx.state.topics.progression?.plan?.routeInstallRequired === true
       ? { routeInstallRequired: true }
       : {}),
+    ...(ctx.state.topics.progression?.plan?.endingByDestroy === true
+      ? { endingByDestroy: true }
+      : {}),
     // PER-CLAIM, not the feature sum: `ctx.grants.money` adds aug-fund +
     // donation + graft + travel together, so a partial aug-fund grant plus a
     // $200k travel grant could fund a purchase the arbiter never allocated
@@ -603,24 +600,16 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
 
 // --- execution --------------------------------------------------------------
 
-/** Turn one decided action into one dodged singularity call.
+/** Turn one decided action into singularity calls on the ns proxy.
  *
  * Every branch reports what the game actually returned. `false` from a
- * boolean Singularity mutation is a modelled refusal rather than an exception. */
+ * boolean Singularity mutation is a modelled refusal rather than an exception;
+ * a genuine throw (no SF4, a rejected enum) propagates to the driver's own
+ * handler, which is the only thing that should latch a backoff. */
 async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view: FactionsView): Promise<void> {
   const at = Date.now();
   const record = (ok: boolean, detail: string): void => {
     lastResult = { action: action.type, ok, detail, at };
-  };
-
-  const refused = Symbol("feature dodge refused");
-  const run = async <T>(methods: readonly string[], body: (stubNs: NS) => T | Promise<T>): Promise<T | typeof refused> => {
-    const outcome = await featureDodge(ctx, "factions", factionClaimId(action.type), methods, body);
-    if (!outcome.ok) {
-      record(false, outcome.reason);
-      return refused;
-    }
-    return outcome.value;
   };
 
   switch (action.type) {
@@ -628,34 +617,22 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
       return;
 
     case "joinFactions": {
-      const result = await run(["singularity.joinFaction"], (stubNs) => {
-        const joined: string[] = [];
-        const failed: string[] = [];
-        for (const faction of action.factions) {
-          if (!stubNs["singularity"]["joinFaction"](faction as never)) {
-            failed.push(faction);
-            continue;
-          }
-          joined.push(faction);
-        }
-        return { joined, failed };
-      });
-      if (result === refused) {
-        // The decision is published before its RAM claim can land. Retry on
-        // the next controller pass, not on the 30-second faction cadence.
-        chainWake = true;
-        return;
+      const joined: string[] = [];
+      const failed: string[] = [];
+      for (const faction of action.factions) {
+        if (await ctx.nsp("singularity.joinFaction", faction as never)) joined.push(faction);
+        else failed.push(faction);
       }
-      if (result.joined.length > 0 || result.failed.length > 0) {
+      if (joined.length > 0 || failed.length > 0) {
         const topic = ctx.state.topics.factions;
-        const accepted = new Set(result.joined);
+        const accepted = new Set(joined);
         // A faction the game REFUSED leaves `invites` too. Nothing else clears
         // it, and `joinFactions` is the first decision step — so one invitation
         // the game will not honour (a withdrawn invite, an enemy our metadata
         // does not predict) would otherwise be re-decided on every single pass,
         // starving purchase, travel, donate and work until the 30 s probe
         // happened to refresh the list. The probe republishes it if it was real.
-        const refusedByGame = new Set(result.failed);
+        const refusedByGame = new Set(failed);
         const acceptedStandings = view.factions.filter((standing) => accepted.has(standing.name));
         const invalidated = new Set(
           view.factions
@@ -667,42 +644,38 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
             .map((standing) => standing.name),
         );
         merge(ctx.state, "factions", {
-          ...(result.joined.length > 0
-            ? { joined: [...new Set([...(topic?.joined ?? []), ...result.joined])] }
+          ...(joined.length > 0
+            ? { joined: [...new Set([...(topic?.joined ?? []), ...joined])] }
             : {}),
           invites: (topic?.invites ?? []).filter(
             (faction) => !accepted.has(faction) && !invalidated.has(faction) && !refusedByGame.has(faction),
           ),
         });
         // Membership changes the immediately actionable work frontier.
-        if (result.joined.length > 0) chainWake = true;
+        if (joined.length > 0) chainWake = true;
       }
-      const complete = result.failed.length === 0;
+      const complete = failed.length === 0;
       record(
         complete,
         complete
-          ? `joined ${result.joined.join(", ")}`
-          : `joined ${result.joined.join(", ") || "none"}; game refused ${result.failed.join(", ")}`,
+          ? `joined ${joined.join(", ")}`
+          : `joined ${joined.join(", ") || "none"}; game refused ${failed.join(", ")}`,
       );
       return;
     }
 
     case "workForFaction": {
-      const ok = await run(["singularity.workForFaction"], (stubNs) =>
-        stubNs["singularity"]["workForFaction"](action.faction as never, action.workType as never, action.focus),
-      );
-      if (ok === refused) return;
+      const ok = await ctx.nsp("singularity.workForFaction", action.faction as never, action.workType as never, action.focus);
       record(
-        Boolean(ok),
+        ok,
         ok ? `working ${action.faction} (${action.workType})` : `${action.faction} does not offer ${action.workType}`,
       );
       return;
     }
 
     case "stopWork": {
-      const ok = await run(["singularity.stopAction"], (stubNs) => stubNs["singularity"]["stopAction"]());
-      if (ok === refused) return;
-      record(Boolean(ok), ok ? "stopped" : "nothing was running");
+      const ok = await ctx.nsp("singularity.stopAction");
+      record(ok, ok ? "stopped" : "nothing was running");
       return;
     }
 
@@ -711,11 +684,8 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
         record(false, "waiting for $200,000 travel grant");
         return;
       }
-      const ok = await run(["singularity.travelToCity"], (stubNs) =>
-        stubNs["singularity"]["travelToCity"](action.city as never),
-      );
-      if (ok === refused) return;
-      record(Boolean(ok), ok ? `travelled to ${action.city}` : `could not afford travel to ${action.city}`);
+      const ok = await ctx.nsp("singularity.travelToCity", action.city as never);
+      record(ok, ok ? `travelled to ${action.city}` : `could not afford travel to ${action.city}`);
       return;
     }
 
@@ -724,43 +694,38 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
       // intent published so the next claims pass reserves the exact amount,
       // but do not bypass that grant in the meantime.
       const reserve = action.amount + (action.purchaseCost ?? 0);
-      if (moneyGrantFor(ctx, "donation-fund") < reserve) {
+      if (Math.max(moneyGrantFor(ctx, "donation-fund"), moneyGrantFor(ctx, "aug-fund")) < reserve) {
         record(false, `waiting for ${formatMoney(reserve)} donation and purchase grant`);
         return;
       }
       const plannedRep = view.factions.find((standing) => standing.name === action.faction)?.rep ?? 0;
       const repTarget = plannedRep
         + repFromDonation(action.amount, view.person.mults.faction_rep, view.repContext.factionWorkRepGain);
-      const result = await run(
-        ["singularity.getFactionRep", "singularity.donateToFaction"],
-        (stubNs) => {
-          // A donation can wait behind its money grant while faction work or
-          // passive gain keeps raising reputation. Read BEFORE mutating, then
-          // preserve the planner's target with the smallest current donation.
-          const currentRep = stubNs["singularity"]["getFactionRep"](action.faction as never);
-          const amount = donationForRep(
-            Math.max(0, repTarget - currentRep),
-            view.person.mults.faction_rep,
-            view.repContext.factionWorkRepGain,
-          );
-          if (amount <= 0) return { ok: true, amount: 0, rep: currentRep };
-          const ok = stubNs["singularity"]["donateToFaction"](action.faction as never, amount);
-          return {
-            ok,
-            amount,
-            rep: ok
-              ? currentRep + repFromDonation(amount, view.person.mults.faction_rep, view.repContext.factionWorkRepGain)
-              : currentRep,
-          };
-        },
+      // A donation can wait behind its money grant while faction work or
+      // passive gain keeps raising reputation. Read BEFORE mutating, then
+      // preserve the planner's target with the smallest current donation.
+      const currentRep = await ctx.nsp("singularity.getFactionRep", action.faction as never);
+      const amount = donationForRep(
+        Math.max(0, repTarget - currentRep),
+        view.person.mults.faction_rep,
+        view.repContext.factionWorkRepGain,
       );
-      if (result === refused) return;
-      setFactionRep(ctx.state, action.faction, result.rep);
+      const donated = amount > 0
+        ? await ctx.nsp("singularity.donateToFaction", action.faction as never, amount)
+        : false;
+      setFactionRep(
+        ctx.state,
+        action.faction,
+        donated
+          ? currentRep + repFromDonation(amount, view.person.mults.faction_rep, view.repContext.factionWorkRepGain)
+          : currentRep,
+      );
+      const ok = amount <= 0 || donated;
       record(
-        result.ok,
-        result.ok
-          ? result.amount > 0
-            ? `donated ${formatMoney(result.amount)}`
+        ok,
+        ok
+          ? amount > 0
+            ? `donated ${formatMoney(amount)}`
             : `already reached ${formatNumber(repTarget)} reputation`
           : "donation refused (favor too low?)",
       );
@@ -790,10 +755,7 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
         record(false, `waiting for the ${formatMoney(fundNeeded)} augmentation fund grant`);
         return;
       }
-      const ok = await run(["singularity.purchaseAugmentation"], (stubNs) =>
-        stubNs["singularity"]["purchaseAugmentation"](action.faction as never, action.augmentation as never),
-      );
-      if (ok === refused) return;
+      const ok = await ctx.nsp("singularity.purchaseAugmentation", action.faction as never, action.augmentation as never);
       // `true` means the game has already queued the augmentation. Record that
       // authoritative transition locally; the later catalogue probe merely
       // reconciles external/manual changes. Appending also models another NFG
@@ -808,7 +770,7 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
         // dominates time-to-install, so ask for an early wake instead.
         chainWake = true;
       }
-      record(Boolean(ok), ok ? `bought ${action.augmentation}` : "purchase refused (rep or money short)");
+      record(ok, ok ? `bought ${action.augmentation}` : "purchase refused (rep or money short)");
       return;
     }
 
@@ -817,26 +779,23 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
         record(false, "waiting for Player.currentWork");
         return;
       }
-      const result = await run(["grafting.graftAugmentation", "singularity.getCurrentWork"], (stubNs) => {
-        disarmWorkCompletion();
-        const ok = stubNs["grafting"]["graftAugmentation"](action.augmentation as never, true);
-        const task = stubNs["singularity"]["getCurrentWork"]() as (Record<string, unknown> & WorkTaskLike) | null;
-        if (task) armWorkCompletion(task);
-        return {
-          ok,
-          currentWork: task
-            ? {
-                type: String(task.type),
-                detail: workDetail(task) ?? "",
-                cyclesWorked: typeof task.cyclesWorked === "number" ? task.cyclesWorked : 0,
-                observedAt: Date.now(),
-              }
-            : null,
-        };
+      // Disarm before starting: a completion belonging to the work the graft
+      // displaces must not be read as this graft's own.
+      disarmWorkCompletion();
+      const ok = await ctx.nsp("grafting.graftAugmentation", action.augmentation as never, true);
+      const task = await ctx.nsp("singularity.getCurrentWork") as (Record<string, unknown> & WorkTaskLike) | null;
+      if (task) armWorkCompletion(task);
+      merge(ctx.state, "career", {
+        currentWork: task
+          ? {
+              type: String(task.type),
+              detail: workDetail(task) ?? "",
+              cyclesWorked: typeof task.cyclesWorked === "number" ? task.cyclesWorked : 0,
+              observedAt: Date.now(),
+            }
+          : null,
       });
-      if (result === refused) return;
-      merge(ctx.state, "career", { currentWork: result.currentWork });
-      record(Boolean(result.ok), result.ok ? `grafting ${action.augmentation}` : "grafting refused");
+      record(ok, ok ? `grafting ${action.augmentation}` : "grafting refused");
       return;
     }
 
@@ -902,6 +861,7 @@ function planDigest(decision: FactionDecision, view: FactionsView, bankedAugment
     alternatives: decision.alternatives.map(({ label, value }) => ({ label, value })),
     invalidation: decision.invalidation,
     ...(decision.drainCeiling !== undefined ? { drainCeiling: decision.drainCeiling } : {}),
+    ...(decision.drainCosts !== undefined ? { drainCosts: decision.drainCosts } : {}),
     blockers: decision.blockers.map((blocker) => ({
       faction: blocker.faction,
       kind: blocker.kind,
@@ -1381,17 +1341,13 @@ function predictedWorkProduces(ctx: ClaimContext, faction: string | undefined): 
 }
 
 /** What this feature is bidding for. */
-function claims(ctx: ClaimContext): FeatureClaim[] {
+function claims(ctx: ClaimContext): Claim[] {
   const topic = ctx.state.topics.factions;
   const plan = topic?.plan;
-  const out: FeatureClaim[] = [];
+  const out: Claim[] = [];
 
   if (!plan) return out;
 
-  // Work has a two-resource bootstrap: the previous plan could not select
-  // work without the time slot, but once this pass grants that slot the driver
-  // will immediately select workForFaction. Claim its RAM in the SAME pass or
-  // execution observes a slot grant with no matching dodge grant.
   const working = plan.action.type === "workForFaction" ? plan.action.faction : undefined;
   const wanted = working ?? nextWorkFaction(ctx.state);
   const routePackage =
@@ -1410,37 +1366,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
   const routeInstallRequired = ctx.state.topics.progression?.plan?.routeInstallRequired === true;
   const installDrain = routeInstallRequired && ctx.state.topics.progression?.plan?.installWanted === true;
   const installPackage = routePackage && routeInstallRequired && !installDrain;
-  // Player time and the dodge that STARTS that work are one atomic action.
-  // Giving the time half route priority while leaving the RAM half tied with
-  // ordinary probes lets another feature win RAM forever: factions owns the
-  // slot, but cannot switch to the faction it planned. Keep both resources at
-  // the same policy band for a route-critical package.
-  const workRamPriority = installPackage
-    ? PRIORITY["factions:install-work"]
-    : routePackage
-    ? PRIORITY["factions:route-work"]
-    : PRIORITY["probe:detail"];
-
-  const methods = factionMethods(plan.action.type);
-  if (methods.length > 0) {
-    out.push(actionRamClaim(
-      ctx,
-      "factions",
-      factionClaimId(plan.action.type),
-      methods,
-      plan.action.type === "workForFaction" ? workRamPriority : PRIORITY["probe:detail"],
-    ));
-  }
-  const legacyReason = (plan.action as typeof plan.action & { reason?: string }).reason;
-  if (plan.action.type === "idle" && (plan.action.awaitingWorkSlot || legacyReason === "slot") && wanted) {
-    out.push(actionRamClaim(
-      ctx,
-      "factions",
-      factionClaimId("workForFaction"),
-      factionMethods("workForFaction"),
-      workRamPriority,
-    ));
-  }
 
   const owned = new Set(topic?.ownedAugs ?? []);
   const objectiveAug = plan.objective?.augmentations.find((name) => !owned.has(name));
@@ -1475,44 +1400,27 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
   const endingByDestroy = ctx.state.topics.progression?.plan?.endingByDestroy === true;
   const endgame =
     plan.recommendInstall !== undefined || plan.drainCeiling !== undefined || plan.action.type === "purchaseAugmentation";
-  if (endgame && !endingByDestroy && plan.nextBuy && !graft && plan.action.type !== "donate") {
-    const probed = (topic?.offers ?? []).find((offer) => offer.name === plan.nextBuy!.name);
+  const drainObligation = plan.drainCosts?.total ?? 0;
+  const hasDrainObligation = drainObligation > 0;
+  if (endgame && !endingByDestroy && !graft && (hasDrainObligation || (plan.nextBuy && plan.action.type !== "donate"))) {
+    const probed = plan.nextBuy
+      ? (topic?.offers ?? []).find((offer) => offer.name === plan.nextBuy!.name)
+      : undefined;
     out.push({
       by: "factions",
       id: "aug-fund",
       resource: "money",
-      amount: Math.max(plan.nextBuy.price, probed?.price ?? 0),
+      amount: hasDrainObligation
+        ? Math.min(drainObligation, ctx.state.topics.player?.money ?? 0)
+        : Math.max(plan.nextBuy?.price ?? 0, probed?.price ?? 0),
       priority: PRIORITY["factions:aug-fund"],
       mode: "reserve",
       shape: "step",
       pricing: "hard",
       value: { state: "unknown", reason: "hard-priority atomic claim" },
     });
-    // The decision is made at tick time, AFTER this pass's arbitration — so a
-    // purchase decided this pass would find no RAM grant and burn a whole
-    // 30-second cadence waiting for the next one (measured: one dead pass per
-    // NeuroFlux level on factions-install). Same anticipation contract as the
-    // workForFaction claim above: whenever the plan is funding a buy, reserve
-    // the dodge RAM that buy will need in the same pass.
-    if (plan.action.type !== "purchaseAugmentation") {
-      out.push(actionRamClaim(
-        ctx,
-        "factions",
-        factionClaimId("purchaseAugmentation"),
-        factionMethods("purchaseAugmentation"),
-      ));
-    }
   }
   if (graft) {
-    if (plan.action.type !== "graft") {
-      out.push(actionRamClaim(ctx, "factions", factionClaimId("graft"), factionMethods("graft")));
-    }
-    // Grafting is only started in New Tokyo. Reserve the travel call before
-    // the planner emits `travelTo`; otherwise the first travel decision cannot
-    // obtain a RAM lease until the following slow faction tick.
-    if (ctx.state.topics.player?.city !== "New Tokyo" && plan.action.type !== "travelTo") {
-      out.push(actionRamClaim(ctx, "factions", factionClaimId("travelTo"), factionMethods("travelTo")));
-    }
     out.push(
       {
         by: "factions",
@@ -1563,7 +1471,7 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
     });
   }
 
-  if (plan.action.type === "donate" && plan.action.amount && plan.action.amount > 0 && !endingByDestroy) {
+  if (plan.action.type === "donate" && plan.action.amount && plan.action.amount > 0 && !endingByDestroy && plan.drainCosts === undefined) {
     out.push({
       by: "factions",
       id: "donation-fund",
@@ -1639,23 +1547,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
   }
 
   return out;
-}
-
-function factionClaimId(type: string): string {
-  return `action:${type}`;
-}
-
-function factionMethods(type: string): readonly string[] {
-  switch (type) {
-    case "joinFactions": return ["singularity.joinFaction"];
-    case "workForFaction": return ["singularity.workForFaction"];
-    case "stopWork": return ["singularity.stopAction"];
-    case "travelTo": return ["singularity.travelToCity"];
-    case "donate": return ["singularity.getFactionRep", "singularity.donateToFaction"];
-    case "purchaseAugmentation": return ["singularity.purchaseAugmentation"];
-    case "graft": return ["grafting.graftAugmentation", "singularity.getCurrentWork"];
-    default: return [];
-  }
 }
 
 export const factionsModule: FeatureModule = {

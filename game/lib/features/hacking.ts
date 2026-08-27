@@ -4,7 +4,7 @@ import { skillFromExp } from "../../../shared/formulas.ts";
 import { roundSigFigs } from "../../../shared/format.ts";
 import { formatMoney } from "../../../shared/format.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
-import { PRIORITY } from "../../../shared/strategy/arbiter.ts";
+import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
 import {
   advanceInfrastructureFrontier,
   deferPrerequisitePurchase,
@@ -42,7 +42,7 @@ import { capitalIndependentScore, farmExperienceRate, farmIncomeRate } from "../
 import { installHorizonSec, nodeHorizonSec, usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
 import { growingProgressSecondsPerRelativeRate, linearSecondsPerRelativeRate } from "../../../shared/strategy/progression/marginal.ts";
 import type { MeasuredMarginal } from "../../../shared/strategy/progression/marginal.ts";
-import { hackMarginalValue, hackRungValue, relativeGainSaving, type HackMarginalInput } from "../../../shared/strategy/share.ts";
+import { hackRungValue, relativeGainSaving, type HackMarginalInput } from "../../../shared/strategy/share.ts";
 import type { ChargePricingInput } from "../../../shared/strategy/stanek/charge.ts";
 import type { FarmPipeline, FarmRollup } from "../../../shared/telemetry/topics/hacking.ts";
 import {
@@ -61,8 +61,6 @@ import { takeTickLateness } from "../tick-health.ts";
 import { signalWake } from "../wake.ts";
 import { workerGlobals } from "../worker-shared.ts";
 import { isScriptDeath } from "../errors.ts";
-import { actionRamClaim, featureDodge } from "./dodge.ts";
-import type { FeatureClaim } from "./claims.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
 
 /** The hacking driver: one HWGW dispatcher pass per heartbeat or worker wake.
@@ -130,7 +128,6 @@ export function resetHackingState(): void {
   lastPumpAt = 0;
   wakesThisFrame = 0;
   wakePumps = 0;
-  plannerPasses = 0;
   routeHackingSkillGoal = undefined;
   latestShareValue = undefined;
   latestChargeValue = undefined;
@@ -182,12 +179,6 @@ let weakenWindowPumps = 0;
  * counter has been published since the wake path was added and rendered
  * nowhere; a per-second figure is the form that is actually readable. */
 let lastWakePumps = 0;
-/** Monotonic count of pumps that actually ran a `planFarm`. `dispatch.pooling`
- * is recomputed exactly once per pump, so this identifies the pass a pooling
- * reading belongs to — letting the broker ignore the several arena builds that
- * sample one unchanged value within a tick. Starts at 1 after the first pump;
- * 0 means no pass has run yet. */
-let plannerPasses = 0;
 /** Latest open hacking-skill outcome from the needs board. Wake-driven pumps
  * run outside a feature context, so they reuse the last scheduled tick's
  * pure-board decision. */
@@ -214,7 +205,7 @@ function chargeValue(game: GameState): ChargePricingInput | undefined {
 function shareValue(game: GameState, caps: DriverContext["caps"]): ShareValue | undefined {
   // Share buys faction-rep rate, and every point of faction rep (and the
   // favor it becomes) is erased when the node ends by destroy. Near that
-  // ending the surplus RAM's alternative uses (farm ops, dodges, Go) are the
+  // ending the surplus RAM's alternative uses (farm ops, residents, Go) are the
   // only ones that still exist — measured failure: 99.9% of a 9.13PB fleet
   // soaked into share for an objective nobody was even working, starving the
   // exp climb that WAS the node's critical path.
@@ -714,10 +705,10 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
 
 /** Per-host retry backoff for failed backdoor attempts. The predecessor was a
  * permanent one-attempt latch, and a transient failure (a connect chain broken
- * by a concurrent terminal user, a stub killed mid-flight) silently cost the
- * whole faction join for the rest of the BitNode. Exponential 30s -> 10min:
+ * by a concurrent terminal user, a resident recycled mid-flight) silently cost
+ * the whole faction join for the rest of the BitNode. Exponential 30s -> 10min:
  * cheap enough to recover from a transient, slow enough that a structurally
- * impossible host does not relaunch a stub every pass. Cleared on reset. */
+ * impossible host does not retry the walk every pass. Cleared on reset. */
 const backdoorBackoff = new Map<string, { attempts: number; nextAt: number }>();
 const BACKDOOR_BACKOFF_BASE_MS = 30_000;
 const BACKDOOR_BACKOFF_CAP_MS = 600_000;
@@ -731,11 +722,6 @@ function recordBackdoorFailure(host: string, now: number): void {
   const delay = Math.min(BACKDOOR_BACKOFF_CAP_MS, BACKDOOR_BACKOFF_BASE_MS * 2 ** (attempts - 1));
   backdoorBackoff.set(host, { attempts, nextAt: now + delay });
 }
-/** ns functions each dodged closure calls. PRICED at runtime rather than
- * guessed: a constant budget has to be at least the sum of the call costs, and
- * getting that wrong kills the stub outright (see dodge.ts#priceCalls). */
-const BACKDOOR_CALLS = ["scan", "singularity.connect", "singularity.installBackdoor"] as const;
-const PORT_OPENER_CALLS = ["ls", "singularity.purchaseTor", "singularity.purchaseProgram"] as const;
 let backdoorInFlight = false;
 let openerInFlight = false;
 let lastServerAccessAt = 0;
@@ -744,10 +730,6 @@ let requestedProgram: ProgramOption | undefined;
  * beside the program because `needs()` posts the need and only the access plan
  * knows what the file unlocks. */
 let requestedProgramValueSec: number | undefined;
-const HOME_RAM_METHODS = ["singularity.upgradeHomeRam"] as const;
-const HOME_CORE_METHODS = ["singularity.upgradeHomeCores"] as const;
-const CLOUD_BUY_METHODS = ["cloud.purchaseServer"] as const;
-const CLOUD_UPGRADE_METHODS = ["cloud.upgradeServer"] as const;
 let infrastructureInFlight = false;
 let lastInfrastructureResult: { action: string; ok: boolean; detail: string; at: number } | undefined;
 
@@ -892,11 +874,6 @@ const MARGINALS_UNPUBLISHED: MeasuredMarginal = {
   state: "unknown",
   reason: "progression RAM marginals have not been published",
 };
-
-function productiveRamMarginal(ctx: RamInvestmentContext): MeasuredMarginal {
-  const inputs = productiveRamInputs(ctx);
-  return inputs ? hackMarginalValue(inputs) : MARGINALS_UNPUBLISHED;
-}
 
 /** BN-seconds one exact rung saves — the hyperbolic whole-purchase valuation
  * (shared/strategy/share.ts#hackRungValue), not the per-GB tangent line, so a
@@ -1072,17 +1049,6 @@ function ramInvestment(ctx: RamInvestmentContext, now = Date.now()): RamInvestme
 // curve keyed on that id could never be reached. The rung's economics travel
 // on the step's own `value` instead.
 
-function infrastructureMethods(kind: ScoredInfrastructure["kind"]): readonly string[] {
-  if (kind === "homeRam") return HOME_RAM_METHODS;
-  if (kind === "homeCore") return HOME_CORE_METHODS;
-  if (kind === "buyServer") return CLOUD_BUY_METHODS;
-  return CLOUD_UPGRADE_METHODS;
-}
-
-function infrastructureClaimId(kind: ScoredInfrastructure["kind"]): string {
-  return `action:infrastructure:${kind}`;
-}
-
 /** The grant behind ONE of this feature's money claims. `ctx.grants.money`
  * sums every money grant for the feature, and hacking posts two independent
  * claims (port opener, infrastructure) — gating each purchase on the sum lets
@@ -1124,35 +1090,29 @@ async function executeInfrastructure(ctx: DriverContext, investment: RamInvestme
   const at = Date.now();
   const grantedCost = decision.cost;
   try {
-    const outcome = await featureDodge(
-      ctx,
-      "hacking",
-      infrastructureClaimId(decision.kind),
-      infrastructureMethods(decision.kind),
-      (stubNs: NS) => {
-        if (decision.kind === "homeRam") {
-          let bought = 0;
-          for (; bought < steps; bought++) {
-            if (!stubNs["singularity"]["upgradeHomeRam"]()) break;
-          }
-          return bought;
-        }
-        if (decision.kind === "homeCore") return stubNs["singularity"]["upgradeHomeCores"]();
-        if (decision.kind === "buyServer") {
-          return stubNs["cloud"]["purchaseServer"]("pserv", decision.targetRam!) !== "";
-        }
-        return stubNs["cloud"]["upgradeServer"](decision.host!, decision.targetRam!);
-      },
-    );
-    const ok = outcome.ok && (
-      decision.kind === "homeRam" ? outcome.value === steps : Boolean(outcome.value)
-    );
+    // Only homeRam is a LADDER: `steps` rungs, each a separate call, and a
+    // partial climb still counts as a refusal because the grant funded all of
+    // them. Every other kind is one call whose boolean is the whole answer.
+    let ok: boolean;
+    if (decision.kind === "homeRam") {
+      let bought = 0;
+      for (; bought < steps; bought++) {
+        if (!await ctx.nsp("singularity.upgradeHomeRam")) break;
+      }
+      ok = bought === steps;
+    } else if (decision.kind === "homeCore") {
+      ok = await ctx.nsp("singularity.upgradeHomeCores");
+    } else if (decision.kind === "buyServer") {
+      ok = await ctx.nsp("cloud.purchaseServer", "pserv", decision.targetRam!) !== "";
+    } else {
+      ok = await ctx.nsp("cloud.upgradeServer", decision.host!, decision.targetRam!);
+    }
     lastInfrastructureResult = {
       action: decision.kind,
       ok,
       detail: ok
         ? "bought " + steps + " " + decision.kind + " rung(s) for " + formatMoney(grantedCost)
-        : outcome.ok ? "purchase refused" : outcome.reason,
+        : "purchase refused",
       at,
     };
     const publishedPlan = ctx.state.topics.fleet?.infrastructurePlan;
@@ -1225,76 +1185,50 @@ async function serveServerAccessNeeds(ctx: DriverContext): Promise<void> {
   if (backdoorInFlight || backdoorRetryBlocked(host, now)) return;
   backdoorInFlight = true;
   try {
-    const outcome = await featureDodge(ctx, "hacking", "action:backdoor", BACKDOOR_CALLS, async (stubNs: NS) => {
-      const parents = new Map<string, string | undefined>([["home", undefined]]);
-      const queue = ["home"];
-      for (let index = 0; index < queue.length && !parents.has(host); index++) {
-        const current = queue[index]!;
-        for (const neighbour of stubNs.scan(current)) {
-          if (parents.has(neighbour)) continue;
-          parents.set(neighbour, current);
-          queue.push(neighbour);
-        }
+    // The LONG proxy, not the general one: `installBackdoor` awaits for
+    // hackingTime/4 — minutes on a real target — and Bitburner allows one
+    // Netscript call per script at a time, so running it on `nsp` would hold
+    // every other read in the automation behind this one errand. The walk that
+    // precedes it rides the same resident because it is one sequence: the
+    // terminal must still be sitting on `host` when the install begins.
+    const parents = new Map<string, string | undefined>([["home", undefined]]);
+    const queue = ["home"];
+    for (let index = 0; index < queue.length && !parents.has(host); index++) {
+      const current = queue[index]!;
+      for (const neighbour of await ctx.nspLong("scan", current)) {
+        if (parents.has(neighbour)) continue;
+        parents.set(neighbour, current);
+        queue.push(neighbour);
       }
-      if (!parents.has(host)) throw new Error(`no network route from home to ${host}`);
-
-      const route: string[] = [];
-      for (let current: string | undefined = host; current && current !== "home"; current = parents.get(current)) {
-        route.push(current);
-      }
-      if (!stubNs["singularity"]["connect"]("home" as never)) {
-        throw new Error("could not return terminal connection to home");
-      }
-      for (const hop of route.reverse()) {
-        if (!stubNs["singularity"]["connect"](hop as never)) {
-          throw new Error(`network route to ${host} failed at ${hop}`);
-        }
-      }
-      await stubNs["singularity"]["installBackdoor"]();
-    });
-    if (outcome.ok) {
-      backdoorBackoff.delete(host);
-      server.backdoorInstalled = true;
-    } else if (!outcome.queued) {
-      // The stub launched and failed (broken connect chain, thrown install).
-      // Backed off per host so it does not relaunch every pass — and REPORTED
-      // through the probe-failure channel: a silent latch here cost a whole
-      // join (the error was invisible for two hours of run). A QUEUED dodge is
-      // not an attempt: the broker will admit it when RAM frees up.
-      recordBackdoorFailure(host, now);
-      recordProbeFailure(ctx.state, `backdoor:${host}`, new Error(outcome.reason));
     }
+    if (!parents.has(host)) throw new Error(`no network route from home to ${host}`);
+
+    const route: string[] = [];
+    for (let current: string | undefined = host; current && current !== "home"; current = parents.get(current)) {
+      route.push(current);
+    }
+    if (!await ctx.nspLong("singularity.connect", "home" as never)) {
+      throw new Error("could not return terminal connection to home");
+    }
+    for (const hop of route.reverse()) {
+      if (!await ctx.nspLong("singularity.connect", hop as never)) {
+        throw new Error(`network route to ${host} failed at ${hop}`);
+      }
+    }
+    await ctx.nspLong("singularity.installBackdoor");
+    backdoorBackoff.delete(host);
+    server.backdoorInstalled = true;
   } catch (error) {
     if (isScriptDeath(error)) throw error;
+    // A broken connect chain or a thrown install. Backed off per host so it
+    // does not relaunch every pass — and REPORTED through the probe-failure
+    // channel: a silent latch here cost a whole join once (the error was
+    // invisible for two hours of run).
     recordBackdoorFailure(host, now);
     recordProbeFailure(ctx.state, `backdoor:${host}`, error);
   } finally {
     backdoorInFlight = false;
   }
-}
-
-/** RAM priority for the pending backdoor dodge. Baseline probe:detail; the
- * `hacking:critical-access` band (111, above the broker's farm-preemption
- * threshold) is granted only when BOTH hold:
- *  - some poster marked the need BLOCKING (it is the last thing between a
- *    faction and an invite), and
- *  - the need's MEASURED value rate (BN-seconds saved per second of install)
- *    strictly beats the farm value of the RAM the dodge would displace.
- * Unmeasured value never escalates: evicting a worker desyncs a real batch,
- * and a fallback-ranked guess is not evidence that trade is right. */
-function backdoorClaimPriority(ctx: ClaimContext, pending: ServerAccessAction): number {
-  const base = PRIORITY["probe:detail"];
-  const blocking = ctx.board.open.some(
-    (need) => need.kind === "backdoor" && need.subject === pending.host && need.urgency === "blocking",
-  );
-  if (!blocking) return base;
-  const valueSec = needValueSeconds(ctx.board, ["backdoor"])[`backdoor:${pending.host}`];
-  if (valueSec === undefined) return base;
-  const costSec = Math.max(1, backdoorActionSec(ctx.state, pending.server));
-  const displaced = productiveRamMarginal(ctx);
-  if (displaced.state !== "measured") return base;
-  const displacedRate = displaced.value * ctx.ramPrice(BACKDOOR_CALLS);
-  return valueSec / costSec > displacedRate ? PRIORITY["hacking:critical-access"] : base;
 }
 
 export type ServerAccessAction = {
@@ -1700,37 +1634,27 @@ async function buyPortOpener(ctx: DriverContext, portsRequired: number, claimId?
   if (!program || openerInFlight || moneyGrantFor(ctx, claimId ?? `port-opener:${program.name}`) < requiredGrant) return false;
   openerInFlight = true;
   try {
-    const outcome = await featureDodge(
-      ctx,
-      "hacking",
-      "action:port-opener",
-      PORT_OPENER_CALLS,
-      (stubNs: NS) => {
-        const files = new Set(stubNs["ls"]("home", ".exe"));
-        const owned = PORT_OPENERS.filter((program) => files.has(program));
-        const missing = PORT_OPENERS.filter((program) => !files.has(program));
-        if (owned.length >= portsRequired || missing.length === 0) return owned.length;
-        // TOR first; it is a precondition and idempotent.
-        // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L401-L442
-        if (!stubNs["singularity"]["purchaseTor"]()) return owned.length;
-        let acquired = owned.length;
-        for (const program of missing.slice(0, portsRequired - owned.length)) {
-          if (!stubNs["singularity"]["purchaseProgram"](program as never)) break;
-          acquired++;
-        }
-        return acquired;
-      },
-    );
-    if (!outcome.ok) return false;
-    const before = ctx.state.topics.fleet?.portOpeners ?? 0;
-    // `hasTor` rides the PROGRAM purchase, not the call: the stub returns early
-    // without touching purchaseTor when the openers are already owned, and
-    // returns the same count when purchaseTor itself refuses. A dark web
-    // program that actually landed is the only proof the router exists.
-    if (outcome.value > before) {
-      merge(ctx.state, "fleet", { portOpeners: outcome.value, hasTor: true, openerPlan: null });
+    const files = new Set(await ctx.nsp("ls", "home", ".exe"));
+    const owned = PORT_OPENERS.filter((name) => files.has(name));
+    const missing = PORT_OPENERS.filter((name) => !files.has(name));
+    let acquired = owned.length;
+    // TOR first; it is a precondition and idempotent.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L401-L442
+    if (owned.length < portsRequired && missing.length > 0 && await ctx.nsp("singularity.purchaseTor")) {
+      for (const name of missing.slice(0, portsRequired - owned.length)) {
+        if (!await ctx.nsp("singularity.purchaseProgram", name as never)) break;
+        acquired++;
+      }
     }
-    return outcome.value > before;
+    const before = ctx.state.topics.fleet?.portOpeners ?? 0;
+    // `hasTor` rides the PROGRAM purchase, not the call: purchaseTor is never
+    // reached when the openers are already owned, and the count is unchanged
+    // when it refuses. A dark web program that actually landed is the only
+    // proof the router exists.
+    if (acquired > before) {
+      merge(ctx.state, "fleet", { portOpeners: acquired, hasTor: true, openerPlan: null });
+    }
+    return acquired > before;
   } catch (error) {
     if (isScriptDeath(error)) throw error;
     // No singularity access — the crackers must come from elsewhere.
@@ -1772,8 +1696,7 @@ async function runPump(
   // market matters the farm's best target is not the richest server but the
   // one whose price movement is worth the most. See spec/targeting.md.
   // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/PlayerInfluencing.ts#L17-L60
-  const view = buildView(
-    ns,
+  const view = await buildView(
     driver,
     servers,
     player,
@@ -1827,7 +1750,6 @@ async function runPump(
   pumpMsSum += elapsed;
   pumpCount++;
   lastPumpAt = performance.now();
-  plannerPasses++;
 
   const target = result.directive.farm?.host ?? "";
   const current = gameGlobal.farmTarget ?? "";
@@ -1845,13 +1767,6 @@ async function runPump(
  * see the target provably at min security, so recomputed durations and
  * isPrepped are exact. Throttled: never within WAKE_MIN_MS of any pump, at
  * most WAKE_MAX_PER_FRAME per frame. */
-/** Which planner pass the current `dispatch.pooling` value came from. Paired
- * with `RamBroker.observePooling` so a value sampled several times inside one
- * tick counts once. */
-export function plannerPassId(): number {
-  return plannerPasses;
-}
-
 export async function pumpOnWake(
   ns: NS,
   game: GameState,
@@ -1925,7 +1840,7 @@ export const hacking: FeatureDriver = {
     // maintenance.
     const globals = workerGlobals();
     if (globals.charge_context_pending) {
-      set(game, "player", ns.getPlayer());
+      set(game, "player", await ctx.nsp("getPlayer"));
       globals.charge_context_pending = false;
     }
     wakesThisFrame = 0;
@@ -1944,10 +1859,10 @@ export const hacking: FeatureDriver = {
       routeHackingSkillGoal = Math.max(routeHackingSkillGoal ?? 0, accessSkillGoal);
     }
 
-    // The reserve is computed per pass, not constant: it grows to cover the
-    // largest dodge step any unlocked feature declares, so an expensive
-    // singularity probe stays affordable instead of being crowded out by the
-    // dispatcher taking every free gigabyte.
+    // The reserve is computed per pass, not constant: it tracks the broker
+    // arena, which grows under actual starvation, so an expensive singularity
+    // read stays affordable instead of being crowded out by the dispatcher
+    // taking every free gigabyte.
     //
     // The horizon is the endgame route's expected remaining run time: a
     // target that would only pay off after the run is expected to end is not
@@ -2039,9 +1954,9 @@ export const hacking: FeatureDriver = {
       }
     }
 
-    // Fire-and-forget for the same reason as the backdoors below: the
-    // purchase dodge serializes on the global dodge mutex, and the dispatcher
-    // must not await a multi-second dodge on its 200 ms cadence.
+    // Fire-and-forget for the same reason as the backdoors below: proxy calls
+    // serialise on their resident, and the dispatcher must not await a
+    // multi-second purchase run on its 200 ms cadence.
     // `infrastructureInFlight` keeps it single-flight.
     const investment = ramInvestment(ctx);
     const openerPlan = game.topics.fleet?.openerPlan ?? undefined;
@@ -2076,7 +1991,7 @@ export const hacking: FeatureDriver = {
       });
     }
 
-    // Serve the board LAST, so a backdoor's dodge can never delay a
+    // Serve the board LAST, so a backdoor can never delay a
     // dispatcher pass. Fire-and-forget: the dispatcher must not await a
     // multi-second backdoor on its 200 ms cadence.
     if (ctx.board.byKind.backdoor.length > 0 || ctx.board.byKind.root.length > 0) {
@@ -2100,29 +2015,16 @@ export const hackingModule: FeatureModule = {
     delete state.topics.fleet;
   },
   claims: (ctx) => {
-    const claims: FeatureClaim[] = [];
+    const claims: Claim[] = [];
     const plan = serverAccessPlan(ctx);
     requestedProgram = plan?.writeProgram;
     requestedProgramValueSec = plan?.writeProgramValueSec;
-    // The concurrent backdoor needs its RAM claim too, or falling through to
-    // it in the driver would only ever find the dodge unfunded.
-    const backdoorTarget = plan?.primary.action === "backdoor" ? plan.primary : plan?.concurrentBackdoor;
-    if (backdoorTarget) {
-      claims.push(actionRamClaim(
-        ctx,
-        "hacking",
-        "action:backdoor",
-        BACKDOOR_CALLS,
-        backdoorClaimPriority(ctx, backdoorTarget),
-      ));
-    }
     if (plan?.primary.action === "port-opener" && !plan.writeProgram) {
       const pending = plan.primary;
       const program = programForPortNeed(ctx.state, pending.server.numOpenPortsRequired ?? 0);
       if (program) {
         const purchaseCost = portOpenerPurchaseCost(ctx.state, pending.server.numOpenPortsRequired ?? 0);
         claims.push(
-          actionRamClaim(ctx, "hacking", "action:port-opener", PORT_OPENER_CALLS),
           {
             by: "hacking",
             id: `port-opener:${program.name}`,
@@ -2145,7 +2047,6 @@ export const hackingModule: FeatureModule = {
     if (openerPlan && plan?.primary.action !== "port-opener") {
       const value = economicOpenerValue(ctx, openerPlan);
       claims.push(
-        actionRamClaim(ctx, "hacking", "action:port-opener", PORT_OPENER_CALLS),
         {
           by: "hacking",
           id: `opener-investment:${openerPlan.program}`,
@@ -2163,7 +2064,6 @@ export const hackingModule: FeatureModule = {
     }
     const investment = ramInvestment(ctx, ctx.now);
     if (investment) {
-      const claimId = infrastructureClaimId(investment.option.kind);
       const allocation = investment.valuePerDollar.state === "measured"
         ? {
             shape: "step" as const,
@@ -2199,12 +2099,6 @@ export const hackingModule: FeatureModule = {
             value: { state: "measured" as const, value: Infinity },
           };
       claims.push(
-        actionRamClaim(
-          ctx,
-          "hacking",
-          claimId,
-          infrastructureMethods(investment.option.kind),
-        ),
         {
           by: "hacking",
           id: "infrastructure:ram",

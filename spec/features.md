@@ -76,55 +76,51 @@ states are distinct on purpose:
 ## Probing
 
 The read side is `game/lib/probes/`, scheduled by `game/lib/probe-runner.ts`.
-Three cost tiers, because home RAM is the binding constraint — the heap hands
-the dispatcher everything above `HOME_RESERVE_GB`:
+Four tiers, by what a body is allowed to touch:
 
 1. **Local** (`probes/local.ts`) — derived from the sweep snapshot
-   (`ns.getPlayer`, the servers map). No ns call, no dodge, always runs. Karma,
-   skills, joined factions and fleet totals live here, so those panels are
-   never empty regardless of budget.
-2. **Gates** (`probes/gates.ts`) — one dodge, budgeted at `GATE_COST_GB`
-   (1.5 GB), every sweep. Every unlock test the game offers is free or nearly
-   so, and `ns.getResetInfo` at 1 GB fills the whole BitNode tab. Cheapest
-   high-value probe we have — and the only one the *controller* cannot run
-   without, since `Capabilities` is what gates the feature drivers.
-3. **Dodged** (`probes/dodged.ts`) — everything else, split into `core` and
-   detail tiers per feature. The runner prices each with
-   `ns.getFunctionRamCost` (0 GB, and it already folds in the singularity
-   16/4/1 multiplier), packs what fits the current budget into one stub, and
-   hands the rest to the broker queue, which reports `ram.starvation` once one
-   has genuinely waited. A panel that stays empty says why.
+   (`ns.getPlayer`, the servers map). No ns call at all, so it always runs.
+   Karma, skills, joined factions and fleet totals live here, so those panels
+   are never empty.
+2. **Direct** (`probes/direct.ts`) — synchronous reads on `start.js`'s own
+   `ns`. The runner re-prices every declared method against the live API each
+   pass and refuses the call if anything stopped being 0 GB, so an API change
+   is reported as drift rather than paid for out of the controller's
+   allocation.
+3. **Gates** (`probes/gates.ts`) — every unlock test the game offers, once per
+   sweep. All of them are free or nearly so, and `ns.getResetInfo` at 1 GB
+   fills the whole BitNode tab. Cheapest high-value probe we have — and the
+   only one the *controller* cannot run without, since `Capabilities` is what
+   gates the feature drivers.
+4. **Priced** (`probes/priced.ts`) — everything with a price, split into
+   `core` and detail tiers per feature. The body awaits `ctx.nsp(path, ...)`,
+   which runs the member on the ns resident (`spec/ns-proxy.md`); nothing here
+   is billed to `start.js`.
 
-A dodged probe comes in two shapes. A **single-step** probe reads everything in
-one stub. A **stepped** probe (`SteppedProbe`) runs one dodge per step, so its
-launch price is the largest *step* rather than the sum of its methods — the
-difference between a 33.5 GB augmentation sweep and five ~5 GB ones. Steps
-accumulate into a shared bag and `finish(acc)` turns it into emissions;
-`finish` **must** tolerate a partial accumulator, because a later step being
-unaffordable does not invalidate what the earlier ones learned.
-
-Home RAM is no longer the ceiling it was. Dodges are placed across the whole
-rooted fleet (`spec/dodging.md`), and the home reserve grows to cover the
-largest step any unlocked feature declares (`FeatureModule.peakStepGb` →
-`shared/ram/reserve.ts`). What that cannot fix is one *indivisible* expensive
-call: a single `SingularityFn3` at SF4 level 1 costs 80 GB, and no splitting
-helps, so the feature reports an explicit blocker instead of spinning.
+There is no `methods` table and no budget arithmetic anywhere in this
+subsystem any more. The resident prices each member the first time a body
+calls it, memoises it, and respawns into a larger allocation when its budget
+fills — so the call *is* the price and the two cannot drift apart. That also
+retired `SteppedProbe`: a probe body is now plain sequential code. What none of
+this fixes is one *indivisible* expensive call: a single
+`SingularityFn3` at SF4 level 1 costs 80 GB, which simply raises the floor the
+resident's placer has to satisfy before that call runs.
 
 Rules for probe bodies:
 
-- **Bracket notation on the stub's own ns** (`stubNs["gang"]["inGang"]()`), or
-  the static parser charges `start.js` and the dodge saves nothing.
+- **Name the member as a string path**, never as a property. Bitburner charges
+  by member NAME across the whole bundle regardless of the receiver, so
+  `ns["gang"]["inGang"]` billed `start.js` exactly as `ns.gang.inGang`
+  would; only the string escapes the static parser. The path is typed, so a
+  wrong one is a compile error rather than a probe that silently never runs.
 - **Guard every call that can throw.** `ns.gang.*`, `ns.bladeburner.*`,
   `ns.grafting.*`, `ns.stock.getPosition` and `ns.getBitNodeMultipliers` throw
   rather than returning empty when unavailable. The runner isolates each probe
-  from its batch-mates; a probe must isolate any sub-API gated differently
-  from its own `requires`.
+  from its neighbours; a probe must isolate any sub-API gated differently from
+  its own `requires`.
 - **Cadences are plain literals** — house style only, since probes are now
   compiled into every build and nothing tree-shakes. Do not reintroduce a test
   for it.
-- **`methods` must name real ns functions.** A typo makes
-  `getFunctionRamCost` throw, the runner guess a price, and the probe quietly
-  never run. The test checks every name against the type definitions.
 
 ## Driving
 
@@ -139,7 +135,6 @@ interface FeatureModule {
   refresh?(ctx: NeedContext): void;  // evaluate store → store, before any act
   claims?(ctx: ClaimContext): Claim[];  // PURE — bids for contended resources
   needs?(ctx: NeedContext): Need[];     // PURE — outcomes wanted from others
-  peakStepGb?: number;               // largest dodge step, feeds the reserve
 }
 
 interface FeatureDriver {
@@ -198,9 +193,12 @@ Two mechanisms, deliberately distinct, both pure and both rendered:
   and decides for itself whether that is Mugs or Homicides. `gang` later posts
   `{kind:"karma", target:-54000}` the same way, and the two weights *add*,
   because delivering the outcome once unblocks both.
-- **The arbiter** (`shared/strategy/arbiter.ts`) allocates the three genuinely
-  contended resources: money, the single `Player.currentWork` slot, and dodge
-  RAM. The work slot needs pre-emption rules rather than fairness ones because
+- **The arbiter** (`shared/strategy/arbiter.ts`) allocates the two genuinely
+  contended resources: money and the single `Player.currentWork` slot. RAM used
+  to be a third, because every dodge bought a transient stub that had to be
+  admitted; the ns residents own theirs for the whole run, so there is nothing
+  left to contend. The work slot needs pre-emption rules rather than fairness
+  ones because
   `ns.singularity.workForFaction` silently *cancels* whatever is running — the
   loser is not delayed, its progress is destroyed.
 
@@ -236,7 +234,7 @@ whole scheduling rule, and it is where the capability gate is enforced. Two
 properties matter.
 
 - **`unknown` never ticks** (see [Capabilities](#capabilities)). Acting on an
-  unprobed feature spends a stub launch discovering an API that throws.
+  unprobed feature spends a proxied call discovering an API that throws.
 - **An unlock is not a wait.** When the gate batch reports a feature moving to
   `yes`, the controller deletes its `featureLastRun` entry so it ticks on the
   next pass instead of serving out a cadence it was never eligible for. A
@@ -259,7 +257,7 @@ file (`hacking`, `factions`, `career`, `hacknet`, `stock`, `dnet`, `side`) becau
 they needed more than the common shape; the other seven (`progression`, `gang`,
 `corp`, `bladeburner`, `sleeves`, `go`, `stanek`) share
 `features/remaining.ts`, which is a statement about their SHAPE — build a view,
-call one pure `step*`, execute at most one action per tick in one dodge — not
+call one pure `step*`, execute at most one action per tick — not
 about their size. Any of them moves to its own file the moment it needs more.
 
 The network sweep — scan, reclaim, root, deploy, reap, heap resync — lives in

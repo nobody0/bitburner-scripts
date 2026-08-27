@@ -37,7 +37,7 @@ function mockNs(pending: MockOp[]): { ns: unknown; exitCbs: (() => void)[] } {
       pending.push({ resolve, ...(opts ? { opts } : {}) });
     });
   const ns = {
-    args: [],
+    args: [] as unknown[],
     disableLog: () => undefined,
     atExit: (cb: () => void) => exitCbs.push(cb),
     hack: op,
@@ -63,7 +63,8 @@ async function launchWorker(
   let run!: Promise<void>;
   await handoffLaunch<WorkerLaunch>(
     { kind: "worker", id: WORKER_ID, worker: info },
-    () => {
+    (launchId) => {
+      ((ns as { args: unknown[] }).args).push(launchId);
       run = workerMain(ns as never).then(() => {
         returned?.();
         if (exitOnReturn) for (const cb of exitCbs) cb();

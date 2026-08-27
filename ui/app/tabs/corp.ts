@@ -23,7 +23,7 @@ export const corpTab: Tab = {
 
     // `undefined` and `[]` are different facts here, and one shared
     // empty-message reported them as the same one. `corp.divisions` publishes
-    // only when every step of its probe ran (dodged.ts `finish` gates on
+    // only when every step of its probe ran (priced.ts `finish` gates on
     // `complete`), and a corporation that has no divisions publishes an empty
     // array — so "waiting for the corp.divisions probe" was printed beside a
     // Decision card reading stage `agriculture` / action `expandIndustry` off

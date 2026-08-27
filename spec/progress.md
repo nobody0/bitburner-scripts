@@ -137,9 +137,9 @@ at its largest **step** rather than the sum of its methods, keeping partial
 results; and the home reserve is feature-aware (`shared/ram/reserve.ts`) — base
 plus the largest step any *unlocked* feature declares, clamped to 40% of home,
 reported as a blocker when capped rather than silently starving the feature.
-`spec/dodging.md` carries the placement policy and the three correctness details
-that go with it (the heap lease, `reclaimFleet` on the stub's own host, and the
-exec retry), each pinned by a test.
+The dodger and `SteppedProbe` are both retired now; `spec/ns-proxy.md` carries
+what replaced them, and the placement policy, the heap lease, `reclaimFleet`'s
+per-process hosts and the exec retry live on there.
 
 *Evidence, and the headline result:* a fresh 8 GB BN1 home previously could not
 afford **any** probe — `capabilities` was never emitted and no gated feature

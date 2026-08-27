@@ -47,7 +47,7 @@ export async function main(ns: NS): Promise<void> {
   // A worker can execute thousands of HGW calls over its life; telemetry, not
   // Netscript's per-call log, is the automation's observable record.
   ns.disableLog("ALL");
-  const scriptWorker = captureLaunch<WorkerLaunch>("worker");
+  const scriptWorker = captureLaunch<WorkerLaunch>("worker", ns.args[0]);
   if (!scriptWorker) return;
   const id = scriptWorker.id;
   const g = workerGlobals();

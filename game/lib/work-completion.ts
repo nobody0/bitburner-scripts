@@ -2,7 +2,7 @@
  *
  * `getCurrentWork()` returns the work object's cached `nextCompletion` promise.
  * It resolves on the next completion OR cancellation; callers therefore disarm
- * before replacing work deliberately. Dodge closures and the controller share
+ * before replacing work deliberately. Feature drivers and the controller share
  * one JavaScript realm, so a short-lived probe can attach this listener and
  * exit instead of trying to reconstruct progress from `cyclesWorked`.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Work/Work.ts#L5-L22 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/ScriptEditor/NetscriptDefinitions.d.ts#L1747-L1763 */

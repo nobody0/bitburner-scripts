@@ -108,62 +108,6 @@ describe("career review scheduling", () => {
     expect(sample.at).toBe(30_000);
   });
 
-  test("a resolved crime keeps an observation claim beside a queued action", async () => {
-    resetCareerState();
-    let resolve!: () => void;
-    const nextCompletion = new Promise<void>((done) => { resolve = done; });
-    armWorkCompletion({ type: "CRIME", crimeType: "Heist", nextCompletion });
-    resolve();
-    await Promise.resolve();
-
-    const state = {
-      topics: {
-        player: {
-          money: 1e9,
-          skills: { ...person.skills },
-          mults: {},
-          jobs: {},
-          city: "Sector-12",
-        },
-        career: {
-          karma: 0,
-          numPeopleKilled: 0,
-          skills: { ...person.skills },
-          exp: { ...person.skills },
-          city: "Sector-12",
-          location: "home",
-          entropy: 0,
-          totalPlaytime: 0,
-          jobs: {},
-          companies: {},
-          currentWork: { type: "CRIME", detail: "Heist", cyclesWorked: 3_000 },
-          crimes: [],
-        },
-      },
-      dirty: new Set(),
-      mirrors: {},
-      mirrorDirty: new Set(),
-      probeFailures: {},
-      featureLastRun: {},
-    } as unknown as GameState;
-    const board = postNeeds([need("employment", "ECorp", "wanted")]);
-    const claims = careerModule.claims!({
-      state,
-      board,
-      now: 1,
-      caps: {} as ClaimContext["caps"],
-      activeFeatures: new Set(),
-      horizons: {
-        node: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "test", reason: "test" },
-        install: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "test", reason: "test" },
-      },
-      ramPrice: (methods) => methods.length,
-    });
-
-    expect(claims.map((claim) => claim.id)).toContain("action:apply");
-    expect(claims.map((claim) => claim.id)).toContain("watch:completion");
-    resetCareerState();
-  });
 });
 
 describe("career request queue", () => {
@@ -261,10 +205,9 @@ describe("the slot lock is bounded by the progress it protects", () => {
         node: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
         install: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
       },
-      ramPrice: (methods) => methods.length,
     });
     resetCareerState();
-    return claims.find((claim): claim is Claim => claim.id === "work" && claim.resource !== "ram")!;
+    return claims.find((claim) => claim.id === "work")!;
   }
 
   test("mid-crime it locks, and holdUntil is the moment progress banks", () => {
@@ -459,7 +402,6 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
         node: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
         install: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
       },
-      ramPrice: (methods) => methods.length,
     });
     return claims;
   }
@@ -667,7 +609,6 @@ describe("the work slot is priced in BN-seconds, not banded", () => {
         node: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
         install: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
       },
-      ramPrice: (methods) => methods.length,
     });
     resetCareerState();
     return claims.find((claim) => claim.id === "work" && claim.resource === "time")! as Claim;
