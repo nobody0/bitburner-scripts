@@ -1,0 +1,40 @@
+{
+  "note": [
+    "THE PROOF-OF-PROGRESS LEDGER for the BN15 route, under the same rules as",
+    "bn1.json: every number is the BEST result actually observed on that",
+    "profile, numbers move only in the improving direction from observed runs,",
+    "and provenance is re-pinned in the same commit whenever sim semantics",
+    "change. BN15's completion route is the darknet labyrinth (Daedalus never",
+    "finds the pill here): five charisma-gated lab walks, each reward installed",
+    "(which resets charisma to 1), then the post-pill hacking regrow to the",
+    "node's doubled daemon gate.",
+    "",
+    "HOW TO RE-MEASURE:",
+    "  bun run sim --profile bn15-full --seed 1 --horizon 6h   # screen",
+    "  bun run sim --profile bn15-full --compact               # benchmark, seeds 1-3"
+  ],
+  "provenance": {
+    "simulatorModelVersion": 10,
+    "vendorCommit": "3162fd2590e221eadd0c0fbd46151913f7c4c41c",
+    "recordedAt": "2026-08-27",
+    "recordedFrom": "first BN15 measurements after the charisma route-pricing pass (charisma marginal channel, closed-form ladder climbs, maze-scaled walks, erased-progress install veto, single-city needs)"
+  },
+  "target": {
+    "note": "An optimal BN15 completes in well under eight hours; the ladder itself prices at ~5h of walks plus charisma climbs, and the post-pill regrow to the doubled daemon gate is the tail to beat."
+  },
+  "profiles": {
+    "bn15-full": {
+      "goal": "bn:15 + installs:2",
+      "horizonHours": 24,
+      "reached": false,
+      "labyrinthStagesCleared": 0,
+      "routeEtaHoursAt1Hour": 30.6,
+      "charismaAt1Hour": 278,
+      "what": "Cold BN15 start, 8 GB home, the full vanilla network plus the darknet. The labyrinth is the only Red Pill route.",
+      "note": "NO RUN HAS YET PASSED ~1.1 VIRTUAL HOURS. Two independent blockers, both outside the route layer: the darknet feature never observes a single host in the simulator (controller session present, zero hosts for hours, while its planner burns most of the sim's wall clock), and runs hard-hang with a frozen virtual clock and a hot JS loop (also reproduced on bn1-speedrun seed 2 at rev 5d2fd3ff, so it is not BN15- or dnet-specific). The route layer itself publishes honestly: labyrinth selected, five charisma-gated stages priced in closed form from measured exp rates, maze-scaled walks, 30.6h total dominated by the post-pill regrow stack.",
+      "history": [
+        "2026-08-27 (model 10, rev fa9cfe79, 1-2h screens): labyrinth route selected with honest legs (charisma stage climbs measured via the exp curve; walks maze-scaled, unmeasured). Tian Di Hui joined once city needs were serialized; before that fix the run teleport-flapped between four city needs for an hour and never joined anything or took a job. Charisma 278 at 1.09h when the run froze."
+      ]
+    }
+  }
+}
