@@ -46,6 +46,21 @@
   --series-3: var(--bb-hack);
   --series-4: var(--bb-secondary);
   --series-5: var(--bb-money);
+  /* Dnet jobs are a categorical overlay. Text always repeats the job name, so
+     these colours distinguish routes without becoming the only channel. */
+  --dnet-job-walk: #ffd700;
+  --dnet-job-relaunch-probe: #f5f5f5;
+  --dnet-job-plant: #4c9aff;
+  --dnet-job-inventory: #a0a0a0;
+  --dnet-job-cache: #00b8d9;
+  --dnet-job-pin: #a671d1;
+  --dnet-job-storm: #ff5630;
+  --dnet-job-attempt: #adff2f;
+  --dnet-job-bleed: #ff8b00;
+  --dnet-job-reclaim: #36b37e;
+  --dnet-job-induce: #8777d9;
+  --dnet-job-phish: #ff78cb;
+  --dnet-job-promote: #f4e04d;
   --good: var(--bb-primary);
   /* Two critical tokens, because one cannot serve both jobs. `--critical`
      (#c00) is 3.6:1 on black: ample for a STROKE — the netmap's broken edge, an

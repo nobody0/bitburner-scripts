@@ -502,6 +502,12 @@ canvas.microchart { height: 88px; }
    always our own knowledge contradicting itself, and it is the reason a row that
    looks wrong looks wrong. Drawn whatever the edge filter says. */
 .netmap .edge.broken { stroke: var(--critical); stroke-dasharray: 1 2; opacity: 0.8; }
+.netmap .edge.context { opacity: 0.18; }
+.netmap .edge.focused { opacity: 1; stroke-width: 2; }
+
+/* Operational routes sit above topology and point into their target. */
+.netmap .jobedge { fill: none; stroke: var(--job-color); stroke-width: 2; opacity: 0.9; }
+.netmap .jobarrow { fill: var(--job-color); }
 
 /* Boxes. Border colour follows the in-game map: green when we are in, grey when
    we are not, gold for a stasis link. */
@@ -520,8 +526,12 @@ canvas.microchart { height: 88px; }
 .netmap .node .stasis { fill: var(--series-5); }
 /* Where our residents stand. Solid = alive; hollow = the host dropped it, which
    is the map's own read on where the mutation clock is killing them. */
-.netmap .node .agentdot { fill: var(--good); }
+.netmap .node .agentdot { fill: var(--job-color, var(--good)); }
 .netmap .node .agentdot.dead { fill: none; stroke: var(--critical); stroke-width: 1; }
+.netmap .node .jobtext { fill: var(--job-color, var(--good)); font-size: 8px; }
+.netmap .node .jobtext.dead { fill: var(--critical-text); }
+.netmap .node.neighbour .box { stroke-width: 2; }
+.netmap .node.unrelated { opacity: 0.72; }
 
 .netmap .node text { font-size: 9px; fill: var(--text-secondary); }
 .netmap .node .host { font-size: 10px; fill: var(--text-primary); }
@@ -551,7 +561,7 @@ canvas.microchart { height: 88px; }
 .netmap .node.hit .box { stroke: var(--bb-white); }
 
 /* Level of detail, by zoom. The hostname is never dropped. */
-.zoom-40 .netmap .ramtext, .zoom-40 .netmap .status, .zoom-40 .netmap .meta { display: none; }
+.zoom-40 .netmap .ramtext, .zoom-40 .netmap .status, .zoom-40 .netmap .meta, .zoom-40 .netmap .jobtext { display: none; }
 .zoom-60 .netmap .ramtext { display: none; }
 
 .netlegend { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); margin-top: var(--sp-2); font-size: var(--fs-xs); color: var(--muted); }
@@ -572,6 +582,21 @@ canvas.microchart { height: 88px; }
 .netkey .sw.ram-unknown { background: var(--muted); }
 .netkey .gl { font-family: var(--font-mono); color: var(--bb-secondary); }
 .netkey .gl.agentkey { color: var(--good); }
+.netkey .jobkey { color: var(--job-color); }
+.job-ready { --job-color: var(--good); }
+.job-walk { --job-color: var(--dnet-job-walk); }
+.job-relaunch-probe { --job-color: var(--dnet-job-relaunch-probe); }
+.job-plant { --job-color: var(--dnet-job-plant); }
+.job-inventory { --job-color: var(--dnet-job-inventory); }
+.job-cache { --job-color: var(--dnet-job-cache); }
+.job-pin { --job-color: var(--dnet-job-pin); }
+.job-storm { --job-color: var(--dnet-job-storm); }
+.job-attempt { --job-color: var(--dnet-job-attempt); }
+.job-bleed { --job-color: var(--dnet-job-bleed); }
+.job-reclaim { --job-color: var(--dnet-job-reclaim); }
+.job-induce { --job-color: var(--dnet-job-induce); }
+.job-phish { --job-color: var(--dnet-job-phish); }
+.job-promote { --job-color: var(--dnet-job-promote); }
 /* Edge keys. Same tokens as the map's own strokes, so the two cannot drift. */
 .netkey .ln { width: 14px; height: 0; border-top: 1px solid var(--bb-well-light); }
 .netkey .ln.tree { border-top-color: var(--bb-primary-dark); }

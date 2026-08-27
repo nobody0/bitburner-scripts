@@ -1,3 +1,15 @@
+import type { TaskKind } from "../../strategy/dnet/jobs.ts";
+
+export interface DarknetResidentRam {
+  jobGb: number;
+  proberGb: number;
+  controllerGb: number;
+}
+
+export function dnetRamGb(ram: DarknetResidentRam): number {
+  return ram.jobGb + ram.proberGb + ram.controllerGb;
+}
+
 /** Darknet feature — BN15's theme (new in game v3.0.0). Problem: traverse the
  * darknet graph by depth, spending stasis links and charisma to keep servers
  * authenticated while instability rises. A routing/budget problem with a
@@ -11,7 +23,11 @@ export interface DarknetAgentDigest {
   /** Jobs waiting in this host's queue. */
   pending?: number;
   /** The job the agent has spawned into, by kind, if any. */
-  active?: string;
+  active?: TaskKind;
+  /** Targets of the active job. Empty when no job is running. */
+  targets: string[];
+  /** Exact dnet-owned process allocation on this host. */
+  ram: DarknetResidentRam;
   /** Capacity available to the next job after fixed controller/prober reserves. */
   freeGb?: number;
   /** Jobs finished and failed here since the controller booted. */

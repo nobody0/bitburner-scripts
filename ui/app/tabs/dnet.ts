@@ -19,7 +19,7 @@ import {
   type Status,
 } from "../lib/dom.ts";
 import { html, raw, type Markup } from "../lib/html.ts";
-import { esc, fmtMoney, fmtNum, fmtPct, fmtRam, fmtTime } from "../lib/format.ts";
+import { esc, fmtMoney, fmtNum, fmtPct, fmtRam, fmtRamExact, fmtTime } from "../lib/format.ts";
 import { view } from "../lib/viewstate.ts";
 import type { ProjectedState } from "../project.ts";
 import { codeName } from "../../../shared/strategy/dnet/courier.ts";
@@ -29,7 +29,7 @@ import { reclaimForecast } from "../../../shared/strategy/dnet/farm.ts";
 import { PHISH_CACHE_COOLDOWN_MS, STORM_COOLDOWN_MS } from "../../../shared/strategy/dnet/rates.ts";
 import { LAB_LADDER, isLabyrinth } from "../../../shared/strategy/dnet/rates.ts";
 import { fieldGroup, type ExpiryOpts } from "../../../shared/strategy/dnet/host.ts";
-import type { DarknetKnownHost, DarknetLabWalker, DarknetState } from "../../../shared/telemetry/topics/dnet.ts";
+import { dnetRamGb, type DarknetKnownHost, type DarknetLabWalker, type DarknetState } from "../../../shared/telemetry/topics/dnet.ts";
 import { AUTH_LABEL, factLife, isStale, matches, mapOptions, netLegend, netMap, ramBuckets } from "./dnet-map.ts";
 import { labEtaMs, labExplored, labMaze, labMazeLegend, labPriorFor, walkerEtaMs } from "./dnet-lab.ts";
 import type { Tab } from "./index.ts";
@@ -222,6 +222,30 @@ function solverStatus(modelId: string | undefined): { status: Status; label: Mar
   return { status: "good", label: `<span class="good">implemented</span>` };
 }
 
+function residentRam(agent: NonNullable<DarknetKnownHost["agent"]>): string {
+  const ram = agent.ram;
+  const parts = [
+    `job ${fmtRamExact(ram.jobGb)}`,
+    `probe ${fmtRamExact(ram.proberGb)}`,
+    ...(ram.controllerGb > 0 ? [`controller ${fmtRamExact(ram.controllerGb)}`] : []),
+  ];
+  return `${fmtRamExact(dnetRamGb(ram))} <span class="muted">(${parts.join(" · ")})</span>`;
+}
+
+function residentJob(
+  host: string,
+  agent: NonNullable<DarknetKnownHost["agent"]>,
+  compact = false,
+): string {
+  if (!agent.alive) return `<span class="bad">lost</span>`;
+  if (!agent.active) return `<span class="muted">ready</span>`;
+  const targets = agent.targets;
+  if (targets.length === 0) return esc(agent.active);
+  const names = targets.map((target) => target === host ? "self" : target);
+  const visible = compact && names.length > 1 ? `${names[0]} +${names.length - 1}` : names.join(", ");
+  return `<span title="${esc(`${agent.active}: ${names.join(", ")}`)}">${esc(agent.active)} → ${esc(visible)}</span>`;
+}
+
 function factRows(host: DarknetKnownHost, now: number, expiry: ExpiryOpts): [Markup, Markup][] {
   const rows: [Markup, Markup][] = [];
   for (const key of Object.keys(host.facts)) {
@@ -399,8 +423,9 @@ function detailCard(
     + (host.agent
       ? host.agent.alive
         ? `<p class="good">resident standing here`
-          + `${host.agent.active ? ` — running ${esc(host.agent.active)}` : ""}`
-          + `${host.agent.pending ? `, ${host.agent.pending} queued` : ""}</p>`
+          + ` — ${residentJob(host.hostname, host.agent)}`
+          + `${host.agent.pending ? `, ${host.agent.pending} queued` : ""}`
+          + ` · dnet RAM ${residentRam(host.agent)}</p>`
         : `<p class="bad">resident lost — last beat ${fmtTime(now - host.agent.lastBeatAt)} ago</p>`
       : "")
     + (host.goneAt !== undefined ? `<p class="bad">gone — its identity facts were dropped with it</p>` : "")
@@ -613,6 +638,7 @@ export const dnetTab: Tab = {
     // in the default and drops a selection the digest no longer carries.
     const picked = view("dnet.sel");
     options.selected = effectiveSel(hosts, picked);
+    options.focus = hosts.some((host) => host.hostname === picked) ? picked : "";
     const matched = options.query ? hosts.filter((host) => matches(host, options.query)) : hosts;
 
     // The three probe-only readings. They arrive from the PRICED PROBE and the
@@ -716,6 +742,11 @@ export const dnetTab: Tab = {
         { value: "all", label: "all links" },
         { value: "none", label: "no links", title: "contradictory links are still drawn" },
       ], "tree")
+      + filters("dnet.jobs", [
+        { value: "all", label: "all jobs", title: "show every active resident-to-target route" },
+        { value: "selected", label: "selected job", title: "show only the selected resident's targets" },
+        { value: "none", label: "no jobs", title: "hide job routes without hiding topology" },
+      ], "all")
       + `</div>`
       // Search HIGHLIGHTS rather than removes, the way the in-game search box
       // does: the shape of the net is the point, and filtering it away to seven
@@ -775,6 +806,27 @@ export const dnetTab: Tab = {
         { id: "blocked", label: "blocked", cell: (h) => ramCell(h, "blocked"), sort: (h) => ramValue(h, "blocked") ?? -1 },
         { id: "used", label: "used", cell: (h) => ramCell(h, "used"), sort: (h) => ramValue(h, "used") ?? -1 },
         { id: "unused", label: "unused", cell: (h) => ramCell(h, "unused"), sort: (h) => ramValue(h, "unused") ?? -1 },
+        {
+          id: "resident",
+          label: "resident",
+          cell: (h) => h.agent === undefined
+            ? NONE
+            : `<span class="${h.agent.alive ? "good" : "bad"}">${h.agent.alive ? "live" : "lost"}</span>`,
+          sort: (h) => h.agent === undefined ? 0 : h.agent.alive ? 2 : 1,
+        },
+        {
+          id: "dnetRam",
+          label: "dnet RAM",
+          cell: (h) => h.agent === undefined ? NONE : residentRam(h.agent),
+          sort: (h) => h.agent === undefined ? -1 : dnetRamGb(h.agent.ram),
+        },
+        {
+          id: "job",
+          label: "job → target",
+          left: true,
+          cell: (h) => h.agent === undefined ? NONE : residentJob(h.hostname, h.agent, true),
+          sort: (h) => h.agent?.active ?? "",
+        },
         {
           id: "charisma",
           label: "charisma",

@@ -1,5 +1,6 @@
 import { expiryMs, fieldGroup, type ExpiryOpts, type Staleness } from "../../../shared/strategy/dnet/host.ts";
 import { modelEntry } from "../../../shared/strategy/dnet/models.ts";
+import { TASK_KINDS, type TaskKind } from "../../../shared/strategy/dnet/jobs.ts";
 import {
   isLabyrinth,
   isOnAirGap,
@@ -8,9 +9,9 @@ import {
   MAX_NET_DEPTH as LIMIT,
   NET_WIDTH as WIDTH,
 } from "../../../shared/strategy/dnet/rates.ts";
-import { esc, fmtNum, fmtRam } from "../lib/format.ts";
+import { esc, fmtNum, fmtRam, fmtRamExact } from "../lib/format.ts";
 import { view } from "../lib/viewstate.ts";
-import type { DarknetKnownHost } from "../../../shared/telemetry/topics/dnet.ts";
+import { dnetRamGb, type DarknetKnownHost } from "../../../shared/telemetry/topics/dnet.ts";
 
 /** The darknet, drawn the way the game draws it.
  *
@@ -98,7 +99,7 @@ export interface LayoutOptions {
  * the orthogonal edge routing runs through, and tightening it is what made a
  * dense row unreadable the first time round. */
 export const BOX_W = 116;
-export const BOX_H = 68;
+export const BOX_H = 82;
 const COL_GAP = 29;
 const ROW_GAP = 63;
 /** Left inset. The row labels live in this gutter — at a smaller pad they were
@@ -107,6 +108,26 @@ const PAD_X = 54;
 const PAD = 12;
 export const COL_PITCH = BOX_W + COL_GAP;
 export const ROW_PITCH = BOX_H + ROW_GAP;
+
+const JOB_VISUALS: Readonly<Record<TaskKind, { label: string; className: string }>> = {
+  walk: { label: "walk", className: "job-walk" },
+  relaunchProbe: { label: "repair probe", className: "job-relaunch-probe" },
+  plant: { label: "plant", className: "job-plant" },
+  inventory: { label: "inventory", className: "job-inventory" },
+  cache: { label: "cache", className: "job-cache" },
+  pin: { label: "pin", className: "job-pin" },
+  storm: { label: "storm", className: "job-storm" },
+  attempt: { label: "attempt", className: "job-attempt" },
+  bleed: { label: "bleed", className: "job-bleed" },
+  reclaim: { label: "reclaim", className: "job-reclaim" },
+  induce: { label: "induce", className: "job-induce" },
+  phish: { label: "phish", className: "job-phish" },
+  promote: { label: "promote", className: "job-promote" },
+};
+
+function jobVisual(kind: TaskKind | undefined): { label: string; className: string } {
+  return kind === undefined ? { label: "ready", className: "job-ready" } : JOB_VISUALS[kind];
+}
 
 /** Total width is fixed by the column count, so the viewBox never changes and
  * zoom is two patched attributes rather than a re-layout.
@@ -768,12 +789,19 @@ function titleOf(host: DarknetKnownHost, options: MapOptions): string {
   }
   if (host.requiredCharisma !== undefined) parts.push(`charisma ${fmtNum(host.requiredCharisma, 0)}`);
   if (host.agent) {
+    const visual = jobVisual(host.agent.active);
+    const targets = host.agent.targets;
     parts.push(
       host.agent.alive
-        ? `resident standing here${host.agent.active ? `, running ${host.agent.active}` : ""}${
+        ? `resident standing here${host.agent.active ? `, running ${visual.label}` : ", ready"}${
           host.agent.pending ? `, ${host.agent.pending} queued` : ""
         }`
         : "resident lost",
+    );
+    if (targets.length > 0) parts.push(`targets ${targets.join(", ")}`);
+    const r = host.agent.ram;
+    parts.push(
+      `dnet RAM ${fmtRamExact(dnetRamGb(r))} total, ${fmtRamExact(r.jobGb)} job, ${fmtRamExact(r.proberGb)} prober, ${fmtRamExact(r.controllerGb)} controller`,
     );
   }
   const why = host.agent === undefined ? options.why?.[host.hostname] : undefined;
@@ -834,13 +862,21 @@ function ramBar(host: DarknetKnownHost, x: number, y: number): string {
   );
 }
 
-function nodeMarkup(entry: Placed, options: MapOptions): string {
+interface RenderOptions extends MapOptions {
+  focusNeighbours?: ReadonlySet<string>;
+}
+
+function nodeMarkup(entry: Placed, options: RenderOptions): string {
   const { selected, query } = options;
   const { host, x, y } = entry;
   const classes = ["node", `auth-${host.authState ?? "no-connection"}`];
   if (host.goneAt !== undefined) classes.push("gone");
   if (isStale(host, options.now, options.expiry)) classes.push("stale");
   if (host.hostname === selected) classes.push("sel");
+  if (options.focusNeighbours?.has(host.hostname)) classes.push("neighbour");
+  if (options.focusNeighbours !== undefined
+    && host.hostname !== options.focus
+    && !options.focusNeighbours.has(host.hostname)) classes.push("unrelated");
   if (query) classes.push(matches(host, query) ? "hit" : "dim");
 
   const glyph = FAMILY_GLYPH[modelEntry(host.modelId)?.family ?? "oracle"] ?? "?";
@@ -852,6 +888,13 @@ function nodeMarkup(entry: Placed, options: MapOptions): string {
     : buckets.used === undefined || buckets.unused === undefined
       ? `T/B ${compactRam(buckets.total)}/${compactRam(buckets.blocked)}`
       : `T/B/U/- ${compactRam(buckets.total)}/${compactRam(buckets.blocked)}/${compactRam(buckets.used)}/${compactRam(buckets.unused)}`;
+  const visual = jobVisual(host.agent?.active);
+  const jobRam = host.agent?.ram.jobGb;
+  const jobText = host.agent === undefined
+    ? ""
+    : !host.agent.alive
+      ? "lost"
+      : `${visual.label}${jobRam !== undefined ? ` · ${compactRam(jobRam)}G` : ""}`;
 
   return (
     // data-view-key is the whole selection mechanism: main.ts's delegated
@@ -874,8 +917,10 @@ function nodeMarkup(entry: Placed, options: MapOptions): string {
     // dot is a live one; a hollow dot marks where one died, which is the map's
     // own read on WHERE the mutation clock is killing them.
     + (host.agent
-      ? `<circle class="agentdot${host.agent.alive ? "" : " dead"}"`
-        + ` cx="${x + BOX_W - 9}" cy="${y + BOX_H - 9}" r="3"></circle>`
+      ? `<circle class="agentdot ${visual.className}${host.agent.alive ? "" : " dead"}"`
+        + ` cx="${x + 9}" cy="${y + 75}" r="3"></circle>`
+        + `<text class="jobtext ${visual.className}${host.agent.alive ? "" : " dead"}"`
+        + ` x="${x + 16}" y="${y + 78}">${esc(jobText)}</text>`
       : "")
     + `<text class="glyph" x="${x + 7}" y="${y + 15}">${esc(glyph)}</text>`
     + `<text class="host" x="${x + 20}" y="${y + 15}">${esc(clip(host.hostname, 14))}</text>`
@@ -897,71 +942,142 @@ export function matches(host: DarknetKnownHost, query: string): boolean {
   );
 }
 
-/** Edges.
- *
- * A LATERAL edge is now the layout's only hard evidence, and once the two hosts
- * are seated in neighbouring columns it draws as what it is: a short straight
- * link across the gap between them. It used to dip into the row gutter along
- * with everything else, which was the right call when the two ends could be
- * anywhere on the row and is the wrong one now.
- *
- * Everything else routes orthogonally through the gutter. Straight diagonals are
- * what the game draws, but the game has a 6000px canvas to draw them on; at
- * panel scale they cross into noise. */
-function edgeMarkup(layout: NetLayout, options: MapOptions): string {
-  const mode = options.edges;
+/** Curved topology routes with stable, distributed node ports. Spreading each
+ * host's endpoints keeps dense views legible instead of merging every link at
+ * the node centre. */
+type PortSide = "top" | "right" | "bottom" | "left";
+interface Port { x: number; y: number; nx: number; ny: number }
+interface TopologyEdge { key: string; a: Placed; b: Placed; classes: string[] }
+
+function sideTowards(from: Placed, to: Placed): PortSide {
+  const dx = (to.x + BOX_W / 2) - (from.x + BOX_W / 2);
+  const dy = (to.y + BOX_H / 2) - (from.y + BOX_H / 2);
+  if (Math.abs(dx) > Math.abs(dy)) return dx >= 0 ? "right" : "left";
+  return dy >= 0 ? "bottom" : "top";
+}
+
+function portAt(entry: Placed, side: PortSide, fraction: number): Port {
+  switch (side) {
+    case "top": return { x: entry.x + BOX_W * fraction, y: entry.y, nx: 0, ny: -1 };
+    case "right": return { x: entry.x + BOX_W, y: entry.y + BOX_H * fraction, nx: 1, ny: 0 };
+    case "bottom": return { x: entry.x + BOX_W * fraction, y: entry.y + BOX_H, nx: 0, ny: 1 };
+    case "left": return { x: entry.x, y: entry.y + BOX_H * fraction, nx: -1, ny: 0 };
+  }
+}
+
+function curveBetween(a: Port, b: Port): string {
+  const distance = Math.hypot(b.x - a.x, b.y - a.y);
+  const reach = Math.min(72, Math.max(18, distance * 0.32));
+  return `M ${a.x.toFixed(1)} ${a.y.toFixed(1)} C `
+    + `${(a.x + a.nx * reach).toFixed(1)} ${(a.y + a.ny * reach).toFixed(1)}, `
+    + `${(b.x + b.nx * reach).toFixed(1)} ${(b.y + b.ny * reach).toFixed(1)}, `
+    + `${b.x.toFixed(1)} ${b.y.toFixed(1)}`;
+}
+
+function topologyEdges(layout: NetLayout, options: MapOptions): TopologyEdge[] {
+  const focus = options.focus;
   const seen = new Set<string>();
-  const parts: string[] = [];
+  const edges: TopologyEdge[] = [];
   for (const from of layout.placed) {
     for (const name of from.host.neighbours ?? []) {
       const to = layout.byHost.get(name);
       if (!to) continue;
-      // One line per pair: adjacency is reported from both ends, and drawing it
-      // twice doubles the stroke and makes an ordinary edge look emphasised.
       const key = edgeKey(from.host.hostname, name);
       if (seen.has(key)) continue;
       seen.add(key);
-
       const sameRow = from.row === to.row && Number.isFinite(from.row);
       const broken = layout.brokenLaterals.has(key);
       const tree = Math.abs(from.row - to.row) === 1 && from.y !== to.y;
-      // A demoted lateral is drawn WHATEVER the mode says. It is the one edge
-      // that explains why a row looks the way it does — our own knowledge
-      // contradicting itself — and hiding it leaves the reader with an odd
-      // layout and no reason for it.
-      if (!broken) {
-        if (mode === "none") continue;
-        if (mode === "tree" && !(tree || sameRow)) continue;
-      }
-
-      const down = to.y > from.y;
-      const [a, b] = down ? [from, to] : [to, from];
+      if (!broken && (options.edges === "none" || (options.edges === "tree" && !(tree || sameRow)))) continue;
       const classes = ["edge", tree ? "tree" : sameRow ? "lateral" : "back"];
       if (broken) classes.push("broken");
       const edgeStale = (host: DarknetKnownHost) =>
         factLife(host, "neighbours", options.now, options.expiry)?.stale === true;
-      if (edgeStale(a.host) || edgeStale(b.host)) classes.push("stale");
-
-      let path: string;
-      if (a.y === b.y && Math.abs(a.slot - b.slot) === 1 && !broken) {
-        // Seated side by side, so the link is the gap itself: straight across at
-        // mid-height, between the two facing edges.
-        const [left, right] = a.x < b.x ? [a, b] : [b, a];
-        const mid = a.y + BOX_H / 2;
-        path = `M ${left.x + BOX_W} ${mid} H ${right.x}`;
-      } else {
-        const x1 = a.x + BOX_W / 2;
-        const y1 = a.y + BOX_H;
-        const x2 = b.x + BOX_W / 2;
-        const y2 = b.y;
-        // Same row but NOT adjacent: dip into the gutter below rather than
-        // drawing through every box between them.
-        const mid = a.y === b.y ? a.y + BOX_H + ROW_GAP / 2 : y1 + (y2 - y1) / 2;
-        path = a.y === b.y
-          ? `M ${x1} ${y1} V ${mid} H ${x2} V ${y1}`
-          : `M ${x1} ${y1} V ${mid} H ${x2} V ${y2}`;
+      if (edgeStale(from.host) || edgeStale(to.host)) classes.push("stale");
+      if (focus) {
+        if (from.host.hostname === focus || to.host.hostname === focus) classes.push("focused");
+        else classes.push("context");
       }
-      parts.push(`<path class="${classes.join(" ")}" data-key="edge:${esc(key)}" d="${path}"></path>`);
+      edges.push({ key, a: from, b: to, classes });
+    }
+  }
+  return edges.sort((a, b) => byName(a.key, b.key));
+}
+
+/** Distinct deterministic ports stop several links from becoming one line at a
+ * node boundary. The opposite endpoint orders the ports, so input order cannot
+ * make the map shimmer. */
+function topologyPorts(edges: readonly TopologyEdge[]): Map<string, Port> {
+  const groups = new Map<string, { edge: TopologyEdge; here: Placed; other: Placed }[]>();
+  for (const edge of edges) {
+    for (const [here, other] of [[edge.a, edge.b], [edge.b, edge.a]] as const) {
+      const side = sideTowards(here, other);
+      const group = `${here.host.hostname}\0${side}`;
+      const entries = groups.get(group) ?? [];
+      entries.push({ edge, here, other });
+      groups.set(group, entries);
+    }
+  }
+  const ports = new Map<string, Port>();
+  for (const entries of groups.values()) {
+    entries.sort((a, b) => byName(a.other.host.hostname, b.other.host.hostname));
+    entries.forEach(({ edge, here, other }, index) => {
+      ports.set(`${edge.key}\0${here.host.hostname}`, portAt(here, sideTowards(here, other), (index + 1) / (entries.length + 1)));
+    });
+  }
+  return ports;
+}
+
+function edgeMarkup(layout: NetLayout, options: MapOptions): string {
+  const edges = topologyEdges(layout, options);
+  const ports = topologyPorts(edges);
+  return edges.map((edge) => {
+    const a = ports.get(`${edge.key}\0${edge.a.host.hostname}`)!;
+    const b = ports.get(`${edge.key}\0${edge.b.host.hostname}`)!;
+    return `<path class="${edge.classes.join(" ")}" data-key="edge:${esc(edge.key)}" d="${curveBetween(a, b)}">`
+      + `<title>${esc(`${edge.a.host.hostname} ↔ ${edge.b.host.hostname}`)}</title></path>`;
+  }).join("");
+}
+
+function arrowPoints(tip: Port): string {
+  const bx = tip.x + tip.nx * 7;
+  const by = tip.y + tip.ny * 7;
+  const px = -tip.ny * 3.5;
+  const py = tip.nx * 3.5;
+  return `${tip.x.toFixed(1)},${tip.y.toFixed(1)} ${(bx + px).toFixed(1)},${(by + py).toFixed(1)} ${(bx - px).toFixed(1)},${(by - py).toFixed(1)}`;
+}
+
+function workEdgeMarkup(layout: NetLayout, options: MapOptions): string {
+  const mode = options.jobs;
+  if (mode === "none") return "";
+  const parts: string[] = [];
+  for (const source of layout.placed) {
+    const agent = source.host.agent;
+    if (!agent?.alive || !agent.active || agent.targets.length === 0) continue;
+    if (mode === "selected" && source.host.hostname !== options.selected) continue;
+    const visual = jobVisual(agent.active);
+    for (const targetName of [...new Set(agent.targets)].sort(byName)) {
+      const target = layout.byHost.get(targetName);
+      if (!target) continue;
+      const key = `job:${source.host.hostname}>${targetName}:${agent.active}`;
+      const title = `${visual.label}: ${source.host.hostname} → ${targetName}`
+        + ` · ${fmtRamExact(agent.ram.jobGb)} job RAM`;
+      if (targetName === source.host.hostname) {
+        const right = source.x + BOX_W;
+        const startY = source.y + BOX_H * 0.32;
+        const end = { x: right, y: source.y + BOX_H * 0.68, nx: 1, ny: 0 };
+        const d = `M ${right} ${startY.toFixed(1)} C ${right + 15} ${startY.toFixed(1)}, ${right + 15} ${end.y.toFixed(1)}, ${right + 7} ${end.y.toFixed(1)}`;
+        parts.push(`<g class="jobroute ${visual.className}" data-key="${esc(key)}"><title>${esc(title)}</title>`
+          + `<path class="jobedge ${visual.className}" d="${d}"></path>`
+          + `<polygon class="jobarrow ${visual.className}" points="${arrowPoints(end)}"></polygon></g>`);
+        continue;
+      }
+      const a = portAt(source, sideTowards(source, target), 0.5);
+      const tip = portAt(target, sideTowards(target, source), 0.5);
+      const end = { ...tip, x: tip.x + tip.nx * 7, y: tip.y + tip.ny * 7 };
+      parts.push(`<g class="jobroute ${visual.className}" data-key="${esc(key)}"><title>${esc(title)}</title>`
+        + `<path class="jobedge ${visual.className}" d="${curveBetween(a, end)}"></path>`
+        + `<polygon class="jobarrow ${visual.className}" points="${arrowPoints(tip)}"></polygon></g>`);
     }
   }
   return parts.join("");
@@ -976,6 +1092,9 @@ export function netLegend(): string {
     `<span class="netkey"><span class="ln ${cls}"></span>${esc(label)}</span>`;
   const glyphs = Object.entries(FAMILY_GLYPH)
     .map(([family, glyph]) => `<span class="netkey"><span class="gl">${esc(glyph)}</span>${esc(family)}</span>`)
+    .join("");
+  const jobs = TASK_KINDS
+    .map((kind) => `<span class="netkey"><span class="jobkey ${JOB_VISUALS[kind].className}">●</span>${esc(JOB_VISUALS[kind].label)}</span>`)
     .join("");
   return (
     `<div class="netlegend">`
@@ -1011,14 +1130,19 @@ export function netLegend(): string {
     + `<span class="netkey"><span class="gl">#</span>never moves</span>`
     + `<span class="netkey"><span class="gl agentkey">●</span>resident standing here (hollow = lost)</span>`
     + `</div><div class="netlegend">${glyphs}</div>`
+    + `<div class="netlegend">${jobs}</div>`
   );
 }
 
 export interface MapOptions {
   selected: string;
+  /** Explicit operator selection used for topology focus. Empty means the
+   * stable fallback selection must not dim the whole map. */
+  focus: string;
   query: string;
   zoom: number;
   edges: string;
+  jobs: string;
   /** The digest's own clock, which every age on this page is measured against. */
   now: number;
   expiry: ExpiryOpts;
@@ -1094,6 +1218,19 @@ export function netMap(hosts: readonly DarknetKnownHost[], options: MapOptions):
     },
   });
   const scale = options.zoom / 100;
+  const focusNeighbours = options.focus ? new Set<string>() : undefined;
+  if (focusNeighbours !== undefined) {
+    for (const host of hosts) {
+      if (host.hostname === options.focus) {
+        for (const name of host.neighbours ?? []) if (layout.byHost.has(name)) focusNeighbours.add(name);
+      } else if (host.neighbours?.includes(options.focus)) {
+        focusNeighbours.add(host.hostname);
+      }
+    }
+  }
+  const renderOptions: RenderOptions = focusNeighbours === undefined
+    ? options
+    : { ...options, focusNeighbours };
 
   return (
     `<div class="netmap-scroll zoom-${options.zoom}">`
@@ -1109,8 +1246,9 @@ export function netMap(hosts: readonly DarknetKnownHost[], options: MapOptions):
     + ` viewBox="0 0 ${MAP_W} ${layout.height}"`
     + ` width="${Math.round(MAP_W * scale)}" height="${Math.round(layout.height * scale)}">`
     + rowMarkup(layout)
-    + edgeMarkup(layout, options)
-    + layout.placed.map((entry) => nodeMarkup(entry, options)).join("")
+    + edgeMarkup(layout, renderOptions)
+    + workEdgeMarkup(layout, renderOptions)
+    + layout.placed.map((entry) => nodeMarkup(entry, renderOptions)).join("")
     + `</svg></div>`
   );
 }
@@ -1129,11 +1267,13 @@ export function mapOptions(
     ...(netDepth !== undefined ? { netDepth } : {}),
     ...(why !== undefined ? { why } : {}),
     selected: view("dnet.sel"),
+    focus: view("dnet.sel"),
     query: view("dnet.q").trim(),
     zoom: Number(view("dnet.zoom", "100")) || 100,
     // Laterals are the layout's only hard evidence now, so hiding them by
     // default made a correctly-constrained row look arbitrary. "tree" keeps
     // parent links AND laterals; only the long back edges are dropped.
     edges: view("dnet.edges", "tree"),
+    jobs: view("dnet.jobs", "all"),
   };
 }

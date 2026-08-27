@@ -1,7 +1,8 @@
 import type { VaultEntry } from "../../shared/strategy/dnet/courier.ts";
 import type { DnetTimingProfile } from "../../shared/strategy/dnet/rates.ts";
+import type { TaskKind } from "../../shared/strategy/dnet/jobs.ts";
 import type { FarmEconomics } from "../../shared/strategy/dnet/farm.ts";
-import type { DarknetProfit } from "../../shared/telemetry/topics/dnet.ts";
+import type { DarknetProfit, DarknetResidentRam } from "../../shared/telemetry/topics/dnet.ts";
 import type { DnetKnowledge } from "../../shared/strategy/dnet/host.ts";
 
 /** The data shapes home and the controller exchange, and the panel reads.
@@ -132,7 +133,12 @@ export interface DnetResidentSnapshot {
   host: string;
   lastBeatAt: number;
   pending: number;
-  active?: string;
+  active?: TaskKind;
+  /** Targets of the active order. Empty when no job is running; a plant may
+   * fan out to several hosts. */
+  targets: string[];
+  /** Exact RAM held by dnet-owned processes on this host. */
+  ram: DarknetResidentRam;
   freeGb?: number;
   completed: number;
   failed: number;

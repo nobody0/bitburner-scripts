@@ -350,7 +350,12 @@ describe("agent mortality, and the caps", () => {
     // transport does not drop data, hosts drop agents.
     const knowledge = fold([{ hostname: "dn-1", present: true, facts: { depth: 0 } }]);
     const digest = publishKnowledge(knowledge, NOW, {
-      agents: { "dn-1": { role: "resident", lastBeatAt: NOW, alive: true } },
+      agents: {
+        "dn-1": {
+          role: "resident", lastBeatAt: NOW, alive: true, targets: [],
+          ram: { jobGb: 0, proberGb: 3.15, controllerGb: 0 },
+        },
+      },
       agentsSeenEver: 5,
       agentsLost: 4,
     });

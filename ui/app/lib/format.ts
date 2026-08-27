@@ -20,6 +20,14 @@ export function fmtRam(gb: number | undefined | null): string {
   return `${gb.toFixed(gb < 10 ? 2 : 0)}GB`;
 }
 
+/** Process allocations are exact fractional bills, unlike host capacities
+ * which are normally powers of two and benefit from compact whole numbers. */
+export function fmtRamExact(gb: number | undefined | null): string {
+  if (gb === undefined || gb === null || Number.isNaN(gb)) return "–";
+  if (gb >= 1e3) return fmtRam(gb);
+  return `${gb.toFixed(2)}GB`;
+}
+
 export function fmtTime(ms: number | undefined | null): string {
   if (ms === undefined || ms === null || Number.isNaN(ms)) return "–";
   const s = ms / 1000;

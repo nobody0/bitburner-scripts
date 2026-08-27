@@ -247,11 +247,28 @@ describe("a fact derives in its own turn", () => {
     standHands();
     standProber(first, VANTAGE);
     standHost(first, VANTAGE, 11);
+    adoptAgent(first, VANTAGE, 12, {
+      id: "induce:target",
+      kind: "induce",
+      host: TARGET,
+      from: VANTAGE,
+      ramOverrideGb: 2,
+      threads: 3,
+      priority: 1,
+      longLived: false,
+      label: "induce target",
+      payload: {},
+    });
     first.deps.recordCredential({ hostname: TARGET, password: "1234", at: Date.now() });
     await settleMicrotasks();
 
     const captured = first.snapshot();
     expect(captured.recovery.vault.map((entry) => entry.hostname)).toContain(TARGET);
+    expect(captured.residents.find((resident) => resident.host === VANTAGE)).toMatchObject({
+      active: "induce",
+      targets: [TARGET],
+      ram: { jobGb: 6, proberGb: 3.15, controllerGb: 1.6 },
+    });
     const durable = captured.recovery.knowledge.hosts.get(VANTAGE)! as HostEntry;
     expect(durable.agent).toBeUndefined();
     expect(durable.ns).toBeUndefined();

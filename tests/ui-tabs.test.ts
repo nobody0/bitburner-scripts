@@ -424,6 +424,11 @@ describe("tab rendering", () => {
               lastCode: 401, lastAt: 1_000 - 30_000,
               solving: true, solve: { phase: "narrowing", spent: 12 },
             },
+            agent: {
+              role: "resident", lastBeatAt: 1_000, alive: true, pending: 2,
+              active: "phish", targets: ["dn-gone"],
+              ram: { jobGb: 12, proberGb: 3.15, controllerGb: 0 },
+            },
           },
           { hostname: "dn-gone", lastSeenAt: 1_000, goneAt: 1_000, facts: {}, authState: "offline" },
         ],
@@ -516,6 +521,11 @@ describe("tab rendering", () => {
     expect(rendered).toContain("4.00GB blocked");
     expect(rendered).toContain("5.00GB used");
     expect(rendered).toContain("7.00GB unused");
+    expect(rendered).toContain("dnet RAM");
+    expect(rendered).toContain("15.15GB");
+    expect(rendered).toContain("job 12.00GB");
+    expect(rendered).toContain("phish → dn-gone");
+    expect(rendered).toContain("job-phish");
     // getDepth's -1 sentinel is "unknown", never a depth to render or sort on.
     expect(rendered).not.toContain(">-1<");
     // Why the net is not growing. `planSpread` has named its refusals since it

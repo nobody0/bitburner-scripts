@@ -2273,16 +2273,34 @@ export async function main(ns: NS): Promise<void> {
       };
       return {
         recovery,
-        residents: liveEntries().map((entry) => ({
-          host: entry.hostname,
-          lastBeatAt: entry.agent?.beatAt ?? requestedAt,
-          pending: (entry.staged ?? []).length,
-          ...(entry.agent !== undefined ? { active: entry.agent.order.kind } : {}),
-          freeGb: usableGb(entry.hostname, requestedAt, expiry),
-          completed: entry.completed ?? 0,
-          failed: entry.failed ?? 0,
-          ...(entry.lastError !== undefined ? { lastError: entry.lastError } : {}),
-        })),
+        residents: liveEntries().map((entry) => {
+          // An exec'd child may be holding its full allocation for the short
+          // window before it adopts. The controller already owns its order and
+          // pid, so reporting it is observation, not a new probe.
+          const active = entry.agent?.order
+            ?? (entry.inbound?.pid !== undefined ? entry.pendingOrder : undefined);
+          const jobGb = active === undefined ? 0 : active.ramOverrideGb * active.threads;
+          const proberGb = entry.prober !== undefined && entry.prober.pid > 0
+            ? proberReserveGb(entry.hostname)
+            : 0;
+          const controllerGb = entry.hostname === selfHost ? CONTROLLER_GB : 0;
+          return {
+            host: entry.hostname,
+            lastBeatAt: entry.agent?.beatAt ?? requestedAt,
+            pending: (entry.staged ?? []).length,
+            ...(active !== undefined ? { active: active.kind } : {}),
+            targets: active === undefined ? [] : [...new Set(hostsOf(active))],
+            ram: {
+              jobGb,
+              proberGb,
+              controllerGb,
+            },
+            freeGb: usableGb(entry.hostname, requestedAt, expiry),
+            completed: entry.completed ?? 0,
+            failed: entry.failed ?? 0,
+            ...(entry.lastError !== undefined ? { lastError: entry.lastError } : {}),
+          };
+        }),
         ram,
         controllerBeatAt: rendezvous.lastBeatAt,
       };

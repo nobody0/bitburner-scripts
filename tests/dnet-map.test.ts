@@ -23,7 +23,7 @@ function host(over: Partial<DarknetKnownHost> & { hostname: string }): DarknetKn
 // tests — `host()` defaults `facts` to `{}` and `isStale` reads that as "nothing
 // to disbelieve".
 const NOW = 1_000;
-const OPTIONS = { selected: "", query: "", zoom: 60, edges: "tree", now: NOW, expiry: {} };
+const OPTIONS = { selected: "", focus: "", query: "", zoom: 60, edges: "tree", jobs: "all", now: NOW, expiry: {} };
 
 beforeAll(() => GlobalRegistrator.register());
 afterAll(() => { void GlobalRegistrator.unregister(); });
@@ -530,6 +530,50 @@ describe("the rendered SVG", () => {
       host({ hostname: "b", depth: 1, neighbours: ["a"] }),
     ];
     expect(parseMap(netMap(mutual, { ...OPTIONS, edges: "all" })).querySelectorAll('[data-key^="edge:"]')).toHaveLength(1);
+  });
+
+  test("active jobs render a coloured badge and directional target routes", () => {
+    const working = [
+      host({
+        hostname: "source", depth: 0, neighbours: ["target"],
+        agent: {
+          role: "resident", lastBeatAt: NOW, alive: true, active: "plant",
+          targets: ["source", "target"],
+          ram: { jobGb: 8, proberGb: 3.15, controllerGb: 0 },
+        },
+      }),
+      host({ hostname: "target", depth: 1, neighbours: ["source"] }),
+    ];
+    const map = parseMap(netMap(working, { ...OPTIONS, jobs: "all" }));
+    const source = map.querySelector('[data-key="node:source"]')!;
+    expect(source.querySelector(".agentdot.job-plant")).not.toBeNull();
+    expect(source.textContent).toContain("plant · 8G");
+    expect(map.querySelector('[data-key="job:source>source:plant"] .jobarrow.job-plant')).not.toBeNull();
+    expect(map.querySelector('[data-key="job:source>target:plant"] .jobarrow.job-plant')).not.toBeNull();
+
+    const selected = parseMap(netMap(working, { ...OPTIONS, selected: "target", jobs: "selected" }));
+    expect(selected.querySelector('[data-key^="job:"]')).toBeNull();
+    const hidden = parseMap(netMap(working, { ...OPTIONS, jobs: "none", edges: "all" }));
+    expect(hidden.querySelector('[data-key^="job:"]')).toBeNull();
+    expect(hidden.querySelector('[data-key^="edge:"]')).not.toBeNull();
+  });
+
+  test("topology uses distinct ports and selection focuses its local links", () => {
+    const connected = [
+      host({ hostname: "hub", depth: 0, neighbours: ["a", "b", "c"] }),
+      host({ hostname: "a", depth: 1, neighbours: ["hub"] }),
+      host({ hostname: "b", depth: 1, neighbours: ["hub"] }),
+      host({ hostname: "c", depth: 2, neighbours: ["hub"] }),
+      host({ hostname: "else", depth: 2, neighbours: ["c"] }),
+    ];
+    const map = parseMap(netMap(connected, { ...OPTIONS, selected: "hub", focus: "hub", edges: "all" }));
+    const incident = [...map.querySelectorAll("path.edge.focused")];
+    expect(incident).toHaveLength(3);
+    expect(map.querySelector("path.edge.context")).not.toBeNull();
+    const starts = incident.map((path) => path.getAttribute("d")!.match(/^M ([^ ]+ [^ ]+)/)![1]);
+    expect(new Set(starts).size).toBe(starts.length);
+    expect(map.querySelector('[data-key="node:a"]')?.classList.contains("neighbour")).toBe(true);
+    expect(map.querySelector('[data-key="node:else"]')?.classList.contains("unrelated")).toBe(true);
   });
 
   test("hostile text is escaped in both the box and its tooltip", () => {

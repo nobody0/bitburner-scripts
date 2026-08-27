@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { formatMoney, formatNumber, formatScientific } from "../shared/format.ts";
 import { collapsible, note } from "../ui/app/lib/dom.ts";
-import { fmtMoney, fmtNum } from "../ui/app/lib/format.ts";
+import { fmtMoney, fmtNum, fmtRamExact } from "../ui/app/lib/format.ts";
 import { html } from "../ui/app/lib/html.ts";
 
 describe("scientific number output", () => {
@@ -23,6 +23,11 @@ describe("scientific number output", () => {
     expect(fmtMoney(Number.NaN)).toBe("–");
     expect(fmtNum(31_305)).toBe("3.131e4");
     expect(fmtMoney(945_200_000)).toBe("$9.452e8");
+  });
+
+  test("exact process RAM keeps the fractional bill host-capacity formatting drops", () => {
+    expect(fmtRamExact(15.15)).toBe("15.15GB");
+    expect(fmtRamExact(12)).toBe("12.00GB");
   });
 });
 
