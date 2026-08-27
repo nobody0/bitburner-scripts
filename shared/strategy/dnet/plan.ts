@@ -1114,16 +1114,32 @@ export interface StormPlan {
   /** The one admitted fire, when every gate is green. `from` is always the
    *  holder itself — the call takes no target. */
   fire?: { host: string; from: string; reason: string };
-  /** Every gate but the LAST one is green: a seed is in hand on a reachable
-   * host, the harvest is finished, the links are spent and the walker is safe,
-   * and all that remains is to land inside the dead phish window.
+  /** A storm is being fired NOW, or is already burning.
    *
-   * That window opens on the next `.d.cache`, which is seconds away rather than
-   * minutes, and it is the only warning we will ever get that the whole movable
-   * fleet is about to be restarted at once. `planArmour` spends it arming.
-   * True whenever `fire` is set, because a storm in the air is the same
-   * certainty as one about to be. */
+   * This is the window in which the whole movable fleet is about to be
+   * restarted at once, and `planArmour` spends it arming. It deliberately does
+   * NOT include "every gate but the phish window is green": that state is the
+   * established net's RESTING state — a seed in hand, harvest done, links
+   * spent, waiting on the next `.d.cache` — and it persists for long stretches.
+   * Treating it as imminent kept the fleet armed roughly half the time and
+   * billed 245 GB-h against 10 GB-h of stranded capacity, which is the blanket
+   * reserve this policy exists to avoid.
+   *
+   * The lead time comes from the controller's own pessimism instead: it stamps
+   * `lastStormFiredAt` at CLAIM time, before the call, so `storm-in-flight`
+   * opens seconds ahead of the engine's 5 s warning and well ahead of the phase
+   * that actually restarts anything. */
   imminent: boolean;
+  /** Every gate but the phish window is green: a seed is in hand on a
+   * reachable host, the harvest is done, the links are spent and the walker is
+   * safe. The storm fires on the next `.d.cache`.
+   *
+   * This is the established net's RESTING state and it persists for long
+   * stretches, so it is reported separately from `imminent` rather than folded
+   * into it. Arming on it buys lead time — more of the fleet reaches an order
+   * boundary before the burst — at the cost of wearing armour while nothing is
+   * happening. `bench:sim:dnet-farm` prices both. */
+  awaitingPhishWindow?: boolean;
   refused: StormRefusal[];
 }
 
@@ -1232,9 +1248,11 @@ export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormP
         ? "no .d.cache ever sighted; waiting to fire just after one lands"
         : `last .d.cache landed ${Math.round((ctx.now - ctx.lastPhishCacheAt) / 1000)}s ago; firing only within ${Math.round(overlapMs / 1000)}s of one`,
     );
-    // THE LAST GATE. Everything else is green, so the storm fires on the next
-    // `.d.cache` — which is the whole warning the fleet gets.
-    return { imminent: true, refused };
+    // NOT imminent — but READY. Every other gate is green, so the storm fires
+    // on the next `.d.cache`. That is the only lead time anyone gets, and
+    // whether it is worth arming on is a measured question, not a definition:
+    // see `awaitingPhishWindow`.
+    return { imminent: false, awaitingPhishWindow: true, refused };
   }
 
   return {

@@ -23,11 +23,11 @@
  *   backdoor stands.
  *
  * There is deliberately no third, arithmetic rung weighing a host's capacity
- * against its hazard. One was built and measured: over sixteen paired seeds it
- * billed 264.70 GB-h against storm-only armour's 4.80 and recovered nothing
- * further, because the net replants itself in the same virtual instant 96% of
- * the time. It was removed rather than left switched off. If recovery ever gets
- * slower that is the thing to rebuild — `spec/dnet.md` keeps the numbers.
+ * against its hazard. One was built and measured, and it lost: it armed most of
+ * the fleet most of the time for no further recovery, because the net replants
+ * itself in the same virtual instant for 96% of restarts. It was removed rather
+ * than left switched off. If recovery ever gets slower that is the thing to
+ * rebuild — `spec/dnet.md` keeps the storm rung's numbers as the bar to beat.
  *
  * Nothing here is a fact about our processes — it is a fact about the ENGINE's
  * appetite for each host — which is why it lives beside `planStorm` rather than

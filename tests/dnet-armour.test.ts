@@ -104,11 +104,11 @@ describe("the two arguments for paying it", () => {
 
   test("there is no standing capacity rung, and that was measured", () => {
     // A rung weighing each host's capacity against its restart hazard was built
-    // and benchmarked: over sixteen paired seeds it billed 264.70 GB-h against
-    // storm-only armour's 4.80 and recovered nothing further, because the net
-    // replants itself in the same virtual instant 96% of the time. It was
-    // removed rather than left switched off, so an enormous idle host is worth
-    // exactly as much armour as a small one: none.
+    // and benchmarked, and it lost: it armed most of the fleet most of the time
+    // for no further recovery, because the net replants itself in the same
+    // virtual instant for 96% of restarts. It was removed rather than left
+    // switched off, so an enormous idle host is worth exactly as much armour as
+    // a small one: none.
     expect(armoured(host({ hostname: "huge", usableGb: 4_096 }), ctx())).toBe(false);
   });
 });

@@ -1264,30 +1264,36 @@ is no. Three arguments override it, and they are different kinds of argument:
    whole population. `msPerRestartOfHost` (`rates.ts`) splits the two terms;
    a lone backdoor is more than an order of magnitude hotter than a plain host.
 There is deliberately **no third rung** weighing a host's capacity against its
-hazard. One was built and measured, and it lost. On the spread lane's full-Dnet
-seeds 665 of 692 occupied restarts were replanted in the same virtual instant off
-a surviving neighbour's probe and only 26 needed a later route, so the mean cost
-of a restart is a few seconds of one host's capacity. The farm lane then priced
-both arms on sixteen paired seeds: storm-only armour spent 4.80 GB-h to cut
-stranded capacity from 72.17 to 23.85 GB-h and unrecovered hosts from 3.9 to 0.9
-— better on 15 seeds of 16, mean delta `-48.32` GB-h, 95% CI `-70.65..-26.00`;
-on total cost (stranded plus armour) better on 14 of 16, `-43.53`, CI
-`-65.65..-21.41`. The capacity rung billed 264.70 GB-h and recovered nothing
-further: worse on total cost on 16 seeds of 16, `+216.63` GB-h, CI
-`184.21..249.04`. The arithmetic was sound; the quantity it acted on was not big
-enough to pay for itself, so it was **removed rather than left switched off**.
-If recovery ever gets slower, that is the thing to rebuild — these numbers are
-the baseline to beat.
+hazard. One was built and measured, and it lost: it armed most of the fleet most
+of the time for no further recovery. The reason is in the spread lane's
+full-Dnet seeds — 665 of 692 occupied restarts were replanted in the same
+virtual instant off a surviving neighbour's probe and only 26 needed a later
+route — so the mean cost of a restart is a few seconds of one host's capacity,
+and there is nothing for a standing reserve to buy. It was **removed rather than
+left switched off**.
 
-What armour does NOT buy is throughput, and this is worth stating because the
-smaller sample suggested otherwise. Caches per hour are flat (`+0.03`, CI
-`-6.84..6.90`). Money looked like `+$57m/h` on eight seeds; at sixteen it fell
-to `+$31m/h` with the interval still spanning zero (`-23.05..85.52`), which is
-what a noise term does when the sample grows. **The capacity ledger is the
-proven result. There is no measured earnings effect, and none should be
-claimed.** That is not an argument against the armour: the storm's mass restart
-is a real loss of the fleet's ability to act, and this lane's reconquest replants
-at zero virtual cost, so it prices the capacity and not the disruption.
+**How much lead time to buy is the one tuned choice**, because a prober can only
+be resized at an order boundary and only hosts that reach one before the burst
+get armed. `bench:sim:dnet-farm` prices both arms over sixteen paired seeds
+against the shipped fleet's 72.17 stranded GB-h and 3.9 unrecovered hosts:
+
+| arm | armours when | armour GB-h | stranded GB-h | dodged | unrecovered | total cost vs shipped |
+| --- | --- | --- | --- | --- | --- | --- |
+| `firing` | the storm is being fired, or burning | 1.04 | 23.17 | 28.8 | 1.0 | `-47.96`, CI `-72.31..-23.61`, 13/16 |
+| `ready` | also while only the phish window is shut | 4.02 | 23.85 | 35.1 | 0.9 | `-44.30`, CI `-66.42..-22.19`, 14/16 |
+
+`ready` buys minutes of lead time and dodges a fifth more restarts, but it wears
+armour through the established net's resting state and the extra 3 GB-h costs
+more than the extra dodges save. **Production ships `firing`** — `StormPlan.imminent`
+— and `awaitingPhishWindow` is reported separately so the alternative stays
+measurable rather than becoming a fork.
+
+What armour does NOT buy is throughput. Caches per hour are flat and money spans
+zero on both arms (`firing` `+$7m/h`, CI `-52.83..66.76`). **The capacity ledger
+is the proven result. There is no measured earnings effect, and none should be
+claimed.** That is not an argument against the armour: this lane's reconquest
+replants at zero virtual cost, so it prices the capacity a restart strands and
+not the disruption it causes.
 
 A stasis-linked host is never armoured: `isImmutable` is
 `openServer || isConnectedTo || hasStasisLink` and `restartServer` returns early
@@ -1693,7 +1699,7 @@ then measures two hours without resetting the world, RNG, charisma, or planner
 state. Resetting only counters prevents the initial RAM-block backlog from
 masquerading as stable cache throughput. The lane reports both means and p10
 rates for caches and money across paired seeds. Its policy counterfactuals are
-withholding the storm and the armour arm; the post-lab row is a lifecycle
+withholding the storm and the two armour arms; the post-lab row is a lifecycle
 phase, not a tuning candidate. Production fixes the validated choices in code:
 depth-first cache hunting (capacity breaks depth ties), a ten-minute optional
 block-clear budget, and storm admission within thirty seconds of a phishing
@@ -1712,7 +1718,8 @@ fact), and both the per-tick restarts and the storm's mass restart arrive
 through the same `darknetProcess` call. The restart ledger it now prints is as
 much the honest cost of the shipped policy as it is the armour's case: on eight
 paired seeds the shipped fleet takes ~316 occupied restarts per measured window,
-~27 of them from its own storm, stranding 72 GB-hours.
+~27 of them from its own storm, stranding 72 GB-hours and leaving 3.9 hosts
+unrecovered at the cap.
 
 The lane follows the live file-observation path: first authentication, a final
 RAM clear, and a winning phish invalidate cache facts, then a separate inventory

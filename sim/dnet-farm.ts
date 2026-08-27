@@ -75,14 +75,19 @@ export interface FarmScenario {
   labPresent?: boolean;
   charisma?: number;
   /** Run `planArmour`, so the fleet wears the `spawn` chain that dodges
-   * `restartServer` while a storm is one gate from firing.
+   * `restartServer` around a storm.
    *
-   * False is the shipped fleet today and the honest baseline. Only the storm
-   * rung can be exercised here: `planArmour`'s other rung is a backdoor, and
-   * `#backdoored()` excludes stasis-linked hosts while a stasis link is the
-   * only thing in either arena that sets `backdoorInstalled` — so that pool is
-   * always empty. `tests/dnet-armour.test.ts` covers it instead. */
-  armour?: boolean;
+   * `"off"` is the shipped fleet today and the honest baseline. `"firing"` arms
+   * only once the storm is being fired or is already burning. `"ready"` also
+   * arms while every gate but the phish window is green, buying lead time — more
+   * of the fleet reaches an order boundary before the burst — at the cost of
+   * wearing armour while nothing is happening.
+   *
+   * Only the storm rung can be exercised here: `planArmour`'s other rung is a
+   * backdoor, and `#backdoored()` excludes stasis-linked hosts while a stasis
+   * link is the only thing in either arena that sets `backdoorInstalled` — so
+   * that pool is always empty. `tests/dnet-armour.test.ts` covers it. */
+  armour?: "off" | "firing" | "ready";
 }
 
 export const SHIPPED_FARM: FarmScenario = { name: "shipped", stormEnabled: true, labPresent: true };
@@ -249,6 +254,19 @@ export function runFarmCase(
    * Every path that stands a resident goes through here, so the recovery
    * accounting cannot be forgotten by a new caller — the spread lane learned
    * that the same way. */
+  /** Take a host's resident away.
+   *
+   * The armour set has to come with it. An armoured host that is restarted or
+   * deleted keeps nothing standing, so leaving its name behind bills capacity
+   * on a process that no longer exists — and because the arm/disarm pass walks
+   * `agents`, a name that has left that map can never be released again. The
+   * set grew monotonically and made a storm-only policy read like a blanket
+   * fleet reserve. */
+  const dropAgent = (name: string): void => {
+    agents.delete(name);
+    armoured.delete(name);
+  };
+
   const plantAgent = (name: string, agent: Agent): void => {
     agents.set(name, agent);
     const outage = restartOutages.get(name);
@@ -417,7 +435,7 @@ export function runFarmCase(
    * storm that finds half the fleet armoured still re-cascades from every
    * survivor, and each survivor's `exec` reaches its own neighbours. */
   const applyArmourPolicy = (): void => {
-    if (policy.armour !== true) return;
+    if ((policy.armour ?? "off") === "off") return;
     const candidates: ArmourCandidate[] = [];
     for (const [name, agent] of agents) {
       if (agent.bootstrap || name === walkerHost || !truth(name)) continue;
@@ -481,7 +499,7 @@ export function runFarmCase(
       // Unarmoured: the host has nothing left standing and must wait for a
       // surviving neighbour to plant it again.
       restartOutages.set(name, { at: clock, usableGb: jobFreeGb(name) });
-      agents.delete(name);
+      dropAgent(name);
     }
   };
 
@@ -489,7 +507,7 @@ export function runFarmCase(
     const reports: ReportHost[] = [];
     for (const name of [...agents.keys()]) {
       if (!truth(name)) {
-        agents.delete(name);
+        dropAgent(name);
         continue;
       }
       reports.push({ hostname: name, at: clock, present: true, neighbours: system.probeFrom(name) });
@@ -621,7 +639,8 @@ export function runFarmCase(
       if (storm.fire) {
         hold.push({ kind: "storm", host: storm.fire.host, from: storm.fire.from, reason: storm.fire.reason });
       }
-      stormImminent = storm.imminent;
+      stormImminent = storm.imminent
+        || (policy.armour === "ready" && storm.awaitingPhishWindow === true);
     }
     applyArmourPolicy();
 
@@ -715,7 +734,7 @@ export function runFarmCase(
         gainCharisma(result.charismaExp);
         fold([{ hostname: job.target, at: clock, present: true, blockedRam: result.blockedRam }]);
         if (result.cleared) fold([{ hostname: job.target, at: clock, present: true, invalidates: ["files"] }]);
-        if (result.cleared && agent.bootstrap) agents.delete(name);
+        if (result.cleared && agent.bootstrap) dropAgent(name);
       }
     } else if (job.kind === "phish") {
       if (!record) return;
