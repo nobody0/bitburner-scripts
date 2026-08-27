@@ -31,7 +31,7 @@ const net = new Map<string, SimHost>();
  *  that never landed has to be able to say so. */
 const deadPids = new Set<number>();
 
-function mockNs(launchId?: number, standingOn?: string): NS {
+function mockNs(launchId?: number, standingOn?: string, exec?: (...args: unknown[]) => number): NS {
   const details = (host: string) => {
     const sim = net.get(host);
     if (!sim) return { isOnline: false } as never;
@@ -61,6 +61,7 @@ function mockNs(launchId?: number, standingOn?: string): NS {
     dnsLookup: (host: string) => `ip-${host}`,
     isRunning: (pid: unknown) => typeof pid !== "number" || !deadPids.has(pid),
     kill: () => true,
+    ...(exec !== undefined ? { exec } : {}),
     dnet: {
       getServerDetails: details,
       // A lender's probe: the neighbours of the host it stands on. Bound at
@@ -78,8 +79,23 @@ function mockNs(launchId?: number, standingOn?: string): NS {
  * with no lender anywhere describes nothing and derives nothing — which is the
  * real behaviour at cold start, and why this is the first thing every case
  * does. */
-function standProber(handle: ControllerHandle, host: string, pid = 900): NS {
-  const borrowed = mockNs(undefined, host);
+function standProber(
+  handle: ControllerHandle,
+  host: string,
+  pid = 900,
+  cold = false,
+  exec?: (...args: unknown[]) => number,
+): NS {
+  if (!cold) {
+    const entry = handle.hosts.get(host);
+    if (entry !== undefined) {
+      entry.seenAt.files = Date.now();
+      entry.caches = [];
+      entry.contracts = [];
+      entry.dirty.files = false;
+    }
+  }
+  const borrowed = mockNs(undefined, host, exec);
   handle.lend(host, borrowed, pid);
   return borrowed;
 }
@@ -187,6 +203,45 @@ afterEach(() => {
 });
 
 describe("a fact derives in its own turn", () => {
+  test("the directly seeded beachhead inventories itself before farming", async () => {
+    const handle = await bootController();
+    standHands();
+    net.get(VANTAGE)!.neighbours = [];
+    const launches: unknown[][] = [];
+    standProber(handle, VANTAGE, 11, true, (...args) => {
+      launches.push(args);
+      return 100 + launches.length;
+    });
+    const beachhead = handle.hosts.get(VANTAGE)!;
+    await settleMicrotasks();
+
+    // Darkweb is not planted by another agent, so `preparePlant` never gets a
+    // chance to request this listing. The lender's first check-in must do it;
+    // otherwise `planFarm` refuses at `cache-unknown` and never reaches the
+    // phishing fallback.
+    const listing = beachhead.pendingOrder;
+    expect(listing, "the seed host was left with unknown files and no farm path").toBeDefined();
+    expect(listing!.kind).toBe("inventory");
+    expect(listing!.from).toBe(VANTAGE);
+    expect(launches[0]?.[0]).toBe("dnet/agent.js");
+
+    // What the inventory report establishes. Once the one-call agent hands
+    // its slot back, the next derive must immediately reach the unconditional
+    // earn floor and exec a correctly-sized phishing agent through the prober.
+    beachhead.seenAt.files = Date.now();
+    beachhead.caches = [];
+    beachhead.contracts = [];
+    beachhead.dirty.files = false;
+    handle.deps.recordCredential({ hostname: VANTAGE, password: "", at: Date.now() });
+    beachhead.pendingOrder = undefined;
+    beachhead.inbound = undefined;
+    handle.wake("inventory-finished");
+    await settleMicrotasks();
+
+    expect(`${beachhead.pendingOrder?.kind}:${beachhead.pendingOrder?.host}`).toBe("phish:vantage");
+    expect(launches[1]?.[0]).toBe("dnet/agent.js");
+  });
+
   test("snapshots are cumulative copies and restore without process runtime", async () => {
     const first = await bootController();
     standHands();

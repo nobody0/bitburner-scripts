@@ -1457,7 +1457,10 @@ export async function main(ns: NS): Promise<void> {
       // agent should do, because the `.d` hint file waiting on it names a
       // neighbour as of the authenticate instant. Filing it inside the placing
       // window puts it in the agent's own `exec` rather than a boot later.
-      if (!entry || (entry.agent === undefined && !processInbound(entry))) continue;
+      // A planted host reaches this point inside its placing window. Darkweb
+      // does not: home seeds its permanent prober directly, and that lender is
+      // precisely the launcher `dispatch` needs for the first inventory agent.
+      if (!entry || (entry.agent === undefined && !processInbound(entry) && entry.ns === undefined)) continue;
       if (entry.agent?.order.kind === "inventory" || (entry.staged ?? []).some((o) => o.kind === "inventory")) { needsInventory.delete(host); continue; }
       const filed = fileTask({ id: `inventory:${host}`, kind: "inventory", host, from: host, priority: priorityOf("inventory"), reason: "files may have changed; listing them" });
       if (filed) needsInventory.delete(host);
@@ -2104,6 +2107,14 @@ export async function main(ns: NS): Promise<void> {
     },
     lend(host, borrowed, pid, refresh) {
       const entry = ensureEntry(host);
+      // `darkweb` is seeded directly by home, so unlike every host reached by
+      // a plant it never passes through `preparePlant`. Request its first file
+      // listing here as part of establishing the lender. Without this, its
+      // caches stay unknown and `planFarm` stops at `cache-unknown`, leaving
+      // the beachhead with no fallback phish order whenever blocking work is
+      // exhausted. The same fact gate safely repairs any restored host whose
+      // file knowledge was invalidated while it had no live lender.
+      if (entry.seenAt.files === undefined || entry.dirty.files === true) needsInventory.add(host);
       // Whichever prober checked in most recently owns the host. Retire the
       // prior one BEFORE publishing, so the invariant converges to one lender
       // and a late arrival cannot retract a newer one's `ns` on its way out
