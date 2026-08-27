@@ -337,6 +337,68 @@ export function regrowInstallOverride(input: {
   return remainAfterSec < remainNowSec;
 }
 
+/** Route progress an OPTIONAL reset would erase, as seconds to re-earn it
+ * after the install (committed multiplier stack active — the reset's own
+ * benefit is credited against its cost). The renewal cadence's overhead term
+ * prices the flat replay; this prices the selected route's CURRENT-stage
+ * reset-sensitive legs, which that flat term cannot see: banked gate money,
+ * a live hacking climb, a live charisma climb. Favor-banked reputation is
+ * deliberately NOT counted — a crossing install converts it rather than
+ * erasing it, and bankedFavorActivationValue already prices the conversion —
+ * and augCount needs are ADVANCED by installs, not erased. */
+export function optionalInstallErasedSec(
+  needs: readonly RouteNeed[] | undefined,
+  view: EndgameView,
+  rates: RouteRates,
+): number {
+  let erased = 0;
+  for (const need of needs ?? []) {
+    if (need.kind === "money") {
+      const banked = Math.min(view.money, need.target);
+      const rate = rates.moneyPerSec > 0 ? rates.moneyPerSec : FALLBACK_MONEY_PER_SEC;
+      if (banked > 0) erased += banked / rate;
+    } else if (need.kind === "skill" && need.subject === "hacking") {
+      erased += skillReearnSec(
+        Math.min(view.hackingSkill, need.target),
+        rates.hackingSkillMult !== undefined
+          ? rates.hackingSkillMult * Math.max(1, rates.postInstallHackingSkillMult)
+          : undefined,
+        rates.hackingExpPerSec,
+        rates.hackingSkillPerSec,
+        FALLBACK_SEC_PER_HACK_LEVEL,
+      );
+    } else if (need.kind === "charisma" || (need.kind === "skill" && need.subject === "charisma")) {
+      erased += skillReearnSec(
+        Math.min(view.charismaSkill ?? 1, need.target),
+        rates.charismaSkillMult !== undefined
+          ? rates.charismaSkillMult * Math.max(1, rates.postInstallCharismaSkillMult)
+          : undefined,
+        rates.charismaExpPerSec,
+        rates.charismaSkillPerSec,
+        FALLBACK_SEC_PER_CHARISMA_LEVEL,
+      );
+    }
+  }
+  return erased;
+}
+
+/** Time to climb back to a level from the post-reset floor: the closed form
+ * when experience-rate evidence exists, the linear tracker otherwise. */
+function skillReearnSec(
+  level: number,
+  committedMult: number | undefined,
+  expPerSec: number | undefined,
+  skillPerSec: number,
+  fallbackSecPerLevel: number,
+): number {
+  if (!(level > 1)) return 0;
+  if (committedMult !== undefined && committedMult > 0 && expPerSec !== undefined && expPerSec > 0) {
+    return expForSkill(Math.ceil(level), committedMult) / expPerSec;
+  }
+  const rate = skillPerSec > 0 ? skillPerSec : 1 / fallbackSecPerLevel;
+  return (level - 1) / rate;
+}
+
 /** One leg of a multiplier-stacked skill ladder: a closed-form climb to a
  * level, from a starting experience, at a base multiplier the shared stack
  * multiplies further. */

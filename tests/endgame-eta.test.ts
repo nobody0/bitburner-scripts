@@ -10,6 +10,7 @@ import {
   FALLBACK_SEC_PER_BLACK_OP,
   FALLBACK_SEC_PER_CHARISMA_LEVEL,
   labyrinthWalkFallbackSec,
+  optionalInstallErasedSec,
   ROUTE_DWELL_MS,
   chooseRoute,
   noRates,
@@ -236,6 +237,49 @@ describe("route ETAs", () => {
       sec: labyrinthWalkFallbackSec(1),
       measured: false,
     });
+  });
+
+  test("an optional reset is charged the route progress it erases", () => {
+    const rates: RouteRates = { ...noRates(), moneyPerSec: 1e6, hackingSkillPerSec: 1 };
+    // Nothing banked, skill at the floor: a reset erases nothing.
+    expect(optionalInstallErasedSec(
+      [{ kind: "money", target: 1e11, have: 0 }],
+      view({ money: 0 }),
+      rates,
+    )).toBe(0);
+    // Banked gate money is re-earned at the measured income rate.
+    expect(optionalInstallErasedSec(
+      [{ kind: "money", target: 1e11, have: 5e8 }],
+      view({ money: 5e8 }),
+      rates,
+    )).toBe(500);
+    // A live climb toward a skill gate is re-earned too (linear tracker here),
+    // and the two add: both are erased by the same reset.
+    const both = optionalInstallErasedSec(
+      [
+        { kind: "money", target: 1e11, have: 5e8 },
+        { kind: "skill", subject: "hacking", target: 2_500, have: 1_600 },
+      ],
+      view({ money: 5e8, hackingSkill: 1_600 }),
+      rates,
+    );
+    expect(both).toBe(500 + 1_599);
+    // Count and reputation needs are not erased-progress: installs ADVANCE
+    // the count gate, and reputation converts to favor at the reset.
+    expect(optionalInstallErasedSec(
+      [
+        { kind: "augCount", target: 30, have: 20 },
+        { kind: "factionRep", subject: "Daedalus", target: 2.5e6, have: 1e6 },
+      ],
+      view({}),
+      rates,
+    )).toBe(0);
+    // A charisma gate mid-climb (the labyrinth ladder) counts the same way.
+    expect(optionalInstallErasedSec(
+      [{ kind: "charisma", target: 2_500, have: 1_900 }],
+      view({ bitNode: 15, charismaSkill: 1_900 }),
+      { ...noRates(), charismaSkillPerSec: 2 },
+    )).toBe(1_899 / 2);
   });
 
   test("route evaluation for all BitNodes remains comfortably below the 10ms budget", () => {

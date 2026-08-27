@@ -39,14 +39,15 @@
       "goal": "bn:1 + installs:2",
       "horizonHours": 24,
       "reached": false,
-      "firstInstallHours": 3.26,
-      "secondInstallHours": 4.5,
-      "augmentationsAt5_6Hours": 11,
-      "routeEtaHoursAt4Hours": 38.8,
+      "firstInstallHours": 0.45,
+      "secondInstallHours": 1.2,
+      "augmentationsAt5_6Hours": 16,
+      "routeEtaHoursAt4Hours": 30.9,
       "what": "Cold BN1 start, 8 GB home, the full vanilla network, every playable feature. The headline route benchmark.",
-      "note": "NOT REACHED, and the honest starting point. Before the cold-start install fixes this profile installed NOTHING in 24 hours and reported a 1,138-hour route estimate; it now installs on cadence and estimates ~40h. Reaching at all is the next milestone, then eight hours.",
+      "note": "NOT REACHED, but seed 3 stood 3.3h from the daemon at the horizon (hacking 2374, $132e12 banked, donation route armed) -- a ~27h trajectory. The remaining walls, from the 24h tails: the Daedalus reputation leg stays at the unmeasured ~50/s fallback until the invite actually lands (12-27h priced), and seed 1 spent the endgame taking economic installs that reset the $100b invite bank every cycle (15 installs, 53 augs, never past $1.3b).",
       "history": [
-        "Before 2026-08-20: zero installs, zero augmentations, route ETA 1,137.7h at four hours. Three chained defects -- an early count tranche demanding a quarter of the whole gate, an unanchored power-law extrapolation, and faction work never announcing the augmentations it produces. See spec/progress.md, BN1 route ledger seventh pass."
+        "Before 2026-08-20: zero installs, zero augmentations, route ETA 1,137.7h at four hours. Three chained defects -- an early count tranche demanding a quarter of the whole gate, an unanchored power-law extrapolation, and faction work never announcing the augmentations it produces. See spec/progress.md, BN1 route ledger seventh pass.",
+        "2026-08-27 (model 10, rev 5d2fd3ff, definitive 3-seed run): 3/3 valid, none reached in 24h. First/second installs 0.45h/1.20h (seed 3), 16 unique augmentations by 5.6h (seed 2), route ETA 30.9h at 4h (seed 2). Seeds at horizon: s1 53 augs/15 installs but $0.8b (install thrash on the invite money gate), s2 36 augs/hacking 683, s3 51 augs/hacking 2374/$132e12 with 3.3h remaining."
       ]
     },
     "bn1-speedrun": {
