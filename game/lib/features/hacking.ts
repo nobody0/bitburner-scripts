@@ -1468,7 +1468,18 @@ export function serverAccessPlan(
   if (!primary) return undefined;
   if (primary.action !== "port-opener") return { primary };
   const program = programForPortNeed(ctx.state, primary.server.numOpenPortsRequired ?? 0);
-  if (!program || !writeInsteadOfBuy(ctx, program)) return { primary };
+  // A progression-posted blocking root need is the route's terminal blocker:
+  // completion is worth the whole remaining horizon, so calendar time — not
+  // money — is the scarce resource, and a multi-hour create-program can never
+  // beat an instant purchase. The write-vs-buy comparison below cannot see
+  // this on its own: at the endgame nothing bids for money, the waterline
+  // vanishes, and its no-model fallback (forgone slot money < buy cost) reads
+  // a $250m SQLInject as precious next to a "free" write that the slot never
+  // actually schedules. Measured on bn1-full seed 2: the plan sat in write
+  // limbo for the final 37 minutes, one root away from destroying the node.
+  const routeBlockingRoot = ctx.board.open.some((need) =>
+    need.by === "progression" && need.kind === "root" && need.subject === primary.host && need.urgency === "blocking");
+  if (!program || routeBlockingRoot || !writeInsteadOfBuy(ctx, program)) return { primary };
   const concurrentBackdoor = candidates.find((entry) => entry.entry.action === "backdoor")?.entry;
   return {
     primary,
