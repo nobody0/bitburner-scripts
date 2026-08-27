@@ -76,6 +76,8 @@ import {
   daedalusAugsRequired,
   GANG_FACTIONS,
   GANG_KARMA,
+  labyrinthCharismaTarget,
+  labyrinthStageIndex,
   RED_PILL,
   stepEndgame,
   type EndgameView,
@@ -2304,6 +2306,8 @@ interface ProgressionMemory {
     hacking: RateTracker;
     hackingExp: RateTracker;
     combat: RateTracker;
+    charisma: RateTracker;
+    charismaExp: RateTracker;
     augs: RateTracker;
     daedalusRep: RateTracker;
     gangRep: RateTracker;
@@ -2341,6 +2345,8 @@ function freshProgressionMemory(): ProgressionMemory {
       hacking: new RateTracker(),
       hackingExp: new RateTracker(),
       combat: new RateTracker(),
+      charisma: new RateTracker(),
+      charismaExp: new RateTracker(),
       augs: new RateTracker(),
       daedalusRep: new RateTracker(),
       gangRep: new RateTracker(),
@@ -2555,6 +2561,9 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
   const hackingExpNow = ctx.state.topics.player?.exp?.hacking;
   if (hackingExpNow !== undefined) trackers.hackingExp.sample(t, hackingExpNow);
   trackers.combat.sample(t, view.lowestCombatSkill);
+  if (view.charismaSkill !== undefined) trackers.charisma.sample(t, view.charismaSkill);
+  const charismaExpNow = ctx.state.topics.player?.exp?.charisma;
+  if (charismaExpNow !== undefined) trackers.charismaExp.sample(t, charismaExpNow);
   // Series whose zero can be FABRICATED (the backing probe has not landed
   // yet) are sampled only when the reading is real: a phantom (t0, 0) sample
   // would sit in the 30-minute window and inflate the rate ~24x when the
@@ -2627,7 +2636,10 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
     : 0;
   const hackingExpPerSec = trackers.hackingExp.perSec();
   const daedalus = projectedDaedalusEconomics(ctx, view, nodeMultsForPrior?.["FactionWorkRepGain"] ?? 1);
-  const catalogAugs = unownedHackingCatalog(ctx.state.topics.factions, view);
+  const catalogAugs = unownedMultCatalog(ctx.state.topics.factions, view, "hacking", "hacking_exp");
+  const charismaCatalogAugs = unownedMultCatalog(ctx.state.topics.factions, view, "charisma", "charisma_exp");
+  const charismaExpPerSec = trackers.charismaExp.perSec();
+  const labyrinthWalks = labyrinthWalkEstimates(ctx.state.topics.dnet, view);
   return {
     moneyPerSec: measuredMoneyPerSec > 0 ? measuredMoneyPerSec : hackingPrior + marketPrior,
     hackingSkillPerSec: trackers.hacking.perSec(),
@@ -2639,6 +2651,13 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
     hackingSkillMult: ((ctx.state.topics.player?.mults as Record<string, number> | undefined)?.["hacking"] ?? 1)
       * (nodeMultsForPrior?.["HackingLevelMultiplier"] ?? 1),
     ...(catalogAugs.length > 0 ? { hackingCatalog: { augs: catalogAugs } } : {}),
+    charismaSkillPerSec: trackers.charisma.perSec(),
+    ...(charismaExpNow !== undefined ? { charismaExp: charismaExpNow } : {}),
+    ...(charismaExpPerSec > 0 ? { charismaExpPerSec } : {}),
+    charismaSkillMult: ((ctx.state.topics.player?.mults as Record<string, number> | undefined)?.["charisma"] ?? 1)
+      * (nodeMultsForPrior?.["CharismaLevelMultiplier"] ?? 1),
+    ...(charismaCatalogAugs.length > 0 ? { charismaCatalog: { augs: charismaCatalogAugs } } : {}),
+    ...(labyrinthWalks ? { labyrinthWalks } : {}),
     ...daedalus,
     gangRepPerSec: trackers.gangRep.perSec(),
     blackOpsPerSec: trackers.blackOps.perSec(),
@@ -2650,6 +2669,7 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
       committedMultiplier("dexterity"),
       committedMultiplier("agility"),
     ),
+    postInstallCharismaSkillMult: committedMultiplier("charisma"),
     ...(curvePoints.length >= 2 || (priorCyclePoints?.length ?? 0) >= 2
       ? {
           cycle: {
@@ -2711,15 +2731,42 @@ function projectedDaedalusEconomics(
   };
 }
 
-/** Aggregate hacking power still on the shelf: per-augmentation ln-mults of
- * every unowned catalogue augmentation carrying hacking skill/exp
+/** Measured walk estimate for the CURRENT labyrinth stage: the live walker's
+ * own pace (authentications per second, the unit every move/wall/radar pays)
+ * against the planner's A* remainder. Future stages have no walker yet and
+ * keep the route ETA's maze-size fallback — this only ever replaces a guess
+ * with an observation, never the reverse. */
+function labyrinthWalkEstimates(
+  dnetTopic: GameState["topics"]["dnet"],
+  view: EndgameView,
+): Record<number, { sec: number; measured: boolean }> | undefined {
+  const walkers = dnetTopic?.lab?.walkers ?? [];
+  let best: { pace: number; leftSec: number } | undefined;
+  for (const walker of walkers) {
+    if (walker.believedLeft === undefined || !(walker.attempts > 0)) continue;
+    const elapsedSec = (walker.beatAt - walker.startedAt) / 1_000;
+    if (!(elapsedSec > 0)) continue;
+    const pace = walker.attempts / elapsedSec;
+    if (!(pace > 0)) continue;
+    const leftSec = walker.believedLeft / pace;
+    if (!best || pace > best.pace) best = { pace, leftSec };
+  }
+  if (!best) return undefined;
+  return { [labyrinthStageIndex(view)]: { sec: best.leftSec, measured: true } };
+}
+
+/** Aggregate skill power still on the shelf: per-augmentation ln-mults of
+ * every unowned catalogue augmentation carrying the named skill/exp
  * multipliers, sorted strongest-first. The route's climb legs price
  * "assemble the best k, then climb" against "climb with what we have" — the
  * skill curve is exponential in 1/mult, so without this the honest climb
- * number is astronomically large and prescribes nothing. */
-function unownedHackingCatalog(
+ * number is astronomically large and prescribes nothing. Hacking prices the
+ * daemon climbs with it; charisma prices the labyrinth ladder. */
+function unownedMultCatalog(
   factionsTopic: GameState["topics"]["factions"],
   view: EndgameView,
+  skillField: string,
+  expField: string,
 ): { skillLn: number; expLn: number }[] {
   const owned = new Set([
     ...Object.keys(view.installedAugs ?? {}),
@@ -2728,8 +2775,8 @@ function unownedHackingCatalog(
   const catalog: { skillLn: number; expLn: number }[] = [];
   for (const [name, meta] of Object.entries(factionsTopic?.augMeta ?? {})) {
     if (owned.has(name)) continue;
-    const skillMult = meta.mults?.["hacking"];
-    const expMult = meta.mults?.["hacking_exp"];
+    const skillMult = meta.mults?.[skillField];
+    const expMult = meta.mults?.[expField];
     const skillLn = skillMult !== undefined && skillMult > 1 ? Math.log(skillMult) : 0;
     const expLn = expMult !== undefined && expMult > 1 ? Math.log(expMult) : 0;
     if (skillLn <= 0 && expLn <= 0) continue;
@@ -2960,9 +3007,11 @@ function progressionRefresh(ctx: NeedContext): void {
   // valuation is wanted before then and a one-pass-old measurement of a slowly
   // moving route estimate is not a different answer.
   const publishedWorth = currencyWorth(ctx.state.topics.progression?.plan?.marginals);
+  const verdictCharismaTarget = labyrinthCharismaTarget(view);
   const verdictWeights = weightsFromMarginals(publishedWorth, {
     hackingTarget: endgame.worldDaemonSkill,
     combatTarget: DAEDALUS_COMBAT,
+    ...(verdictCharismaTarget !== undefined ? { charismaTarget: verdictCharismaTarget } : {}),
     multipliers: (player.mults ?? {}) as unknown as Record<string, number>,
     incomeShares: incomeShares(ctx.state),
   });

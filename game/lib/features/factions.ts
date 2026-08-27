@@ -28,7 +28,7 @@ import {
 import { makeHackContext } from "../../../shared/formulas.ts";
 import type { Need } from "../../../shared/strategy/needs.ts";
 import { COMMISSION } from "../../../shared/strategy/stock/market.ts";
-import { daedalusAugsRequired } from "../../../shared/strategy/progression/endgame.ts";
+import { daedalusAugsRequired, labyrinthCharismaTargetFor, RED_PILL } from "../../../shared/strategy/progression/endgame.ts";
 import { DEFAULT_PLANNING_HORIZON_SEC, forecastAt, usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
 import { factionFavorPointValues } from "../../../shared/strategy/factions/favorValue.ts";
 import type {
@@ -448,6 +448,15 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
   const rates = slotRates(state, ctx.board);
   const profile = repProfile(state, ctx.caps, owned);
   const currentWork = currentWorkView(state);
+  // The labyrinth's final charisma gate, where that route exists; the
+  // worth("charisma") factor is zero everywhere else, so deriving it
+  // unconditionally prices nothing into other nodes.
+  const charismaTarget = labyrinthCharismaTargetFor(
+    ctx.caps.bitNode,
+    sfLevel(ctx.caps.sourceFiles, 12),
+    ctx.caps.darknetFullAccess === "yes",
+    owned.has(RED_PILL),
+  );
 
   const installed = state.topics.progression?.ownedAugs ?? {};
   const occurrences = new Map<string, number>();
@@ -524,6 +533,7 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
     weights: weightsFromMarginals(rates.worth, {
       hackingTarget: worldDaemonSkill(ctx.caps.bitNode, sfLevel(ctx.caps.sourceFiles, 12)),
       combatTarget: 1_500,
+      ...(charismaTarget !== undefined ? { charismaTarget } : {}),
       multipliers: mults,
       incomeShares: incomeShares(state),
     }),

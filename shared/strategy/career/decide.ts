@@ -362,7 +362,8 @@ function planCrime(crime: CrimeStats, view: CareerView): PendingAction {
       { kind: "kills", perSec: killsPerSec(crime, view.person, view.crimeContext) },
       { kind: "money", perSec: money },
       { kind: "combatSkills", perSec: combat },
-      { kind: "charisma", perSec: exp["charisma"] ?? 0 },
+      // No separate `charisma` entry: `skill:charisma` below resolves to the
+      // same currency channel, and `collectRates` sums per channel.
       ...Object.entries(exp).map(([skill, rate]): ProducedRate => ({ kind: "skill", subject: skill, perSec: rate })),
     ],
     moneyPerSec: money,
@@ -370,8 +371,9 @@ function planCrime(crime: CrimeStats, view: CareerView): PendingAction {
 }
 
 function planCourse(course: CareerView["courses"][number], view: CareerView): PendingAction {
+  // A charisma course needs no second entry: `skill:charisma` resolves to the
+  // charisma currency channel itself.
   const rates: ProducedRate[] = [{ kind: "skill", subject: course.skill, perSec: course.expPerSec }];
-  if (course.skill === "charisma") rates.push({ kind: "charisma", perSec: course.expPerSec });
   if (["strength", "defense", "dexterity", "agility"].includes(course.skill)) {
     // A gym trains ONE stat, and a combat need is gated by the weakest — so
     // training the strongest stat contributes nothing to it.

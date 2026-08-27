@@ -207,8 +207,10 @@ function workProduces(
     if (rate > 0) produces[channel] = (produces[channel] ?? 0) + rate;
   };
   for (const [skill, rate] of Object.entries(exp)) {
+    // `skill:charisma` and the dedicated `charisma` kind resolve to the SAME
+    // currency channel (charisma is a single stat), so one add covers both —
+    // a second would double-count the rate into its own channel.
     add(channelForNeed({ kind: "skill", subject: skill }), rate);
-    if (skill === "charisma") add(channelForNeed({ kind: "charisma" }), rate);
   }
   const combat = Math.min(exp.strength ?? 0, exp.defense ?? 0, exp.dexterity ?? 0, exp.agility ?? 0);
   add(channelForNeed({ kind: "combatSkills" }), combat);

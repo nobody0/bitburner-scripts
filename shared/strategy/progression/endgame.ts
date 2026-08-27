@@ -266,6 +266,33 @@ export function labyrinthStageIndex(view: EndgameView): number {
     : LABYRINTH_AUGMENTATIONS.indexOf(reward as (typeof LABYRINTH_AUGMENTATIONS)[number]);
 }
 
+/** The labyrinth's highest remaining charisma gate — the level its ladder
+ * must eventually reach, and therefore the target a charisma multiplier is
+ * priced against. Undefined once the pill is owned, or where the labyrinth is
+ * not mechanically available; the gates are monotone up the ladder, so the
+ * final stage's gate is the binding one whatever stage is current. */
+export function labyrinthCharismaTarget(view: EndgameView): number | undefined {
+  return labyrinthCharismaTargetFor(
+    view.bitNode,
+    view.sf12Level ?? sf(view, 12),
+    view.darknetFullAccess ?? (view.bitNode === 15 || sf(view, 15) > 0),
+    view.ownsRedPill,
+  );
+}
+
+/** Primitive form of `labyrinthCharismaTarget`, for callers holding raw
+ * capabilities rather than an assembled endgame view. */
+export function labyrinthCharismaTargetFor(
+  bitNode: number | undefined,
+  sf12Level: number,
+  darknetFullAccess: boolean,
+  ownsRedPill: boolean,
+): number | undefined {
+  if (!labyrinthOffersRedPill(bitNode, sf12Level) || !darknetFullAccess || ownsRedPill) return undefined;
+  const final = bitNode === 15 ? 4 : LABYRINTH_AUGMENTATIONS.length;
+  return LABYRINTH_CHARISMA[Math.min(final, LABYRINTH_CHARISMA.length - 1)];
+}
+
 /** Does this node's labyrinth hand out The Red Pill? Every node but BN8. */
 export function labyrinthOffersRedPill(bitNode: number | undefined, sf12Level = 0): boolean {
   const mults = bitNodeMultipliers(bitNode, sf12Level);

@@ -466,6 +466,28 @@ export const PROFILES: readonly SimProfile[] = [
     seeds: [1, 2, 3],
   },
   {
+    id: "bn15-full",
+    experiment: "bitnode-route",
+    route: { route: "bn15-first", leg: "bn15-fresh", index: 0, bitNode: 15 },
+    description:
+      "Complete BN15 cold start on the fixed vanilla network: the labyrinth is the only Red Pill route (Daedalus never " +
+      "finds it here), so the run must climb the charisma ladder and walk the darknet labs while building the hacking " +
+      "multipliers the post-pill w0r1d_d43m0n regrow needs, with the declared SF4.3 automation allowance.",
+    bitnode: 15,
+    // The full playable surface of the node, like bn1-full — plus `dnet`,
+    // which in BN15 is not optional income but the route itself: the node
+    // grants full darknet access and the labyrinth ladder ends in the pill.
+    // Career stays on for the same reason it does in bn1-full and one more:
+    // company work is the node's charisma engine, and every lab stage gates
+    // on charisma.
+    features: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side", "dnet"),
+    goals: ["bn:15", "installs:2"],
+    homeRam: 8,
+    world: VANILLA_FULL_WORLD,
+    horizon: "24h",
+    seeds: [1, 2, 3],
+  },
+  {
     id: "jit-lategame",
     experiment: "feature-scenario",
     description:

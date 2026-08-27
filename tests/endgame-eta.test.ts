@@ -8,7 +8,8 @@ import {
 } from "../shared/strategy/progression/endgame.ts";
 import {
   FALLBACK_SEC_PER_BLACK_OP,
-  LABYRINTH_WALK_SEC,
+  FALLBACK_SEC_PER_CHARISMA_LEVEL,
+  labyrinthWalkFallbackSec,
   ROUTE_DWELL_MS,
   chooseRoute,
   noRates,
@@ -134,11 +135,47 @@ describe("route ETAs", () => {
     expect(blade.etaSec).toBe((BLACK_OP_COUNT - done) * FALLBACK_SEC_PER_BLACK_OP);
   });
 
-  test("the labyrinth walk is an explicit unmeasured guess", () => {
+  test("the labyrinth walk is an explicit unmeasured maze-scaled guess", () => {
     const v = view({ sourceFiles: { "15": 1 } });
     const labyrinth = etasFor(v).find((eta) => eta.id === "labyrinth")!;
     expect(labyrinth.available).toBe(true);
-    expect(labyrinth.parts[0]).toMatchObject({ what: "labyrinth stage 1", sec: LABYRINTH_WALK_SEC, measured: false });
+    const walk1 = labyrinth.parts.find((part) => part.what === "labyrinth stage 1")!;
+    expect(walk1).toMatchObject({ sec: labyrinthWalkFallbackSec(0), measured: false });
+    // Later labs stitch far larger mazes; a flat constant hid a ten-fold spread.
+    const walk5 = labyrinth.parts.find((part) => part.what === "labyrinth stage 5")!;
+    expect(walk5.sec).toBeGreaterThan(walk1.sec * 5);
+  });
+
+  test("every labyrinth stage prices its charisma gate as sequential route time", () => {
+    const v = view({ bitNode: 15, darknetFullAccess: true, charismaSkill: 100 });
+    const labyrinth = etasFor(v).find((eta) => eta.id === "labyrinth")!;
+    const charisma = labyrinth.parts.filter((part) => part.resource === "charisma");
+    // Five stages in BN15, each behind its own gate; the installs between
+    // them reset charisma to 1, so no stage's climb is free.
+    expect(charisma).toHaveLength(5);
+    // Linear fallback: the first stage climbs from live skill, later stages
+    // from the post-install floor.
+    expect(charisma[0]!.sec).toBe((300 - 100) * FALLBACK_SEC_PER_CHARISMA_LEVEL);
+    expect(charisma[4]!.sec).toBe((3_000 - 1) * FALLBACK_SEC_PER_CHARISMA_LEVEL);
+  });
+
+  test("a measured charisma exp rate prices the ladder in closed form with a shared stack", () => {
+    const v = view({ bitNode: 15, darknetFullAccess: true, charismaSkill: 100 });
+    const rates: RouteRates = {
+      ...noRates(),
+      charismaExp: 1_000,
+      charismaExpPerSec: 100,
+      charismaSkillMult: 1.1,
+      augsPerSec: 1 / 600,
+      charismaCatalog: { augs: [{ skillLn: Math.log(1.5), expLn: Math.log(1.25) }] },
+    };
+    const labyrinth = etasFor(v, rates).find((eta) => eta.id === "labyrinth")!;
+    const charisma = labyrinth.parts.filter((part) => part.resource === "charisma");
+    expect(charisma).toHaveLength(5);
+    for (const leg of charisma) expect(leg.measured).toBe(true);
+    // One shared acquisition budget for the whole ladder, not one per stage.
+    const stacks = labyrinth.parts.filter((part) => part.what.startsWith("charisma multiplier stack"));
+    expect(stacks.length).toBeLessThanOrEqual(1);
   });
 
   test("Daedalus prices queued unique augs as acquired but still requires their install", () => {
@@ -181,10 +218,24 @@ describe("route ETAs", () => {
   });
 
   test("labyrinth ETA includes every remaining mandatory reward install", () => {
-    const v = view({ bitNode: 15, darknetFullAccess: true });
+    const v = view({ bitNode: 15, darknetFullAccess: true, charismaSkill: 300 });
     const labyrinth = etasFor(v).find((eta) => eta.id === "labyrinth")!;
     expect(labyrinth.parts.filter((part) => part.resource === "install")).toHaveLength(5);
-    expect(labyrinth.nextMandatoryInstall).toMatchObject({ sec: LABYRINTH_WALK_SEC });
+    // The first stage's gate is already met, so its remaining lead time is
+    // exactly the walk.
+    expect(labyrinth.nextMandatoryInstall).toMatchObject({ sec: labyrinthWalkFallbackSec(0) });
+  });
+
+  test("a live walker's measured pace replaces the current stage's walk fallback", () => {
+    const v = view({ bitNode: 15, darknetFullAccess: true, charismaSkill: 300 });
+    const rates: RouteRates = { ...noRates(), labyrinthWalks: { 0: { sec: 120, measured: true } } };
+    const labyrinth = etasFor(v, rates).find((eta) => eta.id === "labyrinth")!;
+    expect(labyrinth.parts.find((part) => part.what === "labyrinth stage 1")).toMatchObject({ sec: 120, measured: true });
+    // Stages with no walker keep the fallback.
+    expect(labyrinth.parts.find((part) => part.what === "labyrinth stage 2")).toMatchObject({
+      sec: labyrinthWalkFallbackSec(1),
+      measured: false,
+    });
   });
 
   test("route evaluation for all BitNodes remains comfortably below the 10ms budget", () => {

@@ -8,6 +8,7 @@ import {
   daedalusAugsRequired,
   labyrinthStageIndex,
   LABYRINTH_AUGMENTATIONS,
+  LABYRINTH_CHARISMA,
   type EndgameDecision,
   type EndgameView,
   type RouteNeed,
@@ -15,6 +16,7 @@ import {
 } from "./endgame.ts";
 import { cycleProgressEtaWithPrior, type CyclePoint, type CurveResource } from "./regrowth.ts";
 import { expForSkill } from "../../formulas.ts";
+import { LAB_LADDER, labMazeSize } from "../dnet/rates.ts";
 
 /** Per-route time-to-finish HEURISTICS, and the route choice built on them.
  *
@@ -57,9 +59,17 @@ export const FALLBACK_GANG_REP_PER_SEC = 50;
 /** Creating/joining a gang is a bounded route prerequisite whose detailed
  * faction/karma work is delegated through needs. */
 export const FALLBACK_GANG_START_SEC = 3_600;
-/** The labyrinth walk itself. The mechanic is simulated, but this route
- * fallback has not yet been calibrated from completed walks. */
-export const LABYRINTH_WALK_SEC = 7_200;
+/** Seconds per charisma level, when unmeasured. Charisma trains like the
+ * combat stats (class/company work) and shares their skill curve. */
+export const FALLBACK_SEC_PER_CHARISMA_LEVEL = 6;
+/** Labyrinth walk seconds per maze ROOM (odd-coordinate cell), when no walk
+ * pace has been measured. Every move is one darknet authentication (roughly
+ * `850ms * (5*chaGate + 100*(diff+1)) / (charisma+150)` at the gate — several
+ * seconds), and a radar-assisted walk visits each room a bounded number of
+ * times, so the walk scales with the PRODUCED maze's room count rather than
+ * being one flat constant: the first lab (10x6 rooms) and the deep 30x20
+ * ones differ ten-fold. Deliberately pessimistic until calibrated. */
+export const LABYRINTH_SEC_PER_ROOM = 12;
 /** Install + requeue overhead around the Red Pill install. */
 export const INSTALL_OVERHEAD_SEC = 300;
 /** The post-install climb is faster than the first one (the installed
@@ -94,6 +104,21 @@ export interface RouteRates {
    * sorted strongest-first. Lets a climb leg price "assemble the best k, then
    * climb" as a real plan and choose k itself. */
   hackingCatalog?: { augs: readonly { skillLn: number; expLn: number }[] };
+  /** The charisma channel, mirrored from hacking: the labyrinth gates every
+   * walk move on charisma and every reward install resets it to 1, so each
+   * remaining lab stage is its own closed-form climb on the same skill curve. */
+  charismaSkillPerSec: number;
+  charismaExp?: number;
+  charismaExpPerSec?: number;
+  /** Effective live charisma skill multiplier (player mult x node mult). */
+  charismaSkillMult?: number;
+  /** Charisma power still on the shelf, shaped like `hackingCatalog`. */
+  charismaCatalog?: { augs: readonly { skillLn: number; expLn: number }[] };
+  postInstallCharismaSkillMult: number;
+  /** Per-stage labyrinth walk estimates from the darknet driver, keyed by
+   * stage index. An active walker's own pace and A* remainder beat any
+   * fallback; stages with no entry are priced from the maze-size fallback. */
+  labyrinthWalks?: Readonly<Record<number, { sec: number; measured: boolean }>>;
   /** Formula-projected Daedalus work rep/sec at the invite gate, for pricing
    * the reputation leg before any Daedalus work has been measured. Derived by
    * the driver from the transcribed rep formulas; never a live measurement. */
@@ -131,8 +156,10 @@ export function noRates(): RouteRates {
     gangRepPerSec: 0,
     blackOpsPerSec: 0,
     bladeburnerRankPerSec: 0,
+    charismaSkillPerSec: 0,
     postInstallHackingSkillMult: 1,
     postInstallCombatSkillMult: 1,
+    postInstallCharismaSkillMult: 1,
   };
 }
 
@@ -159,6 +186,7 @@ export type ProgressResource =
   | "augmentations"
   | "money"
   | "hacking"
+  | "charisma"
   | "reputation"
   | "combat"
   | "install"
@@ -309,37 +337,47 @@ export function regrowInstallOverride(input: {
   return remainAfterSec < remainNowSec;
 }
 
-/** Closed-form time to a hacking level from the exact skill curve and a
- * measured experience rate. Returns undefined without that evidence. */
-function hackingClimbSec(
-  targetLevel: number,
-  startExp: number,
-  effectiveMult: number,
-  rates: RouteRates,
-): number | undefined {
-  const expRate = rates.hackingExpPerSec;
-  if (expRate === undefined || !(expRate > 0) || !(effectiveMult > 0)) return undefined;
-  const needed = Math.max(0, expForSkill(Math.ceil(targetLevel), effectiveMult) - Math.max(0, startExp));
-  return needed / expRate;
+/** One leg of a multiplier-stacked skill ladder: a closed-form climb to a
+ * level, from a starting experience, at a base multiplier the shared stack
+ * multiplies further. */
+interface ClimbLeg {
+  label: string;
+  targetLevel: number;
+  startExp: number;
+  baseMult: number;
 }
 
-/** "Assemble the best k hacking augmentations, then climb" — the minimum over
- * k of acquisition plus the closed-form climb with that stack. Returns
- * undefined when the closed form has no evidence to price with. */
-function stackedClimbPlan(
-  targetLevel: number,
-  startExp: number,
-  baseMult: number,
+/** The skill channel a ladder climbs in: which resource its parts claim, the
+ * measured experience rate, and the unowned-augmentation shelf. Hacking and
+ * charisma share the exact skill curve, so they share this machinery. */
+interface ClimbChannel {
+  resource: "hacking" | "charisma";
+  expPerSec: number | undefined;
+  catalog: { augs: readonly { skillLn: number; expLn: number }[] } | undefined;
+}
+
+/** "Assemble the best k augmentations, then climb the whole ladder" — the
+ * minimum over k of one shared acquisition budget plus every leg's closed-form
+ * climb with that stack. ONE k for all legs, because an installed multiplier
+ * persists: a charisma augmentation bought for lab stage 3 is still active at
+ * stage 5, and pricing each leg's stack independently would buy it twice.
+ * Returns undefined when the closed form has no evidence to price with. */
+function stackedLadderPlan(
+  legs: readonly ClimbLeg[],
   rates: RouteRates,
-  label: string,
+  channel: ClimbChannel,
+  stackLabel: string,
 ): EtaPart[] | undefined {
-  const direct = hackingClimbSec(targetLevel, startExp, baseMult, rates);
-  if (direct === undefined) return undefined;
-  const catalog = rates.hackingCatalog;
-  const baseExpRate = rates.hackingExpPerSec ?? 0;
-  if (catalog && catalog.augs.length > 0 && baseExpRate > 0) {
+  const expRate = channel.expPerSec ?? 0;
+  if (!(expRate > 0) || legs.length === 0 || legs.some((leg) => !(leg.baseMult > 0))) return undefined;
+  const climbSec = (leg: ClimbLeg, skillLnSum: number, expLnSum: number): number =>
+    Math.max(0, expForSkill(Math.ceil(leg.targetLevel), leg.baseMult * Math.exp(skillLnSum)) - Math.max(0, leg.startExp))
+      / (expRate * Math.exp(expLnSum));
+  const direct = legs.map((leg) => climbSec(leg, 0, 0));
+  let best = { k: 0, acquireSec: 0, climbs: direct, total: direct.reduce((a, b) => a + b, 0) };
+  const catalog = channel.catalog;
+  if (catalog && catalog.augs.length > 0) {
     const secPerAug = 1 / (rates.augsPerSec > 0 ? rates.augsPerSec : 1 / FALLBACK_SEC_PER_AUG);
-    let best = { total: direct, k: 0, acquireSec: 0, climbSec: direct };
     let skillLnSum = 0;
     let expLnSum = 0;
     for (let k = 1; k <= catalog.augs.length; k++) {
@@ -348,24 +386,117 @@ function stackedClimbPlan(
       expLnSum += entry.expLn;
       const acquireSec = k * secPerAug;
       if (acquireSec >= best.total) break;
-      const climbSec = Math.max(0, expForSkill(Math.ceil(targetLevel), baseMult * Math.exp(skillLnSum)) - Math.max(0, startExp))
-        / (baseExpRate * Math.exp(expLnSum));
-      const totalSec = acquireSec + climbSec;
-      if (totalSec < best.total) best = { total: totalSec, k, acquireSec, climbSec };
-    }
-    if (best.k > 0) {
-      return [
-        {
-          what: `${label} multiplier stack (${best.k} augmentations)`,
-          resource: "augmentations",
-          sec: best.acquireSec,
-          measured: rates.augsPerSec > 0,
-        },
-        { what: label, resource: "hacking", sec: best.climbSec, measured: true },
-      ];
+      const climbs = legs.map((leg) => climbSec(leg, skillLnSum, expLnSum));
+      const total = acquireSec + climbs.reduce((a, b) => a + b, 0);
+      if (total < best.total) best = { k, acquireSec, climbs, total };
     }
   }
-  return [{ what: label, resource: "hacking", sec: direct, measured: true }];
+  const parts: EtaPart[] = [];
+  if (best.k > 0) {
+    parts.push({
+      what: `${stackLabel} multiplier stack (${best.k} augmentations)`,
+      resource: "augmentations",
+      sec: best.acquireSec,
+      measured: rates.augsPerSec > 0,
+    });
+  }
+  legs.forEach((leg, index) => {
+    parts.push({ what: leg.label, resource: channel.resource, sec: best.climbs[index]!, measured: true });
+  });
+  return parts;
+}
+
+/** "Assemble the best k hacking augmentations, then climb" — the single-leg
+ * hacking ladder. Returns undefined when the closed form has no evidence. */
+function stackedClimbPlan(
+  targetLevel: number,
+  startExp: number,
+  baseMult: number,
+  rates: RouteRates,
+  label: string,
+): EtaPart[] | undefined {
+  return stackedLadderPlan(
+    [{ label, targetLevel, startExp, baseMult }],
+    rates,
+    { resource: "hacking", expPerSec: rates.hackingExpPerSec, catalog: rates.hackingCatalog },
+    label,
+  );
+}
+
+/** The remaining labyrinth ladder's charisma legs.
+ *
+ * Priced like the hacking climbs: the exact skill curve from a measured
+ * charisma experience rate, with one shared "buy the best k charisma
+ * augmentations" budget across the whole ladder (the stack persists through
+ * the mandatory installs; the experience does not). Only the first pending
+ * stage climbs from live experience — every later stage starts at the
+ * post-install floor with the committed multiplier stack. Without exp-rate
+ * evidence the legs fall back to the linear tracker, then to the declared
+ * per-level constant. */
+function labyrinthCharismaParts(
+  view: EndgameView,
+  legs: readonly { stage: number; cha: number; live: boolean }[],
+  rates: RouteRates,
+): { stack?: EtaPart; byStage: Map<number, EtaPart[]> } {
+  const byStage = new Map<number, EtaPart[]>();
+  if (legs.length === 0) return { byStage };
+  const liveMult = rates.charismaSkillMult;
+  const committedMult = liveMult !== undefined
+    ? liveMult * Math.max(1, rates.postInstallCharismaSkillMult)
+    : undefined;
+  if (liveMult !== undefined) {
+    const plan = stackedLadderPlan(
+      legs.map((leg) => ({
+        label: `labyrinth stage ${leg.stage + 1} charisma ${leg.cha}`,
+        targetLevel: leg.cha,
+        startExp: leg.live ? Math.max(0, rates.charismaExp ?? 0) : 0,
+        baseMult: leg.live ? liveMult : committedMult!,
+      })),
+      rates,
+      { resource: "charisma", expPerSec: rates.charismaExpPerSec, catalog: rates.charismaCatalog },
+      "charisma",
+    );
+    if (plan) {
+      let offset = 0;
+      let stack: EtaPart | undefined;
+      if (plan[0]!.resource === "augmentations") {
+        stack = plan[0]!;
+        offset = 1;
+      }
+      legs.forEach((leg, index) => byStage.set(leg.stage, [plan[offset + index]!]));
+      return { ...(stack ? { stack } : {}), byStage };
+    }
+  }
+  for (const leg of legs) {
+    const have = leg.live ? Math.max(1, view.charismaSkill ?? 1) : 1;
+    byStage.set(leg.stage, [part(
+      `labyrinth stage ${leg.stage + 1} charisma ${leg.cha}`,
+      "charisma",
+      leg.cha - have,
+      rates.charismaSkillPerSec,
+      1 / FALLBACK_SEC_PER_CHARISMA_LEVEL,
+    )]);
+  }
+  return { byStage };
+}
+
+/** Fallback walk time for one labyrinth stage, scaled by the PRODUCED maze's
+ * room count — a 60x40 request stitches to 61x41 with 30x20 rooms, ten times
+ * the first lab. */
+export function labyrinthWalkFallbackSec(stage: number): number {
+  const ladder = LAB_LADDER[Math.min(stage, LAB_LADDER.length - 1)]!;
+  const { width, height } = labMazeSize(ladder);
+  return ((width - 1) / 2) * ((height - 1) / 2) * LABYRINTH_SEC_PER_ROOM;
+}
+
+function labyrinthWalkPart(stage: number, rates: RouteRates): EtaPart {
+  const supplied = rates.labyrinthWalks?.[stage];
+  return {
+    what: `labyrinth stage ${stage + 1}`,
+    resource: "other",
+    sec: supplied?.sec ?? labyrinthWalkFallbackSec(stage),
+    measured: supplied?.measured ?? false,
+  };
 }
 
 export function postInstallRegrow(skill: number, rates: RouteRates, deepFuture = false): EtaPart[] {
@@ -563,13 +694,31 @@ export function routeEtas(view: EndgameView, decision: EndgameDecision, rates: R
           const first = labyrinthStageIndex(view);
           const final = view.bitNode === 15 ? 4 : LABYRINTH_AUGMENTATIONS.length;
           const firstQueued = route.mandatoryInstall?.ready === true;
+          // Every stage whose walk is still to come pays its charisma gate
+          // first: the engine refuses every move below the lab's charisma, and
+          // the install that opened the stage reset charisma to 1 — so these
+          // climbs are SEQUENTIAL route time, not a parallel background track.
+          const chaLegs: { stage: number; cha: number; live: boolean }[] = [];
           for (let stage = first; stage <= final; stage++) {
-            if (!(stage === first && firstQueued)) {
-              parts.push({ what: `labyrinth stage ${stage + 1}`, resource: "other", sec: LABYRINTH_WALK_SEC, measured: false });
-            }
-            parts.push({ what: `install labyrinth reward ${stage + 1}`, resource: "install", sec: INSTALL_OVERHEAD_SEC, measured: false });
+            if (stage === first && firstQueued) continue;
+            chaLegs.push({
+              stage,
+              cha: LABYRINTH_CHARISMA[Math.min(stage, LABYRINTH_CHARISMA.length - 1)]!,
+              live: stage === first,
+            });
           }
-          nextMandatoryInstall = { sec: firstQueued ? 0 : LABYRINTH_WALK_SEC, measured: firstQueued };
+          const charisma = labyrinthCharismaParts(view, chaLegs, rates);
+          if (charisma.stack) parts.push(charisma.stack);
+          let firstStageSec = 0;
+          for (let stage = first; stage <= final; stage++) {
+            const stageParts: EtaPart[] = [];
+            stageParts.push(...(charisma.byStage.get(stage) ?? []));
+            if (!(stage === first && firstQueued)) stageParts.push(labyrinthWalkPart(stage, rates));
+            if (stage === first) firstStageSec = sumSec(stageParts);
+            stageParts.push({ what: `install labyrinth reward ${stage + 1}`, resource: "install", sec: INSTALL_OVERHEAD_SEC, measured: false });
+            parts.push(...stageParts);
+          }
+          nextMandatoryInstall = { sec: firstQueued ? 0 : firstStageSec, measured: firstQueued };
           parts.push(...postInstallRegrow(wdSkill ?? 3000, rates));
         }
       } else {

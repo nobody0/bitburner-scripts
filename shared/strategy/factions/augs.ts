@@ -213,6 +213,10 @@ export interface RouteWeightContext {
   /** Route skill levels that installed augmentations must make reachable. */
   hackingTarget?: number;
   combatTarget?: number;
+  /** The labyrinth's highest remaining charisma gate, where that route is
+   * live — charisma shares the exact skill curve, so a direct charisma
+   * multiplier near a gate earns the same nonlinear response hacking does. */
+  charismaTarget?: number;
   /** Already-active stat multipliers. The marginal value of another direct
    * multiplier falls as this base grows (notably across SF12 stress levels). */
   multipliers?: Readonly<Record<string, number>>;
@@ -369,6 +373,11 @@ export function weightsFromMarginals(worth: ChannelWorth, context?: RouteWeightC
     const active = Math.max(1e-9, context.multipliers?.["hacking"] ?? 1);
     const response = context.hackingTarget / (32 * active);
     weights["hacking"] = Math.max(weights["hacking"] ?? 0, (worth.get("hacking") ?? 0) * response);
+  }
+  if (context?.charismaTarget !== undefined && (worth.get("charisma") ?? 0) > 0) {
+    const active = Math.max(1e-9, context.multipliers?.["charisma"] ?? 1);
+    const response = context.charismaTarget / (32 * active);
+    weights["charisma"] = Math.max(weights["charisma"] ?? 0, (worth.get("charisma") ?? 0) * response);
   }
   if (context?.combatTarget !== undefined && (worth.get("combat") ?? 0) > 0) {
     // The four stats are trained sequentially to one gate, so each carries a

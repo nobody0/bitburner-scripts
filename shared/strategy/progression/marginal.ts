@@ -3,6 +3,7 @@ import {
   FALLBACK_RANK_PER_SEC,
   FALLBACK_SEC_PER_AUG,
   FALLBACK_SEC_PER_BLACK_OP,
+  FALLBACK_SEC_PER_CHARISMA_LEVEL,
   FALLBACK_SEC_PER_COMBAT_LEVEL,
   FALLBACK_SEC_PER_HACK_LEVEL,
   routeEtas,
@@ -20,6 +21,7 @@ import type { ForecastComponent, TimeForecast } from "./forecast.ts";
 export type MarginalResource =
   | "money"
   | "hacking"
+  | "charisma"
   | "reputation"
   | "combat"
   | "bladeburnerRank"
@@ -28,6 +30,7 @@ export type MarginalResource =
 export const MARGINAL_RESOURCES: readonly MarginalResource[] = [
   "money",
   "hacking",
+  "charisma",
   "reputation",
   "combat",
   "bladeburnerRank",
@@ -175,6 +178,8 @@ function operatingRate(rates: RouteRates, resource: MarginalResource): number | 
       return rates.hackingSkillPerSec > 0 ? rates.hackingSkillPerSec : 1 / FALLBACK_SEC_PER_HACK_LEVEL;
     case "combat":
       return rates.combatSkillPerSec > 0 ? rates.combatSkillPerSec : 1 / FALLBACK_SEC_PER_COMBAT_LEVEL;
+    case "charisma":
+      return rates.charismaSkillPerSec > 0 ? rates.charismaSkillPerSec : 1 / FALLBACK_SEC_PER_CHARISMA_LEVEL;
     case "augmentations":
       return rates.augsPerSec > 0 ? rates.augsPerSec : 1 / FALLBACK_SEC_PER_AUG;
     case "bladeburnerRank":
@@ -196,6 +201,20 @@ function perturbedRates(rates: RouteRates, resource: MarginalResource, relativeD
     next.hackingSkillPerSec = (
       rates.hackingSkillPerSec > 0 ? rates.hackingSkillPerSec : 1 / FALLBACK_SEC_PER_HACK_LEVEL
     ) * scale;
+    // The closed-form climb legs price off the EXPERIENCE rate, not the level
+    // tracker; leaving it unscaled made every stacked-climb leg blind to the
+    // perturbation, so the route's largest hacking dependencies reported zero
+    // movement and fell to the coarse linear floor.
+    if (rates.hackingExpPerSec !== undefined && rates.hackingExpPerSec > 0) {
+      next.hackingExpPerSec = rates.hackingExpPerSec * scale;
+    }
+  } else if (resource === "charisma") {
+    next.charismaSkillPerSec = (
+      rates.charismaSkillPerSec > 0 ? rates.charismaSkillPerSec : 1 / FALLBACK_SEC_PER_CHARISMA_LEVEL
+    ) * scale;
+    if (rates.charismaExpPerSec !== undefined && rates.charismaExpPerSec > 0) {
+      next.charismaExpPerSec = rates.charismaExpPerSec * scale;
+    }
   } else if (resource === "combat") {
     next.combatSkillPerSec = (
       rates.combatSkillPerSec > 0 ? rates.combatSkillPerSec : 1 / FALLBACK_SEC_PER_COMBAT_LEVEL

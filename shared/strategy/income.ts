@@ -41,6 +41,7 @@ export type RateChannel = string;
 
 export const MONEY_CHANNEL = "money" satisfies MarginalResource;
 export const HACKING_CHANNEL = "hacking" satisfies MarginalResource;
+export const CHARISMA_CHANNEL = "charisma" satisfies MarginalResource;
 export const REPUTATION_CHANNEL = "reputation" satisfies MarginalResource;
 export const COMBAT_CHANNEL = "combat" satisfies MarginalResource;
 export const BLADEBURNER_RANK_CHANNEL = "bladeburnerRank" satisfies MarginalResource;
@@ -303,6 +304,11 @@ export function currencyForNeed(need: Pick<Need, "kind" | "subject">): MarginalR
   // need that is met by the weakest of them.
   if (need.kind === "combatSkills") return COMBAT_CHANNEL;
   if (need.kind === "skill" && need.subject === "hacking") return HACKING_CHANNEL;
+  // Charisma is a single stat, so the dedicated `charisma` kind and a
+  // `skill:charisma` requirement are the same outcome — unlike the four-stat
+  // combat gate, folding them cannot mis-credit an unbalanced trainer.
+  if (need.kind === "charisma") return CHARISMA_CHANNEL;
+  if (need.kind === "skill" && need.subject === "charisma") return CHARISMA_CHANNEL;
   return undefined;
 }
 

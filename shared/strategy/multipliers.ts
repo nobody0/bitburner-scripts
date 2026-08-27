@@ -27,12 +27,15 @@ export type ValuedResource = MarginalResource | "crime";
  * batch. What each channel is WORTH is measured elsewhere and multiplied in.
  * A field absent here but named in `INCOME_SOURCE_FIELDS` lifts that source's
  * dollars and nothing else; a field in NEITHER accelerates nothing the route
- * model prices — charisma reaches the run only through company reputation,
- * which `company_rep` already carries — and contributes zero rather than a
- * guess. */
+ * model prices and contributes zero rather than a guess. */
 const FIELD_SENSITIVITY: Readonly<Record<string, Readonly<Partial<Record<ValuedResource, number>>>>> = {
   hacking: { hacking: 1 },
   hacking_exp: { hacking: 1 },
+  // Charisma is priced by the labyrinth ladder (every walk move gates on it,
+  // and every reward install resets it); elsewhere its marginal measures zero
+  // and these contribute nothing, exactly like a combat field off-route.
+  charisma: { charisma: 1 },
+  charisma_exp: { charisma: 1 },
   hacking_speed: { money: 1, hacking: 1 },
   hacking_money: { money: 1 },
   hacking_chance: { money: 1 },

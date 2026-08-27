@@ -218,6 +218,7 @@ function routeStatus(route: Route): { mark: string; label: string } {
 const MARGINAL_LABELS: Record<MarginalResource, string> = {
   money: "money",
   hacking: "hacking",
+  charisma: "charisma",
   reputation: "reputation",
   combat: "combat",
   bladeburnerRank: "bladeburner rank",

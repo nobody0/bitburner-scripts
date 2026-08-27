@@ -263,7 +263,9 @@ describe("career as the needs-board consumer", () => {
         crimes: [shoplift],
         courses,
         moneyGranted: 30_000,
-        rates: { best: new Map(), worth: new Map([["hacking", 100], ["skill:charisma", 19_000]]) },
+        // Charisma is a priced currency now (the labyrinth marginal), so the
+        // worth table keys it by channel rather than by a board need key.
+        rates: { best: new Map(), worth: new Map([["hacking", 100], ["charisma", 19_000]]) },
       }),
       postNeeds([]),
     );
