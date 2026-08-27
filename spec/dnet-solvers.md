@@ -103,7 +103,11 @@ bun run bench:sim:dnet-auth -- --only DeepGreen --seeds 64 --repeats 5
 ```
 
 It reports authenticate calls per host (mean, p95, maximum) and pure decision
-milliseconds per attempt. Separate contains-only, placement-only, and combined
-lanes report calls saved and hosts improved, making hint utilization an explicit
-optimization metric. Generation, simulated feedback, and I/O are outside the CPU
-timer.
+milliseconds per attempt. The call table is the stable regression and
+optimization surface; the CPU table points at expensive decision paths.
+Generation, simulated feedback, and I/O are outside the CPU timer. Harvested
+hint shapes and their useful ceilings are covered by the correctness suite
+instead of separate benchmark experiments. Feedback solvers receive generic
+authentication failures and recover their model response from the serialized
+log record, as the deployed heartbleed path does; `2G_cellular` receives only
+the modeled authentication duration and does not get a log-oracle shortcut.

@@ -1,5 +1,5 @@
 import { generateSecret, passwordRng } from "./features/dnet-generators.ts";
-import { checkPassword, type PacketWorld } from "./features/dnet-feedback.ts";
+import { checkPassword, getSharedChars, logEntryFor, type PacketWorld } from "./features/dnet-feedback.ts";
 import {
   describeModel,
   planAttempt,
@@ -8,6 +8,7 @@ import {
 } from "../shared/strategy/dnet/models.ts";
 import { solverFor } from "../shared/strategy/dnet/solvers/index.ts";
 import type { PasswordEvidence } from "../shared/strategy/dnet/evidence.ts";
+import { harvestLogs, oracleFor } from "../shared/strategy/dnet/oracle.ts";
 import type { SolverObservation } from "../shared/strategy/dnet/solvers/types.ts";
 
 /** The difficulty samples used by both the correctness ratchet and the CPU
@@ -136,6 +137,13 @@ export function runDnetAuthentication(
   options: DnetAuthRunOptions = {},
 ): DnetAuthOutcome {
   const host = mintDnetAuthHost(model, difficulty, seed, options.evidence);
+  if (model === "2G_cellular") {
+    // Production obtains these from the pinned authentication formula before
+    // measuring each call. Absolute time is irrelevant to the solver; only the
+    // 50 ms added per matching prefix character is observable.
+    host.facts.authenticateBaseMs = 1_000;
+    host.facts.authenticateStepMs = 50;
+  }
   const world = packetWorld(mixSeed(model, difficulty, seed));
   const cap = options.cap ?? 600;
   const entry = describeModel(model);
@@ -175,27 +183,35 @@ export function runDnetAuthentication(
     }
     const attempt = step.password;
     calls++;
-    const response = checkPassword(host.server, attempt, 1_000, world);
+    const elapsedMs = model === "2G_cellular"
+      ? 1_000 + getSharedChars(host.password, attempt) * 50
+      : undefined;
+    const response = checkPassword(host.server, attempt, elapsedMs ?? 1_000, world);
     if (response.ok) {
       return { opened: true, calls, budget, decisionNs, detail: step.kind === "answer" ? "answered" : "attempted" };
     }
     if (step.kind === "answer") {
       return { opened: false, calls, budget, decisionNs, detail: `asserted ${JSON.stringify(attempt)} and was refused` };
     }
+    // `authenticate()` exposes only a generic 401. The model response is
+    // serialized into the host's log ring, then recovered through heartbleed's
+    // public text format. Keep that boundary here: handing `response` directly
+    // to the solver would test an API the deployed job cannot access.
+    const harvest = step.needsOracle
+      ? harvestLogs([
+          JSON.stringify(logEntryFor(model, attempt, 401, response)),
+        ], { bledFrom: host.server.hostname, knownHosts: [host.server.hostname], at: calls })
+      : undefined;
+    const oracle = harvest ? oracleFor(harvest, attempt, model) : undefined;
     const seen: SolverObservation = {
       attempted: attempt,
       code: 401,
       success: false,
-      oracle: {
-        kind: "oracle",
-        code: 401,
-        message: response.message,
-        data: response.data,
-        passwordAttempted: attempt,
-      },
+      ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+      ...(oracle ? { oracle } : {}),
     };
-    const attemptedStep = step;
-    step = decide(() => solver.next(host.facts, attemptedStep.state, seen));
+    const state = step.state;
+    step = decide(() => solver.next(host.facts, state, seen));
   }
   return {
     opened: false,
