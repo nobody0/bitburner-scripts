@@ -1757,16 +1757,30 @@ $132e12 banked). Ledger row updated. Speedrun guard after the charisma pass:
 2.36 h regression bisects to the charisma commit (not the install veto —
 identical run at the pre-veto rev), cause not yet isolated.
 
-**BN15 remains unmeasurable end-to-end for a different reason: the darknet
-feature never boots in the simulator.** Hours of virtual time with zero
-darknet hosts observed, the controller session present but idle, backdoor
-churn errors (`Invalid host: 'dnet-1-x222'` — handled at the boundary as
-host-absent), while the dnet planner (`vantagesFor`, `candidatesFrom`,
-controller projections) burns the majority of the sim's wall clock and
-drives 20-60 GB allocation churn; the forced-GC pacing keys on VIRTUAL time,
-so when progress stalls the GC starves with it and the process spirals.
-Darknet internals are out of scope for the route layer; reported for the
-darknet owner with the CPU profile evidence.
+**BN15 remains unmeasurable end-to-end: darknet-enabled sim runs hard-hang.**
+The isolation evidence, for the darknet owner:
+
+- bn15-full seed 1 hangs deterministically (~vt 1.09 h at rev 03257691,
+  ~vt 0.53 h crawl at 5d2fd3ff): virtual clock frozen, one JS turn never
+  yields, 100% CPU, RSS spiraling 20-66 GB. bn1-speedrun seed 2 at 5d2fd3ff
+  (`--compact`) hangs the same way at vt 2.075 h — BN1 buys Darkscape
+  mid-run, so dnet is live there too.
+- With `--only` everything EXCEPT dnet, the same bn15 run sails past the
+  freeze point and completes its horizon with every other feature active.
+- A 4-minute `bun --cpu-prof` window: `vantagesFor` (dnet/plan.ts:186) and
+  `candidatesFrom` (dnet/plan.ts:898) are the top self-time frames, with
+  `projectInFlight`/`projectFarmHosts` (dnet/controller.ts) and heavy
+  `cloneObject` churn behind the RSS growth.
+- Behaviorally, the dnet topic reports ZERO hosts for hours (controller
+  session present, occasional successful backdoors logged, `charismaNeeded`
+  posted) — the feature plans every tick against an empty map it never
+  fills. Backdoor `Invalid host` churn is already handled at the boundary
+  as host-absent.
+- Harness note: the forced-GC pacing keys on VIRTUAL time, so a frozen
+  clock starves the GC and turns a hang into an OOM spiral.
+
+Darknet internals are out of scope for the route layer; the route side stays
+estimation-pure and is unit-pinned up to the boundary.
 
 ## Known gaps in the current implementation
 

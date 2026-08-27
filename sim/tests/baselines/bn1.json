@@ -59,7 +59,8 @@
       "note": "All three seeds now reach. The archived 2.43-2.46h generation predates the coding-contract runtime and the upstream batcher invariants; under model-10 semantics the honest-ETA strategy layer beats the previously recorded 6.23h/5.01h/DNF on every seed. The remaining spread (1.66h-3.61h) is decision-timing sensitivity worth studying.",
       "history": [
         "2026-08-20: seed 1 7.44h without the cold-start install fixes, 6.23h with them.",
-        "2026-08-20 (model 5): seed 1 6.23h, seed 3 5.01h, seed 2 not reached. 2026-08-27 (model 10, after the route/arbiter pass): all three seeds reach \u2014 3.61h / 1.66h / 2.54h."
+        "2026-08-20 (model 5): seed 1 6.23h, seed 3 5.01h, seed 2 not reached. 2026-08-27 (model 10, after the route/arbiter pass): all three seeds reach \u2014 3.61h / 1.66h / 2.54h.",
+        "2026-08-27 (model 10, after the upstream dnet/batcher merge and the charisma pass): 80.7m / 2.36h / 2.68h \u2014 seed 1 a new best. Seed 2's recorded 1.66h predates the merge: at rev 5d2fd3ff (pre-charisma) seed 2 HANGS at vt 2.075h (frozen clock, dnet-implicated \u2014 see spec/progress.md), so 2.36h at HEAD is the best CURRENT-generation observation, kept out of the headline per the improving-direction rule."
       ],
       "seed2Hours": 1.66
     }
