@@ -207,7 +207,7 @@ function namespace(impl: Record<string, unknown>, path: string, host: SimNsHost,
 /** Suspend this process on the virtual clock, exactly as netscriptDelay does:
  * the timer is cancellable, and a kill rejects the await with ScriptDeath. */
 function netscriptDelay(host: SimNsHost, process: SimProcess, ms: number, functionName: string): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
+  const promise = new Promise<void>((resolve, reject) => {
     process.runningFn = functionName;
     process.delay = host.clock.in(Math.max(0, ms), () => {
       process.delay = undefined;
@@ -218,6 +218,13 @@ function netscriptDelay(host: SimNsHost, process: SimProcess, ms: number, functi
     });
     process.delayReject = reject;
   });
+  // A prestige kill sweep can reject this while the awaiting script is itself
+  // mid-teardown and never observes the rejection — bun then treats it as an
+  // unhandled rejection and takes the WHOLE seed process down (measured on
+  // bn1-full: a seed died silently at 15.2h, its result never written). The
+  // no-op handler marks the rejection observed; real awaiters still see it.
+  void promise.catch(() => {});
+  return promise;
 }
 
 function requireServer(host: SimNsHost, hostname: unknown, fallback = "home"): SimServer {

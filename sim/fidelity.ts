@@ -6,7 +6,7 @@ export type FeatureCoverage = "full" | "partial" | "oracle-only" | "unmodeled";
 
 /** Increment whenever handwritten simulator semantics change in a way that can
  * alter an outcome. It is part of every comparison fingerprint. */
-export const SIMULATOR_MODEL_VERSION = 9;
+export const SIMULATOR_MODEL_VERSION = 10;
 /** Pinned upstream revision mirrored by sim/vendor/manifest.json. */
 export const SIMULATOR_VENDOR_COMMIT = "3162fd2590e221eadd0c0fbd46151913f7c4c41c";
 

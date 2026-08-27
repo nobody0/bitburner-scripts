@@ -804,6 +804,7 @@ async function runGameInstalled(
   // realm. Keeping the slots is load-bearing; otherwise the simulator masks
   // stale-state bugs in the install callback path.
   host.onPrestige = (cbScript, newlyInstalled): void => {
+    try {
     host.processes.killAll();
     host.processes.resetPidCounter();
     share.reset();
@@ -915,6 +916,13 @@ async function runGameInstalled(
       if (process) launch(host, process);
       else host.crashes.push({ pid: 0, filename: callback, error: "home has too little RAM for install callback" });
     });
+    } catch (error) {
+      // A failed prestige orchestration previously vanished: the throw landed
+      // in the already-killed caller's frame and the run sat dead to the
+      // horizon reporting "valid". Record it as the crash it is.
+      host.crashes.push({ pid: 0, filename: "onPrestige", error: String(error) });
+      throw error;
+    }
   };
 
   // Exercise start.ts itself, including telemetry construction, argument

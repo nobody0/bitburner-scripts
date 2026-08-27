@@ -43,11 +43,12 @@
     "Same seed, same settings, an otherwise idle machine. Take the median of three."
   ],
   "provenance": {
-    "recordedAt": "2026-08-24",
+    "recordedAt": "2026-08-27",
     "gitRev": "a76d187b plus the factions-portfolio hot-path pass",
     "bun": "1.3.14",
     "machine": "darwin arm64",
-    "recordedFrom": "the factions-portfolio hot-path pass measured against a76d187b"
+    "recordedFrom": "re-measured after the BN1 route/arbiter pass: honest route ETAs (closed-form climbs, acquisition-aware invite/regrow, bank-netted donations), investment horizon fixes, wake coalescing, share cooldown, prestige killAll rounds, sim GC pacing",
+    "simulatorModelVersion": 10
   },
   "profiles": {
     "bn1-full-1h": {

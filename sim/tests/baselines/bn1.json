@@ -26,10 +26,10 @@
     "Screen on seed 1; confirm anything promising on all three before recording."
   ],
   "provenance": {
-    "simulatorModelVersion": 5,
+    "simulatorModelVersion": 10,
     "vendorCommit": "3162fd2590e221eadd0c0fbd46151913f7c4c41c",
-    "recordedAt": "2026-08-20",
-    "recordedFrom": "first measurement of bn1-full after the hacking/Go/harness rewrites and the BN-second re-denomination"
+    "recordedAt": "2026-08-27",
+    "recordedFrom": "re-measured after the BN1 route/arbiter pass: honest route ETAs (closed-form climbs, acquisition-aware invite/regrow, bank-netted donations), investment horizon fixes, wake coalescing, share cooldown, prestige killAll rounds, sim GC pacing"
   },
   "target": {
     "note": "An optimal BN1 completes in under eight hours. bn1-full runs a 24h horizon; not reaching inside it is a defect to diagnose, not a score to optimise."
@@ -52,14 +52,15 @@
     "bn1-speedrun": {
       "goal": "earn:1e9",
       "horizonHours": 8,
-      "seed1Hours": 6.23,
-      "seed3Hours": 5.01,
-      "seed2Reached": false,
+      "seed1Hours": 3.61,
+      "seed3Hours": 2.54,
       "what": "The cheap regression guard: $1b on the small deterministic early-game fixture.",
-      "note": "ALSO A REGRESSION, and not caused by the route work. spec/progress.md tracked 2.43-2.46h for an older generation; measured on this branch WITHOUT the route changes seed 1 takes 7.44h, and with them 6.23h. The 3x loss against the tracked number predates this pass and is outstanding; the 16% recovery is what the route changes contributed. These archived measurements predate the coding-contract runtime.",
+      "note": "All three seeds now reach. The archived 2.43-2.46h generation predates the coding-contract runtime and the upstream batcher invariants; under model-10 semantics the honest-ETA strategy layer beats the previously recorded 6.23h/5.01h/DNF on every seed. The remaining spread (1.66h-3.61h) is decision-timing sensitivity worth studying.",
       "history": [
-        "2026-08-20: seed 1 7.44h without the cold-start install fixes, 6.23h with them."
-      ]
+        "2026-08-20: seed 1 7.44h without the cold-start install fixes, 6.23h with them.",
+        "2026-08-20 (model 5): seed 1 6.23h, seed 3 5.01h, seed 2 not reached. 2026-08-27 (model 10, after the route/arbiter pass): all three seeds reach \u2014 3.61h / 1.66h / 2.54h."
+      ],
+      "seed2Hours": 1.66
     }
   }
 }

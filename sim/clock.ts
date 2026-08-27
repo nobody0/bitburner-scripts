@@ -110,11 +110,22 @@ export class Clock {
     horizonMs = Infinity,
     drain: () => Promise<void> = drainMicrotasks,
   ): Promise<"goal" | "empty" | "horizon"> {
+    // Virtual hours pass in wall-seconds, so the allocation churn of a busy
+    // late-game fleet outruns the collector's own pacing: RSS ratcheted to
+    // 50+ GB with a ~0.5 GB live heap and the OS killed whole seed processes
+    // with no result written. A forced full collection once per virtual
+    // 10 minutes keeps the footprint bounded; Bun.gc is absent outside bun.
+    const gc = (globalThis as { Bun?: { gc?: (force: boolean) => void } }).Bun?.gc;
+    let nextGcAt = 600_000;
     for (;;) {
       await drain();
       if (until()) return "goal";
       const next = this.#takeNext(horizonMs);
       if (next === "empty" || next === "horizon") return next;
+      if (gc && this.now() >= nextGcAt) {
+        nextGcAt = this.now() + 600_000;
+        gc(true);
+      }
       next.fn();
     }
   }
