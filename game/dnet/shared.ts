@@ -2,9 +2,9 @@ import type { NS } from "@ns";
 import type { DnetProbeRefresh } from "./launch.ts";
 import type { AttemptOutcome, LogDrainOutcome, ReportHost, VaultEntry } from "../../shared/strategy/dnet/courier.ts";
 import type { DnetHost } from "../../shared/strategy/dnet/host.ts";
-import type { TaskKind } from "../../shared/strategy/dnet/plan.ts";
+import type { ProcessMode, TaskKind } from "../../shared/strategy/dnet/jobs.ts";
 import type { DnetTimingProfile } from "../../shared/strategy/dnet/rates.ts";
-import type { DnetDrain, DnetOrders } from "./wire.ts";
+import type { DnetInputs, DnetSnapshot } from "./wire.ts";
 import type { DarknetProfit } from "../../shared/telemetry/topics/dnet.ts";
 
 /** The one object the controller and its agents meet at, and the rules that
@@ -46,15 +46,16 @@ import type { DarknetProfit } from "../../shared/telemetry/topics/dnet.ts";
  * 2. **A foreign generation is refused** (`live` / `controllerIsLive`), because
  *    agents outlive controllers and a live script from a dead run describes a
  *    world this one does not share.
- * 3. **Home keeps its own fold.** `drain()` hands observations over ONCE.
+ * 3. **The controller owns knowledge.** Home receives immutable snapshots and
+ *    may return the latest versioned recovery checkpoint to a replacement.
  * 4. **A credential never reaches telemetry.** It lives in the controller's
- *    vault and in home's; the published record carries a boolean. */
+ *    private checkpoint; the published record carries a boolean. */
 
 /** A version on the global SHAPE. It moves because agents outlive controllers
  * and a build handoff leaves both on disk: an agent from the previous build
  * reading a global whose shape moved under it is a bug with no symptom.
  * Refusing by number makes it exit instead. */
-export const DNET_PROTOCOL = 11;
+export const DNET_PROTOCOL = 12;
 
 /** The script base every allocation starts from. Transcribed rather than read,
  * because a launcher sizes a process it has not started yet.
@@ -63,11 +64,11 @@ export const SCRIPT_BASE_GB = 1.6;
 
 // --- orders and reports: DATA, never closures --------------------------------
 
-export type OrderKind = TaskKind | "idle" | "bootstrapReclaim" | "launchSidecar";
+/** Every kind a PROCESS can be: the kinds of WORK, plus the two modes that
+ * are not work at all. Only the price and call tables are keyed by this — an
+ * `Order` is always real work, so it is keyed by `TaskKind`. */
+export type OrderKind = TaskKind | ProcessMode;
 
-/** Everything an order needs, carried as data. It lives in the realm rather
- * than in `ns.args` because it may carry a password, and `ns.args` is visible
- * in the game's script listing. */
 /** One host on a plant's frontier, carrying everything its launch needs so the
  * body never reaches back into the controller for a per-target fact. */
 export interface PlantJobTarget {
@@ -76,10 +77,14 @@ export interface PlantJobTarget {
   /** The identity the credential was verified against, if we hold one. */
   identity?: string;
   /** Stasis-linked: boot the spawn-free managed resident and hand dispatch to
-   *  the controller. Never inferred from `sessionOnly`. */
+   *  the controller. Never inferred from `remote`. */
   controllerManaged?: boolean;
-  /** Reuse a global rooted session; no `authenticate` fallback at a distance. */
-  sessionOnly?: boolean;
+  /** Reached by REMOTE exec (a backdoor or stasis link) rather than across a
+   *  believed edge. Every plant is session-only now — it holds the credential
+   *  already and never authenticates — so this says only how the target was
+   *  ROUTED: which decides whether losing the edge invalidates it, and whether
+   *  a refused launch should discredit the backdoor we trusted. */
+  remote?: boolean;
   /** Launch the minimal spawn-free self reclaimer, not prober+resident. */
   bootstrapReclaim?: boolean;
   bootstrapThreads?: number;
@@ -87,17 +92,87 @@ export interface PlantJobTarget {
   omitProber?: boolean;
 }
 
-export interface Order {
+/** What each kind of work needs, resolved by the CONTROLLER when it files the
+ * order. A kind with no data of its own carries `{}`.
+ *
+ * These used to be sixteen optional fields on one `Order`, which meant every
+ * one of them was readable on every kind: `order.filename` type-checked on a
+ * `promote` and `order.symbol` on a `cache`, so the bodies opened with runtime
+ * guards — "no cache filename; a job never invents one" — against states the
+ * type should have made unrepresentable. Under `payload` a field exists only
+ * on the kind that has it, and reaching it means narrowing on `kind` first. */
+export interface OrderPayloads {
+  inventory: Record<string, never>;
+  bleed: {
+    /** The log parser's attribution table: a leaked `host:password` line is
+     *  trusted only when the name is one we have already seen. Absent, the
+     *  bleeding host itself is the only name that can be attributed. */
+    knownHosts?: readonly string[];
+    /** A standalone bleed waits for these exact authentication orders, then
+     *  drains the records they wrote. */
+    followAttemptIds?: readonly string[];
+  };
+  attempt: {
+    /** See `bleed`. */
+    knownHosts?: readonly string[];
+    /** An unattributed leaked password this attempt is spending. Resolved from
+     *  the planner's opaque `guessId` back where credentials live. */
+    guess?: string;
+    /** A CONVERSATIONAL solve: the process needs `heartbleed` beside its
+     *  `authenticate` and is priced for it. Absent (the common case) the order
+     *  is lean and must never bleed — `attempt.ts` folds this into `canBleed`,
+     *  which every drain is already gated on. */
+    needsRing?: true;
+    skipInitialBleed?: true;
+  };
+  plant: {
+    /** The whole frontier this one order opens, launched concurrently.
+     *  `Order.host` names `targets[0]` and nothing more — ask `hostsOf`. */
+    targets: PlantJobTarget[];
+    /** The artifacts to `scp` ahead of the launch: agent, then prober. */
+    payloads: string[];
+  };
+  /** A job never invents a filename: `openCache` THROWS on a name the host does
+   *  not hold, and a throw kills the agent rather than failing the job. */
+  cache: { filename: string };
+  reclaim: {
+    /** Re-size to one more worker thread once the block has shrunk this far. */
+    resizeAtBlockedRam?: number;
+  };
+  phish: Record<string, never>;
+  promote: { symbol: string };
+  induce: Record<string, never>;
+  pin: {
+    /** The neighbour the pin exists to keep. */
+    edge?: string;
+    /** Release the link instead of applying one. */
+    unpin?: true;
+  };
+  walk: {
+    /** The macro-route bias the walk body hands `routePrior` — set for a
+     *  mortal scout, absent (unbiased) for the finisher. */
+    route?: string;
+    /** A MORTAL scout rather than the pinned finisher. The controller cannot
+     *  tell the two apart from a live handle otherwise, and the difference
+     *  decides who is stamped irreplaceable, who holds the storm, and whose
+     *  absence re-plans a walk. */
+    scout?: true;
+  };
+  storm: Record<string, never>;
+  relaunchProbe: { proberFile: string };
+}
+
+/** What every order carries whatever its kind: identity, where it runs, how it
+ * is sized, and how it sorts against everything else. */
+export interface OrderBase {
   id: string;
-  kind: OrderKind;
   /** The TARGET the order acts on — not the host it runs on, which is `from`.
    *  The two are the same for most kinds; `induce` is the one call that REFUSES
    *  its own host, so there `host` is a neighbour and `from` is the vantage. */
   host: string;
   /** Where the order RUNS — the agent's own host, the vantage. */
   from: string;
-  /** Allocation for the process that runs it, PER THREAD: base + its calls +
-   *  (except pin/walk) the atExit successor spawn. */
+  /** Allocation for the process that runs it, PER THREAD. */
   ramOverrideGb: number;
   threads: number;
   /** Lower is more urgent, carried from the derived `Task`. */
@@ -106,50 +181,26 @@ export interface Order {
   longLived: boolean;
   /** For the panel and the failure line. */
   label: string;
+  /** The identity the target was believed to have when this was filed. A
+   *  mismatch on arrival means the hostname was reused by another server. */
+  targetIdentity?: string;
   /** When the running process started this order, stamped by the agent. */
   startedAt?: number;
   /** Current completion estimate, used only to choose the least-cost victim. */
   expectedDoneAt?: number;
   /** Run without spawn; the controller remotely restores this stasis host. */
   controllerManaged?: boolean;
-
-  // --- kind-specific data ---------------------------------------------------
-  targetIdentity?: string;
-  password?: string;
-  knownHosts?: string[];
-  jobThreads?: number;
-  resizeAtBlockedRam?: number;
-  bootstrapReclaim?: boolean;
-  bootstrapThreads?: number;
-  /** Plants only: the whole frontier this one order opens, launched
-   *  concurrently. `host` names `targets[0]` and nothing more. */
-  targets?: readonly PlantJobTarget[];
-  edge?: string;
-  unpin?: boolean;
-  payloads?: string[];
-  guess?: string;
-  /** Standalone bleed waits for this exact authentication order. */
-  followAttemptIds?: readonly string[];
-  skipInitialBleed?: boolean;
-  symbol?: string;
-  filename?: string;
-  /** Walks only: the macro-route bias the walk body hands `routePrior` — set
-   *  for a mortal scout, absent (unbiased) for the finisher. */
-  route?: string;
-  /** Walks only: a MORTAL scout rather than the pinned finisher. The
-   *  controller cannot tell the two apart from a live handle otherwise, and
-   *  the difference decides who is stamped irreplaceable, who holds the storm
-   *  and whose absence re-plans a walk. */
-  scout?: true;
-  /** A LINKED ONE-OFF sidecar: exec'd by the resident beside the main order
-   *  instead of being spawned into after it. Spawn-free (its `ramOverrideGb`
-   *  is priced without the successor spawn), reports through `entry.sidecar`,
-   *  exits when its body settles, and dies with its host's agents — the
-   *  controller kills it whenever it retires the vantage. Born for the second
-   *  induce push whose 6 s aligns with the main's: "I have X GB and six
-   *  seconds — find something to do." */
-  oneOff?: true;
 }
+
+/** One piece of work, as data. It lives in the realm rather than in `ns.args`
+ * because it may carry a password, and `ns.args` is visible in the game's
+ * script listing.
+ *
+ * Distributing over `K` is what ties `kind` and `payload` together: a plain
+ * `{ kind: TaskKind; payload: ... }` would let any kind carry any payload.
+ * Narrow on `kind` and the payload narrows with it. */
+export type Order<K extends TaskKind = TaskKind> =
+  { [P in K]: OrderBase & { kind: P; payload: OrderPayloads[P] } }[K];
 
 /** What an order hands back. Data, never live objects: the controller folds it
  * into the map, and the map has to outlive the process that produced it. */
@@ -167,7 +218,7 @@ export interface Report {
   codes?: Record<string, number>;
   charismaNeeded?: number;
   karmaLoss?: number;
-  /** Since-last-report contribution; the controller and home fold it. */
+  /** Since-last-report contribution; the controller folds it. */
   profit?: Partial<DarknetProfit>;
   /** Induce only: the target's accumulated migration charge (0..1), parsed
    *  from the engine's own "Migration prep is now at X.XX%" response — the
@@ -192,14 +243,26 @@ export interface AgentIo {
    * operation settles. Updating this estimate is itself a liveness beat. */
   setExpectedDoneAt: (at: number | undefined) => void;
   cancelled: () => string | undefined;
+  /** Publish the release hook for the Darknet call this body is waiting on, so
+   * the controller can let it go WITHOUT killing the process. Cleared as soon
+   * as the call settles. */
+  hold: (release: (() => void) | undefined) => void;
+  /** Publish the engine call a RELEASED body walked away from. It is still
+   *  running, and it still owns this script's single Netscript slot, so the
+   *  exit path has to wait for it before it may touch `ns` again. */
+  inFlight: (settling: Promise<unknown>) => void;
   deps: ControllerDeps;
 }
 
 /** One agent process, as the controller and the agent both see it.
  *
  * The controller sets cancelReason; bodies observe it at safe boundaries. A
- * blocked Darknet call is stopped by hard-killing an armored agent on the next
- * derive pass. done settles when the body finishes or atExit handles that kill. */
+ * body already inside a multi-second Darknet call cannot look, so it also
+ * publishes `release` — pulling that lets it fall out of the call it is
+ * waiting on, finish, and run its own exit path into the next job. No
+ * `ns.kill`, no ns call at all, and no waiting for the engine to return from
+ * work whose result we have already decided not to want. `done` settles when
+ * the body finishes, is released, or atExit handles a genuine kill. */
 export interface AgentHandle {
   pid: number;
   order: Order;
@@ -208,17 +271,20 @@ export interface AgentHandle {
   beatAt: number;
   /** Whatever the last beat carried, for a long order worth watching live. */
   progress?: Record<string, unknown>;
-  /** The agent proved its atExit respawn hook. The controller's licence to
-   *  hard-kill it: the kill runs that hook synchronously in the killer's stack,
-   *  settling and respawning before `ns.kill` returns. Never set by a pre-armor
-   *  build, so an old process is never killed without its net. */
-  armored: boolean;
   /** Controller-set; the cooperative cancel flag. Bodies poll it at loop
-   *  boundaries and stop there, and it is the licence hard cancel checks. */
+   *  boundaries and stop there, and it is the licence release checks. */
   cancelReason?: string;
-  /** Derive pass that requested cancellation; hard cancellation waits until a
-   * later pass so the body gets one cooperative boundary first. */
-  cancelRequestedPass?: number;
+  /** Let the body out of the Darknet call it is waiting on, right now.
+   *  Published by `awaitDnetOperation` for exactly as long as one call is in
+   *  flight. Calling it does not stop the engine's work — it stops US waiting
+   *  for it, which is the only part that was costing anything. */
+  release?: () => void;
+  /** The engine call still running after a release. Bitburner allows ONE
+   *  Netscript call per script at a time; until this settles, every `ns`
+   *  member in this process throws CONCURRENCY ERROR — the exit path's
+   *  `getScriptName`/`spawn` included, which is how a released body used to
+   *  lose its host. Awaited before the exit path, never cancelled. */
+  inFlight?: Promise<unknown>;
   /** Resolves the instant the order finishes or is cancelled. Idempotent. */
   done: Promise<Report>;
   settle: (report: Report) => void;
@@ -229,6 +295,26 @@ export interface AgentHandle {
  * plain `DnetHost` the fold creates is a valid entry — which is what lets
  * `foldReports` operate on this map directly. */
 export interface HostEntry extends DnetHost {
+  /** This host's prober `ns`, LENT to the controller.
+   *
+   * Every Bitburner script runs in one JS realm, so an `ns` is a live object
+   * bound to its owning process: a call made through this one is billed to the
+   * prober's `ramOverride`, not to the caller's. That is what lets the
+   * controller reach the two calls that are host-BOUND — `dnet.probe` scans
+   * from the calling host, and `exec` reaches only self and connected — without
+   * a launcher process on every host paying for them per thread. The pattern is
+   * not new: `lib/ns-resident.js` lends its own `ns` to the home-side
+   * automation in exactly this way.
+   *
+   * PRESENCE IS THE CONTRACT. The prober publishes this and clears it in its
+   * `atExit`, so a defined `ns` means "a live process on that host is holding
+   * RAM for these calls". Never keep a copy: a call through a dead `ns` throws.
+   *
+   * The prober must hold no Netscript call of its own while lending, or
+   * `env.runningFn` makes every borrowed call throw CONCURRENCY ERROR. It parks
+   * on a plain unresolved Promise for exactly that reason — never `ns.asleep`,
+   * which is itself a call. */
+  ns?: NS;
   /** The permanent prober beside the agent. `pid: 0` marks a walk host whose
    *  prober was deliberately killed; `at` is the last report stamp (dead-prober
    *  detection compares it to the mutation clock). */
@@ -237,24 +323,52 @@ export interface HostEntry extends DnetHost {
    * the host rather than as a launch callback so every caller observes the
    * same readiness barrier and an old prober cannot satisfy it. */
   probeRefresh?: DnetProbeRefresh;
-  /** When the outstanding barrier was opened, for the stale-barrier reclaim:
-   * a launcher that died between exec and settle would otherwise pin the
-   * barrier forever, and every later plant on the host would await a report
-   * nobody will ever file. */
-  probeRefreshAt?: number;
+  /** The prober process the barrier is waiting ON, once it has been exec'd.
+   * Undefined means the launcher has not got there yet and still owns the
+   * barrier. This replaced a deadline: "has the launcher died between exec and
+   * settle" is a question about a process, and the engine answers it. */
+  probeRefreshPid?: number;
   /** THE process on this host. `order.kind === "idle"` is resident mode. */
   agent?: AgentHandle;
-  /** The one linked one-off riding beside the main agent, when the resident
-   * exec'd a sidecar. Dies with the vantage; at most one at a time. */
-  sidecar?: AgentHandle;
-  /** The order the one-off process should run, staged by the `launchSidecar`
-   * hop just before its exec — the sidecar mirror of `pendingOrder`. Claimed
-   * out of `staged` by the hop, NOT by the one-off, so the ordinary successor
-   * chain can never spawn into it by mistake. */
-  sidecarOrder?: Order;
-  /** When the hop claimed `sidecarOrder`; ages the claim out if the exec'd
-   * one-off died before adopting it — the sidecar mirror of `pendingOrderAt`. */
-  sidecarOrderAt?: number;
+  /** When a process was last started for this host but has not adopted yet.
+   *
+   * Set by BOTH hand-offs, because both have this gap and it is not an error
+   * state: a plant between the prober's first report and the agent's `exec`,
+   * and a spawn between `stageSuccessor` clearing the slot and the successor's
+   * `main` running. The spawn gap is the one that bites — the engine schedules
+   * the successor rather than running it inline, so a derive landing in
+   * between sees a perfectly healthy host with no agent, drops it out of
+   * `standing` (every route through it becomes `no-route`) and retires its
+   * queued work as stranded.
+   *
+   * So a host with a process on its way counts as standing. Cleared on
+   * adoption, on retirement, and — when the starter died — by the engine
+   * saying the announced process is not there. Never by a clock. */
+  inbound?: {
+    /** When it was announced. DIAGNOSTIC ONLY — nothing decides on this. The
+     * window used to expire after a fixed 3s, which is a guess standing in for
+     * a question the engine can answer exactly. */
+    at: number;
+    /** WHICH launch announced it. The two paths fail for opposite reasons and
+     * want opposite fixes: a `spawn` is announced by the dying agent and is
+     * refused SILENTLY when the successor no longer fits, while a plant's
+     * `exec` is announced by a live vantage and fails visibly unless its child
+     * dies before its first line. A lost launch is only worth logging if the
+     * log says which one it was. */
+    via: "spawn" | "plant" | "plant-exec";
+    /** The child, once there IS one. Undefined means the launcher has not
+     * exec'd yet and still owns the window — it closes it itself, through
+     * `abandonPlant` on refusal or by handing us a pid on success. Once set,
+     * the window is decided by `isRunning`: a process that is there will adopt,
+     * and one that is not is a ghost. No clock is involved either way. */
+    pid?: number;
+    /** What the announced process should be HOLDING, for the one launch that
+     * yields no pid. `ns.spawn` with `spawnDelay: 0` runs the launch
+     * synchronously before the caller's `ScriptDeath`, so the successor's
+     * allocation is already on the host — or was refused and never will be.
+     * The engine's own occupancy answers which, with no clock involved. */
+    expectGb?: number;
+  };
   /** A spawn-free local reclaimer — not an agent, and must not be staged to. */
   bootstrap?: { pid: number; startedAt: number };
   /** Pending orders, kept priority-sorted; the agent consumes `staged[0]`. */
@@ -264,26 +378,16 @@ export interface HostEntry extends DnetHost {
    *  booting process reads and clears it. Absent means the successor runs as a
    *  resident. This is the whole order handoff — no closures, just data. */
   pendingOrder?: Order;
-  /** When the handoff slot was filled. A slot far older than any spawn
-   * handoff means the spawn died with the order in hand; the reconcile sweep
-   * hands it back to `staged` so the work is not silently lost while
-   * `projectInFlight` reads the target as busy forever. */
-  pendingOrderAt?: number;
-  /** Resolves an idle agent's wait the instant work is staged. */
-  wake?: () => void;
-  wakePending?: boolean;
   completed?: number;
   failed?: number;
   lastError?: string;
-  /** When this host was last planted, for the spread cooldown. */
-  lastPlantAt?: number;
 }
 
 export type DnetHostEntries = Map<string, HostEntry>;
 
 /** The controller, as everything else sees it. The whole inter-process surface
- * of the feature: agents adopt here, probers report here, home drains and
- * orders here. There is no other channel. */
+ * of the feature: agents adopt here, probers report here, and home snapshots
+ * and configures here. There is no other channel. */
 export interface ControllerHandle {
   readonly protocol: number;
   readonly buildId: string;
@@ -303,9 +407,36 @@ export interface ControllerHandle {
   noteMutation(at: number): number;
   /** Wake the controller's derive race — a probe, an adopt, a home order. */
   wake(cause: string): void;
-  /** An agent registers itself the instant it boots. A one-off sidecar
-   * registers into the entry's `sidecar` slot instead of the agent slot. */
-  adopt(host: string, handle: AgentHandle, sidecar?: boolean): void;
+  /** Resolve once the next derive pass has finished.
+   *
+   * What an exiting order awaits before choosing its successor. Publishing a
+   * report and deriving its consequences are two microtask hops apart, so a
+   * body that picked its successor synchronously after settling always looked
+   * at the queue the controller had not filled yet: it spawned a resident, the
+   * derive staged the real order a beat later, and the fresh resident spawned
+   * AGAIN. Two spawns per order, and `[dnet:spin]` is that second one. */
+  derived(): Promise<void>;
+  /** An agent registers itself the instant it boots. */
+  adopt(host: string, handle: AgentHandle): void;
+  /** Name the process a launcher just started, so the placing window it opened
+   * stops being an assertion and becomes a checkable fact. Called with the pid
+   * `exec` returned; from here the window survives exactly as long as
+   * `isRunning` says that process does. */
+  announceLaunch(host: string, pid: number): void;
+  /** Name the prober a plant just exec'd, so the first-probe barrier stops
+   * being timed and starts being checked. */
+  announceProbeRefresh(host: string, pid: number): void;
+  /** A prober CHECKING IN: it hands the controller its own `ns` and then does
+   * nothing for the rest of its life.
+   *
+   * The controller probes through it immediately — a freshly planted host must
+   * appear on the map now, not at the next mutation, and the plant awaits that
+   * first report before it execs the agent. `refresh` is the plant's barrier
+   * token; passing it here is what settles that wait.
+   *
+   * The prober must hold no call of its own after this, or every borrowed call
+   * throws CONCURRENCY ERROR. See `HostEntry.ns`. */
+  lend(host: string, borrowed: NS, pid: number, refresh?: DnetProbeRefresh): void;
   /** Resolve after every named order has reported. Used by a prequeued bleed
    * to follow a whole parallel authentication wave without polling. */
   afterOrders(ids: readonly string[]): Promise<void>;
@@ -316,15 +447,24 @@ export interface ControllerHandle {
   cancelProbeRefresh(host: string, refresh: DnetProbeRefresh): void;
   /** A prober files its host's adjacency, its pid, and wakes the controller. */
   reportProbe(host: string, neighbours: readonly string[], at: number, pid: number, refresh?: DnetProbeRefresh): void;
-  /** Plant calls this after the first probe and before launching the agent. */
-  preparePlant(host: string): { controllerManaged: boolean; next?: Order; reuseProber: boolean };
+  /** Plant calls this before launching the prober: it settles how the agent
+   * will be launched and opens the placing window. */
+  preparePlant(host: string): { reuseProber: boolean };
+  /** Plant calls this after the first probe and immediately before the agent
+   * `exec`: it closes the placing window and hands back the order the derive
+   * staged in it for the new process to adopt. The `exec` is sized from that
+   * order by `processSizeFor`, exactly as the spawn chain sizes its own. */
+  claimPlanted(host: string): Order | undefined;
+  /** Close the placing window without launching anything. */
+  abandonPlant(host: string): void;
   /** A bootstrap reclaimer registers and, on exit, reports itself done. */
   registerBootstrap(host: string, pid: number): void;
   bootstrapDone(host: string): void;
   /** The state a body needs that outlives its process, keyed by target. */
   deps: ControllerDeps;
-  drain(): DnetDrain;
-  order(orders: DnetOrders): void;
+  snapshot(at?: number): DnetSnapshot;
+  configure(inputs: DnetInputs): void;
+  standDown(): void;
 }
 
 /** Controller-owned write-through state a body reaches through, so a killed
@@ -370,7 +510,6 @@ export interface DnetDelayRequest {
 
 // --- the RAM cost table (replaces JOB_METHODS/priceAgent) ---------------------
 
-const SPAWN = ["spawn"] as const;
 const DETAILS = ["dnet.getServerDetails"] as const;
 
 /** What each order kind's process actually calls, per kind.
@@ -382,70 +521,169 @@ const DETAILS = ["dnet.getServerDetails"] as const;
  * `tests/ram-budget.test.ts` pins that the agent's per-arm surface matches. */
 export const KIND_CALLS: Readonly<Record<OrderKind, readonly string[]>> = {
   // Resident mode: spawn, and nothing else.
-  idle: [...SPAWN],
-  // The TRANSIENT launcher the resident spawns through to start a linked
-  // one-off sidecar: exec the sidecar, then chain onward into the main order
-  // as any completing order does. It exists so `exec` is paid on a 1-thread
-  // process for one hop rather than living on every resident (1.3 GB per
-  // host, forever) or on a multi-thread order (1.3 GB PER THREAD).
-  launchSidecar: [...SPAWN, "exec"],
+  idle: [],
   // The dedicated list job: one `ls` of the host it stands on.
-  inventory: [...SPAWN, "dnsLookup", "ls", "read", "rm", ...DETAILS],
-  bleed: [...SPAWN, "dnet.heartbleed", ...DETAILS],
-  attempt: [...SPAWN, "dnet.authenticate", "dnet.heartbleed", ...DETAILS],
-  // `asleep` (0 GB) is the replant grace: a refused exec right after an agent
-  // handoff usually races the dead predecessor's not-yet-freed allocation.
-  plant: [...SPAWN, "dnet.connectToSession", "dnet.authenticate", "scp", "exec", "kill", "dnsLookup", "asleep", ...DETAILS],
-  reclaim: [...SPAWN, "dnet.memoryReallocation", ...DETAILS],
+  inventory: ["dnsLookup", "ls", "read", "rm", ...DETAILS],
+  bleed: ["dnet.heartbleed", ...DETAILS],
+  // ONE CALL. `attempt` is thread-scaled and threads are the only thing that
+  // shortens an `authenticate`, so anything else declared here is charged on
+  // every thread to do something that happens once. `connectToSession` moved
+  // to the controller (instant, needs no threads, and a success means this job
+  // never runs); the host's facts come from the controller's map through the
+  // realm, for nothing. `heartbleed` is here only for a CONVERSATIONAL solve —
+  // see `ATTEMPT_LEAN_GB`.
+  attempt: ["dnet.authenticate", "dnet.heartbleed"],
+  // No `dnet.authenticate` (0.4 GB): a plant holds the credential already, so
+  // `connectToSession` is its only way in — falling back to the expensive call
+  // spent seconds re-doing work that had just succeeded, and cracking belongs
+  // to `attempt`. No `asleep` either: its retry yields a microtask now.
+  plant: ["dnet.connectToSession", "scp", "exec", "kill", "dnsLookup", ...DETAILS],
+  reclaim: ["dnet.memoryReallocation", ...DETAILS],
   // Spawn-free local recovery: base + one action per thread.
   bootstrapReclaim: ["dnet.memoryReallocation"],
-  phish: [...SPAWN, "dnet.phishingAttack", ...DETAILS],
-  cache: [...SPAWN, "dnet.openCache", "dnsLookup", "ls", "read", "rm", ...DETAILS],
-  promote: [...SPAWN, "dnet.promoteStock", ...DETAILS],
-  induce: [...SPAWN, "dnet.induceServerMigration", ...DETAILS],
+  phish: ["dnet.phishingAttack", ...DETAILS],
+  cache: ["dnet.openCache", "dnsLookup", "ls", "read", "rm", ...DETAILS],
+  promote: ["dnet.promoteStock", ...DETAILS],
+  induce: ["dnet.induceServerMigration", ...DETAILS],
   // NO spawn: 12 GB setStasisLink beside a 1.8 GB prober cannot afford it.
   pin: ["dnet.probe", "dnet.setStasisLink", ...DETAILS],
   // NO spawn: every byte goes to authenticate threads.
   walk: ["dnet.authenticate", "dnet.labradar"],
   // `listingOn` is the seed check, and it reads and deletes the data files it
   // walks past — the same `ls`/`read`/`rm` surface `inventory` and `cache` pay.
-  storm: [...SPAWN, "dnet.unleashStormSeed", "ls", "read", "rm", ...DETAILS],
-  relaunchProbe: [...SPAWN, "exec"],
+  storm: ["dnet.unleashStormSeed", "ls", "read", "rm", ...DETAILS],
+  relaunchProbe: ["exec"],
 };
 
-/** The permanent prober's calls: probe (0.2) and nextMutation (0), full stop. */
-export const PROBER_CALLS: readonly string[] = ["dnet.probe", "dnet.nextMutation"];
+/** The permanent prober's calls, and ONLY the two that are host-BOUND.
+ *
+ * `dnet.probe` scans from the calling host and `exec` reaches only self and
+ * connected: neither can be made from anywhere else, which is the entire reason
+ * a process stands on every host. Everything else the controller needs is
+ * global — `kill` by pid, `getServerDetails`, `dnsLookup`, `getServerMaxRam` —
+ * so it is dodged for the length of one batch instead of being reserved here
+ * forever.
+ *
+ * The prober LENDS this surface (`HostEntry.ns`) rather than using it: the
+ * controller decides, the prober's allocation pays. */
+export const PROBER_CALLS: readonly string[] = ["dnet.probe", "exec", "dnet.connectToSession"];
 
-/** The controller's whole surface: the mutation clock is the probers', so the
- * controller only OBSERVES synchronously and retires pointless work. */
-export const CONTROLLER_CALLS: readonly string[] = [
-  "isRunning",
-  "kill",
-  "dnet.getServerDetails",
-  "dnsLookup",
-  "getServerMaxRam",
-  "getServerUsedRam",
+/** The controller's whole surface: the mutation clock, and nothing else.
+ *
+ * It is the one process in the darknet that BLOCKS — `dnet.nextMutation` costs
+ * no RAM and parks its slot indefinitely — so it may own no other call. While
+ * parked, `env.runningFn` would make any second call throw. Everything it does
+ * to a host it does through a borrowed prober `ns` (host-bound work) or a dodge
+ * launched with one (global work), and both are other scripts' slots. */
+export const CONTROLLER_CALLS: readonly string[] = ["dnet.nextMutation"];
+
+/** The controller's hands: every GLOBAL call it makes, on one process for the
+ * whole net. None of these care where they are called from, which is exactly
+ * why one process can serve all of them. */
+export const HANDS_CALLS: readonly string[] = [
+  "dnet.getServerDetails", "dnsLookup", "getServerMaxRam", "kill", "isRunning",
 ];
+/** base 1.6 + the surface above. One process, once, on home. */
+export const HANDS_GB = 2.4;
 
-/** Price an allocation from the game's OWN table. `ns.getFunctionRamCost` is
- * 0 GB, so this is free — and the only way to keep these from drifting. */
-export function costOf(ns: NS, kind: OrderKind): number {
-  let total = SCRIPT_BASE_GB;
-  for (const call of new Set(KIND_CALLS[kind])) total += ns.getFunctionRamCost(call);
-  return total;
-}
+/** What every kind of process costs, as NUMBERS.
+ *
+ * None of this can change at runtime: a kind's dynamic surface is fixed in
+ * `KIND_CALLS` and `getFunctionRamCost` answers from the game's own constant
+ * table. So it is written down rather than rediscovered — a plant used to
+ * re-price three surfaces of ~15 members every time it ran, dozens of engine
+ * round trips for numbers settled at build time, on the one job the whole
+ * spread waits behind.
+ *
+ * Written as literals rather than computed at boot for a second reason: this
+ * is the RAM budget of the whole feature on one screen. Anyone — or anything —
+ * reasoning about what the darknet can afford reads it here instead of
+ * simulating the pricing. `tests/ram-budget.test.ts` pins every entry against
+ * `getFunctionRamCost`, so a game update or a changed `KIND_CALLS` fails the
+ * build rather than silently mis-sizing a launch.
+ *
+ * `spawning` keeps its own `spawn` chain (2.0 GB of it); `managed` is the
+ * spawn-free price a controller-dispatched process pays. `pin` and `walk` are
+ * identical in both because neither ever spawns. */
+export const ORDER_PRICES: Readonly<Record<OrderKind, number>> = {
+  attempt: 2.6,
+  bleed: 2.3,
+  bootstrapReclaim: 2.6,
+  cache: 4.55,
+  idle: 1.6,
+  induce: 5.7,
+  inventory: 2.55,
+  phish: 3.7,
+  pin: 13.9,
+  plant: 4.2,
+  promote: 3.7,
+  reclaim: 2.7,
+  relaunchProbe: 2.9,
+  storm: 2.6,
+  walk: 2,
+};
 
-export function priceCalls(ns: NS, calls: readonly string[]): number {
-  let total = SCRIPT_BASE_GB;
-  for (const call of new Set(calls)) total += ns.getFunctionRamCost(call);
-  return total;
+/** The permanent prober on every host, and the host's WHOLE standing cost —
+ * there is no resident beside it any more:
+ *
+ *     1.6 base + 1.3 exec + 0.2 dnet.probe + 0.05 dnet.connectToSession = 3.15
+ *                              (was: prober 1.8 + idle resident 3.6 = 5.4)
+ *
+ * ONLY the host-bound calls. `dnet.probe` scans from the calling host and
+ * `exec` reaches only self and connected, so neither can come from anywhere
+ * else; `connectToSession` is what makes an `exec` aimed at a neighbour legal.
+ * Every global call the controller makes — `getServerDetails`, `dnsLookup`,
+ * `getServerMaxRam`, `kill` — is borrowed from the HANDS instead, because a
+ * lender is charged the union of everything ever called through it and those
+ * would otherwise be paid by every host in the net, for ever. */
+export const PROBER_GB = 3.15;
+
+/** A STASIS-linked host's prober, without `exec`.
+ *
+ * `exec` is on the prober so a host can be relaunched locally after its
+ * processes die. A stasis host cannot lose them: the engine's own mutation
+ * guard is `openServer || isConnectedTo || hasStasisLink`, so neither the
+ * restart nor the delete path will ever touch it. It is also remotely
+ * exec-able for exactly as long as the link holds, so the controller can
+ * always reach it from a neighbour. Paying 1.3 GB for a recovery that cannot
+ * be needed is the definition of a reserve that should not exist. */
+export const PROBER_STASIS_GB = 1.85;
+/** The stasis prober's surface: no `exec`, for the reason above. */
+export const PROBER_STASIS_CALLS: readonly string[] = ["dnet.probe", "dnet.connectToSession"];
+/** The controller's own reserve on darkweb: base + a free mutation clock. */
+export const CONTROLLER_GB = 1.6;
+
+/** `attempt` WITHOUT the ring reader: `heartbleed`'s 0.6 removed.
+ *
+ * One script runs one Netscript call at a time, so an attempt cannot bleed
+ * while it authenticates — and `attempt` is thread-scaled, so declaring both
+ * charged 0.6 GB on EVERY thread for a call most attempts never make. Threads
+ * are the only thing that shortens `authenticate`, so that waste came straight
+ * out of the speed of the crack.
+ *
+ * Only a CONVERSATIONAL solve needs the two in one process: `authenticate`
+ * returns a generic failure and the model's real answer goes to the target's
+ * log ring, which only `heartbleed` reads back, and splitting that across jobs
+ * races the 200-line ring. A one-shot candidate or a known password has no
+ * response to read — its ring is drained by an ordinary `bleed`, on a second
+ * vantage or on this agent's next spawn. */
+export const ATTEMPT_LEAN_GB = 2.0;
+
+/** One kind's price. There is only one now.
+ *
+ * There used to be two — `spawning` and `managed` — differing by exactly the
+ * 2.0 GB of `spawn`, because a worker that had to become the next order carried
+ * its own launcher and a controller-dispatched one did not. Every worker is
+ * dispatched now, so every kind pays the cheaper of the two and the distinction
+ * has nothing left to describe.
+ *
+ * `needsRing` applies to `attempt` alone: false is the lean price, and it is
+ * the common case. */
+export function priceOf(kind: OrderKind, needsRing = true): number {
+  return kind === "attempt" && !needsRing ? ATTEMPT_LEAN_GB : ORDER_PRICES[kind];
 }
 
 /** The prober's exact allocation: base + its one billable call, no margin. */
-export function proberReserveGb(ns: NS): number {
-  return SCRIPT_BASE_GB + ns.getFunctionRamCost("dnet.probe");
-}
-
 /** Convert usable host RAM into the exact thread count the engine can admit.
  * `ramOverride` is charged once per thread, base and spawn-back included. */
 export function threadsFor(roomGb: number, perThreadGb: number, scaled: boolean, requested = 1): number {
@@ -453,80 +691,94 @@ export function threadsFor(roomGb: number, perThreadGb: number, scaled: boolean,
   return scaled ? Math.floor(roomGb / perThreadGb) : requested;
 }
 
-/** Kinds whose process does NOT hand the host back to a resident: pin (no
- * spawn budget) and walk (spawn-free, PID-bound). Both end by leaving the host
- * empty for the spread planner to re-plant. */
-export const NO_RESPAWN_KINDS: ReadonlySet<OrderKind> = new Set(["pin", "walk"]);
+/** Every host an order acts on.
+ *
+ * `Order.host` is the generic identity every order carries, and for a PLANT it
+ * names only `targets[0]` — the frontier is the job. Every place that asked
+ * "does this order concern host X" by reading `o.host` was therefore right for
+ * one target and silently wrong for the rest: the in-flight overlay left
+ * siblings free to be re-derived onto a second vantage, the plant cooldown
+ * protected one host out of five, and a single gone target retired a healthy
+ * frontier. They were one defect wearing several hats.
+ *
+ * Ask through here. A reader that wants the identity alone still says
+ * `order.host` and means it. */
+export function hostsOf(order: Order): readonly string[] {
+  if (order.kind !== "plant") return [order.host];
+  return order.payload.targets.map((target) => target.host);
+}
 
-/** Kinds the controller's kill sweep must never hard-cancel: pin (never armored)
- * and walk (PID-bound, cooperatively cancelled). */
-export const HARD_CANCEL_EXEMPT_KINDS: ReadonlySet<OrderKind> = new Set(["pin", "walk"]);
+/** Take the next order off a host's queue — the one answer both hand-off paths
+ * use.
+ *
+ * `spawn` and `exec` do the same three things: decide the job, start a process
+ * sized for it, have that process adopt it. They differ in exactly one, and it
+ * is a sizing detail the ORDER already carries: a spawn-chained process pays
+ * 2 GB for `spawn` where a controller `exec` does not, which
+ * `orderCalls(kind, controllerManaged)` priced into `ramOverrideGb` when the
+ * order was filed. Everything before that is common.
+ *
+ * It was not common, and the two copies drifted. The `exec` side learned to
+ * refuse orders the `spawn` side accepted, and a MANAGED host — the one host
+ * with no spawn to fall back on — was left booting a resident that could not
+ * reach its own queue, clearing itself, and being replanted into the same dead
+ * end forever.
+ *
+ * `accepts` is the only knob and it is about REACHABILITY, never sizing: which
+ * orders this particular hand-off is able to deliver. */
+/** How to size the process that will run `order` — or a bare resident when
+ * there is none.
+ *
+ * The second half of the shared hand-off, beside `takeNextOrder`. `spawn` and
+ * `exec` both decide a job, start a process sized for it, and let that process
+ * adopt it; the ONE thing that differs is that a spawn-chained process must
+ * pay 2 GB for `spawn` and an exec'd one must not — and that is already priced
+ * into the order's own `ramOverrideGb` by `orderCalls(kind, controllerManaged)`
+ * when the order was filed. So there is nothing left for the two paths to
+ * disagree about, and this is where they stop being able to. */
+export function processSizeFor(
+  order: Order | undefined,
+  residentGb: number,
+): { threads: number; ramOverride: number } {
+  return order === undefined
+    ? { threads: 1, ramOverride: residentGb }
+    : { threads: order.threads, ramOverride: order.ramOverrideGb };
+}
 
-/** Kinds sized to FILL their host with threads. Everything else runs at what
- * the planner asked for. */
-export const THREAD_SCALED_KINDS: ReadonlySet<OrderKind> = new Set([
-  "attempt",
-  "bleed",
-  "reclaim",
-  "phish",
-  "promote",
-  "walk",
-]);
-
-/** Whether the controller may `kill` this agent outright. Self-spawning agents
- * are armored; stasis-managed agents are recoverable by remote dispatch. */
-export function hardCancelEligible(handle: AgentHandle): boolean {
-  return (handle.armored === true || handle.order.controllerManaged === true)
-    && handle.pid > 0
-    && !HARD_CANCEL_EXEMPT_KINDS.has(handle.order.kind);
+export function takeNextOrder(
+  entry: HostEntry,
+  accepts: (order: Order) => boolean = () => true,
+): Order | undefined {
+  const staged = entry.staged ??= [];
+  const at = staged.findIndex((order) => accepts(order));
+  return at < 0 ? undefined : staged.splice(at, 1)[0];
 }
 
 /** Exact dynamic surface for one recovery mode. */
-export function orderCalls(kind: OrderKind, controllerManaged: boolean): readonly string[] {
-  return controllerManaged ? KIND_CALLS[kind].filter((call) => call !== "spawn") : KIND_CALLS[kind];
-}
-
-/** Eligibility plus the one-pass cooperative grace. Keeping the request pass
- * on the handle makes it follow the exact process being cancelled. */
-export function hardCancelReady(handle: AgentHandle, derivePass: number): boolean {
-  return handle.cancelReason !== undefined
-    && handle.cancelRequestedPass !== undefined
-    && handle.cancelRequestedPass < derivePass
-    && hardCancelEligible(handle);
+export function orderCalls(kind: OrderKind): readonly string[] {
+  return KIND_CALLS[kind];
 }
 
 // --- timing ------------------------------------------------------------------
 
-/** How long an unsettled first-probe barrier stays believable. A launched
- * prober files its report within one engine turn of booting, so a barrier
- * this old means its launcher died between exec and settle — reclaim it and
- * launch fresh rather than awaiting a report nobody will file. */
-export const PROBE_REFRESH_DEADLINE_MS = 30_000;
-
-/** How long a filled `pendingOrder` handoff slot stays believable. A zero-delay
- * spawn adopts it within an engine turn; a slot this old has lost its spawn. */
-export const PENDING_ORDER_GRACE_MS = 15_000;
-
 /** Grace after the last known cooperative boundary. This is a stuck-call
  * recovery margin, not a strategic attempt or batch duration. */
 export const JOB_WATCHDOG_GRACE_MS = 60_000;
-export function jobWatchdogDeadline(handle: AgentHandle): number {
-  return (handle.order.expectedDoneAt ?? handle.beatAt) + JOB_WATCHDOG_GRACE_MS;
-}
-
 export function jobWatchdogExpired(handle: AgentHandle, at: number): boolean {
-  return at > jobWatchdogDeadline(handle);
+  return at > (handle.order.expectedDoneAt ?? handle.beatAt) + JOB_WATCHDOG_GRACE_MS;
 }
-export const RESIDENT_BEAT_MS = 5_000;
-export const RESIDENT_BEAT_MISSES = 3;
-/** The beat window a silent resident (or long order) is given before it is
- * presumed dead with its host. */
-export const BEAT_WINDOW_MS = RESIDENT_BEAT_MS * RESIDENT_BEAT_MISSES;
+/** How long a CONTROLLER may go quiet before an election stops deferring to
+ * it: three missed five-second beats. The only thing this window measures —
+ * it was named for a resident's beat, back when a resident had one. */
+const CONTROLLER_BEAT_WINDOW_MS = 15_000;
 
 // --- the realm accessor and the single-controller election -------------------
 
 export interface DnetGlobals {
   dnet_controller?: ControllerHandle;
+  /** The controller's hands — see `game/dnet/hands.ts`. A live `ns` bound to a
+   *  parked process, lent for every GLOBAL call the controller makes. */
+  dnet_hands?: NS;
 }
 
 export type DnetGlobalThis = typeof globalThis & DnetGlobals;
@@ -542,6 +794,31 @@ export function dnetRealm(): DnetGlobalThis {
  * generation has already retired. Protocol and generation are checked here and
  * nothing else — the beat window belongs to the election below, which answers
  * the opposite question. */
+/** What the controller already knows about a host — read straight out of the
+ * realm, for nothing.
+ *
+ * Every script shares one JS realm, so the controller's host map IS reachable
+ * by every worker: no ns call, no RAM, no report round-trip. A body that
+ * re-read `dnet.getServerDetails` was paying 0.1 GB on EVERY THREAD to learn
+ * what the map beside it already held, and on a thread-scaled kind that came
+ * straight out of the thread count — which is the only thing that makes the
+ * job faster.
+ *
+ * Facts, not permission: the record is folded from observations the controller
+ * made and may be stale in the ways `dirty` describes. A body that needs to
+ * know something is true RIGHT NOW asks the engine by making its own call and
+ * reading the result code, which it was going to do anyway. */
+export function knownHost(host: string): DnetHost | undefined {
+  return live()?.hosts.get(host);
+}
+
+/** The controller's hands: the single warm lender for GLOBAL calls. Undefined
+ * before it has been seeded and after it dies; every caller must handle that
+ * rather than assume, because it is an ordinary state at cold start. */
+export function liveHands(): NS | undefined {
+  return dnetRealm().dnet_hands;
+}
+
 export function live(generation?: string): ControllerHandle | undefined {
   const existing = dnetRealm().dnet_controller;
   if (!existing) return undefined;
@@ -562,38 +839,6 @@ export function controllerIsLive(
   if (!existing) return false;
   if (existing.protocol !== DNET_PROTOCOL) return false;
   if (existing.generation !== generation) return false;
-  return now - existing.lastBeatAt < BEAT_WINDOW_MS;
+  return now - existing.lastBeatAt < CONTROLLER_BEAT_WINDOW_MS;
 }
 
-// --- wake latches (zero-RAM realm timers, no Netscript lock) ------------------
-
-/** Wake an idle agent on this entry, or remember the wake if none is waiting. */
-export function signalWake(entry: HostEntry): void {
-  const wake = entry.wake;
-  if (wake) wake();
-  else entry.wakePending = true;
-}
-
-/** The idle agent's wait: resolve the instant work is signalled, else after
- * `fallbackMs` (which is also its heartbeat). Closes two races — a signal that
- * arrived before this arm (`wakePending`), and a stale timer from a killed
- * agent nulling out a newer one's handle (`entry.wake === finish`). */
-export function waitForWake(entry: HostEntry, fallbackMs: number): Promise<void> {
-  return new Promise((resolve) => {
-    if (entry.wakePending) {
-      entry.wakePending = false;
-      resolve();
-      return;
-    }
-    let done = false;
-    const finish = (): void => {
-      if (done) return;
-      done = true;
-      if (entry.wake === finish) entry.wake = undefined;
-      clearTimeout(timer);
-      resolve();
-    };
-    const timer = setTimeout(finish, fallbackMs);
-    entry.wake = finish;
-  });
-}

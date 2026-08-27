@@ -71,15 +71,10 @@ export const RECLAIM_GB = price(KIND_CALLS.reclaim);
 export const BOOTSTRAP_GB = price(KIND_CALLS.bootstrapReclaim);
 export const PIN_GB = price(KIND_CALLS.pin);
 export const WALK_GB = price(KIND_CALLS.walk);
-export const RESIDENT_GB = price(KIND_CALLS.idle);
 export const CACHE_GB = price(KIND_CALLS.cache);
 export const PHISH_GB = price(KIND_CALLS.phish);
 export const PROMOTE_GB = price(KIND_CALLS.promote);
 export const INDUCE_GB = price(KIND_CALLS.induce);
-/** The linked one-off's spawn-free induce price, and the transient hop that
- * execs it — the deployed `fileTask` sidecar fit, mirrored. */
-export const INDUCE_SIDE_GB = price(KIND_CALLS.induce.filter((call) => call !== "spawn"));
-export const HOP_GB = price(KIND_CALLS.launchSidecar);
 
 // --- the world fixture --------------------------------------------------------
 
@@ -166,9 +161,6 @@ export interface SpreadPolicy {
   maxFerriesPerBand?: number;
   /** False withholds the pre-charge pipeline (`aboutToCrack`). */
   precharge?: boolean;
-  /** False withholds the linked one-off: a second induce filed onto a busy
-   *  induce vantage then queues serially instead of riding beside it. */
-  sidecar?: boolean;
   /** `HoldPlanInputs.spareSlack` / `spareScoring`. */
   spareSlack?: number;
   spareScoring?: "ram" | "ramPerDistance";
@@ -219,8 +211,6 @@ export interface SpreadRun {
   induceCalls: number;
   induceMoves: number;
   induceDeletes: number;
-  /** Induce pushes that rode as a linked one-off beside a busy induce vantage. */
-  sidecarCalls: number;
   /** maxRam of each host holding a stasis link when the run ended. */
   linkedRam: number[];
   elapsedMs: number;
@@ -239,9 +229,6 @@ const CACHE_OPEN_MS = 200;
 
 interface Agent {
   job?: Job;
-  /** The linked one-off riding beside `job`: a second induce whose 6 s call
-   *  runs CONCURRENTLY with the main's, RAM permitting. At most one. */
-  sidecarJob?: Job;
   /** A spawn-free local reclaimer, not a full agent: it only grinds its own
    *  block and exits when the block clears. */
   bootstrap?: boolean;
@@ -319,7 +306,6 @@ export function runSpreadCase(
   const vault = new Set<string>();
   const stasisLinked = new Set<string>();
   const agents = new Map<string, Agent>();
-  const lastPlantAt = new Map<string, number>();
   /** Conclusive attempts spent per host, the arena's own ledger. */
   const tried = new Map<string, number>();
   /** Per-target migration-charge estimate, exactly as the deployed controller
@@ -345,7 +331,6 @@ export function runSpreadCase(
     induceCalls: 0,
     induceMoves: 0,
     induceDeletes: 0,
-    sidecarCalls: 0,
     linkedRam: [],
     elapsedMs: 0,
   };
@@ -503,7 +488,6 @@ export function runSpreadCase(
       const candidates = candidatesFrom(knowledge, clock, {
         standing,
         vault,
-        lastPlantAt,
         // A pinned host is remotely reachable: `setStasisLink` installs a
         // backdoor beside the link, which is what lets the controller re-plant
         // (and release) a stasis host that mutations have orphaned.
@@ -518,7 +502,6 @@ export function runSpreadCase(
         if (agents.has(plant.host) || !truth(plant.host)) continue;
         if (plant.bootstrapReclaim === true && !policy.bootstrapReclaim) continue;
         agents.set(plant.host, plant.bootstrapReclaim === true ? { bootstrap: true } : {});
-        lastPlantAt.set(plant.host, clock);
         fold([
           observeHost(plant.host),
           { hostname: plant.host, at: clock, present: true, neighbours: system.probeFrom(plant.host) },
@@ -635,8 +618,8 @@ export function runSpreadCase(
 
     const inFlight = new Map<string, { from: string; kind: Task["kind"] }[]>();
     for (const [name, agent] of agents) {
-      for (const job of [agent.job, agent.sidecarJob]) {
-        if (!job) continue;
+      const job = agent.job;
+      if (job) {
         const claims = inFlight.get(job.target) ?? [];
         claims.push({ from: name, kind: job.kind === "unpin" ? "pin" : job.kind });
         inFlight.set(job.target, claims);
@@ -663,19 +646,8 @@ export function runSpreadCase(
     for (const task of [...tasks].sort((a, b) => a.priority - b.priority)) {
       const agent = agents.get(task.from);
       if (!agent) continue;
-      if (agent.job) {
-        // A second induce filed onto a vantage already holding one rides as
-        // the LINKED ONE-OFF: spawn-free, exec'd through the transient hop,
-        // its 6 s call CONCURRENT with the main's — mirrors `fileTask`.
-        if (policy.sidecar === false || policy.induce === false) continue;
-        if (task.kind !== "induce" || agent.job.kind !== "induce" || agent.sidecarJob !== undefined) continue;
-        const sideRoom = jobFreeGb(task.from) - Math.max(INDUCE_GB * agent.job.threads, HOP_GB);
-        const threads = Math.min(task.threads ?? 1, Math.floor(sideRoom / INDUCE_SIDE_GB));
-        if (threads < 1) continue;
-        run.sidecarCalls++;
-        agent.sidecarJob = { kind: "induce", target: task.host, threads, doneAt: clock + INDUCE_WAIT_MS };
-        continue;
-      }
+      // One whole-RAM job at a time: a busy vantage takes nothing more.
+      if (agent.job) continue;
       if (agent.bootstrap && task.kind !== "reclaim") continue;
       if (task.kind === "attempt") {
         if (crackAttempts(task.host) === undefined || vault.has(task.host)) continue;
@@ -738,9 +710,9 @@ export function runSpreadCase(
     }
   };
 
-  const completeJob = (name: string, agent: Agent, slot: "job" | "sidecarJob" = "job"): void => {
-    const job = agent[slot]!;
-    agent[slot] = undefined;
+  const completeJob = (name: string, agent: Agent): void => {
+    const job = agent.job!;
+    agent.job = undefined;
     const record = truth(job.target);
     if (job.kind === "attempt") {
       if (!record) return;
@@ -795,12 +767,10 @@ export function runSpreadCase(
       // the spread re-plants it. Clearing the stamp is the controller's own
       // successful-pin rule.
       agents.delete(name);
-      lastPlantAt.delete(job.target);
     } else if (job.kind === "unpin") {
       system.setStasisLink(job.target, false);
       stasisLinked.delete(job.target);
       agents.delete(name);
-      lastPlantAt.delete(job.target);
     } else if (job.kind === "induce") {
       run.induceCalls++;
       const result = system.chargeMigration(job.target, job.threads, charisma);
@@ -811,7 +781,6 @@ export function runSpreadCase(
         agents.delete(job.target);
         stasisLinked.delete(job.target);
         vault.delete(job.target);
-        lastPlantAt.delete(job.target);
         migrationCharge.delete(job.target);
         fold([{ hostname: job.target, at: clock, present: false }]);
         return;
@@ -849,7 +818,6 @@ export function runSpreadCase(
     let next = nextMutationAt;
     for (const agent of agents.values()) {
       if (agent.job && agent.job.doneAt < next) next = agent.job.doneAt;
-      if (agent.sidecarJob && agent.sidecarJob.doneAt < next) next = agent.sidecarJob.doneAt;
     }
     clock = next;
     if (clock >= nextMutationAt) {
@@ -861,9 +829,6 @@ export function runSpreadCase(
     }
     for (const [name, agent] of agents) {
       if (agent.job && agent.job.doneAt <= clock) completeJob(name, agent);
-      // The one-off dies with its vantage: only a still-standing agent's
-      // sidecar completes (deployed: the controller kills it on retirement).
-      if (agents.has(name) && agent.sidecarJob && agent.sidecarJob.doneAt <= clock) completeJob(name, agent, "sidecarJob");
     }
   }
 

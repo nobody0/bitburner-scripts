@@ -400,7 +400,6 @@ function detailCard(
       ? host.agent.alive
         ? `<p class="good">resident standing here`
           + `${host.agent.active ? ` — running ${esc(host.agent.active)}` : ""}`
-          + `${host.agent.sidecar ? ` + one-off ${esc(host.agent.sidecar)}` : ""}`
           + `${host.agent.pending ? `, ${host.agent.pending} queued` : ""}</p>`
         : `<p class="bad">resident lost — last beat ${fmtTime(now - host.agent.lastBeatAt)} ago</p>`
       : "")
@@ -608,7 +607,7 @@ export const dnetTab: Tab = {
       ...(d.netDepth !== undefined ? { netDepth: d.netDepth } : {}),
     };
 
-    const options = mapOptions(now, expiry, d.netDepth);
+    const options = mapOptions(now, expiry, d.netDepth, d.spread?.why);
     // The ring, both table chips and the detail card, all off ONE name — see
     // `effectiveSel`. `dnet.sel` stays the operator's override; this only fills
     // in the default and drops a selection the digest no longer carries.
@@ -616,7 +615,7 @@ export const dnetTab: Tab = {
     options.selected = effectiveSel(hosts, picked);
     const matched = options.query ? hosts.filter((host) => matches(host, options.query)) : hosts;
 
-    // The three probe-only readings. They arrive from the DODGED PROBE and the
+    // The three probe-only readings. They arrive from the PRICED PROBE and the
     // driver tick does not carry them, so a run whose first tick lands before
     // its first probe has a `knowledge` and none of these — which is exactly
     // the shape the panel used to throw on.
@@ -999,7 +998,6 @@ export const dnetTab: Tab = {
     // What agents delivered, and how healthy the delivery is. `known` only moves
     // when a report is drained, so a host an agent saw and never delivered is an
     // agent that died first — see spec/dnet.md.
-    const channel = d.channel;
     const cover = d.coverage;
     const reach = cover
       ? definitions([
@@ -1017,20 +1015,6 @@ export const dnetTab: Tab = {
           : []),
       ])
       : note("no agent report has been folded yet");
-    const delivery = channel
-      ? definitions([
-        ["reports drained", String(channel.drained)],
-        [
-          hint("refused", "a rendezvous belonging to a run this world no longer shares"),
-          `${channel.rejected}`
-          + ` <span class="muted">· we are ${esc(knowledge.generation)}</span>`,
-        ],
-        [hint("hosts forgotten", "unseen long enough that keeping them would be a map of a dead world"), String(channel.forgotten)],
-        ...(channel.vaultDrained !== undefined
-          ? [[hint("credentials taken", "moved into home's vault; the count travels, they do not"), String(channel.vaultDrained)] as [Markup, Markup]]
-          : []),
-      ])
-      : note("the controller has not been drained yet");
 
     // Every darknet call answers with a code, so a refusal is always
     // attributable rather than a blank.
@@ -1597,7 +1581,6 @@ export const dnetTab: Tab = {
       + detailCard(d, hosts, options.selected, picked === options.selected ? "" : picked, now, expiry)
       + crewCard(d, hosts, now, digestNote, options.selected)
       + card("Knowledge", reach)
-      + card("Report channel", delivery)
       // The one count on this tab that is NOT per-derivation, said in the
       // header: the planner rollups above are what the last derivation
       // admitted, and reading these as the same unit is off by the whole run.

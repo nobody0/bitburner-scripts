@@ -1,4 +1,4 @@
-import { msPerHostEvent, msPerHostEventAny } from "./rates.ts";
+import { msPerHostEvent } from "./rates.ts";
 import { conclusiveAttempt, type AttemptOutcome, type DnetFactGroup, type LogDrainOutcome, type ReportHost } from "./courier.ts";
 import type { PasswordEvidence } from "./evidence.ts";
 
@@ -69,13 +69,12 @@ export interface DnetHost {
   /** When each group was last observed. The freshness authority. */
   seenAt: Partial<Record<DirtyGroup, number>>;
   /** When the identity fields were first/last confirmed, for the panel's age
-   *  stamps only — identity never expires by age. */
+   *  stamps only — nothing expires by age. */
   identitySeenAt?: number;
   /** Controller-set invalidation, cleared by the group's refresh channel.
    *  Dirty means "an event may have changed this since we looked": our own
-   *  actions, a report's explicit invalidation, or a storm wipe.
-   *  The age fallback below covers what dirty marks cannot — mutations nobody
-   *  observed. */
+   *  actions, a report's explicit invalidation, or a storm wipe. It is the ONLY
+   *  invalidation — nothing goes stale on a clock. See `expiryMs`. */
   dirty: Partial<Record<DirtyGroup, true>>;
 
   // ---- ours: about US rather than the host. Never expires on the mutation
@@ -85,7 +84,6 @@ export interface DnetHost {
   credentialKnown?: boolean;
   attempts?: AttemptLedger;
   ring?: LogRingState;
-  lastPlantAt?: number;
 
   // ---- runtime overlay, stamped by the controller before each derivation.
   // Observed truths about our own processes; controller secrets (vault,
@@ -320,42 +318,30 @@ function hostExpiry(
   return { ...opts, immune: isImmune(host, opts) };
 }
 
-/** How long a group of fields stays believable without a fresh observation.
+/** How long a group of fields stays believable without a fresh observation:
+ * FOREVER. A fact is replaced by a newer observation or invalidated by a dirty
+ * bit, and by nothing else.
  *
- * Derived, not chosen: `msPerHostEvent` gives the expected time before a
- * mutation touches one named host in the relevant way, and we distrust a value
- * at a fraction of that. Identity fields never expire with age — only with the
- * host's disappearance. Immunity freezes position; topology still ages because
- * neighbours remain mutable.
+ * There used to be an age fallback here — position and topology were distrusted
+ * after a fraction of the expected time to the next mutation, about 43s and 27s
+ * respectively. It was justified as belt-and-braces against unobserved
+ * mutations, and what it actually did was blind the spread on a wall clock.
+ * `neighbours` is the whole of `topology`, and `candidatesFrom` reads it
+ * through `fresh`: 27 seconds after its last probe an agent named nobody,
+ * stopped being a vantage for anything, and every host behind it became
+ * `no-route`. A net fully rooted with every password known would open a few
+ * hosts and then stop, for no reason any log could name.
  *
- * This age fallback exists ALONGSIDE the dirty bits: dirty marks are prompt but
- * depend on the controller observing `nextMutation()` — a dead prober means
- * unobserved mutations, and pure dirty bits would then assert a rotting map
- * forever. Belt and braces. */
-export function expiryMs(group: DirtyGroup | "identity", opts: ExpiryOpts = {}): number {
-  const { netDepth, bitNode, backdoored, immune } = opts;
-  const anyOf = (kinds: Parameters<typeof msPerHostEventAny>[0]): number =>
-    msPerHostEventAny(kinds, netDepth, bitNode, backdoored);
-  switch (group) {
-    case "identity":
-      return Infinity;
-    case "position":
-      return immune === true ? Infinity : anyOf(["moved"]) * TRUST_FRACTION;
-    case "topology":
-      // A move, a disconnect and a new connection each invalidate an edge list,
-      // so their rates compound — edges are strictly shorter-lived than position.
-      return anyOf(["moved", "disconnected", "connected"]) * TRUST_FRACTION;
-    case "ram":
-    case "files":
-      return Infinity;
-  }
+ * The invalidation it was standing in for is real, and it is already handled
+ * properly: `nextMutation` means we are uncertain about every host, so the
+ * controller re-describes the whole map and `reviveProbers` re-execs every
+ * prober whose stamp predates that mutation. The refresh happens AT the
+ * mutation rather than on a timer, which is why a prober is a permanent script
+ * on every host in the first place. A stale edge list is at worst one refused
+ * plant; going blind costs the entire spread. */
+export function expiryMs(_group: DirtyGroup | "identity", _opts: ExpiryOpts = {}): number {
+  return Infinity;
 }
-
-/** We distrust a value well before the expected event, because the expected
- * time is a mean over a memoryless-ish process, not a guarantee. A third is a
- * judgement call and the one number here that is not derived; it is stated
- * plainly rather than hidden inside the expiry function. */
-export const TRUST_FRACTION = 1 / 3;
 
 export interface Staleness {
   ageMs: number;
@@ -372,17 +358,15 @@ export function groupStaleness(
 ): Staleness | undefined {
   const at = host?.seenAt[group];
   if (host === undefined || at === undefined) return undefined;
-  const limit = expiryMs(group, hostExpiry(host, opts));
-  const ageMs = Math.max(0, now - at);
   return {
-    ageMs,
-    expiresInMs: limit === Infinity ? Infinity : Math.max(0, limit - ageMs),
-    stale: host.dirty[group] === true || ageMs > limit,
+    ageMs: Math.max(0, now - at),
+    expiresInMs: Infinity,
+    stale: host.dirty[group] === true,
   };
 }
 
-/** True when a group is believable: observed, not dirty, and inside its age
- * fallback. A gone host believes nothing. */
+/** True when a group is believable: observed and not dirty. A gone host
+ * believes nothing. */
 export function groupFresh(
   host: DnetHost | undefined,
   group: DirtyGroup,
@@ -580,7 +564,6 @@ function resetLifetime(host: DnetHost): void {
   delete host.attempts;
   delete host.ring;
   delete host.credentialKnown;
-  delete host.lastPlantAt;
 }
 
 /** A host unseen for this long is dropped. Scaled off deletion rather than
@@ -628,7 +611,6 @@ export function stormWipe(hosts: DnetHosts, opts: ExpiryOpts = {}): DnetHosts {
       wiped.dirty[group] = true;
     }
     delete wiped.ring;
-    delete wiped.lastPlantAt;
     delete wiped.agentAlive;
     delete wiped.jobFreeGb;
     delete wiped.busy;
@@ -719,6 +701,3 @@ export function usableRam(
   return Math.max(0, maxRam - blocked);
 }
 
-export function stormWipeKnowledge(knowledge: DnetKnowledge, opts: ExpiryOpts = {}): DnetKnowledge {
-  return { ...knowledge, hosts: stormWipe(knowledge.hosts, opts) };
-}

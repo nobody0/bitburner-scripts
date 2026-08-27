@@ -42,12 +42,6 @@ const policies: SpreadPolicy[] = [
   // induce wave with the final authenticate.
   { ...SHIPPED_SPREAD, name: "no pre-charge", precharge: false },
   { ...SHIPPED_SPREAD, name: "single ferry per band", maxFerriesPerBand: 1 },
-  // The linked one-off: a second induce filed onto a busy induce vantage
-  // rides beside it (spawn-free, exec'd through the transient hop) instead of
-  // queueing serially. The serial arm lost 1.18x on the deep tier (n=24,
-  // CI +0.45..+5.21 min excluding zero); depth 36 (n=10) and rung 0 (n=40)
-  // were neutral, leaning the sidecar's way.
-  { ...SHIPPED_SPREAD, name: "no sidecar", sidecar: false },
 ];
 
 // The two worlds the sweep runs against. Rung 0 is the round-2 baseline world;
@@ -89,7 +83,6 @@ for (const tier of tiers) {
         ? (bands.reduce((a, b) => a + b, 0) / bands.length / 60_000).toFixed(2)
         : "-",
       "induce calls": Math.round(held.reduce((a, r) => a + r.induceCalls, 0) / held.length),
-      "sidecar calls": Math.round(held.reduce((a, r) => a + r.sidecarCalls, 0) / held.length),
       "mean cracked": summary.meanCracked.toFixed(1),
       "planted peak": summary.meanPlantedPeak.toFixed(1),
     };

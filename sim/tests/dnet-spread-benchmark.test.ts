@@ -9,7 +9,7 @@ import {
   SHIPPED_SPREAD,
   summarizeSpreadRuns,
 } from "../dnet-spread.ts";
-import { canPreempt, isSameTurn } from "../../shared/strategy/dnet/priority.ts";
+import { canPreempt, isSameTurn } from "../../shared/strategy/dnet/jobs.ts";
 
 /** The reach-the-lab lane's CI mirror: sane bounds on the shipped policy over
  * paired seeds, plus the pricing and priority facts the arena leans on. The

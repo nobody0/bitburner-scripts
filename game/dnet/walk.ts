@@ -62,7 +62,7 @@ type OrderResult = Omit<Report, "id" | "kind" | "host" | "from">;
  * BETWEEN us and the target and returns "You are still at X,Y" without
  * moving, so every position comes from parsing the response rather than from
  * assuming the move worked. */
-export async function runWalk(ns: NS, order: Order, io: AgentIo): Promise<OrderResult> {
+export async function runWalk(ns: NS, order: Order<"walk">, io: AgentIo): Promise<OrderResult> {
   const jobNs = ns;
   const state = order;
   const beat = io.beat;
@@ -92,7 +92,7 @@ export async function runWalk(ns: NS, order: Order, io: AgentIo): Promise<OrderR
   // unbiased finisher tends away from, and the lost-fallback below hands it
   // back the unbiased prior if its route closes. The finisher stays at "any",
   // for which routePrior returns basePrior unchanged.
-  let prior = routePrior(basePrior, (state.route as LabRouteBias | undefined) ?? "any");
+  let prior = routePrior(basePrior, (state.payload.route as LabRouteBias | undefined) ?? "any");
   // Seed from the controller's shared field: the one piece of walk progress
   // that outlives a PID. A re-seeded walker starts with its predecessor's
   // map, so a replacement starts with everything its predecessor learned.
@@ -153,7 +153,7 @@ export async function runWalk(ns: NS, order: Order, io: AgentIo): Promise<OrderR
         // `decideLab` has already written this vantage down, so a refused or
         // unreadable radar is skipped rather than retried forever.
         const seen = await awaitDnetOperation(io, {
-          operation: "labradar", host: state.host, from: state.from, threads: state.jobThreads ?? state.threads,
+          operation: "labradar", host: state.host, from: state.from, threads: state.threads,
         }, () => jobNs["dnet"]["labradar"]());
         radars++;
         count(seen.success ? "radar" : "radar-refused");
@@ -172,7 +172,7 @@ export async function runWalk(ns: NS, order: Order, io: AgentIo): Promise<OrderR
     // are the same move and the shorter one is one less thing to get wrong.
     pending = direction;
     const answer = await awaitDnetOperation(io, {
-      operation: "authenticate", host: state.host, from: state.from, threads: state.jobThreads ?? state.threads,
+      operation: "authenticate", host: state.host, from: state.from, threads: state.threads,
     }, () => jobNs["dnet"]["authenticate"](state.host, direction));
     count(answer.code);
     if (answer.success) {

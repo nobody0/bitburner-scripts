@@ -1,5 +1,6 @@
 import type { ScriptLaunch } from "../lib/launch-shared.ts";
 import type { ArtifactIdentity } from "../../shared/run-identity.ts";
+import type { DnetRecoveryState } from "./wire.ts";
 
 export interface DnetControllerLaunch extends ScriptLaunch {
   readonly kind: "dnet-controller";
@@ -8,21 +9,18 @@ export interface DnetControllerLaunch extends ScriptLaunch {
   readonly generation: string;
   readonly identity?: ArtifactIdentity;
   readonly charisma: number;
+  /** Last immutable controller checkpoint, cached by home for replacement.
+   * Passed through the realm handoff, never
+   * through visible script arguments. */
+  readonly recovery?: DnetRecoveryState;
 }
 
 export interface DnetAgentLaunch extends ScriptLaunch {
   readonly kind: "dnet-agent";
   readonly host: string;
-  /** Stasis-linked agents hand recovery and successor dispatch to the
-   * controller, so their process never needs the spawn surface. */
-  readonly controllerManaged?: boolean;
   /** Minimal local worker used while owner-blocked RAM cannot yet fit the
    * ordinary prober+resident pair. */
   readonly bootstrapReclaim?: boolean;
-  /** A LINKED ONE-OFF: claim the order the `launchSidecar` hop staged into
-   * `entry.sidecarOrder`, report through the entry's sidecar slot, and exit —
-   * no resident, no spawn, no successor. */
-  readonly oneOff?: boolean;
 }
 
 /** Controller-owned readiness barrier for one exact prober launch. Object
@@ -31,6 +29,14 @@ export interface DnetAgentLaunch extends ScriptLaunch {
 export interface DnetProbeRefresh {
   readonly refreshed: Promise<DnetProbeReport | undefined>;
   settle(report: DnetProbeReport | undefined): void;
+}
+
+/** The controller's hands: one parked process for the whole net whose `ns` is
+ * lent for every global call. Carries nothing — the realm slot is the whole
+ * handshake — but still takes a descriptor so the launch is acknowledged the
+ * same way every other one is. */
+export interface DnetHandsLaunch extends ScriptLaunch {
+  readonly kind: "dnet-hands";
 }
 
 /** The first observation produced by one exact prober launch. Returning the

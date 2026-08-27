@@ -18,7 +18,7 @@ import {
   type SolverState,
   type SolverStep,
 } from "../../shared/strategy/dnet/solvers/types.ts";
-import type { AgentIo, Order, Report } from "./shared.ts";
+import { knownHost, type AgentIo, type Order, type Report } from "./shared.ts";
 import { awaitDnetOperation } from "./timing.ts";
 
 /** The `attempt` order body owns authenticate plus any heartbleed needed to
@@ -57,32 +57,23 @@ type OrderResult = Omit<Report, "id" | "kind" | "host" | "from">;
  *
  * `String.prototype.endsWith`, never a RegExp: `RegExp.prototype.exec` anywhere
  * in a bundle that reaches a game script bills the full 1.3 GB of `ns.exec`. */
-/** One host, from `getServerDetails` alone — the attempt body's whole reporting
- * surface. It never lists files or reads identity (those cost `ls`/`dnsLookup`,
- * which are not in `KIND_CALLS.attempt`); a winning authenticate flags the host
- * dirty and the controller's instant `inventory` order reads the drop. */
-function describeHost(jobNs: NS, host: string): ReportHost {
-  // Stamped HERE, at the getter, not when home eventually drains this: a drain
-  // is a batch, and a drain-time stamp would give every host in it one age and
-  // make the fold's newest-wins comparison decide nothing.
-  const at = Date.now();
-  const details = jobNs["dnet"]["getServerDetails"](host);
-  if (!details.isOnline) return { hostname: host, at, present: false };
+/** What this job OBSERVED about its target, which is nothing it had to ask for.
+ *
+ * The body used to re-`getServerDetails` the host to carry its facts home. That
+ * cost 0.1 GB on every thread of a thread-scaled job to report what the
+ * controller already held — and it holds it because it described the host
+ * itself. So the report carries the one thing only this process knows: that a
+ * winning authenticate has just dirtied the host's files, which is what makes
+ * the controller order the `ls` that reads the drop. */
+function observedHost(host: string, won: boolean): ReportHost {
+  // Stamped HERE, not when home eventually drains this: a drain is a batch, and
+  // a drain-time stamp would give every host in it one age and make the fold's
+  // newest-wins comparison decide nothing.
   return {
     hostname: host,
-    at,
+    at: Date.now(),
     present: true,
-    depth: details.depth,
-    blockedRam: details.blockedRam,
-    requiredCharisma: details.requiredCharismaSkill,
-    difficulty: details.difficulty,
-    isStationary: details.isStationary,
-    modelId: details.modelId,
-    passwordLength: details.passwordLength,
-    passwordFormat: details.passwordFormat,
-    passwordHint: details.passwordHint,
-    data: details.data,
-    logTrafficInterval: details.logTrafficInterval,
+    ...(won ? { invalidates: ["files" as const] } : {}),
   };
 }
 
@@ -93,7 +84,7 @@ function describeHost(jobNs: NS, host: string): ReportHost {
  * `heartbleed` reads it back. Splitting a multi-round solver across jobs would
  * race the 200-line ring and lose its exact response. One-shot candidates do
  * not need that response, so they may use a promise-linked second vantage. */
-export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<OrderResult> {
+export async function runAttempt(ns: NS, order: Order<"attempt">, io: AgentIo): Promise<OrderResult> {
   const jobNs = ns;
   const state = order;
   const deps = io.deps;
@@ -103,18 +94,39 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
   const count = (code: number | string): void => {
     jobCodes[String(code)] = (jobCodes[String(code)] ?? 0) + 1;
   };
-  const details = jobNs["dnet"]["getServerDetails"](state.host);
-  if (!details.isOnline) {
+  // THE CONTROLLER'S MAP, not a call of our own. Every field below is one the
+  // controller already folded from its own observation, and it is reachable
+  // through the realm for nothing — where `dnet.getServerDetails` would have
+  // charged 0.1 GB on EVERY THREAD of this job to re-learn it. On the one kind
+  // whose whole speed is its thread count, that came directly out of the crack.
+  const details = knownHost(state.host);
+  if (details === undefined || details.goneAt !== undefined) {
     return { ok: false, targetState: 'gone', hosts: [{ hostname: state.host, at: Date.now(), present: false }], codes: { "503": 1 } };
   }
   const entry = modelEntry(details.modelId);
+  /** The timing model's shape, from the controller's record. `DnetHost` names
+   * the same fact `requiredCharisma`; the formula wants the engine's own
+   * spelling. */
+  const timingTarget = {
+    modelId: details.modelId ?? "",
+    difficulty: details.difficulty ?? 0,
+    depth: details.depth ?? 0,
+    requiredCharismaSkill: details.requiredCharisma ?? 0,
+  };
   const ledger = deps.ledgerFor(state.host);
   const ring = deps.ringFor(state.host);
 
   // `heartbleed` is the only charisma-gated call, so below the requirement the
   // log ring is unreadable and every feedback model is deaf. Read once: it
   // decides whether a solver may hold a conversation at all.
-  const canBleed = details.requiredCharismaSkill <= deps.charisma();
+  //
+  // `needsRing` is folded in here deliberately, because every drain in this
+  // file is already gated on `canBleed` — so one condition makes a lean order
+  // structurally incapable of the call it was not priced for. A lean process
+  // that reached `heartbleed` would exceed its `ramOverride` and die, taking
+  // the host's agent with it.
+  const canBleed = state.payload.needsRing === true
+    && (details.requiredCharisma ?? 0) <= deps.charisma();
 
   const attempts: NonNullable<Report["attempts"]> = [];
   const targetCandidates: string[] = [];
@@ -129,7 +141,7 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
     const attemptedAt = Date.now();
     lastBleedAttemptAt = attemptedAt;
     const bled = await awaitDnetOperation(io, {
-      operation: "heartbleed", host: state.host, from: state.from, threads: state.jobThreads ?? state.threads,
+      operation: "heartbleed", host: state.host, from: state.from, threads: state.threads,
     }, () => jobNs["dnet"]["heartbleed"](state.host, { peek: false, logsToCapture: LOG_LINES }));
     count(bled.code);
     if (!bled.success) {
@@ -142,7 +154,7 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
     }
     const at = Date.now();
     lastBleedAt = at;
-    const harvest = harvestLogs(bled.logs, { bledFrom: state.host, knownHosts: state.knownHosts ?? [state.host], at });
+    const harvest = harvestLogs(bled.logs, { bledFrom: state.host, knownHosts: state.payload.knownHosts ?? [state.host], at });
     pendingAuthRecords = 0;
     deps.recordLogDrain(state.host, { pendingAuthRecords, evidence: harvest.evidence, attemptedAt, drainedAt: at });
     factsEvidence.push(...harvest.evidence);
@@ -161,15 +173,15 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
   // capped ring, so even one attempt could otherwise evict its oldest hint or
   // leaked credential. The ring's own stamp is authoritative—a standalone
   // drain may already have done this before an attempt job was scheduled.
-  if (!state.skipInitialBleed && canBleed && (lastBleedAt === undefined || pendingAuthRecords > 0)) await drainLogs();
+  if (!state.payload.skipInitialBleed && canBleed && (lastBleedAt === undefined || pendingAuthRecords > 0)) await drainLogs();
 
   const facts: PasswordFacts = {
-    passwordLength: details.passwordLength,
-    passwordFormat: details.passwordFormat,
-    passwordHint: details.passwordHint,
-    data: details.data,
+    passwordLength: details.passwordLength ?? 0,
+    passwordFormat: details.passwordFormat ?? "",
+    passwordHint: details.passwordHint ?? "",
+    data: details.data ?? "",
     evidence: factsEvidence,
-    difficulty: details.difficulty,
+    difficulty: details.difficulty ?? 0,
   };
 
   /** Whether the timing channel is available at all. `ns.formulas` is gated
@@ -187,18 +199,26 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
     if (details.modelId === "2G_cellular") {
       const profile = deps.timing();
       if (profile !== undefined) {
-        const threads = state.jobThreads ?? state.threads;
-        const baseline = authenticateWaitMs(details, profile, threads, 0);
+        const threads = state.threads;
+        const baseline = authenticateWaitMs(timingTarget, profile, threads, 0);
         facts.authenticateBaseMs = baseline;
-        facts.authenticateStepMs = authenticateWaitMs(details, profile, threads, 1) - baseline;
+        facts.authenticateStepMs = authenticateWaitMs(timingTarget, profile, threads, 1) - baseline;
       } else {
         delete facts.authenticateBaseMs;
         delete facts.authenticateStepMs;
       }
     }
     const at = Date.now();
+    // ONE CALL, and it is the only one this job is priced for.
+    //
+    // `connectToSession` used to be tried first here — it is instant where
+    // `authenticate` is seconds, and on an already-rooted host it answers the
+    // same question. But it is 0.05 GB on EVERY THREAD of a thread-scaled job,
+    // to make a call that needs no threads at all. It belongs to the
+    // controller, which can make it through any prober's `ns` for one host at
+    // a time and never dispatch this job at all when it succeeds.
     const answer = await awaitDnetOperation(io, {
-      operation: "authenticate", host: state.host, from: state.from, threads: state.jobThreads ?? state.threads,
+      operation: "authenticate", host: state.host, from: state.from, threads: state.threads,
     }, () => jobNs["dnet"]["authenticate"](state.host, password));
     const elapsedMs = Date.now() - at;
     count(answer.code);
@@ -326,7 +346,7 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
       // this thread-scaled job does NOT `ls` to see it — that is 0.2 GB on every
       // authenticate thread. A successful solve flags the host dirty and the
       // controller files one instant list job. Plain describe otherwise.
-      hosts: [{ ...describeHost(jobNs, state.host), ...(won ? { invalidates: ["files" as const] } : {}) }],
+      hosts: [observedHost(state.host, won)],
       attempts,
       ...(grammar ? { grammar } : {}),
       detail,
@@ -363,8 +383,9 @@ export async function runAttempt(ns: NS, order: Order, io: AgentIo): Promise<Ord
   // the solver entirely, because running a thirty-exchange search while a
   // free candidate waits is paying for information the candidate may make
   // unnecessary.
-  if (state.guess !== undefined) {
-    const seen = await send(state.guess, false);
+  const guess = state.payload.guess;
+  if (guess !== undefined) {
+    const seen = await send(guess, false);
     return settle(
       seen.success,
       seen.success

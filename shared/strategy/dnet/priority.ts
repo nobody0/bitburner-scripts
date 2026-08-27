@@ -1,50 +1,13 @@
-/** One authority for queue order and displacement policy.
+import { canPreempt, isSameTurn, priorityOf } from "./jobs.ts";
+
+/** Queue order and displacement policy.
  *
- * Queue lane and strategic priority are deliberately separate. Zero-delay
- * work runs first once an agent is free because it does not occupy the lane;
- * numeric priority decides only among work that can block. Preemption is a
- * third, explicit permission below — front-of-queue never implies cancellation.
- *
- * Lower numbers run first within one lane. The gaps are intentional: attempts
- * retain their depth/model offsets without crossing a kind boundary. */
-export const DNET_PRIORITY = {
-  walk: -2_000,
-  relaunchProbe: -1_900,
-  plant: -1_800,
-  inventory: -1_700,
-  cache: -1_650,
-  pin: -1_600,
-  storm: -1_500,
-  attempt: 0,
-  bleed: 100,
-  reclaim: 300,
-  induce: 400,
-  phish: 500,
-  promote: 600,
-} as const;
-
-export type PriorityKind = keyof typeof DNET_PRIORITY;
-
-/** Operational housekeeping which settles synchronously or through launch
- * microtasks only. Once admitted it is not a competitor for agent time.
- *
- * This is deliberately narrower than "every synchronous API": cache and storm
- * calls are instant too, but their strategic ordering and world effects are
- * policy. They remain in the blocking/strategic lane. */
-const SAME_TURN: ReadonlySet<string> = new Set([
-  "inventory",
-  "relaunchProbe",
-]);
-
-export function isSameTurn(kind: string): boolean {
-  return SAME_TURN.has(kind);
-}
-
-export function strategicQueueDepth(work: readonly { kind: string }[]): number {
-  let depth = 0;
-  for (const entry of work) if (!isSameTurn(entry.kind)) depth++;
-  return depth;
-}
+ * The per-kind FACTS live in `jobs.ts`; this file is the two decisions built
+ * out of them. Queue lane and strategic priority are deliberately separate:
+ * zero-delay work runs first once an agent is free because it does not occupy
+ * the lane, and numeric priority decides only among work that can block.
+ * Preemption is a third, explicit permission — front-of-queue never implies
+ * cancellation. */
 
 export interface QueuedDnetWork {
   kind: string;
@@ -58,23 +21,6 @@ export function compareQueuedDnetWork(a: QueuedDnetWork, b: QueuedDnetWork): num
   return lane || a.priority - b.priority || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 }
 
-/** Cancellation policy is independent of queue order. In particular,
- * inventory and prober repair wait for a free slot even though they queue at
- * the front. */
-const PREEMPTING: ReadonlySet<string> = new Set(['walk', 'plant', 'cache', 'pin', 'attempt']);
-const PROTECTED_ACTIVE: ReadonlySet<string> = new Set(['walk', 'pin', 'storm']);
-
-export function priorityOf(kind: string): number {
-  return DNET_PRIORITY[kind as PriorityKind] ?? Number.POSITIVE_INFINITY;
-}
-
-/** Whether newly-ready work may displace active work on the same worker. */
-export function canPreempt(incoming: string, active: string): boolean {
-  if (!PREEMPTING.has(incoming) || incoming === active) return false;
-  if (PROTECTED_ACTIVE.has(active)) return false;
-  return priorityOf(incoming) < priorityOf(active);
-}
-
 export interface PreemptionCandidate {
   host: string;
   activeKind?: string;
@@ -86,6 +32,10 @@ export interface PreemptionCandidate {
   cancelling?: boolean;
   /** Jobs already assigned here in this scheduling transaction. */
   assigned?: number;
+  /** How long until this worker could START new work: what is left of its
+   *  active order plus everything already queued ahead. Absent means unknown,
+   *  which is not the same as zero and never wins the last tier below. */
+  readyInMs?: number;
 }
 
 export interface PreemptionChoice {
@@ -98,7 +48,9 @@ export interface PreemptionChoice {
  * Reusing an already-selected worker lets one cancellation service several
  * direct-chained jobs. Otherwise idle workers win. A victim is selected by
  * lowest-value active work first and greatest remaining time second; RAM and
- * hostname make the result fast and deterministic. */
+ * hostname make the result fast and deterministic. When no worker is free and
+ * none may be displaced, the busiest lane is still not a dead end — the job
+ * queues on whichever worker will reach it soonest. */
 export function choosePreemptionVantage(
   incomingKind: string,
   candidates: readonly PreemptionCandidate[],
@@ -134,6 +86,18 @@ export function choosePreemptionVantage(
       (b.activePriority ?? priorityOf(b.activeKind!)) - (a.activePriority ?? priorityOf(a.activeKind!))
       || remaining(b) - remaining(a)
       || byCapacityAndName(a, b));
-  if (victims.length === 0) return undefined;
-  return { vantage: victims[0]!.host, preempt: true };
+  if (victims.length > 0) return { vantage: victims[0]!.host, preempt: true };
+
+  // Nobody is free and nothing here may be displaced, so the question stops
+  // being WHO and becomes WHEN: queue on the worker that will reach this
+  // soonest. Returning nothing instead was a refusal to schedule at all, and
+  // the work simply went unfiled — one busy agent could hold up a whole region
+  // it happened to be the only route into.
+  const soonest = candidates
+    .filter((candidate) => candidate.readyInMs !== undefined)
+    .sort((a, b) => a.readyInMs! - b.readyInMs!
+      || (a.assigned ?? 0) - (b.assigned ?? 0)
+      || byCapacityAndName(a, b));
+  if (soonest.length > 0) return { vantage: soonest[0]!.host, preempt: false };
+  return undefined;
 }

@@ -1,12 +1,14 @@
-import type { AttemptOutcome, LogDrainOutcome, ReportHost, VaultEntry } from "../../shared/strategy/dnet/courier.ts";
+import type { VaultEntry } from "../../shared/strategy/dnet/courier.ts";
 import type { DnetTimingProfile } from "../../shared/strategy/dnet/rates.ts";
 import type { FarmEconomics } from "../../shared/strategy/dnet/farm.ts";
 import type { DarknetProfit } from "../../shared/telemetry/topics/dnet.ts";
+import type { DnetKnowledge } from "../../shared/strategy/dnet/host.ts";
 
 /** The data shapes home and the controller exchange, and the panel reads.
  *
- * Pure types plus one fold helper — no runtime, no realm. Home drains a
- * `DnetDrain` and pushes a `DnetOrders`; both sides render the report shapes. */
+ * Pure types plus one fold helper — no runtime, no realm. Home takes an
+ * immutable `DnetSnapshot` and pushes `DnetInputs`; both sides render the
+ * report shapes. */
 
 export interface RefusalExample {
   host: string;
@@ -33,6 +35,13 @@ export function foldRefusals(entries: readonly RefusalExample[]): RefusalRollup 
 
 export interface DnetSpreadReport extends RefusalRollup {
   planted: number;
+  /** Why each still-empty host was not planted, by hostname.
+   *
+   * The rollup counts reasons and keeps one example each, which answers "what
+   * is holding the net back" but never "why is THAT host empty" — and that is
+   * the question anyone looking at the map actually has. Bounded by the size
+   * of the net, and only ever carries hosts with no agent. */
+  why?: Record<string, string>;
 }
 
 export interface DnetFarmReport extends RefusalRollup {
@@ -56,12 +65,6 @@ export interface DnetStormReport extends RefusalRollup {
 
 export interface DnetStasisSnapshot {
   hosts: string[];
-  at: number;
-}
-
-export interface DnetCredentialRejection {
-  hostname: string;
-  identity?: string;
   at: number;
 }
 
@@ -90,60 +93,76 @@ export interface DnetLabReport {
   walkers: DnetLabWalker[];
 }
 
-export interface DnetDrain {
-  hosts: ReportHost[];
-  credentials: VaultEntry[];
-  attempts: { hostname: string; outcome: AttemptOutcome }[];
-  logDrains: { hostname: string; outcome: LogDrainOutcome }[];
+/** Version of the private, in-realm controller checkpoint. This is deliberately
+ * independent of the agent protocol: a build may keep its process handshake
+ * while changing what can safely be restored into a new controller. */
+export const DNET_RECOVERY_VERSION = 1 as const;
+
+/** Durable controller-owned state. No process handles, promises, borrowed NS
+ * objects, queues, or launch windows may enter this shape. It may contain
+ * credentials and therefore must never be merged into telemetry. */
+export interface DnetRecoveryState {
+  version: typeof DNET_RECOVERY_VERSION;
+  generation: string;
+  capturedAt: number;
+  knowledge: DnetKnowledge;
+  vault: VaultEntry[];
   codes: Record<string, number>;
   spread?: DnetSpreadReport;
   farm?: DnetFarmReport;
   hold?: DnetHoldReport;
   storm?: DnetStormReport;
-  stormFiredAt?: number;
-  stasisSnapshot?: DnetStasisSnapshot;
-  credentialRejections: DnetCredentialRejection[];
-  backdoorInvalidations: { hostname: string; at: number }[];
-  charismaNeeded?: number;
-  karmaLoss?: number;
-  /** Since-last-drain returns, folded into home's cumulative digest. */
-  profit?: Partial<DarknetProfit>;
-  lastPhishCacheAt?: number;
-  grammar?: { unrecognised: number; shapes: Record<string, number> };
-  residents: {
-    host: string;
-    lastBeatAt: number;
-    pending: number;
-    active?: string;
-    freeGb?: number;
-    completed: number;
-    failed: number;
-    lastError?: string;
-  }[];
-  /** Live engine RAM, sampled together by the controller. */
-  ram: {
-    host: string;
-    at: number;
-    total: number;
-    blocked: number;
-    used: number;
-  }[];
-  residentsLost: number;
-  mutations: number;
   lab?: DnetLabReport;
+  stasisSnapshot?: DnetStasisSnapshot;
+  /** Latest controller evidence that a home-installed backdoor no longer
+   * provides remote execution. Idempotent timestamps make snapshots repeatable. */
+  backdoorInvalidations?: { hostname: string; at: number }[];
+  charismaNeeded?: number;
+  karmaLoss: number;
+  profit: DarknetProfit;
+  grammar?: { unrecognised: number; shapes: Record<string, number> };
+  lastPhishCacheAt?: number;
+  lastStormAt?: number;
+  unknownModels: Record<string, number>;
+  agentHostsSeen: string[];
+  residentsLost: number;
 }
 
-export interface DnetOrders {
+export interface DnetResidentSnapshot {
+  host: string;
+  lastBeatAt: number;
+  pending: number;
+  active?: string;
+  freeGb?: number;
+  completed: number;
+  failed: number;
+  lastError?: string;
+}
+
+export interface DnetRamSnapshot {
+  host: string;
+  at: number;
+  total: number;
+  blocked: number;
+  used: number;
+}
+
+/** Non-destructive view read by home. `recovery` replaces home's prior cache
+ * whole; repeated reads therefore cannot double-count anything. */
+export interface DnetSnapshot {
+  recovery: DnetRecoveryState;
+  residents: DnetResidentSnapshot[];
+  ram: DnetRamSnapshot[];
+  controllerBeatAt: number;
+}
+
+export interface DnetInputs {
   charisma: number;
   /** Complete only when home has cached every upstream authentication input. */
   timing?: DnetTimingProfile;
-  vaultSnapshot?: { entries: VaultEntry[]; at: number };
   netDepth?: number;
   bitNode?: number;
-  standDown?: boolean;
   openLabCache?: boolean;
-  lastPhishCacheAt?: number;
-  lastStormAt?: number;
   promoteSymbols?: { symbol: string; expectedProfit: number }[];
   crimeSuccessMult?: number;
   farmEconomics?: FarmEconomics;

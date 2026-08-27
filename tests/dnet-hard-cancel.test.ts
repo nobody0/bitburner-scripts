@@ -1,3 +1,4 @@
+import { makeOrder } from './support/dnet-order.ts';
 import { afterEach, describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
 import { installVirtualTime, type VirtualTime } from "../sim/realm/timers.ts";
@@ -6,14 +7,13 @@ import { ProcessTable } from "../sim/ns/process.ts";
 import { makeSimNs, type SimNsHost } from "../sim/ns/api.ts";
 import { darkwebServerSpec } from "../sim/network.ts";
 import { main as agentMain } from "../game/dnet/agent.ts";
-import { handoffLaunch } from "../game/lib/launch-shared.ts";
+import { offerLaunch } from "../game/lib/launch-shared.ts";
+import type { DnetAgentLaunch } from "../game/dnet/launch.ts";
+import { awaitDnetOperation, RELEASED } from "../game/dnet/timing.ts";
 import {
   DNET_PROTOCOL,
   dnetRealm,
-  hardCancelEligible,
-  hardCancelReady,
-  HARD_CANCEL_EXEMPT_KINDS,
-  signalWake,
+  type AgentIo,
   type AgentHandle,
   type ControllerDeps,
   type ControllerHandle,
@@ -24,35 +24,33 @@ import {
   type Report,
 } from "../game/dnet/shared.ts";
 
-/** Hard cancellation, end to end: the REAL agent, killed the way the controller
- * kills it.
+/** Cancelling a running order, end to end: the REAL agent, stopped the way the
+ * controller stops it.
  *
- * The design under test is the pair introduced together: the agent's armed
- * atExit hook (settle the murdered order, stage and spawn the successor, all
- * inside the killer's `ns.kill` call) and the controller-side eligibility rule
- * `hardCancelEligible` (an ARMORED handle with a live pid whose kind is not
- * exempt, and nothing else). The sim's teardown ordering is separately pinned
- * by `sim/tests/process-atexit.test.ts`; this file drives
- * `game/dnet/agent.ts`'s actual main() through it.
+ * Two mechanisms, and the difference between them is the point. RELEASE lets a
+ * body stop WAITING on an engine call whose result nobody wants any more — it
+ * settles a cancelled report at once, and the controller re-plans in that
+ * instant. It does NOT give the script back: Bitburner allows one Netscript
+ * call per script, and the released call keeps that slot until the engine
+ * finishes it. Recovering the HOST takes `ns.kill`, which is the only thing
+ * that clears `env.runningFn`. So release and kill are both needed, and each
+ * one alone leaves something behind.
  *
- * Orders are DATA now, not closures, so the rig cannot inject a job body. It
- * drives real order kinds through `runOrder` instead, over an `ns` whose
- * `dnet` namespace is a stub: a `bleed` whose `heartbleed` parks in a killable
- * `ns.sleep` stands in for the old blocking `authenticate` body, and a quick
- * `bleed` against an offline host stands in for the old instant body. The full
- * seed→spread→cancel→walk path against the real darknet model is covered by
- * sim/tests/dnet-session.test.ts and the sim scenario runs; the old
- * "consecutive PIDs prove atExit chained the successor" closure test survives
- * here as the two-staged-orders chain test.
+ * Orders are DATA, not closures, so the rig cannot inject a job body. It drives
+ * real order kinds through `runOrder` over an `ns` whose `dnet` namespace is a
+ * stub: a `bleed` whose `heartbleed` parks in a killable `ns.sleep` stands in
+ * for a blocking call, and a `bleed` against an offline host for an instant
+ * one. The sim's teardown ordering is pinned separately by
+ * `sim/tests/process-atexit.test.ts`; the full seed→spread→cancel→walk path
+ * against the real darknet model by `sim/tests/dnet-session.test.ts`.
  *
- * What must never regress: a pin or a walk or an unarmored handle is never
- * eligible, a deliberate mode transition never triggers the hook, a dead
- * controller never respawn-loops, a host-restart killall terminates, a
- * host-delete declines quietly, and the boot-race grace holds. */
+ * What must never regress: a released body reports `cancelled` rather than
+ * failed, release alone never frees the host and never crashes the body,
+ * release-then-kill does free it, a clean order drops its handle, a worker
+ * started with no order exits at once, and a game kill with no cancel reason
+ * settles `died` and launches nothing. */
 
 const GENERATION = "15:0";
-/** game/dnet/agent.ts CONTROLLER_STARTUP_GRACE_MS, not exported. */
-const STARTUP_GRACE_MS = 15_000;
 /** A target the stub `heartbleed` parks on in a killable `ns.sleep`. */
 const BLOCKED_TARGET = "dn-block";
 
@@ -89,9 +87,9 @@ interface Rig {
   wakes: string[];
   /** Make the stubbed `setStasisLink` park in a killable sleep. */
   pinBlocks: { value: boolean };
-  /** Launch the real agent in resident mode on darkweb. */
-  plantResident: () => number;
-  plantManaged: () => Promise<number>;
+  /** The controller's own `ensureEntry`, so a test can create the host record
+   *  the real one would have made before it dispatched. */
+  ensure: (hostname: string) => HostEntry;
   entry: () => HostEntry | undefined;
 }
 
@@ -182,6 +180,12 @@ function rig(): Rig {
     mutationEpoch: 0,
     noteMutation: () => 0,
     wake: (cause) => void wakes.push(cause),
+    // The real controller settles this at the end of the derive its caller's
+    // report triggers; the stub has no derive, so it settles at once.
+    derived: () => Promise.resolve(),
+    announceLaunch: () => {},
+    announceProbeRefresh: () => {},
+    lend: () => {},
     adopt: (hostname, handle) => {
       // What the real controller does with an adoption: the handle becomes THE
       // process on that host's entry, and its settle is observed.
@@ -195,34 +199,19 @@ function rig(): Rig {
     cancelProbeRefresh: () => {},
     reportProbe: () => {},
     preparePlant: () => ({ controllerManaged: false, reuseProber: false }),
+    claimPlanted: () => undefined,
+    abandonPlant: () => {},
     registerBootstrap: () => {},
     bootstrapDone: () => {},
     deps: noopDeps,
-    drain: () => {
-      throw new Error("not drained here");
-    },
-    order: () => {},
+    snapshot: () => { throw new Error("not snapshotted here"); },
+    configure: () => {},
+    standDown: () => {},
   };
   dnetRealm().dnet_controller = controller;
 
-  const plantResident = (): number =>
-    controllerNs.exec(
-      "agent.js",
-      "darkweb",
-      { threads: 1, ramOverride: 4.45, temporary: true },
-      "darkweb",
-    );
-  const plantManaged = (): Promise<number> => handoffLaunch(
-    { kind: "dnet-agent", host: "darkweb", controllerManaged: true },
-    (launchId) => controllerNs.exec(
-      "agent.js",
-      "darkweb",
-      { threads: 1, ramOverride: 2.45, temporary: true },
-      launchId,
-    ),
-  );
-
   return {
+    ensure,
     host,
     world,
     processes,
@@ -232,8 +221,6 @@ function rig(): Rig {
     adopted,
     wakes,
     pinBlocks,
-    plantResident,
-    plantManaged,
     entry: () => hosts.get("darkweb"),
   };
 }
@@ -245,32 +232,23 @@ afterEach(() => {
   vt = undefined;
 });
 
-function makeOrder(kind: OrderKind, overrides: Partial<Order> = {}): Order {
-  return {
-    id: `${kind}-1`,
-    kind,
-    host: "darkweb",
-    from: "darkweb",
-    ramOverrideGb: 4,
-    threads: 1,
-    priority: 0,
-    longLived: kind === "walk",
-    label: `${kind} under test`,
-    ...overrides,
-  };
-}
 
-/** Stage an order the way the controller does: push, then wake the resident. */
-function stage(r: Rig, order: Order): void {
-  const entry = r.entry()!;
-  (entry.staged ??= []).push(order);
-  signalWake(entry);
-}
-
-/** Drive the clock until the resident has joined (adopted an idle handle). */
-async function residentJoined(r: Rig): Promise<AgentHandle> {
-  await r.world.clock.runAsync(() => r.entry()?.agent?.order.kind === "idle", 60_000);
-  return r.entry()!.agent!;
+/** Start an order the way the controller now does: stamp the handoff slot,
+ * then `exec` a worker sized for exactly that order.
+ *
+ * There is no resident to wake and no successor chain to fall into. The
+ * controller holds the launcher — it execs through the host's prober `ns` — so
+ * staging and starting are one act, and the worker carries no `spawn`. */
+function start(r: Rig, order: Order): number {
+  const entry = r.ensure("darkweb");
+  entry.pendingOrder = order;
+  const { launchId } = offerLaunch<DnetAgentLaunch>({ kind: "dnet-agent", host: "darkweb" });
+  return r.controllerNs.exec(
+    "agent.js",
+    "darkweb",
+    { threads: order.threads, ramOverride: order.ramOverrideGb, temporary: true },
+    launchId,
+  );
 }
 
 /** Drive the clock until an order of this kind is deep inside its blocking ns
@@ -285,351 +263,133 @@ async function inFlight(r: Rig, kind: OrderKind): Promise<AgentHandle> {
   return r.entry()!.agent!;
 }
 
-describe("hardCancelEligible: the pure licence to kill", () => {
-  function handleOf(kind: OrderKind, opts: { armored?: boolean; pid?: number } = {}): AgentHandle {
-    const order = makeOrder(kind);
-    return {
-      pid: opts.pid ?? 0,
-      order,
-      startedAt: 0,
-      beatAt: 0,
-      armored: opts.armored === true,
-      done: Promise.resolve({ id: order.id, kind, host: order.host, from: order.from, ok: false }),
-      settle: () => {},
-    };
-  }
+describe("release: letting a body out of a call it is waiting on", () => {
+  // A body inside a multi-second Darknet call cannot see the cancel flag, so it
+  // publishes a release hook: pulling it lets the body stop waiting for a
+  // result nobody wants any more, and the controller re-plans that instant.
+  //
+  // What it does NOT do is give the script back. Bitburner allows one Netscript
+  // call per script at a time, and the released call keeps that slot until the
+  // engine finishes it — so the body can settle its report and then only wait.
+  // Recovering the HOST takes a kill, the one thing that clears
+  // `env.runningFn`.
+  test("a released body reports cancelled rather than failed", async () => {
+    let release: (() => void) | undefined;
+    let inFlightCall: Promise<unknown> | undefined;
+    const io = {
+      beat: () => {},
+      setExpectedDoneAt: () => {},
+      hold: (hook: (() => void) | undefined) => { release = hook; },
+      inFlight: (settling: Promise<unknown>) => { inFlightCall = settling; },
+      cancelled: () => "superseded",
+      deps: { expectedDelayMs: () => undefined } as unknown as AgentIo["deps"],
+    } as AgentIo;
 
-  test("a walk keeps cooperative cancellation only, and an unarmored handle is never killed", () => {
-    // A walk is PID-bound and spawn-free: even armored-and-live it is exempt.
-    expect(hardCancelEligible(handleOf("walk", { armored: true, pid: 42 }))).toBe(false);
-    // A pin has no spawn budget and therefore no safety net — exempt even when
-    // the armor flag is forged onto it.
-    expect(hardCancelEligible(handleOf("pin", { armored: true, pid: 42 }))).toBe(false);
-    // A pre-armor process is never killed without its net.
-    expect(hardCancelEligible(handleOf("attempt", { pid: 42 }))).toBe(false);
-    const managed = handleOf("attempt", { pid: 42 });
-    managed.order.controllerManaged = true;
-    expect(hardCancelEligible(managed)).toBe(true);
-    // The one killable shape: armored, live pid, non-exempt kind.
-    expect(hardCancelEligible(handleOf("attempt", { armored: true, pid: 42 }))).toBe(true);
-    // The sweep also refuses a handle with no pid to vouch.
-    expect(hardCancelEligible(handleOf("attempt", { armored: true, pid: 0 }))).toBe(false);
-    // The exemption list is exactly the two spawn-less kinds.
-    expect([...HARD_CANCEL_EXEMPT_KINDS].sort()).toEqual(["pin", "walk"]);
+    // A call that never settles — the engine's own work is not cancellable,
+    // and that is precisely why waiting for it has to be.
+    const waiting = awaitDnetOperation(io, { operation: "authenticate", host: "h", from: "v", threads: 1 },
+      () => new Promise<never>(() => {}));
+    await Promise.resolve();
+    expect(release, "the body never published a release hook").toBeDefined();
+    release!();
+    await expect(waiting).rejects.toBe(RELEASED);
+    // And it handed the still-running call to the exit path. Until that settles
+    // every `ns` member in this process throws CONCURRENCY ERROR.
+    expect(inFlightCall, "a released body must publish the call it walked away from").toBeDefined();
   });
 
-  test("a cancellation follows its handle and receives one cooperative pass", () => {
-    const handle = handleOf("attempt", { armored: true, pid: 42 });
-    handle.cancelReason = "superseded";
-    handle.cancelRequestedPass = 7;
-    expect(hardCancelReady(handle, 7)).toBe(false);
-    expect(hardCancelReady(handle, 8)).toBe(true);
+  test("a release alone never crashes the body, and never frees the host either", async () => {
+    const r = rig();
+    start(r, makeOrder("bleed", { host: BLOCKED_TARGET, from: "darkweb" }, {}));
+    const handle = await inFlight(r, "bleed");
+    const orderPid = handle.pid;
+    expect(handle.release, "a body inside an engine call publishes its release hook").toBeDefined();
 
-    const replacement = handleOf("attempt", { armored: true, pid: 43 });
-    expect(hardCancelReady(replacement, 8)).toBe(false);
+    handle.cancelReason = "preempted";
+    handle.release!();
+    const report = await handle.done;
+    expect(report).toMatchObject({ ok: false, targetState: "cancelled" });
+    for (let drain = 0; drain < 8; drain++) await Promise.resolve();
+
+    // HALF ONE — the safety net. The engine call is still running and still
+    // owns this script's only Netscript slot, so an exit path that touched `ns`
+    // would throw `Concurrent calls to Netscript functions are not allowed!`.
+    // The sim models that rule and records the crash.
+    expect(r.host.crashes).toEqual([]);
+
+    // HALF TWO — and why the net alone is not a fix. Waiting for an engine call
+    // is all a released body CAN do, and this one has 600s left to run. The
+    // host stays occupied for every second of it, so the controller cannot
+    // dispatch anything else there. That is why `cancelActive` follows a
+    // release with a kill.
+    expect(r.processes.ps("darkweb").map((p) => p.pid)).toEqual([orderPid]);
+  });
+
+  test("release then kill is what actually hands the host back", async () => {
+    const r = rig();
+    start(r, makeOrder("bleed", { host: BLOCKED_TARGET, from: "darkweb" }, {}));
+    const handle = await inFlight(r, "bleed");
+    const orderPid = handle.pid;
+
+    // Exactly what `cancelActive` does when `release` is published, meaning the
+    // body is inside an engine call. The kill is not a fallback: it is the only
+    // thing that clears `env.runningFn`, and the engine clears it BEFORE it
+    // runs atExit — so the victim's hook settles on a clean slot.
+    handle.cancelReason = "preempted";
+    handle.release!();
+    expect(r.controllerNs.kill(orderPid)).toBe(true);
+
+    expect(r.host.crashes).toEqual([]);
+    const report = await handle.done;
+    expect(report).toMatchObject({ ok: false, targetState: "cancelled" });
+    // The host is EMPTY, and that is the point. The worker used to spawn its own
+    // successor from inside this kill, which is what put `spawn` — 2.0 GB on
+    // every thread — into its surface. The controller launches what comes next.
+    expect(r.processes.ps("darkweb")).toHaveLength(0);
+    expect(r.entry()?.agent, "the handle must be dropped so the host reads free").toBeUndefined();
   });
 });
 
-describe("the controller's kill, and the agent's survival of it", () => {
-  test("a stasis-managed agent exits to the controller without losing its successor", async () => {
+describe("a worker runs one order and lets go", () => {
+  test("a clean order settles, drops its handle, and leaves the host free", async () => {
     const r = rig();
-    await r.plantManaged();
-    await residentJoined(r);
-
-    const first = makeOrder("bleed", { id: "managed-first", host: "dn-quick", controllerManaged: true });
-    const second = makeOrder("bleed", { id: "managed-second", host: "dn-quick", controllerManaged: true });
-    const entry = r.entry()!;
-    (entry.staged ??= []).push(first, second);
-    signalWake(entry);
+    start(r, makeOrder("bleed", { host: "dn-quick", from: "darkweb" }, {}));
+    await r.world.clock.runAsync(() => r.reports.some((report) => report.kind === "bleed"), 60_000);
+    expect(r.reports.find((report) => report.kind === "bleed")).toMatchObject({ ok: true });
 
     await r.world.clock.runAsync(() => r.processes.ps("darkweb").length === 0, 60_000);
-    expect(entry.agent).toBeUndefined();
-    // The successor stays in the durable staged queue; the resident only wakes
-    // the controller to re-exec it.
-    expect(entry.staged?.map((order) => order.id)).toEqual(["managed-first", "managed-second"]);
-    expect(r.wakes).toContain("stasis-dispatch-requested");
-
-    entry.pendingOrder = entry.staged!.shift();
-    await r.plantManaged();
-    await r.world.clock.runAsync(() => r.reports.some((report) => report.id === first.id), 60_000);
-    expect(r.processes.ps("darkweb")).toHaveLength(0);
-    expect(entry.staged?.map((order) => order.id)).toEqual(["managed-second"]);
-    expect(r.wakes).toContain("stasis-order-finished");
+    expect(r.entry()?.agent).toBeUndefined();
     expect(r.host.crashes).toEqual([]);
   });
 
-  test("the adopted handle exposes the current delayed boundary and clears an early completion", async () => {
+  test("a worker started with no order exits at once rather than waiting", async () => {
     const r = rig();
-    r.plantResident();
-    await residentJoined(r);
+    r.ensure("darkweb");
+    const { launchId } = offerLaunch<DnetAgentLaunch>({ kind: "dnet-agent", host: "darkweb" });
+    r.controllerNs.exec("agent.js", "darkweb", { threads: 1, ramOverride: 4, temporary: true }, launchId);
 
-    const blocked = makeOrder("bleed", { host: BLOCKED_TARGET });
-    stage(r, blocked);
+    // Nothing to wait FOR. The controller launches a worker only once it has
+    // staged the order, so a worker that finds none was launched for nothing —
+    // and one that lingered would hold RAM the next dispatch needs.
+    await r.world.clock.runAsync(() => r.processes.ps("darkweb").length === 0, 60_000);
+    expect(r.entry()?.agent).toBeUndefined();
+    expect(r.host.crashes).toEqual([]);
+  });
+
+  test("a game kill with no cancelReason settles died, and launches nothing", async () => {
+    const r = rig();
+    const pid = start(r, makeOrder("bleed", { host: BLOCKED_TARGET, from: "darkweb" }, {}));
     const handle = await inFlight(r, "bleed");
-    expect(handle.order).toBe(blocked);
-    expect(handle.startedAt).toBe(blocked.startedAt!);
-    expect(blocked.expectedDoneAt!).toBeGreaterThan(handle.startedAt);
-    handle.cancelReason = "test cleanup";
-    expect(r.controllerNs.kill(handle.pid)).toBe(true);
-    await handle.done;
-    expect(blocked.expectedDoneAt).toBeUndefined();
 
-    await residentJoined(r);
-    const quick = makeOrder("bleed", { id: "bleed-quick", host: "dn-quick" });
-    stage(r, quick);
-    await r.world.clock.runAsync(() => r.reports.some((report) => report.id === quick.id), 60_000);
-    expect(quick.startedAt).toBeDefined();
-    expect(quick.expectedDoneAt).toBeUndefined();
-  });
-
-  test("a pointless in-flight order is killed, settles cancelled, and the resident is back before kill returns", async () => {
-    const r = rig();
-    r.plantResident();
-    await residentJoined(r);
-
-    stage(r, makeOrder("bleed", { host: BLOCKED_TARGET }));
-    const handle = await inFlight(r, "bleed");
-    // Order mode stamped its armor the moment it armed the hook, which is the
-    // controller's licence to hard-kill it.
-    expect(handle.armored).toBe(true);
-    expect(hardCancelEligible(handle)).toBe(true);
-    const orderPid = handle.pid;
-
-    // The controller marks the reason, then hard-kills on the following pass.
-    // atExit runs synchronously inside kill and reports cancellation.
-    handle.cancelReason = "credential already verified";
-    expect(r.controllerNs.kill(orderPid)).toBe(true);
-
-    // Everything below was already true when kill returned: the murdered order
-    // settled and its resident successor was spawned inside the killer's stack.
-    const replacement = r.processes.ps("darkweb");
-    expect(replacement).toHaveLength(1);
-    expect(replacement[0]!.pid).not.toBe(orderPid);
-    expect(replacement[0]!.args).toEqual(["darkweb"]);
-    const report = await handle.done;
-    expect(report).toMatchObject({ ok: false, targetState: "cancelled" });
-    expect(report.died).toBeUndefined();
-
-    // The revived resident joins and picks up the next order as though nothing
-    // happened — the zombie continuation of the killed process double-books
-    // nothing.
-    await r.world.clock.runAsync(
-      () => r.adopted.some((a) => a.kind === "idle" && a.pid === replacement[0]!.pid),
-      60_000,
-    );
-    stage(r, makeOrder("bleed", { id: "bleed-2", host: "dn-quick" }));
-    await r.world.clock.runAsync(() => r.reports.some((report2) => report2.id === "bleed-2"), 60_000);
-    expect(r.reports.find((report2) => report2.id === "bleed-2")).toMatchObject({ ok: true });
-    expect(r.host.crashes).toEqual([]);
-  });
-
-  test("a pin is never armored and never eligible, even flagged and forged; completing the atomic call leaves the host empty", async () => {
-    const r = rig();
-    r.pinBlocks.value = true;
-    r.plantResident();
-    await residentJoined(r);
-
-    stage(r, makeOrder("pin"));
-    const handle = await inFlight(r, "pin");
-
-    // Order mode never armed it: no spawn in a pin's budget, no safety net.
-    expect(handle.armored).toBe(false);
-    expect(hardCancelEligible(handle)).toBe(false);
-    // Even a forged armor flag does not make an exempt kind killable.
-    handle.armored = true;
-    expect(hardCancelEligible(handle)).toBe(false);
-    handle.armored = false;
-    // A pin is not killable. If its atomic call completes after cancellation was
-    // requested, the completed result wins; the link cannot be rolled back.
-    handle.cancelReason = "belief changed";
-    await r.world.clock.runAsync(() => r.reports.some((report) => report.kind === "pin"), 700_000);
-    expect(r.reports.find((report) => report.kind === "pin")).toMatchObject({ ok: true });
-    expect(r.processes.ps("darkweb")).toHaveLength(0);
-    expect(r.host.crashes).toEqual([]);
-  });
-
-  test("a clean order exits straight into its staged successor, consecutive pids and no intermediate resident", async () => {
-    const r = rig();
-    r.plantResident();
-    await residentJoined(r);
-
-    // Two orders staged together: the finishing first order's atExit spawn must
-    // take the second DIRECTLY, not via a resident bounce.
-    const entry = r.entry()!;
-    const firstOrder = makeOrder("bleed", { id: "bleed-first", host: "dn-quick" });
-    const secondOrder = makeOrder("bleed", { id: "bleed-second", host: "dn-quick" });
-    (entry.staged ??= []).push(firstOrder, secondOrder);
-    expect(firstOrder.startedAt).toBeUndefined();
-    expect(secondOrder.startedAt).toBeUndefined();
-    signalWake(entry);
-    await r.world.clock.runAsync(() => r.reports.some((report) => report.id === "bleed-second"), 60_000);
-
-    expect(r.reports.map((report) => report.id)).toEqual(["bleed-first", "bleed-second"]);
-    const first = r.adopted.find((a) => a.kind === "bleed")!;
-    const chain = r.adopted.filter((a) => a.kind === "bleed");
-    expect(chain).toHaveLength(2);
-    expect(chain[0]!.startedAt).toBe(firstOrder.startedAt!);
-    expect(chain[0]!.orderStartedAt).toBe(firstOrder.startedAt!);
-    expect(chain[1]!.startedAt).toBe(secondOrder.startedAt!);
-    expect(chain[1]!.orderStartedAt).toBe(secondOrder.startedAt!);
-    expect(secondOrder.startedAt).toBeGreaterThanOrEqual(firstOrder.startedAt!);
-    // Consecutive PIDs prove atExit launched the successor itself. An
-    // intermediate resident would consume one PID before the second order.
-    expect(chain[1]!.pid).toBe(first.pid + 1);
-    // And afterwards the host is back to exactly one resident.
-    await r.world.clock.runAsync(
-      () => r.adopted.some((a) => a.kind === "idle" && a.pid > chain[1]!.pid),
-      60_000,
-    );
-    expect(r.processes.ps("darkweb")).toHaveLength(1);
-    expect(r.host.crashes).toEqual([]);
-  });
-
-  test("a game kill with no cancelReason settles died and stages no successor order", async () => {
-    const r = rig();
-    r.plantResident();
-    await residentJoined(r);
-
-    stage(r, makeOrder("bleed", { host: BLOCKED_TARGET }));
-    const handle = await inFlight(r, "bleed");
-    const orderPid = handle.pid;
-
-    // The game's kill, not the controller's: no cancelReason set. The hook
-    // settles the death honestly and does NOT hand the host a successor order.
-    expect(r.controllerNs.kill(orderPid)).toBe(true);
+    // The host restarting under us, or a killall. No cancel reason was set, so
+    // this is a death rather than a cancellation — and the hook's whole job is
+    // to say so and let go. It never relaunches: a replacement exec'd from here
+    // would be killed by the same live-map loop before its first line.
+    expect(r.controllerNs.kill(pid)).toBe(true);
     const report = await handle.done;
     expect(report).toMatchObject({ ok: false, died: true });
-    expect(report.targetState).toBeUndefined();
-    expect(r.entry()!.pendingOrder).toBeUndefined();
-    // A live host keeps a resident: the replacement is a plain resident, not a
-    // re-run of the killed order.
-    const replacement = r.processes.ps("darkweb");
-    expect(replacement).toHaveLength(1);
-    expect(replacement[0]!.pid).not.toBe(orderPid);
-    await r.world.clock.runAsync(
-      () => r.adopted.some((a) => a.kind === "idle" && a.pid === replacement[0]!.pid),
-      60_000,
-    );
-    expect(r.processes.ps("darkweb")).toHaveLength(1);
-    expect(r.host.crashes).toEqual([]);
-  });
-
-  test("deliberate transitions never trigger the hook, and a dead controller does not respawn-loop", async () => {
-    const r = rig();
-    r.plantResident();
-    await residentJoined(r);
-
-    // resident -> order -> resident, the normal round trip: afterwards exactly
-    // one resident — no doubles from the atExit.
-    stage(r, makeOrder("bleed", { host: "dn-quick" }));
-    await r.world.clock.runAsync(() => r.reports.some((report) => report.kind === "bleed"), 60_000);
-    expect(r.reports.find((report) => report.kind === "bleed")).toMatchObject({ ok: true });
-    const bleedPid = r.adopted.find((a) => a.kind === "bleed")!.pid;
-    await r.world.clock.runAsync(() => r.adopted.some((a) => a.kind === "idle" && a.pid > bleedPid), 60_000);
-    expect(r.processes.ps("darkweb")).toHaveLength(1);
-
-    // Retire the controller: the resident's next pass returns deliberately.
-    // An armed hook here would respawn a process that exits again, for ever.
-    delete dnetRealm().dnet_controller;
-    await r.world.clock.runAsync(() => r.processes.ps("darkweb").length === 0, 60_000);
     expect(r.processes.ps("darkweb")).toHaveLength(0);
-    expect(r.host.crashes).toEqual([]);
-  });
-
-  test("a live-map host restart terminates and is immediately replantable", async () => {
-    const r = rig();
-    const before = r.plantResident();
-    await residentJoined(r);
-
-    // Upstream iterates the LIVE running-script map: the armed resident's
-    // atExit spawn IS visited by the same killall and dies unarmed, so the
-    // teardown terminates instead of looping. External death clears the handle
-    // and wakes the controller to replant.
-    r.processes.killall("darkweb");
-    expect(r.processes.ps("darkweb")).toHaveLength(0);
-    expect(r.entry()!.agent).toBeUndefined();
-    expect(r.wakes).toContain("resident-died");
-
-    const replanted = r.plantResident();
-    expect(replanted).toBeGreaterThan(before);
-    await r.world.clock.runAsync(
-      () => r.adopted.some((a) => a.kind === "idle" && a.pid === replanted),
-      60_000,
-    );
-    expect(r.processes.ps("darkweb")).toHaveLength(1);
-    expect(r.host.crashes).toEqual([]);
-  });
-
-  test("on a deleted host the hook declines: no spawn, no crash", async () => {
-    const r = rig();
-    r.plantResident();
-    const joined = await residentJoined(r);
-    const pid = joined.pid;
-
-    // What a delete mutation leaves behind: no files, no server. The guard
-    // inside the hook swallows the refused spawn and returns instead of
-    // spawning into an error dialog.
-    r.host.files.delete("darkweb");
-    r.world.servers.delete("darkweb");
-    r.processes.kill(pid);
-    expect(r.processes.ps("darkweb")).toHaveLength(0);
-    expect(r.entry()!.agent).toBeUndefined();
-    expect(r.host.crashes).toEqual([]);
-  });
-
-  test("a resident that wins the launch race waits for its controller, then joins", async () => {
-    // The bug this guards: home co-launches controller+resident, the resident
-    // can start first and find no controller yet, and exiting on the spot left
-    // the host bare until home's re-seed backoff elapsed. The resident must
-    // instead wait out the boot race.
-    const r = rig();
-    const registered = dnetRealm().dnet_controller;
-    delete dnetRealm().dnet_controller;
-    const pid = r.plantResident();
-
-    // A few seconds pass with no controller registered: the resident must
-    // still be alive (grace poll) and must NOT have created its entry.
-    await r.world.clock.runAsync(() => false, 3_000);
-    expect(r.processes.get(pid)).toBeDefined();
-    expect(r.entry()).toBeUndefined();
-
-    // The controller finishes booting and registers; the resident joins it.
-    dnetRealm().dnet_controller = registered;
-    await r.world.clock.runAsync(() => r.entry()?.agent?.pid === pid, 30_000);
-    expect(r.entry()?.agent?.order.kind).toBe("idle");
-    expect(r.host.crashes).toEqual([]);
-  });
-
-  test("a resident whose controller never registers gives up after the grace", async () => {
-    // The other side of the same latch: a genuinely dead run (no controller
-    // ever) must not leave a resident polling for ever, or home could never
-    // re-seed a single clean one.
-    const r = rig();
-    delete dnetRealm().dnet_controller;
-    const pid = r.plantResident();
-
-    // Still alive mid-grace, gone once the ~15s grace elapses, with no respawn.
-    await r.world.clock.runAsync(() => false, STARTUP_GRACE_MS / 3);
-    expect(r.processes.get(pid)).toBeDefined();
-    await r.world.clock.runAsync(() => r.processes.get(pid) === undefined, STARTUP_GRACE_MS * 2);
-    expect(r.processes.ps("darkweb")).toHaveLength(0);
-    expect(r.host.crashes).toEqual([]);
-  });
-
-  test("the wake picks up staged work without waiting out the poll", async () => {
-    const r = rig();
-    r.plantResident();
-    await residentJoined(r);
-
-    // Stage an order the way the controller does: push, then wake.
-    const at = r.world.clock.now();
-    stage(r, makeOrder("bleed", { host: "dn-quick" }));
-
-    // Picked up on the wake — virtual time barely advances, far under the 1s
-    // fallback poll a pure poller would have cost.
-    await r.world.clock.runAsync(() => r.reports.some((report) => report.kind === "bleed"), 60_000);
-    expect(r.reports.find((report) => report.kind === "bleed")).toMatchObject({ ok: true });
-    expect(r.world.clock.now() - at).toBeLessThan(1_000);
+    expect(r.entry()?.agent).toBeUndefined();
     expect(r.host.crashes).toEqual([]);
   });
 });

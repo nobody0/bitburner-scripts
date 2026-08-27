@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
-import { dnetRealm, type ControllerHandle, type HostEntry } from "../game/dnet/shared.ts";
-import { resetLaunchState } from "../game/lib/launch-shared.ts";
+import { dnetRealm, processSizeFor, type ControllerHandle, type HostEntry, type Order } from "../game/dnet/shared.ts";
+import { handoffLaunch, resetLaunchState } from "../game/lib/launch-shared.ts";
+import type { DnetRecoveryState } from "../game/dnet/wire.ts";
 
 /** Derivation is FACT-driven: a write-through files its consequences in the
  * same engine turn, not on the controller's 2 s watchdog.
@@ -25,8 +26,12 @@ interface SimHost {
 }
 
 const net = new Map<string, SimHost>();
+/** Pids the engine reports as dead. The placing window is decided by asking
+ *  whether the announced process is really there, so a test about a launch
+ *  that never landed has to be able to say so. */
+const deadPids = new Set<number>();
 
-function mockNs(): NS {
+function mockNs(launchId?: number, standingOn?: string): NS {
   const details = (host: string) => {
     const sim = net.get(host);
     if (!sim) return { isOnline: false } as never;
@@ -46,7 +51,7 @@ function mockNs(): NS {
     };
   };
   return {
-    args: [],
+    args: launchId === undefined ? [] : [launchId],
     pid: 1,
     disableLog: () => {},
     getScriptName: () => "dnet/controller.js",
@@ -54,26 +59,61 @@ function mockNs(): NS {
     getServerMaxRam: (host: string) => net.get(host)?.maxRam ?? 0,
     getServerUsedRam: () => 0,
     dnsLookup: (host: string) => `ip-${host}`,
-    isRunning: () => true,
+    isRunning: (pid: unknown) => typeof pid !== "number" || !deadPids.has(pid),
     kill: () => true,
-    dnet: { getServerDetails: details },
+    dnet: {
+      getServerDetails: details,
+      // A lender's probe: the neighbours of the host it stands on. Bound at
+      // construction, because `probe` is host-BOUND — that is the whole reason
+      // a process stands on every host.
+      probe: () => [...(net.get(standingOn ?? "")?.neighbours ?? [])],
+      nextMutation: () => new Promise<void>(() => {}),
+    },
   } as unknown as NS;
 }
 
+/** Stand a prober on a host and lend its `ns` to the controller.
+ *
+ * Every fact the controller reads now goes through a borrowed `ns`, so a test
+ * with no lender anywhere describes nothing and derives nothing — which is the
+ * real behaviour at cold start, and why this is the first thing every case
+ * does. */
+function standProber(handle: ControllerHandle, host: string, pid = 900): NS {
+  const borrowed = mockNs(undefined, host);
+  handle.lend(host, borrowed, pid);
+  return borrowed;
+}
+
+/** The controller's hands: one warm lender for every GLOBAL call.
+ *
+ * Separate from the probers on purpose. `probe` and `exec` are host-BOUND and
+ * can only come from a process standing on that host; `getServerDetails` and
+ * friends work anywhere, so exactly one process in the net pays for them
+ * instead of every prober paying for ever. With no hands the controller
+ * describes nothing — which is the real cold-start state, and why this is the
+ * other thing every case does first. */
+function standHands(): NS {
+  const borrowed = mockNs();
+  dnetRealm().dnet_hands = borrowed;
+  return borrowed;
+}
+
 /** Start the real controller and stop at its first `await`. */
-async function bootController(): Promise<ControllerHandle> {
+async function bootController(recovery?: DnetRecoveryState): Promise<ControllerHandle> {
   const { main } = await import("../game/dnet/controller.ts");
-  (globalThis as Record<string, unknown>)["spawning_script"] = {
-    descriptor: {
+  // Exactly the real handoff: the controller captures its descriptor inside
+  // the launcher's own turn, which is what acknowledges the launch.
+  await handoffLaunch(
+    {
       kind: "dnet-controller",
       host: VANTAGE,
       buildId: "test",
       generation: "test",
       charisma: 1_000,
+      ...(recovery ? { recovery } : {}),
     },
-    acknowledge: () => {},
-  };
-  void main(mockNs());
+    (launchId) => { void main(mockNs(launchId)).catch(() => {}); return 1; },
+  );
   const handle = dnetRealm().dnet_controller;
   expect(handle, "the controller never published its rendezvous").toBeDefined();
   return handle!;
@@ -84,14 +124,29 @@ const settleMicrotasks = async (): Promise<void> => {
   for (let turn = 0; turn < 8; turn++) await Promise.resolve();
 };
 
-/** A live resident, exactly as an agent registers one. */
-function standResident(handle: ControllerHandle, host: string, pid: number): HostEntry {
+/** A host as production actually has it: a live PROBER lending its `ns`, and
+ * no agent until the controller execs one for a specific order.
+ *
+ * This used to adopt a fake handle carrying an `idle` order, "exactly as an
+ * agent registers one". No agent has registered that way since the resident
+ * was absorbed into the prober — an agent boots with one order and exits — so
+ * the fixture was standing up a state the code can no longer produce, and it
+ * was the only reason these cases passed while a real prober-only host was
+ * being refused every task. */
+function standHost(handle: ControllerHandle, host: string, pid = 900): HostEntry {
+  standProber(handle, host, pid);
+  return handle.hosts.get(host)!;
+}
+
+/** An agent adopting one order, which is the only way an agent ever registers:
+ * the controller execs it FOR that order and it exits when the order is done.
+ * Adopting is also what closes the host's placing window. */
+function adoptAgent(handle: ControllerHandle, host: string, pid: number, order: Order): HostEntry {
   handle.adopt(host, {
     pid,
-    order: { id: `idle:${host}`, kind: "idle", host, from: host, ramOverrideGb: 3.6, threads: 1, priority: 1_000_000, longLived: false, label: "resident" },
+    order,
     startedAt: Date.now(),
     beatAt: Date.now(),
-    armored: false,
     done: new Promise(() => {}),
     settle: () => {},
   });
@@ -101,21 +156,64 @@ function standResident(handle: ControllerHandle, host: string, pid: number): Hos
 beforeEach(() => {
   (globalThis as Record<string, unknown>)["__TELEMETRY__"] = false;
   net.clear();
+  deadPids.clear();
   net.set(VANTAGE, { maxRam: 64, blockedRam: 0, depth: 0, neighbours: [TARGET] });
   net.set(TARGET, { maxRam: 32, blockedRam: 0, depth: 1, neighbours: [VANTAGE] });
 });
 
 afterEach(() => {
   const handle = dnetRealm().dnet_controller;
-  if (handle) handle.order({ charisma: 1_000, standDown: true });
+  if (handle) handle.standDown();
   delete dnetRealm().dnet_controller;
+  delete dnetRealm().dnet_hands;
   resetLaunchState();
 });
 
 describe("a fact derives in its own turn", () => {
+  test("snapshots are cumulative copies and restore without process runtime", async () => {
+    const first = await bootController();
+    standHands();
+    standProber(first, VANTAGE);
+    standHost(first, VANTAGE, 11);
+    first.deps.recordCredential({ hostname: TARGET, password: "1234", at: Date.now() });
+    await settleMicrotasks();
+
+    const captured = first.snapshot();
+    expect(captured.recovery.vault.map((entry) => entry.hostname)).toContain(TARGET);
+    const durable = captured.recovery.knowledge.hosts.get(VANTAGE)! as HostEntry;
+    expect(durable.agent).toBeUndefined();
+    expect(durable.ns).toBeUndefined();
+
+    durable.depth = 999;
+    expect(first.snapshot().recovery.knowledge.hosts.get(VANTAGE)?.depth).not.toBe(999);
+    expect(first.snapshot().recovery.codes).toEqual(captured.recovery.codes);
+
+    first.standDown();
+    delete dnetRealm().dnet_controller;
+    const restored = await bootController(captured.recovery);
+    expect(restored.snapshot().recovery.vault.map((entry) => entry.hostname)).toContain(TARGET);
+    expect(restored.hosts.get(VANTAGE)?.agent).toBeUndefined();
+    expect(restored.hosts.get(VANTAGE)?.ns).toBeUndefined();
+  });
+
+  test("a recovery checkpoint from another generation is ignored", async () => {
+    const first = await bootController();
+    first.deps.recordCredential({ hostname: TARGET, password: "1234", at: Date.now() });
+    await settleMicrotasks();
+    const foreign = { ...first.snapshot().recovery, generation: "foreign" };
+
+    first.standDown();
+    delete dnetRealm().dnet_controller;
+    const replacement = await bootController(foreign);
+
+    expect(replacement.snapshot().recovery.vault).toEqual([]);
+  });
+
   test("a verified credential stages the plant without a tick", async () => {
     const handle = await bootController();
-    const vantage = standResident(handle, VANTAGE, 11);
+    standHands();
+    standProber(handle, VANTAGE);
+    const vantage = standHost(handle, VANTAGE, 11);
     handle.reportProbe(VANTAGE, [TARGET], Date.now(), 11);
 
     handle.deps.recordCredential({ hostname: TARGET, password: "1234", at: Date.now() });
@@ -123,36 +221,40 @@ describe("a fact derives in its own turn", () => {
 
     const plant = (vantage.staged ?? []).find((order) => order.kind === "plant");
     expect(plant, "the plant was not staged in the credential's own turn").toBeDefined();
-    expect(plant!.targets?.map((t) => t.host)).toEqual([TARGET]);
-    expect(plant!.targets?.[0]?.password).toBe("1234");
+    expect(plant!.payload.targets?.map((t) => t.host)).toEqual([TARGET]);
+    expect(plant!.payload.targets?.[0]?.password).toBe("1234");
   });
 
   test("a reload's restored vault stages a remote plant before it has a map", async () => {
     const handle = await bootController();
-    standResident(handle, VANTAGE, 11);
+    standHands();
+    standProber(handle, VANTAGE);
+    standHost(handle, VANTAGE, 11);
     // The vantage knows its own capacity and nothing else. No probe names
     // REMOTE: on a cold boot the only thing home hands back is the file it
     // saved — passwords and stasis links, never topology.
     handle.reportProbe(VANTAGE, [], Date.now(), 11);
     net.set(REMOTE, { maxRam: 32, blockedRam: 0, depth: 4, neighbours: [] });
     const at = Date.now();
-    handle.order({
+    handle.configure({
       charisma: 1_000,
-      vaultSnapshot: { entries: [{ hostname: REMOTE, password: "1234", at }], at },
       stasisSnapshot: { hosts: [REMOTE], at },
     });
+    handle.deps.recordCredential({ hostname: REMOTE, password: "1234", at });
     await settleMicrotasks();
 
     const plant = (handle.hosts.get(VANTAGE)?.staged ?? []).find((order) => order.kind === "plant");
     expect(plant, "the restored credential waited for a prober to rediscover its host").toBeDefined();
-    expect(plant!.targets?.map((t) => t.host)).toEqual([REMOTE]);
+    expect(plant!.payload.targets?.map((t) => t.host)).toEqual([REMOTE]);
     // A stasis link is a backdoor, so the vantage never needed to be adjacent.
-    expect(plant!.targets?.[0]?.sessionOnly).toBe(true);
+    expect(plant!.payload.targets?.[0]?.remote).toBe(true);
   });
 
   test("a vantage's whole frontier is ONE order, not one per host", async () => {
     const handle = await bootController();
-    const vantage = standResident(handle, VANTAGE, 11);
+    standHands();
+    standProber(handle, VANTAGE);
+    const vantage = standHost(handle, VANTAGE, 11);
     const frontier = ["a.corp", "b.corp", "c.corp", "d.corp"];
     for (const host of frontier) net.set(host, { maxRam: 32, blockedRam: 0, depth: 1, neighbours: [VANTAGE] });
     handle.reportProbe(VANTAGE, frontier, Date.now(), 11);
@@ -165,12 +267,91 @@ describe("a fact derives in its own turn", () => {
     // One order runs them together, and the queue cap never sees them.
     const plants = (vantage.staged ?? []).filter((order) => order.kind === "plant");
     expect(plants).toHaveLength(1);
-    expect(plants[0]!.targets?.map((t) => t.host).sort()).toEqual(frontier);
+    expect(plants[0]!.payload.targets.map((t) => t.host).sort()).toEqual(frontier);
+  });
+
+  test("a host being planted takes its first order before the agent exists", async () => {
+    const handle = await bootController();
+    standHands();
+    standProber(handle, VANTAGE);
+    standHost(handle, VANTAGE, 11);
+    handle.reportProbe(VANTAGE, [TARGET], Date.now(), 11);
+    handle.deps.recordCredential({ hostname: TARGET, password: "1234", at: Date.now() });
+    await settleMicrotasks();
+
+    // What the plant body does: open the window, then report the new host's
+    // own first probe. TARGET still has no process at all.
+    handle.preparePlant(TARGET);
+    handle.reportProbe(TARGET, [VANTAGE], Date.now(), 12);
+    await settleMicrotasks();
+    expect(handle.hosts.get(TARGET)?.agent).toBeUndefined();
+
+    // The derive staged work for it anyway, and the plant hands that order to
+    // the `exec` it is about to make — so the new process starts ON it rather
+    // than booting, adopting and spawning first.
+    const first = handle.claimPlanted(TARGET);
+    expect(first, "nothing was ready for the new agent to start on").toBeDefined();
+    expect(first!.kind).toBe("inventory");
+    // The `exec` is sized from the order itself, by the same helper the spawn
+    // chain uses — the two hand-offs have nothing left to disagree about.
+    expect(processSizeFor(first, 3.6)).toEqual({ threads: first!.threads, ramOverride: first!.ramOverrideGb });
+    // And the window is still OPEN: the resident this order was claimed for has
+    // not been exec'd yet, let alone adopted. Closing it here left the host
+    // reading agentless-and-unclaimed for the length of an exec, and the derive
+    // the probe had just woken retired the claim out from under the plant.
+    expect(handle.hosts.get(TARGET)?.inbound).toBeDefined();
+    // `adopt` is what closes it.
+    adoptAgent(handle, TARGET, 13, first!);
+    expect(handle.hosts.get(TARGET)?.inbound).toBeUndefined();
+  });
+
+  test("a launch that never lands stops holding the host", async () => {
+    const handle = await bootController();
+    standHands();
+    standProber(handle, VANTAGE);
+    standHost(handle, VANTAGE, 11);
+    handle.reportProbe(VANTAGE, [TARGET], Date.now(), 11);
+    handle.deps.recordCredential({ hostname: TARGET, password: "1234", at: Date.now() });
+    await settleMicrotasks();
+
+    // A child that died before its first line. The plant handed over its pid,
+    // so the window is a checkable fact rather than a stopwatch: the process is
+    // not running, therefore nothing is coming. No time passes in this test.
+    handle.preparePlant(TARGET);
+    handle.announceLaunch(TARGET, 999_999);
+    deadPids.add(999_999);
+    handle.wake("test");
+    await settleMicrotasks();
+
+    // Reaped on THIS pass, so the host rejoins the plant pool at once rather
+    // than reading staffed until a window happens to lapse.
+    expect(handle.hosts.get(TARGET)?.inbound).toBeUndefined();
+    expect(handle.hosts.get(TARGET)?.agent).toBeUndefined();
+  });
+
+  test("an abandoned plant stops the host accepting orders", async () => {
+    const handle = await bootController();
+    standHands();
+    standProber(handle, VANTAGE);
+    standHost(handle, VANTAGE, 11);
+    handle.reportProbe(VANTAGE, [TARGET], Date.now(), 11);
+    handle.deps.recordCredential({ hostname: TARGET, password: "1234", at: Date.now() });
+    await settleMicrotasks();
+
+    handle.preparePlant(TARGET);
+    expect(handle.hosts.get(TARGET)?.inbound).toBeDefined();
+    // A refused prober exec, or a cancelled refresh: the window closes and the
+    // host stops being a place work can be filed onto.
+    handle.abandonPlant(TARGET);
+    expect(handle.hosts.get(TARGET)?.inbound).toBeUndefined();
+    expect(handle.claimPlanted(TARGET)).toBeUndefined();
   });
 
   test("a resident standing on a host with dirty files stages its own `ls`", async () => {
     const handle = await bootController();
-    standResident(handle, VANTAGE, 11);
+    standHands();
+    standProber(handle, VANTAGE);
+    standHost(handle, VANTAGE, 11);
     handle.reportProbe(VANTAGE, [TARGET], Date.now(), 11);
     handle.deps.recordCredential({ hostname: TARGET, password: "1234", at: Date.now() });
     await settleMicrotasks();
@@ -178,7 +359,7 @@ describe("a fact derives in its own turn", () => {
     // `preparePlant` is what the plant order calls just before exec'ing the
     // resident; it is where the opened host joins `needsInventory`.
     handle.preparePlant(TARGET);
-    const target = standResident(handle, TARGET, 12);
+    const target = standHost(handle, TARGET, 12);
     await settleMicrotasks();
 
     const listing = (target.staged ?? []).find((order) => order.kind === "inventory");

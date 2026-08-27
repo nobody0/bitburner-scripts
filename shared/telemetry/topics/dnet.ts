@@ -12,8 +12,6 @@ export interface DarknetAgentDigest {
   pending?: number;
   /** The job the agent has spawned into, by kind, if any. */
   active?: string;
-  /** The linked one-off riding beside it, by kind, if any. */
-  sidecar?: string;
   /** Capacity available to the next job after fixed controller/prober reserves. */
   freeGb?: number;
   /** Jobs finished and failed here since the controller booted. */
@@ -220,29 +218,18 @@ export interface DarknetState {
   /** The three below are the only darknet facts HOME reads directly, and the
    *  only ones it must: each is a 0 GB call the controller cannot afford, so the
    *  DIRECT probe `dnet.facts` reads them inline (no dodge) and ships them over
-   *  the order channel. The driver tick publishes `knowledge` without them, so
+   *  the controller-input path. The driver tick publishes `knowledge` without them, so
    *  a panel that guarded on `knowledge` and then read these threw on the first
    *  tick before the direct probe landed; they stay optional for that reason,
    *  and the driver has always read its own copy that way (`remaining.ts`,
    *  `stasisLinked ?? []`). Everything darkweb-specific home used to read here
    *  is gone: the resident on darkweb probes it on the mutation clock and
-   *  drains the result home, so the darknet has exactly one prober. */
+   *  includes the result in its snapshot, so the darknet has exactly one prober. */
   stasisLinkLimit?: number;
   stasisLinked?: string[];
   /** Observation time of the authoritative direct stasis snapshot. */
   stasisObservedAt?: number;
   instability?: { authenticationDurationMultiplier: number; authenticationTimeoutChance: number };
-  /** Health of the agent report channel, per tick. `rejected` is a whole
-   *  rendezvous refused for belonging to a run this world no longer shares —
-   *  refused at the channel, because agents outlive controllers. */
-  channel?: {
-    drained: number;
-    rejected: number;
-    forgotten: number;
-    /** Credentials the drain moved into home's vault. The COUNT travels; the
-     *  credentials stay in module state and are never published. */
-    vaultDrained?: number;
-  };
   /** DarknetResponseCode counts, cumulative for the run, keyed by numeric code.
    *  A Record rather than a Map, because the wire is JSON. This is what makes a
    *  refusal attributable instead of a blank. */
@@ -258,6 +245,10 @@ export interface DarknetState {
     planted: number;
     refused: Record<string, number>;
     examples: { host: string; why: string; detail: string }[];
+    /** Why each still-empty host was not planted, by hostname. The counts
+     *  above answer "what is holding the net back"; this answers "why is THAT
+     *  box empty", which is the question the map itself raises. */
+    why?: Record<string, string>;
   };
   /** Current derivation, including refusals needed to explain ladder fallthrough. */
   farm?: {

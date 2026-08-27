@@ -1,9 +1,9 @@
+import { makeOrder } from './support/dnet-order.ts';
 import { describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
 import { runOrder } from "../game/dnet/orders.ts";
 import {
   KIND_CALLS,
-  NO_RESPAWN_KINDS,
   type AgentIo,
   type ControllerDeps,
   type Order,
@@ -173,18 +173,6 @@ function rig(over: {
   return state;
 }
 
-function makeOrder(kind: OrderKind, over: Partial<Order> & { host: string; from: string }): Order {
-  return {
-    id: `${kind}:${over.host}`,
-    kind,
-    ramOverrideGb: 4,
-    threads: 1,
-    priority: 0,
-    longLived: kind === "walk",
-    label: "test",
-    ...over,
-  };
-}
 
 function makeDeps(over: Partial<ControllerDeps> = {}, charisma = 1000): ControllerDeps {
   return {
@@ -207,13 +195,13 @@ function makeDeps(over: Partial<ControllerDeps> = {}, charisma = 1000): Controll
 }
 
 function makeIo(over: Partial<AgentIo> = {}, charisma = 1000): AgentIo {
-  return { beat: () => {}, cancelled: () => undefined, deps: makeDeps({}, charisma), ...over, setExpectedDoneAt: over.setExpectedDoneAt ?? (() => {}) };
+  return { beat: () => {}, hold: () => {}, cancelled: () => undefined, deps: makeDeps({}, charisma), ...over, setExpectedDoneAt: over.setExpectedDoneAt ?? (() => {}), inFlight: over.inFlight ?? (() => {}) };
 }
 
 describe("the walker", () => {
   test("it walks the maze on parsed coordinates alone, and stops at the exit", async () => {
     const r = rig();
-    const result = await runOrder(r.ns, makeOrder("walk", { host: LAB_LADDER[0]!.hostname, from: "dn-1" }), makeIo());
+    const result = await runOrder(r.ns, makeOrder("walk", { host: LAB_LADDER[0]!.hostname, from: "dn-1" }, {}), makeIo());
     expect(result.ok, result.detail).toBe(true);
     expect(r.walked.length).toBeGreaterThan(0);
     // Every word it sent is one the engine's parser accepts. The direction word
@@ -232,7 +220,7 @@ describe("the walker", () => {
     // its move landed would read every later response relative to a position it
     // invented, and nothing would ever correct it.
     const r = rig();
-    const result = await runOrder(r.ns, makeOrder("walk", { host: LAB_LADDER[0]!.hostname, from: "dn-1" }), makeIo());
+    const result = await runOrder(r.ns, makeOrder("walk", { host: LAB_LADDER[0]!.hostname, from: "dn-1" }, {}), makeIo());
     // The planner only ever steps into an edge the render showed open, so after
     // the blind first probe a wall is never chosen at all — which shows up here
     // as a walk that terminates in a handful of moves rather than by exhausting
@@ -246,7 +234,7 @@ describe("the walker", () => {
     // host held for hours in exchange for refusals. The requirement travels to
     // home's existing career need instead.
     const r = rig({ charismaGate: 600 });
-    const result = await runOrder(r.ns, makeOrder("walk", { host: LAB_LADDER[0]!.hostname, from: "dn-1" }), makeIo({}, 300));
+    const result = await runOrder(r.ns, makeOrder("walk", { host: LAB_LADDER[0]!.hostname, from: "dn-1" }, {}), makeIo({}, 300));
     expect(result.ok).toBe(false);
     expect(result.charismaNeeded).toBeUndefined();
     expect(r.walked).toEqual(["east"]);
@@ -257,11 +245,10 @@ describe("the walker", () => {
     // with no way to resume, which is what `longLived` and the beat exist for.
     // But it carries NO `spawn`: while it is the lab walker its host is the most
     // important in the net and runs it alone — every byte a spawn-back would cost
-    // is an `authenticate` thread instead — so it is NO_RESPAWN and ends by
-    // letting `planSpread` re-plant the host as an ordinary worker once the lab is
-    // done (the controller re-execs through the freed, now-immutable host).
+    // is an `authenticate` thread instead — and it ends by letting `planSpread`
+    // re-plant the host as an ordinary worker once the lab is done (the
+    // controller re-execs through the freed, now-immutable host).
     expect(KIND_CALLS["walk"]).not.toContain("spawn");
-    expect(NO_RESPAWN_KINDS.has("walk")).toBe(true);
     // And NO `heartbleed`, ever: the lab answers through `authenticate`'s own
     // return value, and the only extra vision the walker pays for — `labradar` —
     // is a same-PID, 0 GB call whose render also comes back in the return value.
@@ -282,7 +269,7 @@ describe("the walker", () => {
     // walker: two PIDs in one maze.
     const r = rig();
     const beats: Record<string, unknown>[] = [];
-    await runOrder(r.ns, makeOrder("walk", { host: LAB_LADDER[0]!.hostname, from: "dn-1" }), makeIo({
+    await runOrder(r.ns, makeOrder("walk", { host: LAB_LADDER[0]!.hostname, from: "dn-1" }, {}), makeIo({
       beat: (progress) => {
         if (progress) beats.push(progress);
       },
@@ -303,13 +290,13 @@ describe("the walker", () => {
     io.deps.labField = () => shared;
     io.deps.publishLabField = (_host, field) => { shared = field; };
     const first = rig();
-    const blind = await runOrder(first.ns, makeOrder("walk", { host: LAB_LADDER[0]!.hostname, from: "dn-1" }), io);
+    const blind = await runOrder(first.ns, makeOrder("walk", { host: LAB_LADDER[0]!.hostname, from: "dn-1" }, {}), io);
     expect(blind.ok).toBe(true);
     expect(shared).toBeDefined();
     expect(Object.keys(shared!.slots).length).toBeGreaterThan(0);
 
     const second = rig();
-    const seeded = await runOrder(second.ns, makeOrder("walk", { host: LAB_LADDER[0]!.hostname, from: "dn-1" }), io);
+    const seeded = await runOrder(second.ns, makeOrder("walk", { host: LAB_LADDER[0]!.hostname, from: "dn-1" }, {}), io);
     expect(seeded.ok).toBe(true);
     expect(second.walked.length).toBeLessThanOrEqual(first.walked.length);
   });
@@ -324,7 +311,7 @@ describe("the pin", () => {
     // happens here — and a refusal must not touch `setStasisLink`, because the
     // slot is near-irrevocable (no job carries the release).
     const r = rig({ probe: ["dn-9", "dn-2"] });
-    const result = await runOrder(r.ns, makeOrder("pin", { host: "dn-1", from: "dn-1", edge: "th3_l4byr1nth" }), makeIo());
+    const result = await runOrder(r.ns, makeOrder("pin", { host: "dn-1", from: "dn-1" }, { edge: "th3_l4byr1nth" }), makeIo());
     expect(result.ok).toBe(false);
     expect(result.codes).toEqual({ "912": 1 });
     expect(r.calls).toContain("probe");
@@ -332,7 +319,7 @@ describe("the pin", () => {
 
     // With the edge alive, the pin proceeds.
     const alive = rig({ probe: ["th3_l4byr1nth", "dn-2"] });
-    const pinned = await runOrder(alive.ns, makeOrder("pin", { host: "dn-1", from: "dn-1", edge: "th3_l4byr1nth" }), makeIo());
+    const pinned = await runOrder(alive.ns, makeOrder("pin", { host: "dn-1", from: "dn-1" }, { edge: "th3_l4byr1nth" }), makeIo());
     expect(pinned.ok).toBe(true);
     expect(alive.calls).toContain("setStasisLink:true");
   });
@@ -342,7 +329,7 @@ describe("the pin", () => {
     // act-time edge check must not apply — it would refuse the one job that
     // frees the slot.
     const r = rig({ probe: [] });
-    const result = await runOrder(r.ns, makeOrder("pin", { host: "dn-1", from: "dn-1", unpin: true, edge: "th3_l4byr1nth" }), makeIo());
+    const result = await runOrder(r.ns, makeOrder("pin", { host: "dn-1", from: "dn-1" }, { unpin: true, edge: "th3_l4byr1nth" }), makeIo());
     expect(result.ok).toBe(true);
     expect(r.calls).toContain("setStasisLink:false");
     expect(r.calls).not.toContain("probe");
@@ -351,7 +338,7 @@ describe("the pin", () => {
 
   test("it pins the host it is standing on and reports the code", async () => {
     const r = rig();
-    const result = await runOrder(r.ns, makeOrder("pin", { host: "dn-1", from: "dn-1" }), makeIo());
+    const result = await runOrder(r.ns, makeOrder("pin", { host: "dn-1", from: "dn-1" }, {}), makeIo());
     expect(result.ok).toBe(true);
     // No hostname: `setStasisLink` takes none, which is the whole reason a pin
     // needs a resident standing on the host being pinned.
@@ -365,7 +352,7 @@ describe("the pin", () => {
     // engine's, and reporting success would spend the belief as well as the
     // call.
     const r = rig({ pinCode: 453 });
-    const result = await runOrder(r.ns, makeOrder("pin", { host: "dn-1", from: "dn-1" }), makeIo());
+    const result = await runOrder(r.ns, makeOrder("pin", { host: "dn-1", from: "dn-1" }, {}), makeIo());
     expect(result.ok).toBe(false);
     expect(result.codes).toEqual({ "453": 1 });
   });
@@ -383,7 +370,7 @@ describe("the push", () => {
     // fake engine that answers instantly has to be bounded by a refusal
     // instead.
     const r = rig({ depths: [3, 1], induceCodes: [200] });
-    const result = await runOrder(r.ns, makeOrder("induce", { host: "dn-2", from: "dn-1" }), makeIo());
+    const result = await runOrder(r.ns, makeOrder("induce", { host: "dn-2", from: "dn-1" }, {}), makeIo());
     expect(result.ok).toBe(true);
     expect(r.calls.filter((call) => call.startsWith("induce:")).length).toBe(1);
     expect(r.calls[0]).toBe("induce:dn-2");
@@ -395,33 +382,34 @@ describe("the push", () => {
     // A 351 is the vantage gone, and every later call in the batch would answer
     // the same thing six seconds apart.
     const r = rig({ induceCodes: [351] });
-    const result = await runOrder(r.ns, makeOrder("induce", { host: "dn-2", from: "dn-1" }), makeIo());
+    const result = await runOrder(r.ns, makeOrder("induce", { host: "dn-2", from: "dn-1" }, {}), makeIo());
     expect(r.calls.filter((call) => call.startsWith("induce:")).length).toBe(1);
     expect(result.codes).toEqual({ "351": 1 });
   });
 });
 
 describe("propaganda", () => {
-  test("a job never invents a symbol", async () => {
+  test("a job cannot be given a promote it has no symbol for", () => {
     // Nothing standing on a darknet host can see the market, so the symbol is
-    // home's or there is no job.
-    const r = rig();
-    const result = await runOrder(r.ns, makeOrder("promote", { host: "dn-1", from: "dn-1" }), makeIo());
-    expect(result.ok).toBe(false);
-    expect(result.codes).toEqual({ "902": 1 });
-    expect(r.calls).toEqual([]);
+    // home's or there is no job. That used to be a runtime guard in the body
+    // ("no symbol; a job never invents one") answering with local code 902,
+    // one wasted order after the mistake. `promote`'s payload requires the
+    // symbol, so the order cannot be built at all — and `@ts-expect-error`
+    // fails the build if that ever stops being true.
+    // @ts-expect-error - promote requires { symbol }
+    makeOrder("promote", { host: "dn-1" }, {});
   });
 
   test("each order spreads exactly once", async () => {
     const r = rig({ promoteFailAfter: 3 });
-    const result = await runOrder(r.ns, makeOrder("promote", { host: "dn-1", from: "dn-1", symbol: "ECP" }), makeIo());
+    const result = await runOrder(r.ns, makeOrder("promote", { host: "dn-1", from: "dn-1" }, { symbol: "ECP" }), makeIo());
     expect(result.ok).toBe(true);
     // Three that paid, and the fourth — the refusal — ends the batch.
     expect(r.calls.filter((call) => call === "promoteStock:ECP").length).toBe(1);
     expect(result.detail).toContain("one promotion of ECP");
 
     const refused = rig({ promoteFails: true });
-    const stopped = await runOrder(refused.ns, makeOrder("promote", { host: "dn-1", from: "dn-1", symbol: "ECP" }), makeIo());
+    const stopped = await runOrder(refused.ns, makeOrder("promote", { host: "dn-1", from: "dn-1" }, { symbol: "ECP" }), makeIo());
     expect(stopped.ok).toBe(false);
     expect(refused.calls.filter((call) => call === "promoteStock:ECP").length).toBe(1);
   });
@@ -460,7 +448,7 @@ describe("the storm job", () => {
     // and the job. The failure report carries `stormSeed: false`, which is
     // what retires the stale fact on the next fold.
     const r = stormRig({ seeded: false });
-    const result = await runOrder(r.ns, makeOrder("storm", { host: "dn-1", from: "dn-1" }), makeIo());
+    const result = await runOrder(r.ns, makeOrder("storm", { host: "dn-1", from: "dn-1" }, {}), makeIo());
     expect(result.ok).toBe(false);
     expect(result.codes).toEqual({ "404": 1 });
     expect(r.calls).toEqual([]);
@@ -473,7 +461,7 @@ describe("the storm job", () => {
     // host dies seconds later and the facts are about to be garbage. The stamp
     // is the whole payload.
     const r = stormRig();
-    const result = await runOrder(r.ns, makeOrder("storm", { host: "dn-1", from: "dn-1" }), makeIo());
+    const result = await runOrder(r.ns, makeOrder("storm", { host: "dn-1", from: "dn-1" }, {}), makeIo());
     expect(result.ok).toBe(true);
     expect(r.calls).toEqual(["unleashStormSeed"]);
     expect(result.stormFiredAt).toBeDefined();
@@ -482,15 +470,14 @@ describe("the storm job", () => {
 
   test("an engine refusal carries no stamp, so the controller's pessimistic one rolls back", async () => {
     const r = stormRig({ fireOk: false });
-    const result = await runOrder(r.ns, makeOrder("storm", { host: "dn-1", from: "dn-1" }), makeIo());
+    const result = await runOrder(r.ns, makeOrder("storm", { host: "dn-1", from: "dn-1" }, {}), makeIo());
     expect(result.ok).toBe(false);
     expect(result.codes).toEqual({ "503": 1 });
     expect(result.stormFiredAt).toBeUndefined();
   });
 
-  test("the kind is deliberate: not routine, not respawn-exempt, and priced", () => {
+  test("the kind is deliberate: not routine, and priced", () => {
     expect(KIND_CALLS["storm"]).toContain("dnet.unleashStormSeed");
     expect(KIND_CALLS["storm"]).toContain("ls");
-    expect(NO_RESPAWN_KINDS.has("storm")).toBe(false);
   });
 });

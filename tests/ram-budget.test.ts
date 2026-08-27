@@ -3,9 +3,22 @@ import { readdir, readFile, rm } from "node:fs/promises";
 import { buildScript, buildScripts } from "../tools/build.ts";
 import type { BitburnerConfig } from "../tools/config.ts";
 import { analyzeScriptRam, billableRamNames } from "../tools/ram-analysis.ts";
-import { CONTROLLER_CALLS, KIND_CALLS, PROBER_CALLS, threadsFor, type OrderKind } from "../game/dnet/shared.ts";
+import {
+  ATTEMPT_LEAN_GB, CONTROLLER_CALLS, CONTROLLER_GB, HANDS_CALLS, HANDS_GB, KIND_CALLS, ORDER_PRICES,
+  PROBER_CALLS, PROBER_GB, PROBER_STASIS_CALLS, PROBER_STASIS_GB,
+  SCRIPT_BASE_GB, orderCalls, priceOf, threadsFor, type OrderKind,
+} from "../game/dnet/shared.ts";
+
+/** The engine's own charge for a call set, base included. */
+const priceOfCalls = (calls: readonly string[]): number => {
+  let total = SCRIPT_BASE_GB;
+  for (const call of new Set(calls)) total += getFunctionRamCost(call);
+  return Math.round(total * 1e6) / 1e6;
+};
 import { getFunctionRamCost } from "../sim/ns/ram-costs.ts";
-import { priceCalls, UNKNOWN_CALL_GB } from "../game/lib/dodge.ts";
+import { priceCall, UNKNOWN_CALL_GB } from "../game/lib/ns-proxy.ts";
+import { nsMainGlobal } from "../game/lib/ns-proxy-shared.ts";
+import { START_SCRIPT_GB } from "../game/lib/proxies.ts";
 
 /** The order kinds that run as an ORDER (through the agent switch), i.e. every
  * kind except resident `idle` and the spawn-free `bootstrapReclaim`. */
@@ -55,7 +68,9 @@ const RAM_COSTS: Record<string, number> = {
 };
 const BASE_GB = 1.6;
 /** start.js + dodge stub (1.6 + 2.5) must stay under an 8 GB home. */
-const START_BUDGET_GB = 3.6;
+/** Single-sourced with the bootstrap arithmetic, so the two cannot drift:
+ * home's 5.1 GB bootstrap window is 8 GB minus exactly this. */
+const START_BUDGET_GB = START_SCRIPT_GB;
 
 const config: BitburnerConfig = {
   host: "127.0.0.1",
@@ -112,15 +127,20 @@ describe("in-game static RAM budget", () => {
     expect(KIND_CALLS.attempt).not.toContain("formulas.dnet.getAuthenticateTime");
   });
 
-  test("an unpriceable dodged method cannot be mistaken for a cheap call", () => {
-    const ns = { getFunctionRamCost: () => { throw new Error("unknown method"); } } as unknown as NS;
-    expect(priceCalls(ns, ["renamed.method"])).toBe(UNKNOWN_CALL_GB + 0.5);
+  test("an unpriceable proxied method cannot be mistaken for a cheap call", () => {
+    const held = nsMainGlobal().nsMain;
+    nsMainGlobal().nsMain = { getFunctionRamCost: () => { throw new Error("unknown method"); } } as unknown as NS;
+    try {
+      expect(priceCall("renamed.method")).toBe(UNKNOWN_CALL_GB);
+    } finally {
+      nsMainGlobal().nsMain = held;
+    }
   });
 
   test("the game bills the shipped start.js at exactly its declared budget", async () => {
     // This is the autostart contract: start.js is launched by the game
     // (autoexec, destroyW0r1dD43m0n) with no way to pass an override, so the
-    // static analyzer itself must resolve to the declared 3.6 GB.
+    // static analyzer itself must resolve to the declared 2.9 GB.
     const [start] = await buildScripts(config, { telemetry: true });
     const analysis = analyzeScriptRam(start!.content);
     expect(analysis.overridden).toBe(true);
@@ -129,7 +149,7 @@ describe("in-game static RAM budget", () => {
 
   test("the override decoy is doing real work, not masking an empty walk", async () => {
     // Strip the appended decoy declaration and the pessimistic walk must
-    // reappear; if this ever reads 3.6 without the decoy, the analyzer port
+    // reappear; if this ever reads 2.9 without the decoy, the analyzer port
     // is broken and the previous test proves nothing.
     const [start] = await buildScripts(config, { telemetry: true });
     const withoutDecoy = start!.content.replace(/async function main\(ns\)\{ns\.ramOverride\([\d.]+\)\}\s*$/, "");
@@ -162,7 +182,7 @@ describe("in-game static RAM budget", () => {
     // Only the shipped flavour carries the appended RAM-override decoy — the
     // names-preserved flavour provably must not (see the next test) — so it
     // is removed before comparing what the renaming itself produced.
-    const decoy = "async function main(ns){ns.ramOverride(3.6)}";
+    const decoy = "async function main(ns){ns.ramOverride(2.9)}";
     expect(shipped!.content).toContain(decoy);
     expect(billableSurface(shipped!.content.replace(decoy, ""))).toEqual(billableSurface(readable!.content));
   });
@@ -174,7 +194,7 @@ describe("in-game static RAM budget", () => {
     // exits. The build must skip the decoy exactly when the surviving
     // declaration already satisfies the analyzer (`sync --readable` deploys
     // such bundles), and keep it when identifier minification renamed `main`.
-    const decoy = "async function main(ns){ns.ramOverride(3.6)}";
+    const decoy = "async function main(ns){ns.ramOverride(2.9)}";
     const [readable] = await buildScripts(config, { telemetry: true, minifyNames: false });
     expect(readable!.content).not.toContain(decoy);
     expect(analyzeScriptRam(readable!.content).overridden).toBe(true);
@@ -188,13 +208,42 @@ describe("in-game static RAM budget", () => {
     const { total, members } = staticRam(start!.content);
     console.log(`start.js dynamic RAM <=${total.toFixed(2)}GB via ${members.join(", ")}`);
     expect(total).toBeLessThanOrEqual(START_BUDGET_GB + 1e-9);
-    // The hot path must never dodge, so these two live reads are expected...
-    expect(members).toContain("ns.getServerSecurityLevel");
-    expect(members).toContain("ns.getServerMoneyAvailable");
-    // ...and these must stay inside dodge closures (bracket notation).
-    expect(members).not.toContain("ns.scp");
-    expect(members).not.toContain("ns.getServer");
-    expect(members).not.toContain("ns.scan");
+    // start.js's whole billable surface, exhaustively, because the ns proxy's
+    // entire value is that this list does not grow. Each entry is deliberate:
+    //
+    //  - `exec` is the ONE member the bundle owns on purpose. Every resident is
+    //    launched through it and every proxied `exec` routes back to it, so the
+    //    bundle pays 1.3 GB once and residents never pay it at all.
+    //  - `disableLog` is free.
+    //
+    // Nothing else. The hot-target live reads and the cadenced `getPlayer`
+    // were the last holdouts, kept out of the proxy by a rule inherited from
+    // the DODGER — "never dodge inside a timing-critical window" — which
+    // priced a throwaway stub process per call. A warm resident is a
+    // microtask, so they went through the proxy too and took 0.7 GB with
+    // them.
+    //
+    // Anything else appearing here is a leak — see the next test for why that
+    // is so easy to do by accident.
+    expect(new Set(members)).toEqual(new Set(["ns.disableLog", "ns.exec"]));
+  });
+
+  test("no source file compiled into start.js names an ns member as a property", async () => {
+    // THE backstop for the proxy's one rule. Bitburner charges by member NAME
+    // across the whole bundle whatever the receiver, so a dotted `ns.getServer`
+    // — or merely a local helper called `run`, or a `.exec` on a RegExp — bills
+    // start.js for a member nobody meant to buy.
+    //
+    // This is not hypothetical. Before the migration, `career.ts` and
+    // `factions.ts` each defined `const run = async (methods, body) => …` as
+    // the dodge idiom itself, silently billing `ns.run`'s 1 GB; and
+    // `hacking.ts` wrote `stubNs.scan(current)` dotted inside a dodge closure,
+    // billing 0.2 GB. Both survived review for months because nothing checked.
+    const [start] = await buildScripts(config, { telemetry: true, minifyNames: false });
+    const { members } = staticRam(start!.content);
+    const allowed = new Set(["ns.disableLog", "ns.exec"]);
+    const leaked = members.filter((member) => !allowed.has(member));
+    expect(leaked).toEqual([]);
   });
 
   test("the controller can never reach the save", async () => {
@@ -306,19 +355,14 @@ describe("in-game static RAM budget", () => {
       .filter((name) => !MANGLE_COLLISIONS.includes(name))
       .sort();
     expect(referenced).toEqual(["getServerMaxRam"]);
-    // The controller now OBSERVES — but only through SYNCHRONOUS, instant reads
-    // (`getServerDetails` plus the two RAM getters for any host from anywhere), never
-    // a blocking `authenticate`. Darkweb has the same dedicated prober as every
-    // other planted host. The map-holder
-    // stays responsive; "never block" is preserved, "never observe" relaxed.
-    expect(CONTROLLER_METHODS).toEqual([
-      "isRunning",
-      "kill",
-      "dnet.getServerDetails",
-      "dnsLookup",
-      "getServerMaxRam",
-      "getServerUsedRam",
-    ]);
+    // The controller owns ONE call, and it is the mutation clock.
+    //
+    // It is the only process in the darknet that blocks, so it may own nothing
+    // else: while parked in `dnet.nextMutation` its `env.runningFn` is held and
+    // a second call of its own would throw. Every read and every launch it
+    // performs goes through a prober's borrowed `ns` — another script's slot,
+    // another script's allocation — which is what makes being parked here free.
+    expect(CONTROLLER_METHODS).toEqual(["dnet.nextMutation"]);
     expect(getFunctionRamCost("getServerMaxRam")).toBe(0.05);
     expect(getFunctionRamCost("getServerUsedRam")).toBe(0.05);
 
@@ -339,7 +383,7 @@ describe("in-game static RAM budget", () => {
     const agent = artifacts.find((a) => a.filename === "dnet/agent.js")!;
     const analysis = analyzeScriptRam(agent.content);
 
-    // Same discipline as lib/dodge-stub.js: the file references only what it
+    // Same discipline as lib/ns-resident.js: the file references only what it
     // needs to be a RESIDENT, and every job's cost arrives as a ramOverride at
     // spawn time. If a job's calls appeared here, every resident on every host
     // would pay for the most expensive thing any of them might ever do.
@@ -348,10 +392,7 @@ describe("in-game static RAM budget", () => {
         .map((entry) => entry.name)
         .filter((name) => !MANGLE_COLLISIONS.includes(name))
         .sort(),
-    ).toEqual(["spawn"]);
-    // getScriptName is 0 GB, so it never appears in a BILLABLE list — the agent
-    // uses it to spawn itself rather than carrying its own filename.
-    expect(agent.content).toContain("getScriptName");
+    ).toEqual([]);
     const names = new Set(analysis.entries.map((entry) => entry.name));
     for (const forbidden of ["probe", "getServerDetails", "heartbleed", "authenticate", "connectToSession", "scp"]) {
       expect(names.has(forbidden), `agent must not reference ns.${forbidden} in source`).toBe(false);
@@ -365,21 +406,43 @@ describe("in-game static RAM budget", () => {
 
     // The prober stands on its host for ONE reason — `probe()` is host-local — and
     // its ONLY billed call is that. `nextMutation` (its clock) is 0 GB, so it is a
-    // member of PROBER_METHODS but never a billed entry. Critically ABSENT are
-    // `spawn` (2.0) and `getServerMaxRam` (0.05): the prober carries no self-
-    // revival, so its whole cost is base + probe = exactly 1.8 GB. The controller
-    // re-execs a dead one through its worker instead.
+    // NOTHING. The prober does not make calls — it LENDS them.
+    //
+    // Its source references no billable member at all, because every one of
+    // them is invoked by the controller through the `ns` this process publishes.
+    // So the static analysis is empty and the budget is entirely a promise the
+    // launcher's `ramOverride` keeps, which is exactly why it is pinned here.
     expect(
       analysis.entries
         .map((entry) => entry.name)
         .filter((name) => !MANGLE_COLLISIONS.includes(name))
         .sort(),
-    ).toEqual(["probe"]);
-    expect(PROBER_METHODS).toEqual(["dnet.probe", "dnet.nextMutation"]);
-    // base 1.6 + probe 0.2, and NOTHING else — the reserve every host holds.
-    expect(BASE_GB + getFunctionRamCost("dnet.probe")).toBe(1.8);
+    ).toEqual([]);
+    // `dnet.probe` scans from the CALLING host and `exec` reaches only self and
+    // connected: those two cannot be made from anywhere else, and are the whole
+    // reason a process stands on every host. The rest is global, lent
+    // synchronously because the controller reads facts inside synchronous
+    // paths that `dodge` would have had to make async.
+    // ONLY the host-bound calls. `dnet.probe` scans from the calling host and
+    // `exec` reaches only self and connected, so neither can be borrowed from
+    // anywhere else — which is the entire reason a process stands on every
+    // host. `connectToSession` is what makes an `exec` aimed at a neighbour
+    // legal.
+    expect(PROBER_METHODS).toEqual(["dnet.probe", "exec", "dnet.connectToSession"]);
+    expect(priceOfCalls(PROBER_METHODS)).toBeCloseTo(3.15, 10);
+    expect(priceOfCalls(PROBER_METHODS)).toBe(PROBER_GB);
+    // Every GLOBAL call lives on the HANDS instead: one parked process for the
+    // whole net. A lender is charged the union of everything ever called
+    // through it, so leaving these here would have made every host in the net
+    // pay, for ever, for calls the controller makes centrally.
+    expect(priceOfCalls(HANDS_CALLS)).toBe(HANDS_GB);
+    for (const global of HANDS_CALLS) {
+      expect(PROBER_METHODS, `${global} is global; it belongs on the hands`).not.toContain(global);
+    }
+    // It must still never SPAWN: a lender that replaced itself would take the
+    // borrowed `ns` with it mid-call.
     const names = new Set(analysis.entries.map((entry) => entry.name));
-    for (const forbidden of ["spawn", "getServerMaxRam", "getServerDetails", "heartbleed", "authenticate", "connectToSession", "scp", "exec"]) {
+    for (const forbidden of ["spawn", "asleep", "heartbleed", "authenticate", "connectToSession", "scp"]) {
       expect(names.has(forbidden), `prober must not reference ns.${forbidden} in source`).toBe(false);
     }
   });
@@ -553,15 +616,42 @@ describe("in-game static RAM budget", () => {
       for (const method of new Set(methods)) total += getFunctionRamCost(method);
       return total;
     };
-    expect(cost(RESIDENT_METHODS)).toBe(3.6);
+    // A resident is a bare script now — 1.6 and nothing else — because there is
+    // no resident. The kind survives only as a price nothing launches.
+    expect(cost(RESIDENT_METHODS)).toBe(1.6);
     expect(BASE_GB + getFunctionRamCost("dnet.probe")).toBe(1.8);
     expect(cost(BOOTSTRAP_RECLAIM_METHODS)).toBe(2.6);
-    expect(cost(JOB_METHODS["attempt"]!)).toBeCloseTo(4.7, 10);
+    // 4.75 is the CONVERSATIONAL price: a solve that must read the target's
+    // log ring carries `heartbleed` beside its `authenticate`. It also carries
+    // `connectToSession` (0.05), so a password can be checked instantly against
+    // an already-rooted host instead of spending seconds of `authenticate`.
+    expect(cost(JOB_METHODS["attempt"]!)).toBeCloseTo(2.6, 10);
+    // Everything else is LEAN. One script runs one Netscript call at a time, so
+    // an attempt cannot bleed while it authenticates — and the kind is
+    // thread-scaled, so declaring both charged 0.6 GB on every thread for a
+    // call most attempts never make.
+    const leanCalls = JOB_METHODS["attempt"]!.filter((call) => call !== "dnet.heartbleed");
+    expect(cost(leanCalls)).toBeCloseTo(ATTEMPT_LEAN_GB, 10);
+    expect(priceOf("attempt", false)).toBe(ATTEMPT_LEAN_GB);
+    expect(priceOf("attempt", true)).toBeGreaterThan(ATTEMPT_LEAN_GB);
     expect(cost(JOB_METHODS["walk"]!)).toBe(2);
     expect(JOB_METHODS["walk"]).not.toContain("dnet.getServerDetails");
 
-    const ordinaryRoom = 16 - 1.8;
-    expect(threadsForJob(ordinaryRoom, cost(JOB_METHODS["attempt"]!), true)).toBe(3);
+    // What the launcher move bought, as a number. The worker no longer carries
+    // `spawn`, so its 2.0 GB left the PER-THREAD price entirely: it is paid once
+    // per host by the prober's `exec` instead of once per thread here. Threads
+    // are the only thing that shortens an `authenticate`.
+    // SIX, where the spawn-chained worker managed three. `attempt` is now base
+    // plus its one call and nothing else: no `spawn` (the controller launches
+    // it), no `connectToSession` (instant, and the controller tries it through
+    // a prober before dispatching anything), no `getServerDetails` (the
+    // controller's map is in the realm, for nothing). Threads are the only
+    // thing that shortens an `authenticate`, so every byte taken off the
+    // per-thread price is crack speed.
+    const ordinaryRoom = 16 - PROBER_GB;
+    expect(ATTEMPT_LEAN_GB).toBe(BASE_GB + getFunctionRamCost("dnet.authenticate"));
+    expect(threadsForJob(ordinaryRoom, ATTEMPT_LEAN_GB, true)).toBe(6);
+    expect(threadsForJob(16 - 1.8, 4.15, true), "the old spawn-chained price").toBe(3);
     expect(threadsForJob(16, cost(JOB_METHODS["walk"]!), true)).toBe(8);
   });
 
@@ -582,10 +672,10 @@ describe("in-game static RAM budget", () => {
     };
     const pinGb = cost(JOB_METHODS["pin"]!);
     const controllerGb = cost(CONTROLLER_METHODS);
-    const proberGb = BASE_GB + getFunctionRamCost("dnet.probe");
+    const proberGb = cost(PROBER_METHODS);
 
     expect(getFunctionRamCost("dnet.setStasisLink")).toBe(12);
-    expect(pinGb).toBeGreaterThan(16 - controllerGb);
+    expect(pinGb).toBeGreaterThan(16 - proberGb);
 
     // THE EXCEPTION, encoded rather than loosened. `pin` is the only kind whose
     // method list omits `spawn`, and that is not an economy: with the 2.0 GB
@@ -595,20 +685,22 @@ describe("in-game static RAM budget", () => {
     // has just made that host immutable, and which the controller refuses by
     // name when no neighbour could re-plant it.
     expect(JOB_METHODS["pin"]).not.toContain("spawn");
-    expect(pinGb + proberGb).toBeLessThanOrEqual(16);
-    expect(pinGb + proberGb + getFunctionRamCost("spawn")).toBeGreaterThan(16);
-    // The two NO_RESPAWN kinds omit `spawn` and end by handing the host to
-    // `planSpread` to re-plant: `pin` because 12 GB + spawn will not fit a shallow
-    // host, `walk` because while it IS the lab walker its host runs it alone and
-    // every byte the spawn would cost is an `authenticate` thread instead.
-    expect(JOB_METHODS["walk"]).not.toContain("spawn");
-    // Every other kind hands the host back itself, because nothing outside can put
-    // a resident there mid-run.
+    // A pin no longer clears a 16 GB host beside the prober, and that is the
+    // point rather than a regression: the prober absorbed the resident and got
+    // bigger, so `pin` DISPLACES it exactly as `walk` does. Both jobs need
+    // every byte and both end by leaving the host empty for `planSpread`, so
+    // the prober beside them is killed rather than reserved around. Reserving
+    // anyway would simply have stopped stasis-linking shallow hosts — which is
+    // how the labyrinth walk gets set up.
+    expect(pinGb + proberGb).toBeGreaterThan(16);
+    expect(pinGb).toBeLessThanOrEqual(16);
+    // NO kind spawns. `pin` and `walk` were the two exceptions — they needed
+    // every byte and ended by handing the host to `planSpread` — and the
+    // launcher move made every kind look like them: the controller execs each
+    // worker through the host's prober `ns`, so none of them ever has to become
+    // the next order.
     for (const [kind, methods] of Object.entries(JOB_METHODS)) {
-      // `pin`/`walk` are NO_RESPAWN; `bootstrapReclaim` is the spawn-free local
-      // reclaimer (it ends and the controller re-execs); `idle` IS the resident.
-      if (kind === "pin" || kind === "walk" || kind === "bootstrapReclaim" || kind === "idle") continue;
-      expect(methods, `${kind} must be able to spawn back to resident mode`).toContain("spawn");
+      expect(methods, `${kind} still carries a launcher`).not.toContain("spawn");
     }
     // ...and every routine kind is comfortably under it, which is the gap the
     // routine set exists to preserve.
@@ -626,6 +718,39 @@ describe("in-game static RAM budget", () => {
     // the dynamic check.
     for (const kind of ["hack", "grow", "weaken", "share"] as const) {
       expect(WORKER_RAM[kind]).toBeGreaterThanOrEqual(BASE_GB + RAM_COSTS[`ns.${kind}`]! - 1e-9);
+    }
+  });
+});
+
+describe("the written-down price table", () => {
+  // `ORDER_PRICES` is literals, so the darknet's whole RAM budget is readable
+  // on one screen instead of being a boot-time side effect. That only stays
+  // true if the numbers are true — this is what makes a game update or an
+  // edited `KIND_CALLS` fail the build rather than silently mis-size a launch.
+  test("every entry matches what the engine actually charges", () => {
+    for (const kind of Object.keys(KIND_CALLS) as OrderKind[]) {
+      expect(ORDER_PRICES[kind], `ORDER_PRICES.${kind} is stale`)
+        .toBeCloseTo(priceOfCalls(orderCalls(kind)), 6);
+    }
+    expect(Object.keys(ORDER_PRICES).sort()).toEqual(Object.keys(KIND_CALLS).sort());
+    expect(PROBER_GB).toBe(priceOfCalls(PROBER_CALLS));
+    expect(CONTROLLER_GB).toBe(priceOfCalls(CONTROLLER_CALLS));
+    // The stasis prober drops `exec`: the engine's mutation guard exempts a
+    // linked host, so it can never lose its processes and never needs to
+    // relaunch them locally. This pin was missing, which left the one price in
+    // the feature free to drift from the surface it is supposed to buy.
+    expect(PROBER_STASIS_GB).toBe(priceOfCalls(PROBER_STASIS_CALLS));
+    expect(PROBER_STASIS_CALLS).not.toContain("exec");
+  });
+
+  test("no worker carries a launcher, so there is only one price", () => {
+    // There used to be two prices per kind, differing by exactly the 2.0 GB of
+    // `spawn`: a worker that had to become the next order carried its own
+    // launcher, a controller-dispatched one did not. Every worker is dispatched
+    // now — the controller execs it through the host's prober `ns` — so the
+    // distinction has nothing left to describe, and `spawn` appears nowhere.
+    for (const [kind, methods] of Object.entries(KIND_CALLS)) {
+      expect(methods, `${kind} still carries a launcher`).not.toContain("spawn");
     }
   });
 });

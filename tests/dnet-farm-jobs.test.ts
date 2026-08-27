@@ -1,3 +1,4 @@
+import { makeOrder } from './support/dnet-order.ts';
 import { afterEach, describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
 import { captureLaunch, handoffLaunch } from "../game/lib/launch-shared.ts";
@@ -21,18 +22,6 @@ afterEach(() => {
   delete dnetRealm().dnet_controller;
 });
 
-function makeOrder(kind: OrderKind, over: Partial<Order> & { host: string; from: string }): Order {
-  return {
-    id: `${kind}:${over.host}`,
-    kind,
-    ramOverrideGb: 4,
-    threads: 1,
-    priority: 0,
-    longLived: kind === "walk",
-    label: "test",
-    ...over,
-  };
-}
 
 function makeDeps(over: Partial<ControllerDeps> = {}): ControllerDeps {
   return {
@@ -55,7 +44,8 @@ function makeDeps(over: Partial<ControllerDeps> = {}): ControllerDeps {
 }
 
 function makeIo(over: Partial<ControllerDeps> = {}): AgentIo {
-  return { beat: () => {}, setExpectedDoneAt: () => {}, cancelled: () => undefined, deps: makeDeps(over) };
+  return { beat: () => {}, setExpectedDoneAt: () => {}, hold: () => {},
+  inFlight: () => {}, cancelled: () => undefined, deps: makeDeps(over) };
 }
 
 function probeRefreshMethods() {
@@ -147,7 +137,7 @@ describe("darknet farm job cache observations", () => {
 
     const result = await runOrder(
       ns,
-      makeOrder("cache", { host: "dn-1", from: "dn-1", filename: "mail_123.d.cache" }),
+      makeOrder("cache", { host: "dn-1", from: "dn-1" }, { filename: "mail_123.d.cache" }),
       makeIo({ recordProvisional: (entry) => provisionals.push(entry) }),
     );
 
@@ -191,7 +181,7 @@ describe("darknet farm job cache observations", () => {
 
     const running = runOrder(
       ns,
-      makeOrder("bleed", { host: "target", from: "listener", followAttemptIds: ["a", "b", "c"] }),
+      makeOrder("bleed", { host: "target", from: "listener" }, { followAttemptIds: ["a", "b", "c"] }),
       makeIo(),
     );
     await Promise.resolve();
@@ -233,7 +223,7 @@ describe("darknet farm job cache observations", () => {
       read: (name: string) => contents[name] ?? "",
       rm: (name: string) => { removed.push(name); return true; },
     } as unknown as NS;
-    const result = await runOrder(ns, makeOrder("inventory", { host: "dn-1", from: "dn-1" }), makeIo({
+    const result = await runOrder(ns, makeOrder("inventory", { host: "dn-1", from: "dn-1" }, {}), makeIo({
       recordNeighbourPassword: (source, password) => neighbours.push({ source, password }),
       recordProvisional: (entry) => provisionals.push(entry),
       recordFileEvidence: (hostname, clue) => {
@@ -262,7 +252,7 @@ describe("darknet farm job cache observations", () => {
   test("a winning phish flags the host dirty instead of spending a thread on ls", async () => {
     const result = await runOrder(
       winningPhish(["bankdata_577.d.cache"]),
-      makeOrder("phish", { host: "darkweb", from: "darkweb" }),
+      makeOrder("phish", { host: "darkweb", from: "darkweb" }, {}),
       makeIo(),
     );
 
@@ -305,7 +295,7 @@ describe("darknet farm job cache observations", () => {
     } as unknown as NS;
     const result = await runOrder(
       ns,
-      makeOrder("reclaim", { host: "dn-1", from: "dn-1", resizeAtBlockedRam: 3 }),
+      makeOrder("reclaim", { host: "dn-1", from: "dn-1" }, { resizeAtBlockedRam: 3 }),
       makeIo(),
     );
     expect(calls).toBe(1);
@@ -330,7 +320,7 @@ describe("darknet farm job cache observations", () => {
     } as unknown as NS;
     const result = await runOrder(
       ns,
-      makeOrder("reclaim", { host: "dn-1", from: "dn-1", resizeAtBlockedRam: 0 }),
+      makeOrder("reclaim", { host: "dn-1", from: "dn-1" }, { resizeAtBlockedRam: 0 }),
       makeIo(),
     );
 
@@ -348,10 +338,14 @@ describe("darknet farm job cache observations", () => {
     dnetRealm().dnet_controller = {
       protocol: DNET_PROTOCOL,
       ...probeRefreshMethods(),
+      announceLaunch: () => {},
+      announceProbeRefresh: () => {},
       preparePlant: (host: string) => {
         order.push(`prepare:${host}`);
         return { controllerManaged: false, reuseProber: false };
       },
+      claimPlanted: (host: string) => { order.push(`claim:${host}`); return undefined; },
+      abandonPlant: () => {},
     } as unknown as ControllerHandle;
     const ns = {
       dnet: {
@@ -364,11 +358,11 @@ describe("darknet farm job cache observations", () => {
       },
       scp: () => { order.push("scp"); return true; },
       dnsLookup: () => "10.0.0.1",
-      exec: (file: string, _host: string, options: { temporary?: boolean }) => {
+      exec: (file: string, _host: string, options: { temporary?: boolean }, launchId: unknown) => {
         launches.push({ file, options });
         if (file.includes("prober")) {
           order.push("prober");
-          const launch = captureLaunch<DnetProberLaunch>("dnet-prober");
+          const launch = captureLaunch<DnetProberLaunch>("dnet-prober", launchId);
           const report = () => {
             order.push("first-probe");
             launch?.refresh?.settle({ host: launch.host, neighbours: [], at: Date.now(), pid: 41 });
@@ -378,7 +372,7 @@ describe("darknet farm job cache observations", () => {
         }
         else {
           order.push("agent");
-          captureLaunch<DnetAgentLaunch>("dnet-agent");
+          captureLaunch<DnetAgentLaunch>("dnet-agent", launchId);
         }
         if (!file.includes("prober") && !residentAccepted) return 0;
         return launches.length;
@@ -390,11 +384,7 @@ describe("darknet farm job cache observations", () => {
     } as unknown as NS;
     const planting = runOrder(
       ns,
-      makeOrder("plant", {
-        host: "dn-1", from: "darkweb",
-        targets: [{ host: "dn-1", password: "pw" }],
-        payloads: ["dnet/agent.js", "dnet/prober.js"],
-      }),
+      makeOrder("plant", { host: "dn-1", from: "darkweb" }, { targets: [{ host: "dn-1", password: "pw" }], payloads: ["dnet/agent.js", "dnet/prober.js"] }),
       makeIo(),
     );
     await Promise.resolve();
@@ -408,7 +398,7 @@ describe("darknet farm job cache observations", () => {
     const result = await planting;
     expect(result.ok).toBe(true);
     expect(launches.map((entry) => entry.file)).toEqual(["dnet/prober.js", "dnet/agent.js"]);
-    expect(order).toEqual(["scp", "prepare:dn-1", "prober", "first-probe", "agent"]);
+    expect(order).toEqual(["scp", "prepare:dn-1", "prober", "first-probe", "claim:dn-1", "agent"]);
     expect(launches.every((entry) => entry.options.temporary === true)).toBe(true);
 
     // If the second launch loses a RAM race, the first launch must not poison
@@ -419,11 +409,7 @@ describe("darknet farm job cache observations", () => {
     residentAccepted = false;
     const refused = await runOrder(
       ns,
-      makeOrder("plant", {
-        host: "dn-2", from: "darkweb",
-        targets: [{ host: "dn-2", password: "pw" }],
-        payloads: ["dnet/agent.js", "dnet/prober.js"],
-      }),
+      makeOrder("plant", { host: "dn-2", from: "darkweb" }, { targets: [{ host: "dn-2", password: "pw" }], payloads: ["dnet/agent.js", "dnet/prober.js"] }),
       makeIo(),
     );
     expect(refused.ok).toBe(false);
@@ -437,8 +423,8 @@ describe("darknet farm job cache observations", () => {
       ...probeRefreshMethods(),
     } as unknown as ControllerHandle;
     const ns = {
-      exec: () => {
-        const launch = captureLaunch<DnetProberLaunch>("dnet-prober");
+      exec: (_file: string, _host: string, _opts: unknown, launchId: unknown) => {
+        const launch = captureLaunch<DnetProberLaunch>("dnet-prober", launchId);
         reportFirst = () => launch?.refresh?.settle({ host: launch.host, neighbours: [], at: Date.now(), pid: 41 });
         return 91;
       },
@@ -448,11 +434,7 @@ describe("darknet farm job cache observations", () => {
     let settled = false;
     const repairing = runOrder(
       ns,
-      makeOrder("relaunchProbe", {
-        host: "dn-1",
-        from: "dn-1",
-        filename: "dnet/prober.js",
-      }),
+      makeOrder("relaunchProbe", { host: "dn-1", from: "dn-1" }, { proberFile: "dnet/prober.js" }),
       makeIo(),
     ).then((result) => {
       settled = true;
@@ -469,7 +451,7 @@ describe("darknet farm job cache observations", () => {
   });
 
   test("a cramped plant launches only the thread-scaled local reclaimer", async () => {
-    const launches: { file: string; options: { temporary?: boolean; threads?: number; ramOverride?: number } }[] = [];
+    const launches: { file: string; options: { temporary?: boolean; threads?: number; ramOverride?: number; preventDuplicates?: boolean } }[] = [];
     const registered: { host: string; pid: number }[] = [];
     dnetRealm().dnet_controller = {
       protocol: DNET_PROTOCOL,
@@ -486,26 +468,25 @@ describe("darknet farm job cache observations", () => {
         }),
       },
       scp: () => true,
-      exec: (file: string, _host: string, options: { temporary?: boolean; threads?: number; ramOverride?: number }) => {
+      exec: (file: string, _host: string, options: { temporary?: boolean; threads?: number; ramOverride?: number }, launchId: unknown) => {
         launches.push({ file, options });
-        captureLaunch<DnetAgentLaunch>("dnet-agent");
+        captureLaunch<DnetAgentLaunch>("dnet-agent", launchId);
         return 7;
       },
       getFunctionRamCost: (method: string) => method === "dnet.memoryReallocation" ? 1 : 0,
     } as unknown as NS;
     const result = await runOrder(
       ns,
-      makeOrder("plant", {
-        host: "dn-1", from: "darkweb",
-        targets: [{ host: "dn-1", password: "pw", bootstrapReclaim: true, bootstrapThreads: 3 }],
-        payloads: ["dnet/agent.js", "dnet/prober.js"],
-      }),
+      makeOrder("plant", { host: "dn-1", from: "darkweb" }, { targets: [{ host: "dn-1", password: "pw", bootstrapReclaim: true, bootstrapThreads: 3 }], payloads: ["dnet/agent.js", "dnet/prober.js"] }),
       makeIo(),
     );
     expect(result.ok).toBe(true);
     expect(launches).toEqual([{
       file: "dnet/agent.js",
-      options: { threads: 3, ramOverride: 2.6, temporary: true },
+      // `preventDuplicates: false` rides on every launch: each one already
+      // carries a unique handoff id, so the engine's filename+args duplicate
+      // check can only ever produce a false refusal.
+      options: { threads: 3, ramOverride: 2.6, temporary: true, preventDuplicates: false },
     }]);
     expect(registered).toEqual([{ host: "dn-1", pid: 7 }]);
   });
@@ -539,7 +520,8 @@ describe("darknet farm job cache observations", () => {
     let running!: Promise<void>;
     await handoffLaunch<DnetAgentLaunch>(
       { kind: "dnet-agent", host: "dn-1", bootstrapReclaim: true },
-      () => {
+      (launchId) => {
+        (ns.args as unknown[]).push(launchId);
         running = agentMain(ns);
         return ns.pid;
       },

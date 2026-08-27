@@ -8,7 +8,8 @@ import {
 import { modelEntry, planAttempt } from "./models.ts";
 import { conclusiveAttempt } from "./courier.ts";
 import type { HoldTask } from "./hold.ts";
-import { DNET_PRIORITY, compareQueuedDnetWork } from "./priority.ts";
+import { compareQueuedDnetWork } from "./priority.ts";
+import { JOBS, isTaskKind, priorityOf, type TaskKind } from "./jobs.ts";
 import { isLabyrinth, STORM_PHISH_OVERLAP_MS, STORM_QUIET_MS } from "./rates.ts";
 
 /** What there is to do out there, and who is doing it.
@@ -46,31 +47,14 @@ import { isLabyrinth, STORM_PHISH_OVERLAP_MS, STORM_QUIET_MS } from "./rates.ts"
  * ALREADY been viewed: a field that is absent is unknown, exactly the contract
  * the old projections had. */
 
-/** The four jobs that LEARN or SPREAD, the four that FARM, and the four
- * DELIBERATE ones.
+/** The kinds, and every scheduling fact about them, live in `jobs.ts`.
  *
  * `cache`, `reclaim`, `phish` and `promote` are decided by
  * `shared/strategy/dnet/farm.ts`; `pin`, `induce` and `walk` by
  * `shared/strategy/dnet/hold.ts`; `storm` by `planStorm` below. All are merged
  * exactly as `plant` is merged from `planSpread`: the queue does not
  * second-guess a planner that has already named its refusals. */
-export type TaskKind =
-  | "inventory"
-  | "bleed"
-  | "attempt"
-  | "plant"
-  | "cache"
-  | "reclaim"
-  | "phish"
-  | "promote"
-  | "pin"
-  | "induce"
-  | "walk"
-  | "storm"
-  // Re-establish a host's dead prober with one local `exec`. Not derived from
-  // the map like the others — the controller files it directly from prober
-  // deaths, at max urgency, because the prober carries no self-revival.
-  | "relaunchProbe";
+export type { TaskKind };
 
 export interface Task {
   id: string;
@@ -121,6 +105,9 @@ export interface Task {
   /** Parallel candidate races authenticate immediately; none competes
    * for the shared ring before writing its result. */
   skipInitialBleed?: boolean;
+  /** A conversational solve: the process needs `heartbleed` beside its
+   *  `authenticate` and is priced for it. Everything else is lean. */
+  needsRing?: boolean;
 }
 
 export interface DeriveOptions {
@@ -149,14 +136,7 @@ export interface DeriveOptions {
   /** Hosts we hold a credential for. */
   vault?: ReadonlySet<string>;
   /** Hosts admitted by `planSpread`, already filtered and ordered. */
-  plantable?: readonly {
-    host: string;
-    from: string;
-    remote?: boolean;
-    bootstrapReclaim?: boolean;
-    bootstrapThreads?: number;
-    omitProber?: boolean;
-  }[];
+  plantable?: readonly (PlantTarget & { from: string })[];
   /** Farm work admitted by `planFarm`, already laddered and thread-sized. */
   farm?: readonly {
     kind: "cache" | "reclaim" | "phish" | "promote";
@@ -192,37 +172,12 @@ export interface DeriveOptions {
   labAdjacentBonus?: number;
 }
 
-const FARM_PRIORITY: Readonly<Record<"cache" | "reclaim" | "phish" | "promote", number>> = {
-  cache: DNET_PRIORITY["cache"],
-  reclaim: DNET_PRIORITY["reclaim"],
-  phish: DNET_PRIORITY["phish"],
-  promote: DNET_PRIORITY["promote"],
-};
-
-/** Where the deliberate blocking kinds sit. The walk goes first among them —
- * completing the labyrinth is the whole point of the darknet. The pin precedes
- * ordinary work; the storm sits below the pin STRUCTURALLY (a pending pin is a
- * reason not to fire yet); induce is a project of hundreds of calls whose value
- * arrives at the end, so it waits behind everything that opens the net. */
-const HOLD_PRIORITY: Readonly<Record<"pin" | "induce" | "walk" | "storm", number>> = {
-  walk: DNET_PRIORITY["walk"],
-  pin: DNET_PRIORITY["pin"],
-  storm: DNET_PRIORITY["storm"],
-  induce: DNET_PRIORITY["induce"],
-};
-
-/** Placing a process is the scarcest blocking work we do — it is the only
- * action that grows the set of places we can act FROM — so it outranks every
- * other blocking kind. Zero-delay housekeeping is a separate queue lane. */
-const PLANT_PRIORITY = DNET_PRIORITY["plant"];
-
-/** The per-host offsets, all applied to `rank` (the negated depth). These are
- * BANDS rather than fine gradations: no host's bleed can reach into another
- * kind's band, because the ordering across kinds is a policy and the ordering
- * within one is a detail. */
-const GUESS_BONUS = -5;
-const ORACLE_SOLVE_SURCHARGE = 10;
-const PROBE_SURCHARGE = 50;
+/** How far a solve that needs its oracle, and a deliberate probe, sort behind
+ * work that can open a host outright. Divisors of the attempt score rather than
+ * additions to a priority: the score is a ratio, so a penalty has to be one
+ * too or it stops meaning the same thing at different difficulties. */
+const ORACLE_PENALTY = 10;
+const PROBE_PENALTY = 50;
 const BLEED_BAND = 10;
 /** A failed read is operational, not evidence that the ring is empty. Retry
  * eventually, without tying the backoff to passive traffic the API never
@@ -334,6 +289,38 @@ export function deriveTasks(
     && candidate.isStationary !== true
     && !vault.has(candidate.hostname));
 
+  /** Every attempt this pass wants, with the keys that order them.
+   *
+   * Collected rather than priced inline because the order is a comparison
+   * BETWEEN targets, and a per-host formula cannot express one. Depth alone —
+   * all the old rank carried — ties constantly, and two attempts that tie have
+   * no stable order at all: which one a vantage ends up running can flip from
+   * pass to pass. The last key being the hostname is what makes this a TOTAL
+   * order, and a total order is the whole point.
+   *
+   * Choosing a target only. Once an attempt has started it is not re-chosen —
+   * `canPreempt` refuses same-kind displacement, so an authenticate never
+   * cancels an authenticate. */
+  const attemptRanking: {
+    task: Task;
+    /** Lab-adjacent first when the policy asks for it (0 by default). */
+    lab: boolean;
+    /** Higher is better: `difficulty / calls / requiredCharisma`. Difficulty is
+     * what the host is WORTH; calls and charisma are what it costs. A rough
+     * proxy for real duration and deliberately so — `authenticateWaitMs` needs
+     * a timing profile this planner does not have, and an exact number would
+     * buy nothing an ordering does not. */
+    score: number;
+    depth: number;
+    difficulty: number;
+    maxRam: number;
+    host: string;
+  }[] = [];
+  const attemptScore = (host: DnetHost, calls: number): number =>
+    ((host.difficulty ?? 0) + 1)
+    / Math.max(1, calls)
+    / Math.max(1, host.requiredCharisma ?? 1);
+
   for (const host of views.values()) {
     if (host.goneAt !== undefined) continue;
     const vantages = vantagesFor(host, views, opts);
@@ -404,7 +391,7 @@ export function deriveTasks(
         host: host.hostname,
         from: bleedFrom,
         eligibleFrom: [bleedFrom],
-        priority: DNET_PRIORITY["bleed"] + rank + BLEED_BAND,
+        priority: priorityOf("bleed") + rank + BLEED_BAND,
         reason: `prequeued behind ${attemptIds.length} authentication${attemptIds.length === 1 ? "" : "s"}`,
         ...(threads !== 1 ? { threads } : {}),
         followAttemptIds: [...attemptIds],
@@ -456,11 +443,24 @@ export function deriveTasks(
           host: host.hostname,
           from: vantage,
           eligibleFrom: [vantage],
-          priority: DNET_PRIORITY["attempt"] + rank + GUESS_BONUS,
+          // Replaced below by the total order over every attempt this pass.
+          priority: priorityOf("attempt"),
           reason: guess.reason,
           ...(threads !== 1 ? { threads } : {}),
           guessId: guess.id,
           ...(selected.length > 1 ? { skipInitialBleed: true } : {}),
+        });
+        attemptRanking.push({
+          task: tasks[tasks.length - 1]!,
+          lab: labAdjacent,
+          // A guess is ONE authenticate with nothing to lose by being wrong,
+          // which is what a flat guess bonus was for. Under this score it needs no
+          // bonus: one call is the fewest there is.
+          score: attemptScore(host, 1),
+          depth: host.depth ?? -Infinity,
+          difficulty: host.difficulty ?? 0,
+          maxRam: host.maxRam ?? 0,
+          host: host.hostname,
         });
       });
       if (allocation.bleedSlots === 1) queueFollowerBleed(attemptIds, used);
@@ -497,15 +497,6 @@ export function deriveTasks(
       const needsRing = attempt.kind === "probe" || (attempt.kind === "solve" && attempt.needsOracle);
       const withheld = needsRing && !bleedable;
       if (attempt.kind !== "none" && host.modelId !== undefined && !withheld) {
-        // What the task is worth, cheapest-certain first. A dictionary hit or a
-        // closed-form decode is one call away from a new vantage; a solve that
-        // has to converse costs more but still opens the net; a probe only ever
-        // buys information.
-        const surcharge = attempt.kind === "candidate"
-          ? 0
-          : attempt.kind === "solve"
-            ? (attempt.needsOracle ? ORACLE_SOLVE_SURCHARGE : 0)
-            : PROBE_SURCHARGE;
         scheduledAttempt = true;
         tasks.push({
           id: `attempt:${host.hostname}`,
@@ -513,13 +504,32 @@ export function deriveTasks(
           host: host.hostname,
           from: workFrom,
           eligibleFrom: free.length > 0 ? free : vantages,
-          priority: DNET_PRIORITY["attempt"] + rank + surcharge,
+          // Replaced below by the total order over every attempt this pass.
+          priority: priorityOf("attempt"),
           reason: attempt.kind === "candidate"
             ? `${entry?.name ?? host.modelId} candidate ${attempt.index + 1}/${attempt.total}`
             : attempt.kind === "solve"
               ? `${entry?.name ?? host.modelId}: ${attempt.note} (up to ${attempt.budget} attempts)`
               : attempt.reason,
           ...(attemptThreads !== 1 ? { threads: attemptThreads } : {}),
+          // Only a conversation pays for the ring reader; see `priceOf`.
+          ...(needsRing ? { needsRing: true } : {}),
+        });
+        attemptRanking.push({
+          task: tasks[tasks.length - 1]!,
+          lab: labAdjacent,
+          // A probe buys information rather than a vantage, and an oracle solve
+          // costs a conversation — both sort behind work that can open a host
+          // outright, which is the job the surcharges used to do.
+          score: attemptScore(host, attempt.kind === "candidate"
+            ? Math.max(1, attempt.total - attempt.index)
+            : attempt.kind === "solve" ? attempt.budget : 1)
+            / (attempt.kind === "probe" ? PROBE_PENALTY
+              : attempt.kind === "solve" && attempt.needsOracle ? ORACLE_PENALTY : 1),
+          depth: host.depth ?? -Infinity,
+          difficulty: host.difficulty ?? 0,
+          maxRam: host.maxRam ?? 0,
+          host: host.hostname,
         });
         // Calls that do not need an oracle can finish independently; use a
         // second, smaller vantage to arrive at the ring immediately afterward.
@@ -550,7 +560,7 @@ export function deriveTasks(
         host: host.hostname,
         from: workFrom,
         eligibleFrom: free.length > 0 ? free : vantages,
-        priority: DNET_PRIORITY["bleed"] + rank + BLEED_BAND,
+        priority: priorityOf("bleed") + rank + BLEED_BAND,
         reason: pendingBleed
           ? `drain ${ring!.pendingAuthRecords} authentication log record(s)`
           : "drain this identity's initial log ring",
@@ -569,17 +579,26 @@ export function deriveTasks(
   // time; making the order the frontier rather than a single host is what
   // turns the spread from a serial walk into one concurrent wave per hop.
   const frontiers = new Map<string, PlantTarget[]>();
+  // The total order, applied. Lower priority number is more urgent, so the
+  // best-scoring attempt gets the smallest offset. The offsets stay inside the
+  // attempt band (0) and well clear of the next one (bleed at 100).
+  attemptRanking.sort((a, b) =>
+    Number(b.lab) - Number(a.lab)
+    || b.score - a.score
+    || b.depth - a.depth
+    || b.difficulty - a.difficulty
+    || b.maxRam - a.maxRam
+    || (a.host < b.host ? -1 : a.host > b.host ? 1 : 0));
+  attemptRanking.forEach((ranked, index) => {
+    ranked.task.priority = priorityOf("attempt") + index * 0.01;
+  });
+
   for (const entry of opts.plantable ?? []) {
     if (agents.has(entry.host) || busy("plant", entry.host)) continue;
-    const frontier = frontiers.get(entry.from) ?? [];
-    frontier.push({
-      host: entry.host,
-      ...(entry.remote ? { remote: true } : {}),
-      ...(entry.bootstrapReclaim ? { bootstrapReclaim: true } : {}),
-      ...(entry.bootstrapThreads !== undefined ? { bootstrapThreads: entry.bootstrapThreads } : {}),
-      ...(entry.omitProber ? { omitProber: true } : {}),
-    });
-    frontiers.set(entry.from, frontier);
+    const { from, ...target } = entry;
+    const frontier = frontiers.get(from) ?? [];
+    frontier.push(target);
+    frontiers.set(from, frontier);
   }
   for (const [from, targets] of frontiers) {
     tasks.push({
@@ -591,7 +610,7 @@ export function deriveTasks(
       host: targets[0]!.host,
       from,
       targets,
-      priority: PLANT_PRIORITY,
+      priority: priorityOf("plant"),
       reason: targets.length === 1
         ? "a credential and room for an agent"
         : `${targets.length} credentials and room for an agent on each`,
@@ -616,7 +635,7 @@ export function deriveTasks(
       kind: entry.kind,
       host: entry.host,
       from,
-      priority: FARM_PRIORITY[entry.kind],
+      priority: priorityOf(entry.kind),
       reason: entry.reason,
       ...(entry.threads !== 1 ? { threads: entry.threads } : {}),
       ...(entry.filename !== undefined ? { filename: entry.filename } : {}),
@@ -634,7 +653,7 @@ export function deriveTasks(
     // TARGET, so N pushers move it ~N× faster. A walk target likewise carries
     // the finisher and, when one is admitted, a mortal scout, each from its
     // own vantage. Every other hold kind keeps the plain per-target check.
-    const perVantage = entry.kind === "induce" || entry.kind === "walk";
+    const perVantage = JOBS[entry.kind].perVantage === true;
     const alreadyPlanned = !perVantage && tasks.some((task) => task.kind === entry.kind && task.host === entry.host);
     const inFlight = perVantage
       ? (opts.inFlight?.get(entry.host) ?? []).some((claim) => claim.kind === entry.kind && claim.from === entry.from)
@@ -645,7 +664,7 @@ export function deriveTasks(
       kind: entry.kind,
       host: entry.host,
       from: entry.from,
-      priority: HOLD_PRIORITY[entry.kind],
+      priority: priorityOf(entry.kind),
       reason: entry.reason,
       ...(entry.threads !== undefined && entry.threads !== 1 ? { threads: entry.threads } : {}),
       ...(entry.edge !== undefined ? { edge: entry.edge } : {}),
@@ -774,7 +793,6 @@ export interface SpreadCandidate {
   hasCredential: boolean;
   /** A live agent is already here. */
   agentAlive: boolean;
-  lastPlantAt?: number;
   goneAt?: number;
 }
 
@@ -791,15 +809,6 @@ export interface SpreadLimits {
   proberRamGb: number;
   /** One thread of the spawn-free local reclaim bootstrap. */
   bootstrapRamGb: number;
-  /** How long after a plant a host is left alone. The one surviving limit that
-   *  is not a fact about RAM, and it is not a budget either: a host that keeps
-   *  coming back empty is RESTARTING, and re-planting it every derivation would
-   *  spend the whole net's spare RAM on one flapping machine.
-   *
-   *  A minute is a little over ten mutation ticks at the default depth, so a
-   *  host that survives one cooldown has survived long enough to be worth the
-   *  2.6 GB. */
-  plantCooldownMs: number;
 }
 
 export const DEFAULT_SPREAD_LIMITS: SpreadLimits = {
@@ -808,10 +817,9 @@ export const DEFAULT_SPREAD_LIMITS: SpreadLimits = {
   managedResidentRamGb: 1.6,
   proberRamGb: 1.8,
   bootstrapRamGb: 2.6,
-  plantCooldownMs: 60_000,
 };
 
-/** Six reasons, and every one of them is a fact about the host in front of us.
+/** Every one of them a fact about the host in front of us.
  *
  * `too-deep`, `fan-out` and `agent-cap` were deleted rather than retired: they
  * were the three invented budgets, and a refusal name that can never fire is a
@@ -823,7 +831,18 @@ export type RefusalReason =
   | "no-credential"
   | "not-enough-ram"
   | "unknown-ram"
-  | "cooldown";
+  /** Emitted by the CALLER, not this planner: `candidatesFrom` returns the
+   *  hosts a plant could be aimed at and says nothing about the rest, so a
+   *  host no vantage can reach never entered `planSpread` at all and had no
+   *  refusal of its own. That is the commonest reason a cracked host sits
+   *  empty, and it was the one reason the panel could not name. */
+  | "no-route"
+  /** Also emitted by the CALLER: the host is not a candidate because a process
+   *  has already been launched at it and has not adopted yet. Distinct from
+   *  `no-route`, which says the opposite — that nothing is coming. Reading one
+   *  as the other sent a whole debugging session after a routing bug that was
+   *  really a launch that never landed. */
+  | "launching";
 
 export interface Refusal {
   host: string;
@@ -896,22 +915,6 @@ export function planSpread(
       refuse("unknown-ram", "no believable RAM facts; survey it before planting");
       continue;
     }
-    // BEFORE the bootstrap branch below, which plants too: a bootstrap that
-    // skipped the cooldown re-derived on every pass for a host whose plant
-    // keeps dying, which is exactly the spawn-churn loop this guard exists for.
-    // The cooldown is the anti-flap for a host that keeps RESTARTING — coming
-    // back empty because the game killed its scripts. A stasis-linked host is
-    // immune to restart, and its agent is recovered by remote `exec` from any
-    // live resident (not the believed edge), so it can neither flap nor spin a
-    // failing plant: the cooldown is meaningless there and only wedged it
-    // agentless (its managed dispatch re-plants once per order, each restamping
-    // the cooldown against the next) — the observed prober-only stasis orphan.
-    if (candidate.stasisManaged !== true
-      && candidate.lastPlantAt !== undefined && now - candidate.lastPlantAt < limits.plantCooldownMs) {
-      // A host that keeps restarting must not absorb every worker we have.
-      refuse("cooldown", "planted recently; if it is empty again it is restarting");
-      continue;
-    }
     // A stasis-linked target runs the spawn-free MANAGED resident: its bar is
     // managed resident + prober capacity, roughly two GB under the unmanaged
     // `agentRamGb` — the difference that left blocked stasis hosts refused
@@ -970,8 +973,6 @@ export function candidatesFrom(
     standing: ReadonlySet<string>;
     /** Hosts we hold a credential for. */
     vault: ReadonlySet<string>;
-    /** When each host was last planted, for the cooldown. */
-    lastPlantAt?: ReadonlyMap<string, number>;
     /** Targets whose backdoor/stasis fact is fresh enough for remote exec. */
     remoteExec?: ReadonlySet<string>;
     /** Live resident queues able to run a session-only remote plant. */
@@ -1031,17 +1032,6 @@ export function candidatesFrom(
       }
     }
     if (from === undefined) continue;
-    // The cooldown applies to EVERY host, immune ones included. An immune host
-    // cannot flap from a restart — but it CAN from a persistently-FAILING plant,
-    // and it must be held off exactly then: symmetric adjacency can propose a
-    // vantage across an edge that an immune host's never-expiring neighbour list
-    // still names but the net has since severed, and without the cooldown that
-    // plant re-derives, fails its preflight and re-derives again every pass — a
-    // spawn-churn loop that starves the game. The one case the cooldown would
-    // wrongly block — a freshly-PINNED host whose own pin job emptied it — is
-    // handled at the source instead: a successful pin clears the host's plant
-    // stamp (see the controller), so its re-plant is not seen as a flap.
-    const plantedAt = opts.lastPlantAt?.get(host.hostname);
     const raw = hosts.get(host.hostname);
     out.push({
       host: host.hostname,
@@ -1053,7 +1043,6 @@ export function candidatesFrom(
       ...(opts.stasisLinked?.has(host.hostname) ? { stasisManaged: true } : {}),
       hasCredential: opts.vault.has(host.hostname),
       agentAlive: false,
-      ...(plantedAt !== undefined ? { lastPlantAt: plantedAt } : {}),
       ...(raw?.goneAt !== undefined ? { goneAt: raw.goneAt } : {}),
     });
   }
@@ -1184,10 +1173,6 @@ export interface StormPlan {
  * to hang them on even when no seed has ever been sighted. */
 const NET = "(net)";
 
-/** The harvest kinds whose in-flight presence holds the seed: the work whose
- * results a storm would throw away mid-collection. */
-const HARVEST_KINDS: ReadonlySet<string> = new Set(["attempt", "reclaim", "cache"]);
-
 /** `hosts` are ALREADY-VIEWED records (see the module header): an absent field
  * is unknown or stale, and unknown does not admit. */
 export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormPlan {
@@ -1242,7 +1227,7 @@ export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormP
     || (host.blockedRam > 0 && ctx.budgetRefusedBlocks?.has(host.hostname) !== true)
     || host.caches === undefined
     || host.caches.length > 0
-    || [...(host.busy ?? [])].some((kind) => HARVEST_KINDS.has(kind))
+    || [...(host.busy ?? [])].some((kind) => isTaskKind(kind) && JOBS[kind].harvest === true)
   ));
   if (incomplete !== undefined) {
     const detail = !ctx.vault.has(incomplete.hostname)

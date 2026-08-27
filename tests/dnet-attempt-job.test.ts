@@ -1,7 +1,16 @@
+import { makeOrder } from './support/dnet-order.ts';
 import { describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
 import { runOrder } from "../game/dnet/orders.ts";
-import type { AgentIo, ControllerDeps, Order, OrderKind } from "../game/dnet/shared.ts";
+import {
+  DNET_PROTOCOL,
+  dnetRealm,
+  type AgentIo,
+  type ControllerDeps,
+  type ControllerHandle,
+  type Order,
+  type OrderKind,
+} from "../game/dnet/shared.ts";
 import { checkPassword, logEntryFor, type PacketWorld } from "../sim/features/dnet-feedback.ts";
 import { generateSecret, passwordRng } from "../sim/features/dnet-generators.ts";
 import type { AttemptLedger } from "../shared/strategy/dnet/host.ts";
@@ -28,18 +37,6 @@ const world: PacketWorld = {
   rand: () => 0.5,
 };
 
-function makeOrder(kind: OrderKind, over: Partial<Order> & { host: string; from: string }): Order {
-  return {
-    id: `${kind}:${over.host}`,
-    kind,
-    ramOverrideGb: 4,
-    threads: 1,
-    priority: 0,
-    longLived: kind === "walk",
-    label: "test",
-    ...over,
-  };
-}
 
 function makeDeps(over: Partial<ControllerDeps> = {}): ControllerDeps {
   return {
@@ -70,6 +67,8 @@ function makeIo(
   return {
     beat: () => {},
     setExpectedDoneAt: () => {},
+    hold: () => {},
+  inFlight: () => {},
     cancelled: cancelled ?? (() => undefined),
     deps: makeDeps({ ledgerFor: () => ledger, ...over }),
   };
@@ -103,6 +102,32 @@ function rig(modelId: string, difficulty: number, opts: { charismaGate?: number;
     data: secret.data,
     difficulty,
   };
+  // The host's facts come from the CONTROLLER'S MAP now, not from a call the
+  // body makes. Every script shares one realm, so a worker reads what the
+  // controller already folded for nothing — where `dnet.getServerDetails`
+  // charged 0.1 GB on every thread to re-learn it. Publishing the record here
+  // is what the real controller's own describe does.
+  dnetRealm().dnet_controller = {
+    protocol: DNET_PROTOCOL,
+    hosts: new Map([[host, {
+      hostname: host,
+      lastSeenAt: 0,
+      seenAt: {},
+      dirty: {},
+      modelId,
+      passwordHint: secret.hint,
+      data: secret.data,
+      logTrafficInterval: 30,
+      passwordLength: secret.passwordLength,
+      passwordFormat: secret.passwordFormat,
+      blockedRam: 0,
+      difficulty,
+      depth: 0,
+      requiredCharisma: opts.charismaGate ?? 1,
+      isStationary: false,
+    }]]),
+  } as unknown as ControllerHandle;
+
   const ring: string[] = [...(opts.initialLogs ?? [])];
   const state: Rig = { ns: undefined as unknown as NS, sent: [], bleeds: 0, bleedOptions: [], moved: false, timeoutOnce: false, password: secret.password };
 
@@ -124,6 +149,12 @@ function rig(modelId: string, difficulty: number, opts: { charismaGate?: number;
         requiredCharismaSkill: opts.charismaGate ?? 1,
         isStationary: false,
       }),
+      // The engine's own gate: a session is granted only when the host is
+      // ALREADY rooted and the password is right. This rig's hosts start
+      // unrooted, so every check falls through to `authenticate` — which is
+      // what makes these cases still exercise the expensive path.
+      connectToSession: (_target: string, _password: string) =>
+        ({ success: false, code: 401, message: "Unauthorized" }),
       authenticate: (_target: string, password: string) => {
         state.sent.push(password);
         if (state.timeoutOnce) {
@@ -170,11 +201,7 @@ describe("the attempt order runs the whole conversation in one process", () => {
       const r = rig("AccountsManager_4.2", 12);
       const recovered: VaultEntry[] = [];
       const drained: number[] = [];
-      const result = await runOrder(r.ns, makeOrder("attempt", {
-        host: "dn-1",
-        from: "darkweb",
-        targetIdentity: "10.0.0.1",
-      }), makeIo(undefined, {
+      const result = await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb", targetIdentity: "10.0.0.1" }, { needsRing: true }), makeIo(undefined, {
         recordCredential: (entry) => recovered.push(entry),
         recordLogDrain: (_host, outcome) => drained.push(outcome.pendingAuthRecords),
       }));
@@ -206,7 +233,7 @@ describe("the attempt order runs the whole conversation in one process", () => {
   test("a closed-form model costs one authenticate and needs no log feedback", () => {
     return (async () => {
       const r = rig("DeskMemo_3.1", 2);
-      const result = await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }), makeIo());
+      const result = await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }, { needsRing: true }), makeIo());
       expect(result.ok, result.detail).toBe(true);
       expect(r.sent).toEqual([r.password]);
       // The initial drain protects existing logs from the capped-ring prepend.
@@ -218,7 +245,7 @@ describe("the attempt order runs the whole conversation in one process", () => {
 
   test("a completed standalone initial drain is not repeated by the first attempt", async () => {
     const r = rig("DeskMemo_3.1", 2);
-    const result = await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }), makeIo(undefined, {
+    const result = await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }, { needsRing: true }), makeIo(undefined, {
       ringFor: () => ({ pendingAuthRecords: 0, lastBleedAttemptAt: 1, lastBleedAt: 1 }),
     }));
     expect(result.ok, result.detail).toBe(true);
@@ -233,7 +260,7 @@ describe("the attempt order runs the whole conversation in one process", () => {
     });
     const recovered: VaultEntry[] = [];
     const candidates: ProvisionalCredential[] = [];
-    await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }), makeIo(undefined, {
+    await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }, { needsRing: true }), makeIo(undefined, {
       recordCredential: (entry) => recovered.push(entry),
       recordProvisional: (entry) => candidates.push(entry),
     }));
@@ -248,7 +275,7 @@ describe("the attempt order runs the whole conversation in one process", () => {
     const withLeak = rig("DeskMemo_3.1", 2, {
       initialLogs: [`Logging in with passcode: ${leaked} ...`],
     });
-    const result = await runOrder(withLeak.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }), makeIo());
+    const result = await runOrder(withLeak.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }, { needsRing: true }), makeIo());
     expect(result.ok, result.detail).toBe(true);
     expect(withLeak.sent).toEqual([leaked]);
   });
@@ -261,7 +288,7 @@ describe("the attempt order runs the whole conversation in one process", () => {
       recordAttempt: (_host, outcome) => recordedAttempts.push(outcome.attempted ?? ""),
       recordLogDrain: (_host, outcome) => drains.push(outcome),
     });
-    const result = await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }), io);
+    const result = await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }, { needsRing: true }), io);
     expect(result.ok, result.detail).toBe(true);
     expect([...new Set(recordedAttempts)]).toEqual(r.sent);
     expect(drains.some((outcome) => outcome.pendingAuthRecords === 1)).toBe(true);
@@ -275,7 +302,7 @@ describe("the attempt order runs the whole conversation in one process", () => {
     return (async () => {
       const r = rig("AccountsManager_4.2", 12);
       r.timeoutOnce = true;
-      const result = await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }), makeIo());
+      const result = await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }, { needsRing: true }), makeIo());
       expect(result.ok, result.detail).toBe(true);
       // The same guess is sent twice in a row: once into the timeout, once for
       // real. A solver that treated 408 as a refusal would have moved its search
@@ -289,7 +316,7 @@ describe("the attempt order runs the whole conversation in one process", () => {
     const r = rig("DeskMemo_3.1", 2);
     const result = await runOrder(
       r.ns,
-      makeOrder("attempt", { host: "dn-1", from: "darkweb" }),
+      makeOrder("attempt", { host: "dn-1", from: "darkweb" }, { needsRing: true }),
       makeIo(undefined, {}, () => "credential was verified elsewhere"),
     );
     expect(result.targetState).toBe("cancelled");
@@ -301,13 +328,13 @@ describe("a solve that loses its host keeps its place", () => {
   test("a host that moves mid-conversation ends the job but not the search", () => {
     return (async () => {
       const r = rig("AccountsManager_4.2", 12);
-      const first = await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }), makeIo());
+      const first = await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }, { needsRing: true }), makeIo());
       expect(first.ok).toBe(true);
 
       // Now the same solve, interrupted after its opening move.
       const r2 = rig("AccountsManager_4.2", 12);
       r2.moveAfter = 1;
-      const interrupted = await runOrder(r2.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }), makeIo());
+      const interrupted = await runOrder(r2.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }, { needsRing: true }), makeIo());
       expect(interrupted.ok).toBe(false);
       expect(interrupted.targetState).toBe("edge-lost");
       expect(interrupted.detail).toContain("vantage");
@@ -325,7 +352,7 @@ describe("a solve that loses its host keeps its place", () => {
       // Run once to get a genuine mid-solve state.
       const r = rig("AccountsManager_4.2", 16);
       r.moveAfter = 1;
-      const stopped = await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }), makeIo());
+      const stopped = await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }, { needsRing: true }), makeIo());
       const carried = stopped.attempts?.[stopped.attempts.length - 1]?.solver as Record<string, unknown>;
       expect(carried).toBeDefined();
 
@@ -333,7 +360,7 @@ describe("a solve that loses its host keeps its place", () => {
       const r2 = rig("AccountsManager_4.2", 16);
       const resumed = await runOrder(
         r2.ns,
-        makeOrder("attempt", { host: "dn-1", from: "darkweb" }),
+        makeOrder("attempt", { host: "dn-1", from: "darkweb" }, { needsRing: true }),
         makeIo({ tried: 0, probes: 0, solver: carried }),
       );
       expect(resumed.ok, resumed.detail).toBe(true);
@@ -352,7 +379,7 @@ describe("a solve that loses its host keeps its place", () => {
       const r = rig("AccountsManager_4.2", 12);
       const result = await runOrder(
         r.ns,
-        makeOrder("attempt", { host: "dn-1", from: "darkweb" }),
+        makeOrder("attempt", { host: "dn-1", from: "darkweb" }, { needsRing: true }),
         makeIo({ tried: 0, probes: 0, solver: foreign }),
       );
       expect(result.ok, result.detail).toBe(true);
@@ -362,7 +389,7 @@ describe("a solve that loses its host keeps its place", () => {
   test("a timeout while resending a pending attempt retries that same attempt", async () => {
     const firstRig = rig("AccountsManager_4.2", 16);
     firstRig.moveAfter = 1;
-    const stopped = await runOrder(firstRig.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }), makeIo());
+    const stopped = await runOrder(firstRig.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }, { needsRing: true }), makeIo());
     const carried = stopped.attempts?.at(-1)?.solver as Record<string, unknown>;
     expect(carried).toBeDefined();
 
@@ -370,7 +397,7 @@ describe("a solve that loses its host keeps its place", () => {
     resumedRig.timeoutOnce = true;
     const resumed = await runOrder(
       resumedRig.ns,
-      makeOrder("attempt", { host: "dn-1", from: "darkweb" }),
+      makeOrder("attempt", { host: "dn-1", from: "darkweb" }, { needsRing: true }),
       makeIo({ tried: 0, probes: 0, solver: carried }),
     );
     expect(resumed.ok, resumed.detail).toBe(true);
@@ -390,20 +417,12 @@ describe("a verified credential is bound to the server lifetime", () => {
   }) as unknown as NS;
 
   test("a 401 on the same identity quarantines only the credential", async () => {
-    const result = await runOrder(plantNs("10.0.0.1"), makeOrder("plant", {
-      host: "dn-1",
-      from: "darkweb",
-      targets: [{ host: "dn-1", password: "formerly-right", identity: "10.0.0.1" }],
-    }), makeIo());
+    const result = await runOrder(plantNs("10.0.0.1"), makeOrder("plant", { host: "dn-1", from: "darkweb" }, { targets: [{ host: "dn-1", password: "formerly-right", identity: "10.0.0.1" }], payloads: [] }), makeIo());
     expect(result.targetState).toBe("credential-rejected");
   });
 
   test("a 401 with a changed IP proves hostname reuse", async () => {
-    const result = await runOrder(plantNs("10.0.0.2"), makeOrder("plant", {
-      host: "dn-1",
-      from: "darkweb",
-      targets: [{ host: "dn-1", password: "formerly-right", identity: "10.0.0.1" }],
-    }), makeIo());
+    const result = await runOrder(plantNs("10.0.0.2"), makeOrder("plant", { host: "dn-1", from: "darkweb" }, { targets: [{ host: "dn-1", password: "formerly-right", identity: "10.0.0.1" }], payloads: [] }), makeIo());
     expect(result.targetState).toBe("replaced");
   });
 
@@ -416,12 +435,7 @@ describe("a verified credential is bound to the server lifetime", () => {
       dnsLookup: () => "10.0.0.1",
       scp: () => false,
     } as unknown as NS;
-    const result = await runOrder(ns, makeOrder("plant", {
-      host: "dn-1",
-      from: "darkweb",
-      targets: [{ host: "dn-1", password: "right", identity: "10.0.0.1" }],
-      payloads: ["agent.js", "prober.js"],
-    }), makeIo());
+    const result = await runOrder(ns, makeOrder("plant", { host: "dn-1", from: "darkweb" }, { targets: [{ host: "dn-1", password: "right", identity: "10.0.0.1" }], payloads: ["agent.js", "prober.js"] }), makeIo());
     expect(result.targetState).toBe("launch-refused");
     expect(result.codes?.["903"]).toBeUndefined();
     expect(result.codes?.["913"]).toBe(1);
@@ -435,7 +449,7 @@ describe("the charisma gate decides which models can be attempted at all", () =>
       // cannot read the response — and must say so by name rather than looking
       // like a solver that failed.
       const r = rig("AccountsManager_4.2", 12, { charismaGate: 5000 });
-      const result = await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }), makeIo());
+      const result = await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }, { needsRing: true }), makeIo());
       expect(result.ok).toBe(false);
       expect(result.codes?.["908"]).toBe(1);
       expect(r.bleeds).toBe(0);
@@ -447,9 +461,40 @@ describe("the charisma gate decides which models can be attempted at all", () =>
       // The whole reason these are worth shipping first: the answer arrives in
       // authenticate's own return value, so charisma is irrelevant.
       const r = rig("CloudBlare(tm)", 2, { charismaGate: 5000 });
-      const result = await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }), makeIo());
+      const result = await runOrder(r.ns, makeOrder("attempt", { host: "dn-1", from: "darkweb" }, { needsRing: true }), makeIo());
       expect(result.ok, result.detail).toBe(true);
       expect(r.bleeds).toBe(0);
     })();
+  });
+});
+
+describe("a lean attempt never touches the ring it was not priced for", () => {
+  test("no heartbleed, whatever the ring holds", async () => {
+    // One script runs one Netscript call at a time, so an attempt cannot bleed
+    // while it authenticates. Declaring both charged `heartbleed`'s 0.6 GB on
+    // EVERY thread of a thread-scaled kind, for a call most attempts never
+    // make — and threads are the only thing that shortens `authenticate`.
+    //
+    // So the common attempt is priced lean, and this is the guarantee that
+    // makes that safe: a lean process which reached `heartbleed` would exceed
+    // its `ramOverride` and die, taking the host's agent with it. The initial
+    // drain and the ring-full harvest are both gated on the same condition, so
+    // neither can fire here.
+    const r = rig("DeskMemo_3.1", 2);
+    const io = makeIo({ tried: 0, probes: 0 }, {
+      // A ring that is BOTH undrained and full: every reason to bleed at once.
+      ringFor: () => ({ pendingAuthRecords: 999 }),
+    });
+    const result = await runOrder(
+      r.ns,
+      // No `needsRing` in the payload IS the lean attempt.
+      makeOrder("attempt", { host: "dn-1", from: "darkweb" }, {}),
+      io,
+    );
+    // Whether it opened the host or not is beside the point; what matters is
+    // that it did its work without ever reaching for the ring.
+    expect(result).toBeDefined();
+    expect(r.bleeds, "a lean attempt bled; it is not priced for that call").toBe(0);
+    expect(r.sent.length, "a lean attempt did no work at all").toBeGreaterThan(0);
   });
 });

@@ -421,7 +421,7 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
       // `getSetStasisLinkDuration`, not a token wait: 30 s at charisma 0 down to
       // 3 s at 9000. It is half of what makes a pin expensive — the job costs
       // 12 GB AND holds its host — and a flat 100 ms reported pinning as free in
-      // time while the game charges half a `JOB_TIMEOUT_MS` for it.
+      // time while the game charges half a job timeout for it.
       await delay(stasisWaitMs(skills().charisma), "dnet.setStasisLink");
       const code = system.setStasisLink(process.host, shouldLink);
       return code === 200

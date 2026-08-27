@@ -1294,9 +1294,8 @@ export function planInduce(view: HoldView): InducePlan {
   const pushes: InducePlan["pushes"] = [];
   /** Threads a pusher still has to give. A pusher is not binary: its RAM is a
    * pool, and a wave that needs less than the pool leaves the rest for the
-   * NEXT target — run as a linked one-off sidecar beside the main push, both
-   * 6 s calls in lockstep. At most two targets per pusher: a host runs one
-   * main order and one sidecar. */
+   * NEXT target, whose push queues behind the first on the same vantage. At
+   * most two targets per pusher, so one host cannot absorb the whole plan. */
   const pusherPool = new Map<string, { threads: number; targets: number }>();
   const poolFor = (pusher: HoldHost): { threads: number; targets: number } => {
     let held = pusherPool.get(pusher.hostname);
@@ -1360,7 +1359,7 @@ export function planInduce(view: HoldView): InducePlan {
       // in the calling script's threads and the 6 s wait is constant. Capped
       // at what the wave still needs, so a giant pusher does not overshoot
       // the reset — and what it does not spend here stays in its pool for
-      // the next target's sidecar.
+      // the next target.
       const pool = poolFor(pusher);
       const threads = Math.min(pool.threads, neededThreads);
       if (threads < 1) continue;

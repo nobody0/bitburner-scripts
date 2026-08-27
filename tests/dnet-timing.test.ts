@@ -1,3 +1,4 @@
+import { makeOrder } from './support/dnet-order.ts';
 import { describe, expect, test } from "bun:test";
 import {
   DNET_REFUSAL_WAIT_MS,
@@ -89,6 +90,7 @@ describe("operation-boundary estimates", () => {
       beat: () => {},
       setExpectedDoneAt: (at: number | undefined) => stamps.push(at),
       cancelled: () => undefined,
+      hold: () => {},
       deps: { expectedDelayMs: () => delays.shift() },
     } as unknown as AgentIo;
     let release!: () => void;
@@ -106,10 +108,7 @@ describe("operation-boundary estimates", () => {
   });
 
   test("estimated work can remain healthy past sixty seconds while a truly stalled unknown call expires", () => {
-    const order: Order = {
-      id: "attempt:dn-1", kind: "attempt", host: "dn-1", from: "darkweb", ramOverrideGb: 4,
-      threads: 1, priority: 0, longLived: false, label: "test", expectedDoneAt: 120_000,
-    };
+    const order = makeOrder("attempt", { host: "dn-1", from: "darkweb", expectedDoneAt: 120_000 }, {});
     const handle = { order, beatAt: 0 } as AgentHandle;
     expect(jobWatchdogExpired(handle, 90_000)).toBe(false);
     expect(jobWatchdogExpired(handle, 120_000 + JOB_WATCHDOG_GRACE_MS + 1)).toBe(true);

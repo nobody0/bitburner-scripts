@@ -26,8 +26,10 @@ different places.
 the calling script instance only; the docs are explicit that "other running
 scripts will need to use `connectToSession` with the correct password to also get
 a session". No channel — a file or the page realm — can transfer one. This is
-why a dodge stub cannot win a session on the controller's behalf: the stub dies,
-and the session dies with it.
+why no borrowed `ns` can win a session on the controller's behalf: the session
+belongs to the process that made the call, so only a process standing there can
+hold one. This is a question of IDENTITY, which is why it survived the move from
+the dodger to the ns proxy unchanged (`spec/ns-proxy.md`).
 
 **Transfer is distance-free; execution is not.**
 
@@ -63,10 +65,12 @@ check. Only `home` holds the TOR edge to `darkweb`, so:
 > **`ns.exec` onto `darkweb` works from `home` and from nowhere else.**
 
 `ns.scp` passes no connection requirement at all (`NetscriptFunctions.ts:769-773`),
-so *copying* to `darkweb` works from any host — which is why the seeding dodge may
-be placed anywhere to `scp`, but must be pinned to `home` to `exec`. A dodge stub
-landing on an arbitrary leased fleet host would `scp` successfully and then get a
-silent `0` from `exec`, which is indistinguishable from "the host is full".
+so *copying* to `darkweb` works from any host, while the `exec` must issue from
+home. The seed used to carry an explicit `pinHost` for exactly that, because a
+dodge stub landing on an arbitrary leased fleet host would `scp` successfully and
+then get a silent `0` from `exec` — indistinguishable from "the host is full".
+The pin is gone: every proxied `exec` routes through `nsMain`, which IS home, so
+the property now holds by construction (`spec/ns-proxy.md`).
 
 That is the beachhead the whole feature stands on: from `darkweb`, `probe()`
 finally returns the depth-0 servers that `home` cannot see, and cracking starts
@@ -305,23 +309,8 @@ evidence: together 0.63× walker-start against neither):
   plant behind it — authenticate, scp/exec, move, with the whole induce wave
   overlapped behind the crack instead of serialized after it.
 
-Two RAM disciplines squeeze the wave's vantages dry:
+One RAM discipline squeezes the wave's vantages dry:
 
-- **The linked one-off sidecar.** A vantage's induce order rarely wants all
-  of its RAM (the wave caps its threads), and a resident runs one order at a
-  time — so a SECOND induce push filed onto a vantage already holding one
-  becomes a spawn-free one-off that runs BESIDE the main: "I have X GB and
-  six seconds, find something to do." The resident cannot carry `exec`
-  (1.3 GB, and PER THREAD on a sized order), so it spawns through a transient
-  1-thread `launchSidecar` hop that claims the one-off order out of the queue
-  (into `entry.sidecarOrder`, so the ordinary successor chain can never spawn
-  into it), execs the one-off at its own spawn-free sizing, and chains into
-  the main order — both 6 s calls aligned. The one-off reports through
-  `entry.sidecar`, dies when its body settles, and is killed by the
-  controller whenever the vantage retires (it is LINKED, never independent).
-  A second induce is preferred as the passenger because the flight times
-  match; at most one one-off per host at a time, never on stasis-managed
-  vantages (their resident hands staged work to the remote dispatcher).
 - **Overscale.** Pool threads left over after every target's wave is served
   are added to that pusher's own push anyway (never onto a held-closing
   target, whose early close would land under the in-flight authenticate):
@@ -347,7 +336,7 @@ the lab is stationary and `cache-lab-deferred` already holds it.
 **A lab-less world storms too.** `getCurrentLabName` is gated on full darknet
 access, so a DarkscapeNavigator-only run gets the 5-deep net and no labyrinth
 is ever generated — there is no walk to protect and `walker-unpinned` never
-binds. Home sends `DnetOrders.labExpected = false` (it can see the bitNode and
+binds. Home sends `DnetInputs.labExpected = false` (it can see the bitNode and
 SF15), which stands the walker's slot reservation down and hands the bottom-row
 anchor to the spare targets — the deepest, hardest-to-reconquer row becomes an
 ordinary spare's, and since the limit can never grow there (the +1s are
@@ -357,11 +346,12 @@ remaining gates alone.
 
 Around the fire: the controller stamps `lastStormFiredAt` **pessimistically at
 claim time** — the firing host dies ~5 s after a successful call
-(`restartAllDarknetServers`), so the authoritative drained stamp may never
+(`restartAllDarknetServers`), so the authoritative checkpoint stamp may never
 arrive and a lost report must not skip the recovery. It then derives nothing
-for 35 s (`STORM_QUIET_MS`), then runs one `stormWipe`. Identity is retained provisionally, but position, topology, RAM, files and log state become unknown because home cannot distinguish a restarted survivor from a deleted or replaced host. The next observations reconcile each hostname by IP. Ordinary survey then fans out from survivors. Home mirrors the wipe
-with the same shared function and replays `lastStormAt` to a re-seeded
-controller, exactly as it replays the phishing stamp. While the storm's other
+for 35 s (`STORM_QUIET_MS`), then runs one `stormWipe`. Identity is retained provisionally, but position, topology, RAM, files and log state become unknown because home cannot distinguish a restarted survivor from a deleted or replaced host. The next observations reconcile each hostname by IP. Ordinary survey then fans out from survivors. Home needs no wipe of its own —
+it replaces its read projection wholesale from the next snapshot — and replays
+`lastStormAt` to a re-seeded controller, exactly as it replays the phishing
+stamp. While the storm's other
 gates are met, no seed is in hand and the 30-minute window is open, the farm
 runs a **seed hunt**: `FarmInputs.seedHunt` suspends `reclaim-not-needed`'s
 clear budget, since every block ground to zero is a 15% roll.
@@ -685,11 +675,14 @@ These are **two independent axes**, and the routing keeps them separate.
   symmetric edge is still believed — that plant keeps the `authenticate`
   fallback, because it holds a direct connection; `remote` when no edge
   survives but a fresh backdoor or stasis fact does, so ANY live resident is a
-  vantage and the plant is session-only (`Task.remote` → `Order.sessionOnly`);
-  `ineligible` otherwise. Adjacency wins over remote. This governs BOTH
-  candidate creation and urgent rerouting: a reroute onto a non-adjacent agent
-  derives `remote` from the new route instead of deleting it, or the plant
-  would try to `authenticate` at a distance and fail.
+  vantage and the plant is session-only (`PlantTarget.remote` →
+  `PlantJobTarget.sessionOnly`); `ineligible` otherwise. Adjacency wins over
+  remote. The route is decided once, with the vantage, in `candidatesFrom`.
+  Urgent rerouting does NOT move a plant: `deriveTasks` groups a vantage's
+  whole admitted frontier into ONE order, and moving that order would carry
+  targets whose route was classified against the vantage it left. A plant
+  still passes through `routeUrgentTasks` to preempt a lesser order for its
+  slot.
 - **Durability** (may the resident skip its defensive self-spawn chain).
   `targetControllerManaged` is set from the target's STASIS state alone, never
   inferred from `remote`, `sessionOnly`, or an ordinary backdoor. A merely
@@ -705,20 +698,26 @@ target at the spawn-free managed resident plus the prober
 blocked stasis hosts in between refused `not-enough-ram` forever — agentless
 with a lone revived prober, the observed prober-only orphan.
 
-Durability also EXEMPTS a stasis host from the plant cooldown. The cooldown is
-the anti-flap for a host that keeps RESTARTING — coming back empty because the
-game killed its scripts, which would let one flapping machine absorb every
-worker. A stasis host is immune to restart, and its agent is recovered by
-remote `exec` from any live resident rather than across the believed edge, so
-it can neither flap nor spin a failing plant. Its managed dispatch re-plants
-once per order (the spawn-free agent cannot chain into the next itself), and
-each such plant stamps `lastPlantAt`; with the cooldown applied, a killed
-managed resident — whose death leaves the staged queue intact for the
-controller but is NOT a full retire — left the stamp standing with no agent to
-clear it, and the host sat agentless with its own queue undrained for the whole
-minute. So `planSpread` skips the cooldown for `stasisManaged` candidates
-outright; the model is "this host needs an agent, and stasis makes re-execing
-one always safe and immediate," not a stamp to be raced clear.
+**There is no plant cooldown, and no stasis exemption from one.** There used to
+be a minute-long hold on any host that had been planted and was empty again,
+justified as anti-flap for a host stuck RESTARTING. The game does not produce
+that: a restart is a per-mutation roll across the whole net, so no single host
+flaps on a seconds timescale, and the right answer to a restart is to replant
+at once. What the hold did instead was exile every host that emptied for an
+ordinary reason — a managed stasis handoff, a kind that hands its host back, an
+agent chaining out of its last order — and it made a broken plant read as a
+host politely waiting its turn. Observed in play: fourteen empty hosts at once,
+nearly all of them held, with nothing wrong with any of them.
+
+The one hold that remains is `plantRetryMs`, a two-second breath after a plant
+that could not LAUNCH. That is the case the guard was really for — a plant
+re-deriving on every pass is a spin to stop — and it applies to every host,
+immune ones included, because an `exec` can be refused for reasons unrelated to
+whether the host can be restarted out from under us. It is stamped per FRONTIER
+target, since one refused launch usually refused all of them.
+
+The model is "this host needs an agent, and there is no reason to wait", not a
+stamp to be raced clear.
 
 The managed dispatch cycle also RACES its own RAM. A handoff (the resident
 exiting for the dispatcher, or a finished order) wakes the controller
@@ -1241,8 +1240,8 @@ server lifetime (new IP), which is exactly the boundary above. A verified
 credential returning `401` is therefore treated as an invariant failure. IP
 reconciliation decides the boundary: replacement retires the old lifetime,
 while the same IP drops only the credential rather than fabricating a server
-deletion. The rejection is drained back to home with its identity and time, so
-home cannot replay it; a newer verification or replacement identity wins.
+deletion. The controller updates its checkpoint in place, so a replacement
+cannot replay an older credential; a newer verification or identity wins.
 
 After verification, cracking attempts, solver state and evidence for that
 target are pruned immediately. The log-ring retry state is separate so an
@@ -1252,28 +1251,85 @@ target-specific guesses, queued work, credentials, resident queues,
 probe/bootstrap records, dirty-list flags, lab fields and cooldowns. A
 restart/process loss takes only the PID/session side of that list and preserves
 identity/password facts. Tombstones remain only for the deletion-derived forget
-window, after which both knowledge and auxiliary registries forget the hostname. Home
-replays an authoritative identity-bearing vault snapshot at every rendezvous,
-so a controller replacement cannot resurrect an entry home has already removed.
-Restart evidence and a remote `exec` refusal also invalidate the ordinary
-backdoor with a timestamp drained to home; otherwise home's persisted snapshot
-would immediately replay the route the controller had just disproved. A later
-installation timestamp wins.
+window, after which both knowledge and auxiliary registries forget the hostname.
+The controller checkpoint carries its identity-bearing vault, so replacement
+cannot resurrect an entry the controller already removed. Restart evidence and
+a remote `exec` refusal also add a timestamped ordinary-backdoor invalidation to
+that checkpoint; a later installation timestamp wins.
 
 Stasis state is one last-write-wins register. Home stamps every direct
-`getStasisLinkedServers()` result; a successful pin/unpin stamps and drains the
+`getStasisLinkedServers()` result; a successful pin/unpin stamps the
 controller's complete updated set. The newer complete snapshot replaces the old
 one, including with empty. This removes both the old accumulating union and the
 later per-host reconciliation maps: neither can resurrect released links or
 retain stale names forever.
 
-A restored snapshot also SEEDS the map: a cold boot hands the controller the
-linked NAMES, but a name without a knowledge entry is invisible to
-`candidatesFrom`, and a mid-net stasis host then sat empty after every reload
+A restored vault SEEDS the map, and the stasis snapshot needs no seeding of
+its own. A cold boot hands the controller passwords and linked names before it
+knows a single host, and a name without a knowledge entry is invisible to
+`candidatesFrom` — a mid-net stasis host then sat empty after every reload
 until the spread wave happened to probe its way back. The controller can
-describe any named darknet host directly, so on accepting a snapshot it folds a
-fresh description of every linked host it does not know, and the remote replant
-fires on the first derive instead.
+describe any named darknet host directly, so each derive surveys every host we
+hold a password for and are not standing on, folding a fresh description for
+any that has no entry or whose RAM facts have expired. That is the same survey
+`planSpread`'s `unknown-ram` refusal asks for, and a stasis host worth
+replanting is one we hold a password for, so the remote replant fires on the
+first derive.
+
+## What the engine actually guarantees about timing (v3.0.1)
+
+Read from the game's own source, because guessing at it cost a day.
+
+- **`ns.exec` does not start the child.** `NetscriptFunctions.exec` →
+  `runScriptFromScript` → `startWorkerScript` → `createAndAddWorkerScript` is
+  synchronous to the pid: the process is registered, its RAM is deducted, and
+  `ns.ps`/`isRunning` see it. But `createAndAddWorkerScript` calls
+  `startNetscript2Script(...)` WITHOUT awaiting, and that function's first
+  suspension is `await compile(script, scripts)`. Not one line of the child has
+  run when `exec` returns. Cached module → one microtask hop; first compile →
+  a real module load, several event-loop turns.
+- **`ns.spawn` with `spawnDelay: 0` skips `setTimeout` entirely** — the 0 case
+  is special-cased — but it kills the CALLER first and only then calls
+  `spawnCb()` inline. The successor's `main` still waits on the same
+  `await compile(...)`. So there is always a gap between a spawn chain
+  clearing its slot and the successor adopting, and `HostEntry.inboundAt`
+  exists to make that gap visible as "a process is on its way" rather than as
+  an unstaffed host. Any nonzero `spawnDelay` registers the `setTimeout`
+  BEFORE the kill, so the caller dies at once and the replacement lands a
+  macrotask later. The default is 10 s.
+- **The 200 ms engine cycle does not schedule scripts.** `Engine.updateGame`
+  advances terminal/work/stocks/gang/corp/bladeburner/sleeves/hacknet and
+  accumulates script runtime stats; nothing resumes a script. Scripts are
+  ordinary async JS on the browser event loop, so a resolved promise resumes
+  on the microtask queue with no relation to the tick. **A chain of hops
+  costs microtasks, not ticks** — which is why the spread can open a whole net
+  without waiting for the game clock.
+- **`ns.sleep`/`ns.asleep` are `setTimeout`**, so `sleep(0)` is a macrotask,
+  not a yield. `netscriptDelay` registers `ws.delay`/`ws.delayReject` so a kill
+  can abort it; `asleep` cannot be aborted.
+- **The realm is shared by reference.** `moduleCache` is keyed on transformed
+  source, so two scripts importing an identical library get the SAME module
+  instance across servers — which is what makes the rendezvous work at all,
+  and why a release hook on a handle reaches a body in another process with no
+  ns call.
+- **One Netscript call per script at a time.** While a call is outstanding the
+  engine holds `env.runningFn`, and any other `ns` member in that process
+  throws `Concurrent calls to Netscript functions are not allowed!`. A release
+  hook ends the WAIT, never the call, so a released body cannot exec or spawn —
+  and cannot reach the ns proxy either, since a proxied call still needs this
+  process to issue the `exec` that placed the resident. The only way out of a
+  call in flight is `ns.kill` from another process.
+- **A kill is ordered for exactly that.** `killWorkerScript` clears
+  `env.runningFn` FIRST, then runs the `atExit` callbacks synchronously with a
+  clean slot, and only THEN sets `stopFlag` and frees the allocation. So a
+  victim's atExit may spawn its own successor, and that spawn's own kill frees
+  the victim's RAM before the launch.
+- **A zero-delay `spawn` is synchronous and its result is discarded.**
+  `spawn` kills the caller, then calls `runScriptFromScript` inline and throws
+  the return value away. That function returns `0` — never throws — when the
+  script is missing, the host is unrooted, the RAM does not fit, or no PID is
+  free. A failed self-respawn is therefore invisible by construction; the only
+  observable trace is a host that never adopts.
 
 ## The shape that follows: a controller, probers, agents, and a spawn chain
 
@@ -1284,13 +1340,14 @@ static budget (`tests/ram-budget.test.ts`); the **controller**
 `darkweb`.
 
 **Home cannot play the feature.** `probe()` is host-local, so from `home` the
-darknet is one host wide; a session belongs to the PID that won it, so a dodge
-stub cannot win one on anyone's behalf; and putting `ns.dnet.*` or `ns.scp`
-into `start.js`'s billable surface would break the 3.6 GB pin that is the whole
-reason the dodger exists. So the home driver only seeds the beachhead (`scp` +
-`exec` onto `darkweb`, pinned to home — see the check order above), drains what
-the controller has learned, and sends orders home alone can compute (charisma,
-netDepth, bitNode, the vault replay).
+darknet is one host wide; a session belongs to the PID that won it, so no
+borrowed `ns` can win one on anyone's behalf; and putting `ns.dnet.*` or
+`ns.scp` into `start.js`'s billable surface would break the static pin that is
+the whole reason the ns proxy exists. So the home driver only seeds the
+beachhead (`scp` through the proxy, `exec` from home's own `ns` — see the check
+order above), reads an
+immutable checkpoint, and sends inputs only home can compute (charisma,
+netDepth, bitNode and direct stasis facts).
 
 **Something long-lived has to live out there** and hold the accumulated map:
 the controller. It must not die, which means it can never `spawn` — `spawn` kills
@@ -1367,16 +1424,21 @@ code (`game/dnet/shared.ts`):
    its own timeout); a job that stops settling is timed out and its promise
    rejected. A promise that never settles is a process that was killed, and out
    there that is the common case.
-2. **The rendezvous holds work, never knowledge.** `drain()` hands each
-   observation to home ONCE, and home folds it into knowledge it owns — so a
-   controller dying loses scheduling, not the map.
+2. **The controller is the sole knowledge authority.** `snapshot()` returns a
+   non-destructive, immutable `DnetSnapshot`; home replaces its read projection
+   wholesale and never folds observations. The snapshot carries a versioned
+   `DnetRecoveryState` which home returns only when launching a replacement
+   controller, so controller death or a build handoff preserves the map without
+   creating a second mutator.
 3. **A foreign generation is refused**, by the controller's election and by every
    agent on every pass. Agents outlive controllers, so a live script from a dead
    run really can be talking to us.
-4. **A credential lives only in the realm and in home's vault.** It is never
+4. **A credential lives only in the realm and the private recovery vault.** It is never
    published to a topic and never written to a log; what the panel gets is a
-   boolean. `stripCredentials` enforces that recursively at the one place
-   anything is recorded.
+   boolean. Only credentials and home's installed-backdoor ledger are persisted
+   to disk across a page reload; runtime handles and promises never enter the
+   recovery checkpoint. `stripCredentials` enforces telemetry redaction at the
+   one place anything is recorded.
 
 `tests/dnet-publish.test.ts` pins the fourth, and
 `sim/tests/dnet-session.test.ts` pins the engine rules the first three
@@ -1447,7 +1509,7 @@ iterator reason above, and leaves immediate replanting to the controller.
 
 Three kinds break the pattern, and all are encoded:
 
-- **`pin` never respawns** (`NO_RESPAWN_KINDS`). `setStasisLink` alone is 12 GB;
+- **`pin` never respawns.** `setStasisLink` alone is 12 GB;
   with the 2.0 GB spawn back it would not fit a 16 GB host at all. Its process
   ends and leaves the host empty for `planSpread` to re-plant — which is safe
   only because the pin has just made that host immutable, and which the controller
@@ -1494,11 +1556,11 @@ than reading the realm, so `ui/store.ts` groups them into the controller's run
 artifact.
 
 The metric worth keeping: agent telemetry leaves the game the instant an agent
-sees something, while home's `known` state only advances when a report is
-drained. A host that appears as `observed` and never becomes `known` is an agent
-that died before reporting — the gap is a direct read on **agent mortality**,
-which, since the transport does not lose data, is the loss that actually matters
-out there.
+sees something, while home's published `known` state advances on its next
+controller snapshot. A persistent `observed`/`known` gap therefore means the
+agent died before its report reached the controller; a brief gap is only the
+five-second publication cadence. That distinction keeps **agent mortality**
+observable without inventing a report-channel health model.
 
 ### What a walk reports
 

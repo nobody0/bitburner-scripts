@@ -1,4 +1,5 @@
 import { compareDepthDesc } from "./host.ts";
+import type { FarmKind } from "./jobs.ts";
 import {
   PHISH_CACHE_COOLDOWN_MS,
   phishExpectedRates,
@@ -20,9 +21,8 @@ import {
  * phishing. Low-difficulty hosts prefer promotion but may fall back to phish;
  * the quality preference must never create idle RAM. */
 
-export type FarmKind = "cache" | "reclaim" | "phish" | "promote";
+export type { FarmKind };
 
-export const FARM_KINDS: readonly FarmKind[] = ["cache", "reclaim", "phish", "promote"];
 
 /** Every reason a rung can decline, and every one of them is a fact about the
  * host in front of us or about a call's own gate. Prefixed by rung, because the

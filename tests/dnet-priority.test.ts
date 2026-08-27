@@ -1,12 +1,7 @@
+import { makeOrder } from './support/dnet-order.ts';
 import { describe, expect, test } from 'bun:test';
-import {
-  DNET_PRIORITY,
-  strategicQueueDepth,
-  canPreempt,
-  choosePreemptionVantage,
-  compareQueuedDnetWork,
-  isSameTurn,
-} from '../shared/strategy/dnet/priority.ts';
+import { choosePreemptionVantage, compareQueuedDnetWork } from '../shared/strategy/dnet/priority.ts';
+import { canPreempt, isSameTurn, priorityOf } from '../shared/strategy/dnet/jobs.ts';
 import { preemptionCandidateFromHandle } from '../game/dnet/priority.ts';
 import type { AgentHandle, AgentIo, Order } from '../game/dnet/shared.ts';
 
@@ -15,10 +10,10 @@ const NOW = 100_000;
 describe('darknet cancellation policy', () => {
   test('zero-delay work queues before blocking priority without gaining preemption', () => {
     const work = [
-      { id: 'walk:lab', kind: 'walk', priority: DNET_PRIORITY.walk },
-      { id: 'inventory:dn-1', kind: 'inventory', priority: DNET_PRIORITY.inventory },
-      { id: 'plant:dn-2', kind: 'plant', priority: DNET_PRIORITY.plant },
-      { id: 'relaunchProbe:dn-1', kind: 'relaunchProbe', priority: DNET_PRIORITY.relaunchProbe },
+      { id: 'walk:lab', kind: 'walk', priority: priorityOf('walk') },
+      { id: 'inventory:dn-1', kind: 'inventory', priority: priorityOf('inventory') },
+      { id: 'plant:dn-2', kind: 'plant', priority: priorityOf('plant') },
+      { id: 'relaunchProbe:dn-1', kind: 'relaunchProbe', priority: priorityOf('relaunchProbe') },
     ].sort(compareQueuedDnetWork);
 
     expect(work.map((entry) => entry.kind)).toEqual([
@@ -32,12 +27,11 @@ describe('darknet cancellation policy', () => {
     expect(canPreempt('inventory', 'promote')).toBe(false);
     expect(canPreempt('relaunchProbe', 'promote')).toBe(false);
     expect(canPreempt('plant', 'promote')).toBe(true);
-    expect(strategicQueueDepth(work)).toBe(2);
   });
 
   test('an idle eligible worker always avoids cancellation', () => {
     expect(choosePreemptionVantage('plant', [
-      { host: 'busy', activeKind: 'promote', activePriority: DNET_PRIORITY.promote },
+      { host: 'busy', activeKind: 'promote', activePriority: priorityOf('promote') },
       { host: 'idle', usableGb: 16 },
     ], NOW)).toEqual({ vantage: 'idle', preempt: false });
   });
@@ -47,13 +41,13 @@ describe('darknet cancellation policy', () => {
       {
         host: 'valuable',
         activeKind: 'reclaim',
-        activePriority: DNET_PRIORITY.reclaim,
+        activePriority: priorityOf('reclaim'),
         activeExpectedDoneAt: NOW + 90_000,
       },
       {
         host: 'filler',
         activeKind: 'promote',
-        activePriority: DNET_PRIORITY.promote,
+        activePriority: priorityOf('promote'),
         activeExpectedDoneAt: NOW + 1_000,
       },
     ], NOW)).toEqual({ vantage: 'filler', preempt: true });
@@ -64,13 +58,13 @@ describe('darknet cancellation policy', () => {
       {
         host: 'almost-done',
         activeKind: 'phish',
-        activePriority: DNET_PRIORITY.phish,
+        activePriority: priorityOf('phish'),
         activeExpectedDoneAt: NOW + 1_000,
       },
       {
         host: 'mostly-left',
         activeKind: 'phish',
-        activePriority: DNET_PRIORITY.phish,
+        activePriority: priorityOf('phish'),
         activeExpectedDoneAt: NOW + 20_000,
       },
     ], NOW)).toEqual({ vantage: 'mostly-left', preempt: true });
@@ -78,12 +72,9 @@ describe('darknet cancellation policy', () => {
 
   test('estimated and unknown remaining branches are reached through adopted handle wiring', () => {
     const handle = (host: string, startedAt: number): AgentHandle => {
-      const order: Order = {
-        id: `phish:${host}`, kind: 'phish', host, from: host, ramOverrideGb: 4,
-        threads: 1, priority: DNET_PRIORITY.phish, longLived: false, label: 'phish', startedAt,
-      };
+      const order = makeOrder('phish', { host, priority: priorityOf('phish'), startedAt }, {});
       return {
-        pid: 1, order, startedAt, beatAt: startedAt, armored: true,
+        pid: 1, order, startedAt, beatAt: startedAt,
         done: Promise.resolve({ id: order.id, kind: order.kind, host, from: host, ok: true }),
         settle: () => {},
       };
@@ -113,16 +104,47 @@ describe('darknet cancellation policy', () => {
     ], NOW)).toEqual({ vantage: 'unknown', preempt: true });
   });
 
+  test('a busy lane is a queue, not a refusal: the soonest-free worker takes it', () => {
+    // There is no queue-depth cap. When nobody is idle and nothing here may be
+    // displaced, the job still has to land somewhere — on whichever worker
+    // reaches it first. Refusing instead simply left the work unfiled, and one
+    // busy agent could hold up every host it was the only route into.
+    const busy = (host: string, readyInMs: number) => ({
+      host,
+      activeKind: 'walk',
+      activePriority: priorityOf('walk'),
+      readyInMs,
+    });
+
+    expect(choosePreemptionVantage('attempt', [
+      busy('later', 30_000),
+      busy('sooner', 4_000),
+    ], NOW)).toEqual({ vantage: 'sooner', preempt: false });
+
+    // Unknown readiness is not zero: a worker we cannot time never wins the
+    // tier by looking free.
+    expect(choosePreemptionVantage('attempt', [
+      { host: 'untimed', activeKind: 'walk', activePriority: priorityOf('walk') },
+    ], NOW)).toBeUndefined();
+
+    // Preemption still outranks queueing — waiting behind work a plant may
+    // simply displace would be slower, not politer.
+    expect(choosePreemptionVantage('plant', [
+      busy('quick-walk', 1_000),
+      { host: 'displaceable', activeKind: 'bleed', activePriority: priorityOf('bleed'), readyInMs: 60_000 },
+    ], NOW)).toEqual({ vantage: 'displaceable', preempt: true });
+  });
+
   test('one selected cancellation can carry another directly chained job', () => {
     expect(choosePreemptionVantage('plant', [
       {
         host: 'already-yielding',
         activeKind: 'phish',
-        activePriority: DNET_PRIORITY.phish,
+        activePriority: priorityOf('phish'),
         cancelling: true,
         assigned: 1,
       },
-      { host: 'protected', activeKind: 'pin', activePriority: DNET_PRIORITY.pin },
+      { host: 'protected', activeKind: 'pin', activePriority: priorityOf('pin') },
     ], NOW)).toEqual({ vantage: 'already-yielding', preempt: false });
   });
 
@@ -133,11 +155,27 @@ describe('darknet cancellation policy', () => {
     expect(canPreempt('plant', 'storm')).toBe(false);
   });
 
-  test('a discovered cache outranks strategic and farm work', () => {
-    expect(DNET_PRIORITY.inventory).toBeLessThan(DNET_PRIORITY.cache);
-    expect(DNET_PRIORITY.cache).toBeLessThan(DNET_PRIORITY.pin);
-    expect(DNET_PRIORITY.cache).toBeLessThan(DNET_PRIORITY.attempt);
-    expect(canPreempt('cache', 'reclaim')).toBe(true);
-    expect(canPreempt('cache', 'phish')).toBe(true);
+  test('a discovered cache queues near the front but cancels nothing', () => {
+    // Queue order is unchanged: a cache still sorts ahead of a pin, an attempt
+    // and every farm kind, so it takes the next free slot on its vantage.
+    expect(priorityOf('inventory')).toBeLessThan(priorityOf('cache'));
+    expect(priorityOf('cache')).toBeLessThan(priorityOf('pin'));
+    expect(priorityOf('cache')).toBeLessThan(priorityOf('attempt'));
+
+    // But it may not DISPLACE, and that is a rule about farm work rather than
+    // about caches. The controller files farm work only onto a host that is
+    // already spare, so a cache that preempts cancels an order it cannot then
+    // replace — and because non-farm work is filed FIRST, the attempt it just
+    // killed retakes the freed slot before the farm pass looks at all. The
+    // cache cancels it again next pass, forever. Observed in play: thousands
+    // of spawns, an `attempt` killed ~1ms after adopting every time, and the
+    // cache never ran once.
+    expect(canPreempt('cache', 'attempt')).toBe(false);
+    expect(canPreempt('cache', 'reclaim')).toBe(false);
+    expect(canPreempt('cache', 'phish')).toBe(false);
+    // The kinds that may preempt are exactly those the controller will file
+    // onto a busy host.
+    expect(canPreempt('plant', 'attempt')).toBe(true);
+    expect(canPreempt('attempt', 'phish')).toBe(true);
   });
 });

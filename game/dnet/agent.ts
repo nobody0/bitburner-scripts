@@ -1,13 +1,10 @@
 import type { NS } from "@ns";
-import { realmSleep } from "../lib/wake.ts";
 import { captureLaunch, temporaryRunOptions } from "../lib/launch-shared.ts";
 import type { DnetAgentLaunch } from "./launch.ts";
 import {
-  NO_RESPAWN_KINDS,
   live,
   orderCalls,
-  priceCalls,
-  waitForWake,
+  takeNextOrder,
   type AgentHandle,
   type AgentIo,
   type ControllerHandle,
@@ -16,6 +13,7 @@ import {
   type Report,
 } from "./shared.ts";
 import { runOrder } from "./orders.ts";
+import { RELEASED } from "./timing.ts";
 
 /** The one thing that runs on a darknet host, in two modes.
  *
@@ -28,12 +26,25 @@ import { runOrder } from "./orders.ts";
  * states why the spawn round trip is cheaper than `exec` and how a session
  * survives it.
  *
- * ## Cancellation is cooperative, with a hard-kill backstop
+ * ## Cancellation is cooperative between calls, and a kill inside one
  *
- * Bodies check cancelReason at safe boundaries. A body blocked inside one
- * Darknet call cannot observe the flag, so the controller hard-kills an armored
- * agent on the next derive pass; atExit stages the successor after the game
- * clears the blocked Netscript call.
+ * Bodies check cancelReason at safe boundaries, and a body BETWEEN calls needs
+ * nothing else: it reads the flag, exits on its own terms, and spawns its
+ * successor. A body blocked INSIDE a Darknet call has no boundary to read it
+ * at, so it publishes a release hook (`awaitDnetOperation`) — but the hook only
+ * ends the WAIT, never the call. Bitburner allows one Netscript call per script
+ * at a time, and the engine holds that slot until it finishes, so a released
+ * body may settle its report and then do nothing but wait for the engine.
+ *
+ * Recovering the host takes `ns.kill`, and the engine builds the handoff for
+ * it: `killWorkerScript` clears `env.runningFn` FIRST, runs the atExit
+ * handlers with a clean slot, and only then frees the allocation. So the
+ * victim's `armRespawn` hook spawns its own successor from inside the kill,
+ * and that spawn's own kill frees this process's RAM before the launch. The
+ * release still earns its keep — the controller stops waiting on a result it
+ * no longer wants and re-plans in that instant — it just cannot be the whole
+ * mechanism. It was, and hosts were lost to `CONCURRENCY ERROR` on the way
+ * out; see `timing.ts`.
  *
  * ## The one rule that binds this file (and `orders.ts`/`attempt.ts`/`walk.ts`)
  *
@@ -43,21 +54,41 @@ import { runOrder } from "./orders.ts";
  * dynamic check matters, and `KIND_CALLS` is what it is sized against.
  * `tests/ram-budget.test.ts` pins that the per-kind surface matches. */
 
-const RESIDENT_POLL_MS = 1_000;
-const CONTROLLER_STARTUP_GRACE_MS = 15_000;
-
 export async function main(ns: NS): Promise<void> {
   ns.disableLog("ALL");
 
-  const launch = captureLaunch<DnetAgentLaunch>("dnet-agent");
+  const launch = captureLaunch<DnetAgentLaunch>("dnet-agent", ns.args[0]);
   const hostArg = typeof ns.args[0] === "string" ? ns.args[0] : undefined;
   const host = launch?.host ?? hostArg;
   if (!host) return;
+
+  // ARM FIRST, decide later.
+  //
+  // Every recovery hook in this file is armed by `armRespawn`, and that cannot
+  // happen until the process has read its launch descriptor, found the
+  // controller and priced itself. A death anywhere in that window leaves the
+  // host empty with NO hook and no trace: the controller sees a plant that
+  // exec'd a real pid and a host that is agentless moments later, so it
+  // replants, and the same window swallows the next one. Every path out of
+  // this process must pass through an `atExit`, so the first one is registered
+  // before there is anything to lose.
+  //
+  // It stands down the moment a real hook takes over — `armed` — because the
+  // engine runs every registered handler and the real one owns the exit.
+  const guard = { armed: false };
+  ns.atExit(() => {
+    if (guard.armed) return;
+    // grep `dnet:` to remove.
+    live()?.wake("agent-died-before-arming");
+  }, "dnet-boot-guard");
 
   // A host too cramped for the ordinary prober + resident runs this deliberately
   // tiny mode: every byte is action threads, no probe, no details, no spawn net.
   if (launch?.bootstrapReclaim === true) {
     const finish = (): void => live()?.bootstrapDone(host);
+    // Its own hook, so the boot guard stands down: a reclaimer that exits is
+    // not a lost agent, it is a finished one.
+    guard.armed = true;
     ns.atExit(finish, "dnet-bootstrap-reclaim");
     try {
       const g = live();
@@ -70,37 +101,51 @@ export async function main(ns: NS): Promise<void> {
     return;
   }
 
-  // A LINKED ONE-OFF: claim the first sidecar-marked staged order, run it,
-  // report through the entry's sidecar slot, and exit. No resident, no spawn.
-  if (launch?.oneOff === true) {
-    await runAsOneOff(ns, host);
+  // ONE ORDER, THEN GONE.
+  //
+  // There is no resident. The controller holds the launcher — it execs this
+  // process through the host's prober `ns`, sized for exactly the order it
+  // staged — so a worker that finds no order was launched for nothing and has
+  // nothing to wait for. It exits, and the host is free the moment it does.
+  //
+  // That is the whole reason this process no longer carries `spawn`: it never
+  // becomes the next order, so it never pays 2 GB PER THREAD for a handoff
+  // that happens once.
+  const g = live();
+  const entry = g?.hosts.get(host);
+  const pending = entry?.pendingOrder;
+  if (g === undefined || entry === undefined || pending === undefined) {
+    // grep `dnet:` to remove.
     return;
   }
+  entry.pendingOrder = undefined;
 
-  const controllerManaged = launch?.controllerManaged === true;
-  const residentGb = priceCalls(ns, orderCalls("idle", controllerManaged));
+  // grep `dnet:` to remove. The label is the WHY: for an attempt it is the
+  // difference between "a cache log named this password" (one instant call)
+  // and "candidate 7/12" (a step through a dictionary) — and if the same label
+  // repeats for ever, that is the bug naming itself.
+  await runAsOrder(ns, g, entry, pending, guard);
+}
 
-  // Did the predecessor hand us a specific order? It stamps `entry.pendingOrder`
-  // just before its zero-delay spawn; we read and clear it.
-  const g = live();
-  const pending = g?.hosts.get(host)?.pendingOrder;
-  if (g !== undefined && pending !== undefined) {
-    const entry = g.hosts.get(host)!;
-    entry.pendingOrder = undefined;
-    // Adopt only an order this process was SIZED for: a spawn-chained
-    // successor (no launch descriptor) always was, and a plant exec was only
-    // when the plant claimed the order (controller-managed). A bare-resident
-    // exec adopting a stale order would run it at the 3.6 GB idle budget and
-    // die at its first uncovered call — leaving the host prober-only again.
-    // Handing it back to the queue lets THIS resident spawn into it priced.
-    if (launch === undefined || controllerManaged) {
-      await runAsOrder(ns, g, entry, pending, residentGb);
-      return;
-    }
-    (entry.staged ??= []).unshift(pending);
-  }
-
-  await runAsResident(ns, host, residentGb, controllerManaged);
+/** Wake the controller from `atExit`, never before returning.
+ *
+ * A spawn-free host hands its slot back and waits to be re-`exec`'d, and the
+ * two processes must not overlap: `spawn` kills its caller before launching
+ * the successor, but `exec` has no such ordering. A body that wakes the
+ * controller and THEN returns queues the derive first, so the plant and its
+ * `exec` can run while this process is still holding its RAM, and the launch
+ * is refused onto a host that looks full.
+ *
+ * `atExit` does NOT run with the free — `killWorkerScript` runs the handlers
+ * FIRST and only then sets `stopFlag` and does `updateRamUsed(ramUsed -
+ * ramUsage * threads)`, both synchronously. So waking from here is still
+ * inside this process's allocation. What makes it safe is on the other side:
+ * `signalDerive` defers the pass to a MICROTASK, which cannot run until this
+ * whole synchronous stack — handlers, stopFlag, free — has unwound. The
+ * ordering is real, but it is the controller's deferral that provides it, not
+ * the engine's. Do not "simplify" that microtask away. */
+function wakeOnExit(ns: NS, cause: string): void {
+  ns.atExit(() => live()?.wake(cause), `dnet-wake-${cause}`);
 }
 
 /** This host's entry, creating it if the controller has not seen this host yet.
@@ -116,134 +161,34 @@ function ensureEntry(g: ControllerHandle, host: string): HostEntry {
   return created;
 }
 
-/** The successor-spawn atExit hook. Fires on EVERY exit; `deliberate` tells a
- * clean handoff (spawn the successor the exit path already staged into
- * `pendingOrder`) from a game kill (`onDeath` decides). A game kill must NOT
- * spawn: v3.0.1's `killServerScripts` iterates the live PID map and a
- * zero-delay replacement would be re-killed in a loop. `spawn` with
- * spawnDelay:0 runs its server check synchronously and THROWS if the host was
- * deleted — caught, so the whole surface stays `spawn`. */
-function armRespawn(
+/** Arm the ONE hook that turns an unnatural death into a report.
+ *
+ * It no longer respawns anything. A worker used to be its own launcher — its
+ * `atExit` spawned the successor — and that is precisely what put `spawn` on
+ * every thread of every order. The controller holds the launcher now, so all
+ * this has to do is say what happened and let go of the host.
+ *
+ * `state.deliberate` still separates the two exits: set by the body just
+ * before it returns, it says "I finished and reported"; unset means a kill,
+ * where this hook is the only word anyone gets. */
+function armExit(
   ns: NS,
-  host: string,
-  residentGb: number,
   state: { deliberate: boolean },
   onDeath: () => void,
-  respawns: boolean,
+  /** The boot guard this supersedes. Stood down here rather than in `main` so
+   * it cannot be forgotten by a future third runner. */
+  guard?: { armed: boolean },
 ): void {
+  if (guard !== undefined) guard.armed = true;
   ns.atExit(() => {
     if (state.deliberate) return;
     onDeath();
-    if (respawns) respawnFromEntry(ns, host, residentGb);
-  }, "dnet-respawn");
-}
-
-/** Spawn the process the entry says should run next: the pending order at its
- * own budget, or a resident. Silent if the host is gone. */
-function respawnFromEntry(ns: NS, host: string, residentGb: number): void {
-  try {
-    const entry = live()?.hosts.get(host);
-    const next = entry?.pendingOrder;
-    ns.spawn(
-      ns.getScriptName(),
-      next !== undefined
-        ? temporaryRunOptions({ threads: next.threads, spawnDelay: 0, ramOverride: next.ramOverrideGb })
-        : temporaryRunOptions({ threads: 1, spawnDelay: 0, ramOverride: residentGb }),
-      host,
-    );
-  } catch {
-    /* host gone, or the post-spawn ScriptDeath — nothing after this runs */
-  }
-}
-
-/** Resident mode: register an idle handle, beat, wait for work. When the
- * controller stages an order, hand `staged[0]` to a fresh process and spawn. */
-async function runAsResident(ns: NS, host: string, residentGb: number, controllerManaged: boolean): Promise<void> {
-  const state = { deliberate: false };
-  // A resident killed by a host restart drops its handle and wakes the
-  // controller, but never inserts a replacement into the live killall iterator.
-  const onDeath = (): void => {
-    const entry = live()?.hosts.get(host);
-    if (entry?.agent?.pid === ns.pid) entry.agent = undefined;
-    live()?.wake("resident-died");
-  };
-  // Resident death does not self-handoff: it settles and lets the controller
-  // replant. Suppress the respawn by not staging a pendingOrder — but the hook
-  // would still spawn a resident, which is correct here (a live host keeps its
-  // resident). So a plain resident kill DOES respawn a resident; only a host
-  // restart/delete makes the spawn throw and stop. That matches the old design.
-  armRespawn(ns, host, residentGb, state, onDeath, !controllerManaged);
-
-  const startupAt = Date.now();
-  let sawController = false;
-  for (;;) {
-    const g = live();
-    if (!g) {
-      if (sawController || Date.now() - startupAt >= CONTROLLER_STARTUP_GRACE_MS) {
-        state.deliberate = true;
-        return;
-      }
-      await realmSleep(RESIDENT_POLL_MS);
-      continue;
-    }
-    sawController = true;
-    const entry = ensureEntry(g, host);
-
-    // Register / refresh the idle handle so the controller can see this resident
-    // and stage work beside it.
-    if (entry.agent?.pid !== ns.pid || entry.agent.order.kind !== "idle") {
-      g.adopt(host, makeHandle(ns, idleOrder(host, residentGb)));
-    } else {
-      entry.agent.beatAt = Date.now();
-    }
-
-    const staged = entry.staged ??= [];
-
-    // A one-off riding in the queue must launch BESIDE the main order, not
-    // after it — the whole point is that their 6 s calls align. Residents never
-    // carry `exec` (1.3 GB, and PER THREAD on a sized order), so hop through a
-    // transient 1-thread `launchSidecar` process that execs the one-off and
-    // then chains into the main order like any completing order.
-    if (!controllerManaged && entry.sidecar === undefined && entry.sidecarOrder === undefined
-      && staged.some((order) => order.oneOff === true)) {
-      entry.pendingOrder = launcherOrder(ns.getScriptName(), host, priceCalls(ns, orderCalls("launchSidecar", false)));
-      entry.pendingOrderAt = Date.now();
-      state.deliberate = true;
-      respawnFromEntry(ns, host, residentGb);
-      return;
-    }
-
-    // Skip any one-off left in the queue (sidecar slot occupied, or a managed
-    // host that cannot hop): only ordinary orders enter the spawn chain.
-    const next = staged.find((order) => order.oneOff !== true);
-    if (next) {
-      if (controllerManaged) {
-        // Stasis idle resident, spawn-free: it cannot run the staged order
-        // itself (a heavier RAM size). Leave the order in the durable staged
-        // queue and wake the controller, which re-execs the host from a free
-        // neighbour (the controller itself has no `exec`).
-        if (entry.agent?.pid === ns.pid) entry.agent = undefined;
-        state.deliberate = true;
-        g.wake("stasis-dispatch-requested");
-        return;
-      }
-      staged.splice(staged.indexOf(next), 1);
-      entry.pendingOrder = next;
-      entry.pendingOrderAt = Date.now();
-      state.deliberate = true;
-      respawnFromEntry(ns, host, residentGb);
-      return;
-    }
-
-    await waitForWake(entry, RESIDENT_POLL_MS);
-  }
+  }, "dnet-exit");
 }
 
 /** The `AgentIo` an order body talks to. `isCurrent` gates every write on the
- * handle still owning its slot (agent OR sidecar): a hard-killed order whose
- * zombie `await` resumes must not stamp the map for the process that replaced
- * it. Shared by the main-order and one-off runners, whose only difference is
- * which slot they check. */
+ * handle still owning its slot: a hard-killed order whose zombie `await`
+ * resumes must not stamp the map for the process that replaced it. */
 function orderIo(g: ControllerHandle, order: Order, handle: AgentHandle, isCurrent: () => boolean): AgentIo {
   return {
     beat: (progress) => {
@@ -258,6 +203,15 @@ function orderIo(g: ControllerHandle, order: Order, handle: AgentHandle, isCurre
       else order.expectedDoneAt = at;
     },
     cancelled: () => (isCurrent() ? handle.cancelReason : "orphaned"),
+    hold: (release) => {
+      if (!isCurrent()) return;
+      handle.release = release;
+    },
+    // NOT gated on `isCurrent`. This is a fact about the PROCESS, not about
+    // who owns the slot: the engine call is outstanding either way, and an
+    // orphaned handle that drops it would send the exit path straight into a
+    // CONCURRENCY ERROR.
+    inFlight: (settling) => { handle.inFlight = settling; },
     deps: g.deps,
   };
 }
@@ -269,18 +223,31 @@ async function runOrderToReport(ns: NS, order: Order, io: AgentIo): Promise<Repo
   try {
     return { ...tag, ...(await runOrder(ns, order, io)) };
   } catch (error) {
+    // Released, not failed: the controller decided this work no longer
+    // mattered while we were waiting on a call, and we stopped waiting. The
+    // process goes on to its exit path and its next job.
+    if (error === RELEASED) {
+      return { ...tag, ok: false, targetState: "cancelled", detail: io.cancelled() ?? "released" };
+    }
     return { ...tag, ok: false, detail: `${order.kind}: ${String(error)}`.slice(0, 200) };
   }
 }
 
-/** Order mode: run one order to completion, then atExit into the next. */
-async function runAsOrder(ns: NS, g: ControllerHandle, entry: HostEntry, order: Order, residentGb: number): Promise<void> {
+/** Order mode: run one order to completion, then spawn into the next.
+ *
+ * ONE order per process, always. The successor gets a `spawn` even when its
+ * allocation is smaller, and that is not an oversight to optimise away: the
+ * engine's dynamic RAM check charges a process for the UNION of every `ns`
+ * member it has ever called, so a second order run in the same process owes
+ * for both surfaces and is killed the moment the union exceeds what the exec
+ * was sized for. Chaining two orders here read as `killed mid-order` — no
+ * cancel reason, no codes — and left the host holding its prober alone.
+ * Resetting that charge is the whole reason `spawn` is in this path. */
+async function runAsOrder(ns: NS, g: ControllerHandle, entry: HostEntry, order: Order, guard?: { armed: boolean }): Promise<void> {
   const startedAt = Date.now();
   order.startedAt = startedAt;
   delete order.expectedDoneAt;
   const state = { deliberate: false };
-  const controllerManaged = order.controllerManaged === true;
-  const respawns = !controllerManaged && !NO_RESPAWN_KINDS.has(order.kind);
 
   let settled = false;
   let settleDone!: (r: Report) => void;
@@ -296,21 +263,19 @@ async function runAsOrder(ns: NS, g: ControllerHandle, entry: HostEntry, order: 
     order,
     startedAt,
     beatAt: startedAt,
-    armored: false,
     done,
     settle,
   };
 
   // The death path: settle (cancelled if the controller marked a reason, else
-  // died) and stage the successor only for a controller kill of a respawning
-  // kind. A plain game kill drops the handle and spawns nothing.
+  // died), drop the handle, and tell the controller. It launches whatever comes
+  // next — this process never did, and no longer carries the `spawn` it would
+  // have needed to.
   //
-  // `atExitRan` is the whole reason the tail below must be guarded: a hard kill
-  // runs THIS synchronously inside the killer's `ns.kill`, and the killed
-  // process's blocked `await` then resumes as a ZOMBIE — its `ns` call throws
-  // ScriptDeath, the `catch` swallows it, and the tail would otherwise run a
-  // SECOND `stageSuccessor`, orphaning the successor this atExit already staged
-  // and spawned. So once this has fired, the tail does nothing.
+  // `atExitRan` still guards the tail: a hard kill runs THIS synchronously
+  // inside the killer's `ns.kill`, and the killed process's blocked `await`
+  // then resumes as a ZOMBIE whose `ns` call throws ScriptDeath into a `catch`.
+  // Once this has fired, the tail must not touch the map again.
   let atExitRan = false;
   const onDeath = (): void => {
     atExitRan = true;
@@ -318,20 +283,13 @@ async function runAsOrder(ns: NS, g: ControllerHandle, entry: HostEntry, order: 
     const cancelled = handle.cancelReason !== undefined;
     handle.pid = 0;
     settle(terminal(order, cancelled ? "cancelled" : undefined, handle.cancelReason ?? "killed mid-order", cancelled ? false : true));
-    if (cancelled && respawns) {
-      stageSuccessor(entry);
-    } else {
-      if (entry.agent === handle) entry.agent = undefined;
-      entry.pendingOrder = undefined;
-      // A stasis order that DIED reported it through `settle` above, but the
-      // controller's `onReport` does not wake the derive on a death. Wake it
-      // explicitly so the host is re-staffed promptly rather than waiting for
-      // the mutation sweep.
-      if (controllerManaged) g.wake("stasis-order-died");
-    }
+    if (entry.agent === handle) entry.agent = undefined;
+    entry.pendingOrder = undefined;
+    // CHECK OUT. The host is free the instant this returns, and the controller
+    // is the only thing that can act on that.
+    g.wake("order-died");
   };
-  armRespawn(ns, host_of(order), residentGb, state, onDeath, respawns);
-  handle.armored = respawns; // pin/walk never arm the respawn spawn.
+  armExit(ns, state, onDeath, guard);
 
   g.adopt(order.from, handle);
 
@@ -344,40 +302,38 @@ async function runAsOrder(ns: NS, g: ControllerHandle, entry: HostEntry, order: 
     settle(result);
   }
 
-  // A hard kill already ran `onDeath` synchronously (staging and spawning the
-  // successor inside the killer's `ns.kill`); anything past here is the killed
-  // process's zombie continuation, which must not touch the map again.
+  // The report is published; the ENGINE may not be finished. A released body
+  // walked away from a call that still holds this script's one Netscript slot,
+  // and everything below — `wakeOnExit`'s `atExit`, the handle drop —
+  // is an `ns` call that would throw CONCURRENCY ERROR and take the host's
+  // agent with it. Settling first costs this process the remainder of a call
+  // it could not have cancelled anyway; the controller was freed to re-plan at
+  // the moment of release, which is the part that mattered.
+  if (handle.inFlight !== undefined) {
+    try { await handle.inFlight; } catch { /* the engine's problem, not ours */ }
+    handle.inFlight = undefined;
+  }
+
+  // A hard kill already ran `onDeath` synchronously; anything past here is the
+  // killed process's zombie continuation, which must not touch the map again.
   if (atExitRan) return;
 
-  // Deliberate exit: stage the successor and spawn into it (respawning kinds).
+  // DELIBERATE EXIT. Drop the handle and say so — the controller launches the
+  // next order through this host's lender, so there is nothing here to choose,
+  // size, or spawn into.
+  //
+  // The `derived()` barrier this replaced existed only because the exiting
+  // worker picked its own successor and had to wait for the controller to
+  // decide first. Nobody picks a successor here any more, so the race it
+  // closed cannot happen, and `[dnet:spin]` — the wasted resident hop it was
+  // failing to prevent — has nothing left to describe.
   state.deliberate = true;
   handle.pid = 0;
-  if (respawns) {
-    // Spawn-capable: poll the successor into `pendingOrder` and spawn into it.
-    stageSuccessor(entry);
-    respawnFromEntry(ns, order.from, residentGb);
-  } else {
-    // No spawn. The successor stays in the durable staged queue and the host
-    // is left empty for re-staffing from outside — a stasis order's successor
-    // by the controller's re-exec, pin/walk by the spread planner. Both just
-    // wake the derive.
-    if (entry.agent === handle) entry.agent = undefined;
-    entry.pendingOrder = undefined;
-    g.wake(controllerManaged ? "stasis-order-finished" : "order-finished");
-  }
+  if (entry.agent === handle) entry.agent = undefined;
+  entry.pendingOrder = undefined;
+  wakeOnExit(ns, "order-finished");
 }
 
-/** Move the first ORDINARY staged order into `pendingOrder` for the next
- * spawn; absent → resident. A `oneOff` order is never a successor: only the
- * resident's `launchSidecar` hop may claim it, at its spawn-free sizing. */
-function stageSuccessor(entry: HostEntry): void {
-  const staged = entry.staged ??= [];
-  const at = staged.findIndex((order) => order.oneOff !== true);
-  const next = at < 0 ? undefined : staged.splice(at, 1)[0];
-  entry.pendingOrder = next;
-  if (next !== undefined) entry.pendingOrderAt = Date.now();
-  entry.agent = undefined; // the successor process adopts its own handle
-}
 
 function makeHandle(ns: NS, order: Order): AgentHandle {
   let settle!: (r: Report) => void;
@@ -388,7 +344,6 @@ function makeHandle(ns: NS, order: Order): AgentHandle {
     order,
     startedAt,
     beatAt: startedAt,
-    armored: false,
     done: new Promise<Report>((resolve) => { settle = resolve; }),
     settle: (r) => settle(r),
   };
@@ -403,68 +358,6 @@ function terminal(order: Order, targetState: "cancelled" | undefined, detail: st
   };
 }
 
-/** One-off mode: run the order the `launchSidecar` hop staged into
- * `entry.sidecarOrder`, reporting through the entry's SIDECAR slot beside the
- * main agent. No resident, no spawn, no successor — death settles and clears
- * the slot, and the controller kills this pid whenever the vantage retires. */
-async function runAsOneOff(ns: NS, host: string): Promise<void> {
-  const g = live();
-  const entry = g?.hosts.get(host);
-  const order = entry?.sidecarOrder;
-  if (g === undefined || entry === undefined || order === undefined || entry.sidecar !== undefined) return;
-  entry.sidecarOrder = undefined;
-
-  const handle = makeHandle(ns, order);
-  delete order.expectedDoneAt;
-
-  ns.atExit(() => {
-    delete order.expectedDoneAt;
-    handle.pid = 0;
-    const cancelled = handle.cancelReason !== undefined;
-    handle.settle(terminal(order, cancelled ? "cancelled" : undefined, handle.cancelReason ?? "one-off killed mid-order", !cancelled));
-    if (entry.sidecar === handle) entry.sidecar = undefined;
-  }, "dnet-oneoff");
-
-  g.adopt(host, handle, true);
-
-  const io = orderIo(g, order, handle, () => entry.sidecar === handle);
-  const result = await runOrderToReport(ns, order, io);
-  delete order.expectedDoneAt;
-  handle.settle(result);
-  // The exit right behind this return fires the atExit, which zeroes the pid
-  // and clears the slot; its terminal settle is a no-op after this one.
-}
-
-/** The transient 1-thread hop that execs a linked one-off. Synthesized by the
- * resident (never by the controller), so it carries the script name along. */
-function launcherOrder(scriptFile: string, host: string, ramOverrideGb: number): Order {
-  return {
-    id: `launchSidecar:${host}:${Date.now()}`,
-    kind: "launchSidecar",
-    host,
-    from: host,
-    filename: scriptFile,
-    ramOverrideGb,
-    threads: 1,
-    priority: 0,
-    longLived: false,
-    label: "sidecar hop",
-  };
-}
-
-function idleOrder(host: string, ramOverrideGb: number): Order {
-  return {
-    id: `idle:${host}`,
-    kind: "idle",
-    host,
-    from: host,
-    ramOverrideGb,
-    threads: 1,
-    priority: 1_000_000,
-    longLived: false,
-    label: "resident",
-  };
-}
 
 function host_of(order: Order): string {
   return order.from;
