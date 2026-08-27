@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  credentialRejectionApplies,
   invalidatedPersistedBackdoors,
   parsePersistedDnetState,
   serializePersistedDnetState,
@@ -26,13 +25,6 @@ const backdoors: PersistedBackdoorEntry[] = [
 ];
 
 describe("private darknet state persistence", () => {
-  test("a rejection removes only the credential version it disproved", () => {
-    const held = entries[0]!;
-    expect(credentialRejectionApplies(held, { hostname: held.hostname, identity: "ip-1", at: 1_001 })).toBe(true);
-    expect(credentialRejectionApplies(held, { hostname: held.hostname, identity: "replacement", at: 1_001 })).toBe(false);
-    expect(credentialRejectionApplies({ ...held, at: 2_000 }, { hostname: held.hostname, identity: "ip-1", at: 1_001 })).toBe(false);
-  });
-
   test("a same-generation round-trip restores credentials and backdoors", () => {
     expect(parsePersistedDnetState(serializePersistedDnetState(GEN, entries, backdoors), GEN))
       .toEqual({ vault: entries, backdoors });

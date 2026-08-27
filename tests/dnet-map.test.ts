@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { AUTH_LABEL, BOX_H, BOX_W, COL_PITCH, MAP_W, NET_WIDTH, isStale, layoutNet, matches, netLegend, netMap, ramBuckets } from "../ui/app/tabs/dnet-map.ts";
 import { TABS } from "../ui/app/tabs/index.ts";
 import { emptyState } from "../ui/app/project.ts";
@@ -23,6 +24,15 @@ function host(over: Partial<DarknetKnownHost> & { hostname: string }): DarknetKn
 // to disbelieve".
 const NOW = 1_000;
 const OPTIONS = { selected: "", query: "", zoom: 60, edges: "tree", now: NOW, expiry: {} };
+
+beforeAll(() => GlobalRegistrator.register());
+afterAll(() => { void GlobalRegistrator.unregister(); });
+
+function parseMap(markup: string): SVGElement {
+  const template = document.createElement("template");
+  template.innerHTML = markup;
+  return template.content.querySelector("svg.netmap")!;
+}
 
 describe("layout puts the net on the game's grid", () => {
   test("darkweb gets its own row above depth 0, centred", () => {
@@ -433,13 +443,13 @@ describe("the rendered SVG", () => {
   });
 
   test("every host is drawn exactly once, with a stable key", () => {
-    const html = netMap(hosts, OPTIONS);
-    expect(html).toContain("<svg");
-    expect(html.split('data-key="node:').length - 1).toBe(2);
+    const map = parseMap(netMap(hosts, OPTIONS));
+    expect(map.getAttribute("role")).toBe("img");
+    expect(map.querySelectorAll('[data-key^="node:"]')).toHaveLength(2);
     // The key is what lets morph MOVE a node whose depth changed instead of
     // rebuilding it, which is what keeps hover and the native tooltip alive.
-    expect(html).toContain('data-key="node:dn-1"');
-    expect(html).toContain('data-key="edge:darkweb&gt;dn-1"');
+    expect(map.querySelector('[data-key="node:dn-1"]')).not.toBeNull();
+    expect(map.querySelector('[data-key="edge:darkweb>dn-1"]')).not.toBeNull();
   });
 
   test("every data-key in the map is unique, including the row gutter", () => {
@@ -454,8 +464,8 @@ describe("the rendered SVG", () => {
       host({ hostname: "th3_l4byr1nth", depth: -1, modelId: "(The Labyrinth)" }),
       host({ hostname: "rumour" }),
     ];
-    const html = netMap(crowded, { ...OPTIONS, edges: "all" });
-    const keys = [...html.matchAll(/data-key="([^"]+)"/g)].map((match) => match[1]!);
+    const map = parseMap(netMap(crowded, { ...OPTIONS, edges: "all" }));
+    const keys = [...map.querySelectorAll("[data-key]")].map((element) => element.getAttribute("data-key")!);
     expect(keys.length).toBeGreaterThan(0);
     expect(new Set(keys).size).toBe(keys.length);
   });
@@ -463,22 +473,24 @@ describe("the rendered SVG", () => {
   test("selection is declarative, so main.ts needs no change", () => {
     // The delegated handler in main.ts resolves closest() on SVG elements and
     // SVGElement carries .dataset, so a data attribute is the whole mechanism.
-    const html = netMap(hosts, OPTIONS);
-    expect(html).toContain('data-view-key="dnet.sel" data-view-value="dn-1"');
-    expect(netMap(hosts, { ...OPTIONS, selected: "dn-1" })).toContain("node auth-auth-required sel");
+    const map = parseMap(netMap(hosts, OPTIONS));
+    expect(map.querySelector('[data-view-key="dnet.sel"][data-view-value="dn-1"]')).not.toBeNull();
+    const selected = parseMap(netMap(hosts, { ...OPTIONS, selected: "dn-1" }));
+    expect(selected.querySelector('[data-key="node:dn-1"]')?.classList.contains("sel")).toBe(true);
   });
 
   test("a box carries what the in-game box carries, plus the RAM", () => {
-    const html = netMap(hosts, OPTIONS);
-    expect(html).toContain("dn-1");
-    expect(html).toContain("cha:120");
-    expect(html).toContain("[ auth required ]");
+    const map = parseMap(netMap(hosts, OPTIONS));
+    const node = map.querySelector('[data-key="node:dn-1"]')!;
+    expect(node.textContent).toContain("dn-1");
+    expect(node.textContent).toContain("cha:120");
+    expect(node.textContent).toContain("[ auth required ]");
     // The in-game box only hints at blocked RAM with a lock icon; we show the
     // split, because it is what decides whether an agent fits at all.
-    expect(html).toContain('class="ram used ram-used"');
-    expect(html).toContain('class="ram unused ram-unused"');
-    expect(html).toContain('class="ram blocked ram-blocked"');
-    expect(html).toContain("T/B/U/- 16/4/5/7");
+    expect(node.querySelector(".ram.used")).not.toBeNull();
+    expect(node.querySelector(".ram.unused")).not.toBeNull();
+    expect(node.querySelector(".ram.blocked")).not.toBeNull();
+    expect(node.textContent).toContain("T/B/U/- 16/4/5/7");
   });
 
   test("zoom changes the width attribute and never the viewBox", () => {
@@ -502,9 +514,11 @@ describe("the rendered SVG", () => {
   });
 
   test("edge modes drop links without dropping hosts", () => {
-    expect(netMap(hosts, { ...OPTIONS, edges: "none" })).not.toContain('data-key="edge:');
-    expect(netMap(hosts, { ...OPTIONS, edges: "all" })).toContain('data-key="edge:');
-    expect(netMap(hosts, { ...OPTIONS, edges: "none" }).split('data-key="node:').length - 1).toBe(2);
+    const hidden = parseMap(netMap(hosts, { ...OPTIONS, edges: "none" }));
+    const shown = parseMap(netMap(hosts, { ...OPTIONS, edges: "all" }));
+    expect(hidden.querySelector('[data-key^="edge:"]')).toBeNull();
+    expect(shown.querySelector('[data-key^="edge:"]')).not.toBeNull();
+    expect(hidden.querySelectorAll('[data-key^="node:"]')).toHaveLength(2);
   });
 
   test("an edge reported from both ends is drawn once", () => {
@@ -515,14 +529,14 @@ describe("the rendered SVG", () => {
       host({ hostname: "a", depth: 0, neighbours: ["b"] }),
       host({ hostname: "b", depth: 1, neighbours: ["a"] }),
     ];
-    expect(netMap(mutual, { ...OPTIONS, edges: "all" }).split('data-key="edge:').length - 1).toBe(1);
+    expect(parseMap(netMap(mutual, { ...OPTIONS, edges: "all" })).querySelectorAll('[data-key^="edge:"]')).toHaveLength(1);
   });
 
   test("hostile text is escaped in both the box and its tooltip", () => {
     const nasty = [host({ hostname: "<script>x</script>&", depth: 0, passwordHint: "a & b" })];
-    const html = netMap(nasty, OPTIONS);
-    expect(html).not.toContain("<script>");
-    expect(html).toContain("&lt;script&gt;");
+    const map = parseMap(netMap(nasty, OPTIONS));
+    expect(map.querySelector("script")).toBeNull();
+    expect(map.textContent).toContain("<script>x</script>&");
   });
 
   test("matches searches the fields an operator would actually type", () => {
@@ -633,6 +647,8 @@ describe("the key describes the map, and not something near it", () => {
       modelId: "(Dictionary)",
       maxRam: 8,
       facts: { modelId: 1, maxRam: 1, requiredCharisma: 1, depth: 1, neighbours: 1 },
+      // A mutation dirtied everything perishable and no refresh has landed yet.
+      dirty: { position: true, topology: true, ram: true, files: true },
     }),
   ];
 
@@ -666,21 +682,23 @@ describe("the key describes the map, and not something near it", () => {
 describe("the fade is keyed on the facts that can actually go stale", () => {
   const OLD = NOW + 60 * 60 * 1000;
 
-  test("a host whose position and topology have expired is stale, identity and all", () => {
+  test("a host whose position and topology were dirtied by a mutation is stale, identity and all", () => {
     // THE defect this replaced: `isStale` was `every` over ALL of `host.facts`,
-    // and `expiryMs("identity")` is Infinity, so a single modelId — which every
-    // report carries — held the fade off forever. An hour-old depth read as
-    // confirmed on a net that rewires itself every few seconds.
+    // and identity never expires, so a single modelId — which every report
+    // carries — held the fade off forever.
     const drifted = host({
       hostname: "dn-drifted",
       depth: 3,
       modelId: "(Dictionary)",
       facts: { modelId: 1, passwordLength: 1, depth: 1, neighbours: 1 },
+      dirty: { position: true, topology: true },
     });
     expect(isStale(drifted, OLD, {})).toBe(true);
-    // Fresh position, ancient identity: nothing to disbelieve.
-    expect(isStale(host({ ...drifted, facts: { modelId: 1, depth: OLD, neighbours: OLD } }), OLD, {}))
-      .toBe(false);
+    // Age alone is not staleness: the same host an hour on, with the mutation
+    // refresh landed, has nothing to disbelieve.
+    expect(isStale(host({ ...drifted, dirty: {} }), OLD, {})).toBe(false);
+    // And one perishable group still believed is enough to hold the fade off.
+    expect(isStale(host({ ...drifted, dirty: { position: true } }), OLD, {})).toBe(false);
   });
 
   test("nothing that cannot expire is counted as expired", () => {

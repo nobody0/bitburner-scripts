@@ -148,7 +148,6 @@ export function runFarmCase(
   const vault = new Set<string>();
   const stasisLinked = new Set<string>();
   const agents = new Map<string, Agent>();
-  const lastPlantAt = new Map<string, number>();
   const tried = new Map<string, number>();
   const crackCost = new Map<string, number | undefined>();
 
@@ -320,7 +319,6 @@ export function runFarmCase(
       if (!truth(name)) continue;
       if (maxRamOf(name) - truth(name)!.blockedRam < DEFAULT_SPREAD_LIMITS.agentRamGb) continue;
       agents.set(name, {});
-      lastPlantAt.set(name, clock);
     }
     agents.set("darkweb", {});
   }
@@ -355,7 +353,6 @@ export function runFarmCase(
       const candidates = candidatesFrom(knowledge, clock, {
         standing,
         vault,
-        lastPlantAt,
         remoteExec: new Set(stasisLinked),
         remoteVantages: [...agents.keys()].map((host) => ({ host, freeGb: jobFreeGb(host) })),
         stasisLinked,
@@ -365,7 +362,6 @@ export function runFarmCase(
       for (const plant of planSpread(candidates, DEFAULT_SPREAD_LIMITS, clock).plant) {
         if (plant.host === walkerHost || agents.has(plant.host) || !truth(plant.host)) continue;
         agents.set(plant.host, plant.bootstrapReclaim === true ? { bootstrap: true } : {});
-        lastPlantAt.set(plant.host, clock);
         fold([
           observeHost(plant.host),
           { hostname: plant.host, at: clock, present: true, neighbours: system.probeFrom(plant.host) },

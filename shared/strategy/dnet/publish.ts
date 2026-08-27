@@ -99,7 +99,6 @@ function solveProgress(state: Record<string, unknown> | undefined): { solve?: { 
 /** A solver's phase name is a label like `bisect` or `probe`. Anything longer is
  * not a label, and a cap costs nothing to enforce. */
 const PHASE_MAX = 32;
-const RUNTIME_RAM_MAX_AGE_MS = 60_000;
 
 export interface PublishOptions {
   netDepth?: number;
@@ -159,7 +158,13 @@ export function publishHost(
   const entry = modelEntry(values["modelId"] as string | undefined);
   const ledger = host.attempts;
   const ram = opts.ram?.get(host.hostname);
-  const liveRam = !gone && ram !== undefined && now - ram.at <= RUNTIME_RAM_MAX_AGE_MS ? ram : undefined;
+  // Not aged out. Three of this sample's four fields cannot go stale on a
+  // clock — `total` never changes and is re-read on every `getServerDetails`,
+  // and `blocked` has its own dirty bit — so a 60s cutoff hid the whole RAM
+  // readout, durable fields included, over one volatile one. The sample is
+  // replaced when a newer one arrives and carries `at` so the panel can say
+  // how old it is. A gone host keeps nothing.
+  const liveRam = gone ? undefined : ram;
 
   return {
     hostname: host.hostname,

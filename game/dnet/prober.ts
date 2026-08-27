@@ -3,65 +3,74 @@ import { captureLaunch } from "../lib/launch-shared.ts";
 import type { DnetProberLaunch } from "./launch.ts";
 import { live } from "./shared.ts";
 
-/** The prober: the one darknet process that MUST stand on its host.
+/** The prober: the one darknet process that MUST stand on its host, and the
+ * host's whole standing cost.
  *
- * `probe()` is host-local — it returns the neighbours of the calling script's own
- * host and nothing else (`spec/dnet.md`) — so adjacency can only be learned by a
- * process standing there. Everything else about a host (its model, RAM, caches)
- * the controller reads for itself from darkweb with no connection, so this process
- * does that ONE thing and nothing more: on boot, and on every net mutation, it
- * probes and files the result to the controller, then blocks on the mutation clock.
+ * It does not act. It LENDS.
  *
- * It never competes with the worker for the host's single job slot, which is the
- * whole point — while the worker is seconds deep in an `authenticate`, this keeps
- * the map's adjacency current the instant the net changes.
+ * Every Bitburner script runs in one JS realm, so an `ns` is a live object
+ * bound to its owning process and a call made through it is billed to that
+ * process's `ramOverride`. So this process publishes its own `ns` into the
+ * host's entry and then does nothing at all: the controller decides, and this
+ * allocation pays for the two calls that cannot be made from anywhere else.
  *
- * **No safety net — 1.8 GB flat.** Unlike the resident, the prober carries no
- * `spawn` (2 GB) and no `getServerMaxRam`: its whole cost is `SCRIPT_BASE_GB` +
- * `probe` = 1.8 GB, the fixed reserve every host holds for it (`proberReserveGb`).
- * So it cannot revive itself, and it does not try — it has no atExit at all. Its
- * report stamps a timestamp into the shared `probes` map every mutation; when a
- * host RESTART kills it, that stamp simply stops advancing, and the controller
- * reads the stale `at`, sees the prober is gone, and re-`exec`s a fresh one
- * through the host's worker (a max-priority `relaunchProbe` job). A host DELETE or
- * a prestige destroys the host outright, and the successor controller never
- * re-plants a host that no longer exists. Death is an ABSENCE, not an event.
+ * - `dnet.probe` scans from the CALLING host, so adjacency can only be learned
+ *   by a process standing here.
+ * - `exec` reaches only self and connected, so a worker on this host can only
+ *   be launched from here (or from a neighbour — `exec` takes its target as an
+ *   argument, which is what makes recovery possible when this process dies).
+ *
+ * Everything else the controller needs is global — `kill` by pid,
+ * `getServerDetails`, `dnsLookup`, `getServerMaxRam` — and is dodged for the
+ * length of one batch rather than reserved on every host forever.
+ *
+ * **It must hold no Netscript call of its own.** Bitburner allows one per
+ * script: while `env.runningFn` is set, every borrowed call would throw
+ * CONCURRENCY ERROR. So it parks on a plain unresolved Promise, which is not a
+ * call and holds nothing. NEVER `ns.asleep` — that is a call, and it would make
+ * the lent `ns` useless while looking perfectly idle. This is the single line
+ * the whole design rests on.
+ *
+ * That is also why the mutation clock moved to the controller. This process
+ * used to block on `dnet.nextMutation()` forever, which is precisely the state
+ * that makes an `ns` unlendable.
+ *
+ * **Death is an event now, not an absence.** The `atExit` clears the lent `ns`
+ * and wakes the controller, so a host that has lost its launcher says so in the
+ * same engine turn instead of being inferred from a stale timestamp. The
+ * controller re-execs a replacement through a neighbour; this process still
+ * cannot revive itself and still does not try.
  *
  * The one rule it shares with `agent.ts`: no billable `ns` member beyond
- * `PROBER_METHODS` (`probe`, `nextMutation`), because its cost is the
- * `ramOverride` its launcher declares, pinned by `tests/ram-budget.test.ts`. */
+ * `PROBER_CALLS` (`dnet.probe`, `exec`), because its cost is the `ramOverride`
+ * its launcher declares, pinned by `tests/ram-budget.test.ts`. Note that it
+ * REFERENCES neither — they are called through the lent object by someone
+ * else — so the budget is a promise this file cannot keep on its own. */
 export async function main(ns: NS): Promise<void> {
   ns.disableLog("ALL");
 
-  const launch = captureLaunch<DnetProberLaunch>("dnet-prober");
+  const launch = captureLaunch<DnetProberLaunch>("dnet-prober", ns.args[0]);
   if (!launch) return;
   const host = launch.host;
 
-  // Probe once immediately (a freshly planted host must appear on the map now,
-  // not at the next mutation), then on every mutation. Each report stamps this
-  // host's neighbours, the time, and OUR pid — the pid so the controller can kill
-  // us if this host becomes a lab walker.
-  let first = true;
-  for (;;) {
-    // Resolved from the LIVE rendezvous every pass, never held across the await:
-    // a controller dies with darkweb and a re-seed installs a fresh one of the
-    // same generation. A gap between the two is "not yet", not "never" — skip the
-    // report and try again after the next mutation. The prober keeps running
-    // across a re-seed untouched, so the successor controller just starts receiving
-    // its reports again; no death, no revival.
-    const controller = live();
-    if (controller) {
-      controller.reportProbe(host, ns.dnet.probe(), Date.now(), ns.pid, first ? launch.refresh : undefined);
-      if (first) {
-        first = false;
-      }
-    }
-    // Block until the net changes. 0 GB, and a kill delivered while awaiting is a
-    // clean ScriptDeath — the loop just ends. The controller notices the stale
-    // stamp and re-establishes us through the agent.
-    await ns.dnet.nextMutation();
-    // All waiters resolving in this engine turn observe the same realm time;
-    // the controller coalesces them before the next topology report.
-    live()?.noteMutation(Date.now());
-  }
+  const controller = live();
+  if (!controller) return;
+  // CHECK OUT before checking in, so the ordering cannot be forgotten: the
+  // engine runs `atExit` on a kill as well as a clean exit, which makes this
+  // the only place that can promise the lent `ns` is retracted the moment it
+  // stops being callable. Guarded on identity — a replacement prober may
+  // already have published its own, and this one must not retract that.
+  ns.atExit(() => {
+    const held = live()?.hosts.get(host);
+    if (held?.ns === ns) held.ns = undefined;
+    live()?.wake("prober-died");
+  }, "dnet-prober-checkout");
+
+  // CHECK IN. The controller probes through the lent `ns` inside this call, so
+  // a freshly planted host is on the map before this line returns — which is
+  // what the plant's first-probe barrier is waiting for.
+  controller.lend(host, ns, ns.pid, launch.refresh);
+
+  // Nothing else, for ever. Not `ns.asleep`: see above.
+  await new Promise<never>(() => {});
 }

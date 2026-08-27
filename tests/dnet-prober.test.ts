@@ -14,139 +14,137 @@ const HOST = "hydro_org";
 const NEIGHBOURS = ["darkweb", "stasis_link", "hydro_org_cache"];
 const PROBER_PID = 4242;
 
-/** A minimal live controller: it accepts probe reports (storing them on the
- * host entry exactly as the real controller does) and counts derive wakes. */
-function installController(): { controller: ControllerHandle; wakes: () => number } {
-  let wakeCount = 0;
+/** A minimal live controller that does what the real one does with a lender:
+ * keeps the `ns`, and probes THROUGH it rather than waiting to be told. */
+function installController(): {
+  controller: ControllerHandle;
+  hosts: Map<string, HostEntry>;
+  wakes: () => string[];
+} {
+  const wakes: string[] = [];
   const hosts = new Map<string, HostEntry>();
   const controller = {
     protocol: DNET_PROTOCOL,
     generation: "15:0",
     hosts,
     mutationEpoch: 0,
-    noteMutation(at: number) {
-      void at;
-      controller.mutationEpoch++;
-      return controller.mutationEpoch;
-    },
-    wake() { wakeCount++; },
-    reportProbe(host: string, neighbours: readonly string[], at: number, pid: number, refresh?: DnetProbeRefresh) {
-      const entry = hosts.get(host) ?? { hostname: host, lastSeenAt: at, seenAt: {}, dirty: {}, staged: [] };
-      entry.prober = { neighbours: [...neighbours], at, pid, epoch: controller.mutationEpoch };
+    wake(cause: string) { wakes.push(cause); },
+    lend(host: string, borrowed: NS, pid: number, refresh?: DnetProbeRefresh) {
+      const entry = hosts.get(host)
+        ?? { hostname: host, lastSeenAt: 0, seenAt: {}, dirty: {}, staged: [] };
+      entry.ns = borrowed;
+      const neighbours = borrowed.dnet.probe();
+      entry.prober = { neighbours: [...neighbours], at: Date.now(), pid, epoch: 0 };
       hosts.set(host, entry);
-      refresh?.settle({ host, neighbours, at, pid });
-      wakeCount++;
+      refresh?.settle({ host, neighbours, at: Date.now(), pid });
     },
   } as unknown as ControllerHandle;
   dnetRealm().dnet_controller = controller;
-  return { controller, wakes: () => wakeCount };
+  return { controller, hosts, wakes: () => wakes };
 }
 
-function mutationGate(): { wait: Promise<void>; fire: () => void } {
-  let fire!: () => void;
-  const wait = new Promise<void>((resolve) => { fire = resolve; });
-  return { wait, fire };
+/** The prober's `ns`. `probe` is the host-bound call it exists to lend; the
+ *  exit hooks are captured so a test can fire them like the engine would. */
+function proberNs(): { ns: NS; probes: () => number; exit: () => void } {
+  let probes = 0;
+  const hooks: (() => void)[] = [];
+  const ns = {
+    disableLog: () => {},
+    pid: PROBER_PID,
+    args: [] as unknown[],
+    atExit: (fn: () => void) => { hooks.push(fn); },
+    dnet: { probe: () => { probes++; return [...NEIGHBOURS]; } },
+  } as unknown as NS;
+  return { ns, probes: () => probes, exit: () => { for (const fn of hooks) fn(); } };
+}
+
+/** Wrapped in an object on purpose: the prober's `main` never resolves, and
+ *  returning it bare from an async function would make `await` unwrap it and
+ *  hang the test on the park it is supposed to be asserting. */
+async function launch(ns: NS, refresh?: DnetProbeRefresh): Promise<{ running: Promise<void> }> {
+  let running!: Promise<void>;
+  await handoffLaunch<DnetProberLaunch>(
+    { kind: "dnet-prober", host: HOST, ...(refresh !== undefined ? { refresh } : {}) },
+    (launchId) => { (ns.args as unknown[]).push(launchId); running = proberMain(ns); return PROBER_PID; },
+  );
+  return { running };
 }
 
 afterEach(() => {
   delete dnetRealm().dnet_controller;
 });
 
-describe("the darknet prober", () => {
-  test("readiness waits until a report is stored in a live controller", async () => {
-    let gate = mutationGate();
-    let stopping = false;
-    let ready = 0;
-    const ns = {
-      disableLog: () => {},
-      pid: PROBER_PID,
-      dnet: {
-        probe: () => [...NEIGHBOURS],
-        nextMutation: async () => { await gate.wait; if (stopping) throw new Error("stop prober"); },
-      },
-    } as unknown as NS;
-
-    delete dnetRealm().dnet_controller;
-    let resolveRefresh!: (value: DnetProbeReport | undefined) => void;
-    const refresh: DnetProbeRefresh = {
-      refreshed: new Promise<DnetProbeReport | undefined>((resolve) => { resolveRefresh = resolve; }),
-      settle(value) { if (value !== undefined) ready++; resolveRefresh(value); },
-    };
-    let running!: Promise<void>;
-    await handoffLaunch<DnetProberLaunch>(
-      { kind: "dnet-prober", host: HOST, refresh },
-      () => { running = proberMain(ns); return PROBER_PID; },
-    );
-    expect(ready).toBe(0);
-
+describe("the prober lends its ns and then does nothing", () => {
+  test("it checks in, and the controller probes through the borrowed ns", async () => {
     const live = installController();
-    const firstGate = gate;
-    gate = mutationGate();
-    firstGate.fire();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(ready).toBe(1);
-    expect(live.controller.hosts.get(HOST)?.prober?.neighbours).toEqual(NEIGHBOURS);
-    expect(await refresh.refreshed).toEqual({
-      host: HOST,
-      neighbours: NEIGHBOURS,
-      at: expect.any(Number),
-      pid: PROBER_PID,
-    });
+    const { ns, probes } = proberNs();
+    let settled: DnetProbeReport | undefined;
+    const refresh: DnetProbeRefresh = {
+      refreshed: Promise.resolve(undefined),
+      settle(value) { settled = value; },
+    };
 
-    stopping = true;
-    gate.fire();
-    await expect(running).rejects.toThrow("stop prober");
+    await launch(ns, refresh);
+
+    // The prober itself never called `probe` — the CONTROLLER did, through the
+    // `ns` this process is holding RAM for. That is the whole design: the
+    // allocation is here, the decision is there.
+    expect(probes()).toBe(1);
+    expect(live.hosts.get(HOST)?.ns).toBe(ns);
+    expect(live.hosts.get(HOST)?.prober).toMatchObject({ neighbours: NEIGHBOURS, pid: PROBER_PID });
+    // The plant awaits this before it execs the agent, so a freshly planted
+    // host is on the map before the launch chain continues.
+    expect(settled).toMatchObject({ host: HOST, neighbours: NEIGHBOURS, pid: PROBER_PID });
   });
 
-  test("reports at boot and sends later mutations to the current controller", async () => {
-    let gate = mutationGate();
-    let stopping = false;
-    let probes = 0;
-    const ns = {
-      disableLog: () => {},
-      pid: PROBER_PID,
-      dnet: {
-        probe: () => { probes++; return [...NEIGHBOURS]; },
-        nextMutation: async () => { await gate.wait; if (stopping) throw new Error("stop prober"); },
-      },
-    } as unknown as NS;
+  test("it parks for ever, holding no Netscript call", async () => {
+    installController();
+    const { ns } = proberNs();
+    let finished = false;
+    void (await launch(ns)).running.then(() => { finished = true; });
 
-    const first = installController();
-    let firstReports = 0;
-    let resolveRefresh!: (value: DnetProbeReport | undefined) => void;
-    const refresh: DnetProbeRefresh = {
-      refreshed: new Promise<DnetProbeReport | undefined>((resolve) => { resolveRefresh = resolve; }),
-      settle(value) { if (value !== undefined) firstReports++; resolveRefresh(value); },
-    };
-    let running!: Promise<void>;
-    expect(await handoffLaunch<DnetProberLaunch>(
-      {
-        kind: "dnet-prober",
-        host: HOST,
-        refresh,
-      },
-      () => { running = proberMain(ns); return PROBER_PID; },
-    )).toBe(PROBER_PID);
+    // A prober that ever resolved would free the RAM the lent `ns` is billed
+    // against. A prober that AWAITED anything of its own would hold
+    // `env.runningFn` and make every borrowed call throw CONCURRENCY ERROR —
+    // which is why it parks on a plain Promise and not on `ns.asleep`.
+    for (let turn = 0; turn < 8; turn++) await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(finished, "the prober returned; its RAM and its lent ns are gone").toBe(false);
+  });
 
-    expect(probes).toBe(1);
-    expect(first.controller.hosts.get(HOST)?.prober).toMatchObject({ neighbours: NEIGHBOURS, pid: PROBER_PID, epoch: 0 });
-    expect(first.wakes()).toBe(1);
-    expect(firstReports).toBe(1);
+  test("its atExit retracts the lent ns, and says so", async () => {
+    const live = installController();
+    const { ns, exit } = proberNs();
+    await launch(ns);
+    expect(live.hosts.get(HOST)?.ns).toBe(ns);
 
-    const replacement = installController();
-    const firstGate = gate;
-    gate = mutationGate();
-    firstGate.fire();
-    await Promise.resolve();
-    await Promise.resolve();
+    // Death is an EVENT, not an absence inferred from a stale timestamp: the
+    // engine runs `atExit` on a kill too, so this is the one place that can
+    // promise a dead `ns` is never called.
+    exit();
+    expect(live.hosts.get(HOST)?.ns).toBeUndefined();
+    expect(live.wakes()).toContain("prober-died");
+  });
 
-    expect(probes).toBe(2);
-    expect(replacement.controller.hosts.get(HOST)?.prober).toMatchObject({ neighbours: NEIGHBOURS, pid: PROBER_PID, epoch: 1 });
-    expect(replacement.wakes()).toBe(1);
+  test("a late exit never retracts a REPLACEMENT's ns", async () => {
+    const live = installController();
+    const first = proberNs();
+    await launch(first.ns);
 
-    stopping = true;
-    gate.fire();
-    await expect(running).rejects.toThrow("stop prober");
+    const second = proberNs();
+    await launch(second.ns);
+    expect(live.hosts.get(HOST)?.ns).toBe(second.ns);
+
+    // The old process dies after the new one checked in. Identity is what
+    // stops it taking the live lender down with it.
+    first.exit();
+    expect(live.hosts.get(HOST)?.ns).toBe(second.ns);
+  });
+
+  test("with no controller it lends nothing and exits", async () => {
+    delete dnetRealm().dnet_controller;
+    const { ns, probes } = proberNs();
+    await (await launch(ns)).running;
+    expect(probes()).toBe(0);
   });
 });

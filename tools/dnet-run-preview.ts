@@ -82,7 +82,6 @@ console.log(
 console.log(`last action: ${JSON.stringify(latest.plan?.lastResult)}`);
 console.log(`codes: ${JSON.stringify(latest.codes)}`);
 console.log(`controller digest: ${JSON.stringify(latest.knowledge?.controller)}`);
-console.log(`channel: ${JSON.stringify(latest.channel)}`);
 console.log(`crashes: ${result.crashes.length}, unmodeled: ${JSON.stringify(result.unmodeled)}`);
 console.log(JSON.stringify(result.crashes.slice(0,3), null, 1));
 console.log(`trail (hosts/known cracked agents): ${trail.join(" ")}`);

@@ -75,23 +75,32 @@ describe("every group carries an observation time", () => {
     expect(host.lastSeenAt).toBe(1_000);
   });
 
-  test("identity fields never age out, topology fields do", () => {
-    // A host's password format cannot change while the host lives; its
-    // neighbour list is the first thing a mutation breaks.
+  test("nothing ages out — a dirty bit is the only invalidation there is", () => {
     expect(fieldGroup("passwordFormat")).toBe("identity");
     expect(fieldGroup("neighbours")).toBe("topology");
-    expect(expiryMs("identity")).toBe(Infinity);
-    expect(expiryMs("topology")).toBeLessThan(expiryMs("position"));
+    // No group has an age limit. Facts are replaced by newer observations or
+    // invalidated by a mutation marking them dirty, and by nothing else. The
+    // age fallback this replaced distrusted a neighbour list after ~27s, which
+    // stopped its host being a vantage and stalled the spread on a wall clock.
+    for (const group of ["identity", "position", "topology", "ram", "files"] as const) {
+      expect(expiryMs(group)).toBe(Infinity);
+    }
   });
 
-  test("a group past its expiry is reported stale and refused to callers", () => {
+  test("a DIRTY group is reported stale and refused to callers; age alone never is", () => {
     const hosts = mapOf(report("dn-1", 0, { neighbours: ["dn-2"], modelId: "TopPass" }));
     const host = hosts.get("dn-1")!;
-    const beyond = expiryMs("topology") + 1;
+    const beyond = 10 * 60_000;
 
     expect(groupStaleness(host, "topology", 0)!.stale).toBe(false);
     expect(fresh<string[]>(host, "neighbours", 0)).toEqual(["dn-2"]);
 
+    // Ten minutes on, with no mutation, the edge list is still believed.
+    expect(groupStaleness(host, "topology", beyond)!.stale).toBe(false);
+    expect(fresh<string[]>(host, "neighbours", beyond)).toEqual(["dn-2"]);
+
+    // A mutation marks it dirty, and only then is it refused.
+    foldReports(hosts, [report("dn-1", beyond, { invalidates: ["topology"] })], beyond);
     expect(groupStaleness(host, "topology", beyond)!.stale).toBe(true);
     // Refused, but still HELD — a caller that wants to explain the refusal can
     // still read the raw field and its age.
@@ -213,26 +222,28 @@ describe("host immunity freezes its lifetime, not its neighbours", () => {
     expect(isImmune(host)).toBe(true);
     // Upstream raises rather than move darkweb; showing this expiring in a
     // minute was the bug that made the guard worth writing.
-    const wayLater = expiryMs("position") * 100;
+    const wayLater = 100 * 60_000;
     expect(groupStaleness(host, "position", wayLater, { immune: true })!.stale).toBe(false);
     expect(fresh<number>(host, "depth", wayLater)).toBe(-1);
   });
 
-  test("a stasis link freezes position, but its neighbours can still change", () => {
+  test("a stasis link freezes position, and neighbours change only when a mutation says so", () => {
     const hosts = mapOf(report("dn-1", 0, { neighbours: ["dn-2"], depth: 3 }));
     const host = hosts.get("dn-1")!;
-    const beyond = expiryMs("topology") + 1;
+    const later = 100 * 60_000;
     const linked = { stasisLinked: new Set(["dn-1"]) };
 
     expect(isImmune(host, linked)).toBe(true);
-    expect(fresh<string[]>(host, "neighbours", beyond, linked)).toBeUndefined();
-    // ...while its pinned position holds.
-    const wayLater = expiryMs("position") * 100;
-    expect(fresh<number>(host, "depth", wayLater, linked)).toBe(3);
-    // Released: it remains stale, and its position resumes ageing too.
+    // Age buys nothing either way: both facts still stand, linked or not.
+    expect(fresh<string[]>(host, "neighbours", later, linked)).toEqual(["dn-2"]);
+    expect(fresh<number>(host, "depth", later, linked)).toBe(3);
     expect(isImmune(host, { stasisLinked: new Set<string>() })).toBe(false);
-    expect(fresh<string[]>(host, "neighbours", beyond)).toBeUndefined();
-    expect(fresh<number>(host, "depth", wayLater)).toBeUndefined();
+    expect(fresh<string[]>(host, "neighbours", later)).toEqual(["dn-2"]);
+    expect(fresh<number>(host, "depth", later)).toBe(3);
+
+    // The mutation is what invalidates the edge list, and it does so at once.
+    foldReports(hosts, [report("dn-1", later, { invalidates: ["topology"] })], later);
+    expect(fresh<string[]>(host, "neighbours", later)).toBeUndefined();
   });
 
   test("an immune host is never forgotten, because it is never deleted", () => {
@@ -284,9 +295,10 @@ describe("a host that goes away is forgotten, not remembered for ever", () => {
       report("dn-2", 0, { modelId: "Laika4" }),
     );
     expect(coverage(hosts, 0)).toMatchObject({ known: 2, adjacencyKnown: 1, freshFraction: 1 });
-    // Later, the neighbour list is no longer believable but identity still is,
-    // so coverage falls without collapsing.
-    const after = coverage(hosts, expiryMs("topology") + 1);
+    // A mutation dirties the neighbour list; identity still stands, so
+    // coverage falls without collapsing.
+    foldReports(hosts, [report("dn-1", 1, { invalidates: ["topology"] })], 1);
+    const after = coverage(hosts, 1);
     expect(after.adjacencyKnown).toBe(0);
     expect(after.freshFraction).toBeLessThan(1);
     expect(after.freshFraction).toBeGreaterThan(0);

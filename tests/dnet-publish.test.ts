@@ -326,13 +326,21 @@ describe("what the panel still needs the controller to decide", () => {
     expect(publishKnowledge(knowledge, NOW).hosts[0]!.usableRam).toBe(12);
   });
 
-  test("runtime RAM stays separate from durable capacity and expires", () => {
+  test("runtime RAM stays separate from durable capacity, and does not age out", () => {
     const knowledge = fold([
       { hostname: "dn-1", present: true, facts: { maxRam: 16, blockedRam: 4 } },
     ]);
     const ram = new Map([["dn-1", { at: NOW, total: 16, blocked: 4, used: 5 }]]);
     expect(publishKnowledge(knowledge, NOW, { ram }).hosts[0]!.ram).toEqual(ram.get("dn-1"));
-    expect(publishKnowledge(knowledge, NOW + 60_001, { ram }).hosts[0]!.ram).toBeUndefined();
+    // Three of these four fields cannot go stale on a clock — `total` never
+    // changes and is re-read on every `getServerDetails`, `blocked` has its own
+    // dirty bit — so a cutoff hid the entire readout over one volatile field.
+    // The sample carries `at`; the panel can say how old it is.
+    expect(publishKnowledge(knowledge, NOW + 60 * 60_000, { ram }).hosts[0]!.ram)
+      .toEqual(ram.get("dn-1"));
+    // A host that is gone keeps nothing.
+    knowledge.hosts.get("dn-1")!.goneAt = NOW;
+    expect(publishKnowledge(knowledge, NOW, { ram }).hosts[0]!.ram).toBeUndefined();
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { classifyPlantRoute, DEFAULT_SPREAD_LIMITS, allocateCredentialChecks, candidatesFrom, deriveTasks, planSpread, type SpreadCandidate } from "../shared/strategy/dnet/plan.ts";
+import { classifyPlantRoute, DEFAULT_SPREAD_LIMITS, allocateCredentialChecks, candidatesFrom, deriveTasks, planSpread, type RefusalReason, type SpreadCandidate } from "../shared/strategy/dnet/plan.ts";
 import { choosePreemptionVantage } from "../shared/strategy/dnet/priority.ts";
 import { foldReports, type DnetHosts } from "../shared/strategy/dnet/host.ts";
 import type { ReportHost } from "../shared/strategy/dnet/courier.ts";
@@ -35,37 +35,20 @@ describe("every refusal to spread is named", () => {
    * invisible at once. When the net stops growing, these strings are the answer
    * to "why" — so each is asserted individually rather than as "not planted". */
 
-  test("a host that is simply gone is not reported as anything else", () => {
-    // Order matters: a refusal that sends someone looking at the wrong problem
-    // is worse than no refusal at all.
-    const plan = planSpread([candidate({ host: "dead", goneAt: NOW - 1, usableRam: 0, hasCredential: false })], DEFAULT_SPREAD_LIMITS, NOW);
-    expect(plan.plant).toEqual([]);
-    expect(plan.refused[0]!.why).toBe("gone");
-  });
-
-  test("no credential is a CRACKING failure, and says so", () => {
-    // Spreading and cracking want different fixes, and conflating them is how a
-    // password problem gets debugged as a RAM problem.
-    const plan = planSpread([candidate({ host: "locked", hasCredential: false })], DEFAULT_SPREAD_LIMITS, NOW);
-    expect(plan.refused[0]!.why).toBe("no-credential");
-    expect(plan.refused[0]!.detail).toContain("attempt, not a plant");
-  });
-
-  test("unknown RAM never reads as room for an agent", () => {
-    // exec on a full host returns a silent 0, indistinguishable from a missing
-    // file. Guessing here would burn a plant and report success.
-    const plan = planSpread([candidate({ host: "unknown", usableRam: undefined })], DEFAULT_SPREAD_LIMITS, NOW);
-    expect(plan.refused[0]!.why).toBe("unknown-ram");
-  });
-
-  test("not enough RAM names the number and the likely cause", () => {
-    // A big darknet host can arrive with ALL of its RAM blocked by its owner,
-    // which is a different problem from a small host.
-    const plan = planSpread([candidate({ host: "blocked", usableRam: 1 })], DEFAULT_SPREAD_LIMITS, NOW);
-    expect(plan.refused[0]!.why).toBe("not-enough-ram");
-    expect(plan.refused[0]!.detail).toContain("1.00GB usable");
-    expect(plan.refused[0]!.detail).toContain("memoryReallocation");
-  });
+  test.each([
+    ["gone", { host: "dead", goneAt: NOW - 1, usableRam: 0, hasCredential: false }, []],
+    ["no-credential", { host: "locked", hasCredential: false }, ["attempt, not a plant"]],
+    ["unknown-ram", { host: "unknown", usableRam: undefined }, []],
+    ["not-enough-ram", { host: "blocked", usableRam: 1 }, ["1.00GB usable", "memoryReallocation"]],
+  ] satisfies readonly [RefusalReason, Partial<SpreadCandidate> & { host: string }, readonly string[]][])(
+    "%s is reported with its actionable diagnostic",
+    (why, input, details) => {
+      const plan = planSpread([candidate(input)], DEFAULT_SPREAD_LIMITS, NOW);
+      expect(plan.plant).toEqual([]);
+      expect(plan.refused[0]!.why).toBe(why);
+      for (const detail of details) expect(plan.refused[0]!.detail).toContain(detail);
+    },
+  );
 
   test("an ordinary cramped blocked host is refused, not bootstrapped", () => {
     // The bootstrap used to plant here too; the deep-world benchmark priced
@@ -113,16 +96,17 @@ describe("every refusal to spread is named", () => {
     }));
   });
 
-  test("a stasis host is exempt from the plant cooldown — it cannot flap", () => {
-    // The cooldown is anti-flap for a host that keeps RESTARTING. A stasis
-    // host is immune to restart and recovered by remote exec, so a recent
-    // plant must never block re-staffing it — else its managed dispatch (one
-    // plant per order, each restamping the cooldown) wedges it agentless.
-    const ordinary = planSpread([candidate({ host: "plain", lastPlantAt: NOW })], DEFAULT_SPREAD_LIMITS, NOW);
-    expect(ordinary.refused[0]?.why).toBe("cooldown");
-    const stasis = planSpread([candidate({ host: "pinned", lastPlantAt: NOW, stasisManaged: true })], DEFAULT_SPREAD_LIMITS, NOW);
-    expect(stasis.plant.map((p) => p.host)).toEqual(["pinned"]);
-    expect(stasis.refused).toEqual([]);
+  test("a host that was planted and is empty again is replanted AT ONCE", () => {
+    // There is no hold for having been planted. That was justified as anti-flap
+    // for a host stuck restarting, which the game does not produce — a restart
+    // is a per-mutation roll across the whole net, and the right answer to one
+    // is to replant immediately. What it actually did was exile every host
+    // that emptied for an ordinary reason: a managed stasis handoff, a kind
+    // that hands its host back, an agent chaining out of its last order.
+    const emptied = candidate({ host: "replant-me" });
+    expect(planSpread([emptied], DEFAULT_SPREAD_LIMITS, NOW).plant.map((p) => p.host))
+      .toEqual(["replant-me"]);
+    expect(planSpread([emptied], DEFAULT_SPREAD_LIMITS, NOW).refused).toEqual([]);
   });
 
   test("nothing is refused for being far away, or for being the third one", () => {
@@ -149,8 +133,9 @@ describe("every refusal to spread is named", () => {
   });
 
   test("every surviving refusal is a fact about the host in front of us", () => {
-    // The six that are left, as a set. This is what makes the deletion above
-    // durable: a budget re-introduced as a refusal name shows up here.
+    // The ones that are left, as a set. This is what makes the deletions above
+    // durable: a budget re-introduced as a refusal name shows up here. Note
+    // what is NOT here — there is no refusal for having been planted before.
     const named = new Set<string>();
     for (const plan of [
       planSpread([candidate({ host: "a", goneAt: NOW - 1 })], DEFAULT_SPREAD_LIMITS, NOW),
@@ -158,13 +143,11 @@ describe("every refusal to spread is named", () => {
       planSpread([candidate({ host: "c", hasCredential: false })], DEFAULT_SPREAD_LIMITS, NOW),
       planSpread([candidate({ host: "d", usableRam: undefined })], DEFAULT_SPREAD_LIMITS, NOW),
       planSpread([candidate({ host: "e", usableRam: 0.5 })], DEFAULT_SPREAD_LIMITS, NOW),
-      planSpread([candidate({ host: "f", lastPlantAt: NOW })], DEFAULT_SPREAD_LIMITS, NOW),
     ]) {
       for (const refusal of plan.refused) named.add(refusal.why);
     }
     expect([...named].sort()).toEqual([
       "agent-alive",
-      "cooldown",
       "gone",
       "no-credential",
       "not-enough-ram",
@@ -172,11 +155,13 @@ describe("every refusal to spread is named", () => {
     ]);
   });
 
-  test("a host that keeps restarting is not allowed to absorb every worker", () => {
-    const hot = candidate({ host: "flapping", lastPlantAt: NOW - 1_000 });
-    expect(planSpread([hot], DEFAULT_SPREAD_LIMITS, NOW).refused[0]!.why).toBe("cooldown");
-    // ...but the cooldown does expire.
-    expect(planSpread([hot], DEFAULT_SPREAD_LIMITS, NOW + 120_000).plant).toHaveLength(1);
+  test("a plant that failed to launch is re-derived at once, never held off", () => {
+    // There is NO hold. Root, a credential and no agent is the whole rule, and
+    // a failed launch does not subtract from it: the next pass plants again.
+    // A hold here only ever meant "a real bug is now invisible for N seconds".
+    const failed = candidate({ host: "refused-me" });
+    expect(planSpread([failed], DEFAULT_SPREAD_LIMITS, NOW).plant).toHaveLength(1);
+    expect(planSpread([failed], DEFAULT_SPREAD_LIMITS, NOW + 1).plant).toHaveLength(1);
   });
 
   test("an agent already standing there is not replaced", () => {
@@ -314,12 +299,9 @@ describe("remote recovery candidates", () => {
     })).toEqual([]);
   });
 
-  test("the cooldown applies to immune hosts too — a recent plant stamp is honoured", () => {
-    // An immune host is NOT exempt from the cooldown: it can flap from a
-    // persistently-failing plant (a stale reverse-edge from symmetric adjacency),
-    // and the cooldown is what stops that becoming a spawn-churn loop. The
-    // deliberate-empty case (a pin) is handled by the controller clearing the stamp
-    // at the source, not by exempting it here.
+  test("a stasis-immune host plants the moment it is empty", () => {
+    // No cooldown, immune or otherwise: an empty host with a credential is a
+    // plant on the very next pass.
     const knowledge = fold([
       { hostname: "resident", present: true, facts: { neighbours: ["pinned", "mortal"], depth: 1 } },
       { hostname: "pinned", present: true, facts: { depth: 7, maxRam: 32, blockedRam: 0 } },
@@ -328,22 +310,12 @@ describe("remote recovery candidates", () => {
     const cands = candidatesFrom(knowledge, NOW, {
       standing: new Set(["resident"]),
       vault: new Set(["pinned", "mortal"]),
-      lastPlantAt: new Map([["pinned", NOW - 1_000], ["mortal", NOW - 1_000]]),
       expiry: { stasisLinked: new Set(["pinned"]) },
     });
     for (const host of ["pinned", "mortal"]) {
       const c = cands.find((entry) => entry.host === host)!;
-      expect(c.lastPlantAt).toBe(NOW - 1_000);
-      expect(planSpread([c], DEFAULT_SPREAD_LIMITS, NOW).refused[0]!.why).toBe("cooldown");
+      expect(planSpread([c], DEFAULT_SPREAD_LIMITS, NOW).plant).toHaveLength(1);
     }
-    // With no recent stamp — the controller having cleared it after a pin — the
-    // same immune host plants at once.
-    const cleared = candidatesFrom(knowledge, NOW, {
-      standing: new Set(["resident"]),
-      vault: new Set(["pinned"]),
-      expiry: { stasisLinked: new Set(["pinned"]) },
-    }).find((c) => c.host === "pinned")!;
-    expect(planSpread([cleared], DEFAULT_SPREAD_LIMITS, NOW).plant).toHaveLength(1);
   });
 });
 
@@ -652,14 +624,16 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     expect(tasks.some((task) => task.followAttemptIds !== undefined)).toBe(false);
   });
 
-  test("candidate allocation races tiny sets and spends one slot on information for wider sets", () => {
-    expect(allocateCredentialChecks(10, 1)).toEqual({ authSlots: 1, bleedSlots: 0 });
-    expect(allocateCredentialChecks(2, 2)).toEqual({ authSlots: 2, bleedSlots: 0 });
-    expect(allocateCredentialChecks(3, 3)).toEqual({ authSlots: 3, bleedSlots: 0 });
-    expect(allocateCredentialChecks(3, 2)).toEqual({ authSlots: 1, bleedSlots: 1 });
-    expect(allocateCredentialChecks(10, 3)).toEqual({ authSlots: 2, bleedSlots: 1 });
-    expect(allocateCredentialChecks(10, 10)).toEqual({ authSlots: 3, bleedSlots: 1 });
-    expect(allocateCredentialChecks(10, 10, false)).toEqual({ authSlots: 10, bleedSlots: 0 });
+  test.each([
+    [10, 1, true, { authSlots: 1, bleedSlots: 0 }],
+    [2, 2, true, { authSlots: 2, bleedSlots: 0 }],
+    [3, 3, true, { authSlots: 3, bleedSlots: 0 }],
+    [3, 2, true, { authSlots: 1, bleedSlots: 1 }],
+    [10, 3, true, { authSlots: 2, bleedSlots: 1 }],
+    [10, 10, true, { authSlots: 3, bleedSlots: 1 }],
+    [10, 10, false, { authSlots: 10, bleedSlots: 0 }],
+  ] as const)("candidate allocation (%i choices, %i vantages)", (choices, vantages, oracle, expected) => {
+    expect(allocateCredentialChecks(choices, vantages, oracle)).toEqual(expected);
   });
 
   test("ten choices on ten vantages use three auth records and one shared follower bleed", () => {
@@ -951,4 +925,66 @@ describe("attempts stand on the roomiest vantage, and buy threads with it", () =
     expect(attempt.threads).toBeUndefined();
   });
 
+});
+
+describe("a plant task is a FRONTIER, and `host` is only its name", () => {
+  // The invariant every reader downstream depends on. `Order.host` is the
+  // generic identity each order carries; for a plant it names `targets[0]` and
+  // nothing more, and asking "does this order concern host X" by reading it was
+  // one defect that showed up as six: the in-flight overlay left siblings free
+  // to be re-derived onto a second vantage, the plant cooldown protected one
+  // host out of five, and one gone target retired a healthy frontier.
+  const knowledge: DnetHosts = new Map();
+  const at = 1_000_000;
+  const seen: ReportHost[] = [
+    { hostname: "darkweb", at, present: true, depth: -1, maxRam: 64, blockedRam: 0, neighbours: ["a.corp", "b.corp", "c.corp"] },
+    { hostname: "a.corp", at, present: true, depth: 0, maxRam: 32, blockedRam: 0 },
+    { hostname: "b.corp", at, present: true, depth: 1, maxRam: 32, blockedRam: 0 },
+    { hostname: "c.corp", at, present: true, depth: 2, maxRam: 32, blockedRam: 0 },
+  ];
+  foldReports(knowledge, seen, at, {});
+
+  const plantable = candidatesFrom(knowledge, at, {
+    standing: new Set(["darkweb"]),
+    vault: new Set(["a.corp", "b.corp", "c.corp"]),
+  });
+  const plan = planSpread(plantable, DEFAULT_SPREAD_LIMITS, at);
+
+  test("one vantage's whole frontier is one task", () => {
+    expect(plan.plant.map((entry) => entry.host).sort()).toEqual(["a.corp", "b.corp", "c.corp"]);
+
+    const tasks = deriveTasks(knowledge, at, {
+      agents: new Set(["darkweb"]),
+      vault: new Set(["a.corp", "b.corp", "c.corp"]),
+      plantable: plan.plant.map((entry) => ({ host: entry.host, from: entry.from })),
+    }).filter((task) => task.kind === "plant");
+
+    // Three targets, ONE order. Serialised behind three spawns they would be
+    // three prober round trips deep; together they cost one.
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]!.from).toBe("darkweb");
+    expect(tasks[0]!.targets?.map((target) => target.host).sort()).toEqual(["a.corp", "b.corp", "c.corp"]);
+  });
+
+  test("`host` names the first target and never stands in for the frontier", () => {
+    const tasks = deriveTasks(knowledge, at, {
+      agents: new Set(["darkweb"]),
+      vault: new Set(["a.corp", "b.corp", "c.corp"]),
+      plantable: plan.plant.map((entry) => ({ host: entry.host, from: entry.from })),
+    }).filter((task) => task.kind === "plant");
+
+    const task = tasks[0]!;
+    expect(task.host).toBe(task.targets![0]!.host);
+    expect(task.targets!.length).toBeGreaterThan(1);
+  });
+
+  test("a target already carrying an agent never joins a frontier", () => {
+    const tasks = deriveTasks(knowledge, at, {
+      agents: new Set(["darkweb", "b.corp"]),
+      vault: new Set(["a.corp", "b.corp", "c.corp"]),
+      plantable: plan.plant.map((entry) => ({ host: entry.host, from: entry.from })),
+    }).filter((task) => task.kind === "plant");
+
+    expect(tasks[0]!.targets?.map((target) => target.host).sort()).toEqual(["a.corp", "c.corp"]);
+  });
 });

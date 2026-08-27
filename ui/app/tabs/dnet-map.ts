@@ -706,54 +706,44 @@ export const AUTH_LABEL: Record<NonNullable<DarknetKnownHost["authState"]>, stri
  * decision about what is stale would be worse than one that showed nothing.
  * `staleness` reads only `at`, so the value is a placeholder.
  *
- * Immunity is a property of the HOST, not of a fact: a stationary or
- * stasis-linked server is skipped by every mutation branch upstream, so nothing
- * about it ages. `darkweb` is the one you meet first. */
+ * Nothing ages any more: a fact is perishable when a mutation can invalidate
+ * it, and it is stale exactly when a mutation HAS — the dirty bit, and nothing
+ * about the clock. `expiresInMs` is therefore always Infinity; the age is kept
+ * because the tooltip still says how long ago we looked. */
 export function factLife(
   host: DarknetKnownHost,
   key: string,
   now: number,
-  expiry: ExpiryOpts,
+  _expiry: ExpiryOpts,
 ): Staleness | undefined {
   const at = host.facts[key];
   if (at === undefined) return undefined;
-  const immune = host.isStationary === true || host.stasisLinked === true;
   const group = fieldGroup(key);
   if (group === undefined) return undefined;
-  const limit = expiryMs(group, { ...expiry, immune });
-  const ageMs = Math.max(0, now - at);
   return {
-    ageMs,
-    expiresInMs: limit === Infinity ? Infinity : Math.max(0, limit - ageMs),
-    stale: (group !== "identity" && host.dirty?.[group] === true) || ageMs > limit,
+    ageMs: Math.max(0, now - at),
+    expiresInMs: Infinity,
+    stale: group !== "identity" && host.dirty?.[group] === true,
   };
 }
 
 /** True when nothing PERISHABLE we hold about this host is still believable.
- * Drawn faded, because "we believed this five minutes ago" and "this is true"
- * must not look the same on a net that rewires itself every few seconds.
+ * Drawn faded, because "we believed this before the last mutation" and "this is
+ * true" must not look the same.
  *
- * Only the facts that CAN expire get a vote, and this used to be `every` over
- * ALL of them — which no host on the wire could ever satisfy. `describeHost`
- * sends the identity fields (modelId, difficulty, maxRam, the password shape)
- * alongside depth and RAM on every report, `expiryMs("identity")` is `Infinity`,
- * so one never-expiring fact per host held the fade off permanently: the node
- * opacity, this tooltip line, the legend swatch, the servers-table chip and the
- * `stale` filter were all unreachable, and every box on the map read confirmed.
- *
- * The test is "cannot expire" rather than a list of fact classes on purpose.
- * `position` is also eternal on a stationary or stasis-linked host, and `expiryMs`
- * is where that rule lives; a class list here would re-state it and then drift
- * from it. A host holding only eternal facts has nothing to disbelieve, so it is
- * not faded — the same answer as a host holding no facts at all. */
-export function isStale(host: DarknetKnownHost, now: number, expiry: ExpiryOpts): boolean {
-  const keys = Object.keys(host.facts);
-  if (keys.length === 0) return false;
-  const perishable = keys
-    .map((key) => factLife(host, key, now, expiry))
-    .filter((life) => life !== undefined && life.expiresInMs !== Infinity);
+ * Only the facts a mutation can invalidate get a vote. Identity fields cannot
+ * change while the host lives, so a host holding only those has nothing to
+ * disbelieve and is not faded — the same answer as a host holding no facts at
+ * all. This used to be `every` over ALL facts including identity, which no host
+ * on the wire could satisfy, so the fade was unreachable and every box on the
+ * map read confirmed. */
+export function isStale(host: DarknetKnownHost, _now: number, _expiry: ExpiryOpts): boolean {
+  const perishable = Object.keys(host.facts)
+    .map((key) => fieldGroup(key))
+    .filter((group): group is Exclude<ReturnType<typeof fieldGroup>, "identity" | undefined> =>
+      group !== undefined && group !== "identity");
   if (perishable.length === 0) return false;
-  return perishable.every((life) => life?.stale === true);
+  return perishable.every((group) => host.dirty?.[group] === true);
 }
 
 function clip(text: string, max: number): string {
@@ -786,6 +776,8 @@ function titleOf(host: DarknetKnownHost, options: MapOptions): string {
         : "resident lost",
     );
   }
+  const why = host.agent === undefined ? options.why?.[host.hostname] : undefined;
+  if (why !== undefined) parts.push(`not planted — ${why}`);
   if (host.goneAt !== undefined) parts.push("gone");
   if (isStale(host, options.now, options.expiry)) {
     parts.push("stale — one or more observations are no longer confirmed");
@@ -1033,6 +1025,11 @@ export interface MapOptions {
   /** The net's true depth when the topic knows it, so the map can draw the rows
    *  we have never reached as well as the ones we have. */
   netDepth?: number;
+  /** Why each still-empty host was not planted, by hostname, straight from the
+   *  spread planner. The rollup below the map counts reasons; this answers the
+   *  question you actually have while looking at a green box with no scripts
+   *  in it. */
+  why?: Record<string, string>;
 }
 
 /** The row gutter: one label per display row, plus a rule across the rows that
@@ -1120,11 +1117,17 @@ export function netMap(hosts: readonly DarknetKnownHost[], options: MapOptions):
 
 /** Read the map's view controls. Kept beside the renderer so the keys are
  * declared once. */
-export function mapOptions(now: number, expiry: ExpiryOpts, netDepth?: number): MapOptions {
+export function mapOptions(
+  now: number,
+  expiry: ExpiryOpts,
+  netDepth?: number,
+  why?: Record<string, string>,
+): MapOptions {
   return {
     now,
     expiry,
     ...(netDepth !== undefined ? { netDepth } : {}),
+    ...(why !== undefined ? { why } : {}),
     selected: view("dnet.sel"),
     query: view("dnet.q").trim(),
     zoom: Number(view("dnet.zoom", "100")) || 100,

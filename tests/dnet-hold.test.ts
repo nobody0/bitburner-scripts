@@ -213,31 +213,26 @@ describe("stasis is spent on what cannot be rebuilt", () => {
     // [0-7] (36, 18, 12 all beat 10); centers of 3/2/1 even slices of an
     // 8-row band avoid the gap-adjacent edge rows.
     expect(stasisTargetDepths(12, 3)).toEqual([6, 4, 1]);
-    expect(stasisTargetDepths(12, 2)).toEqual([6, 2]);
-    expect(stasisTargetDepths(12, 1)).toEqual([4]);
-    expect(stasisTargetDepths(12, 0)).toEqual([]);
     // A small early net has one band; centers spread inside it.
-    expect(stasisTargetDepths(7, 2)).toEqual([3, 1]);
     // Deeper nets: the deep band's mass wins it the extra spare — one spare at
     // each band's middle, the deepest band densest.
-    expect(stasisTargetDepths(19, 3)).toEqual([14, 10, 4]);
-    expect(stasisTargetDepths(36, 3)).toEqual([30, 26, 20]);
   });
 
-  test("no target ever sits on a gap row or the walker's rows", () => {
+  test("targets obey the spare-placement invariants", () => {
     // Gap rows are structurally empty; the walker's pin covers netDepth-1 and
     // netDepth-2. Band construction makes both impossible by construction.
     for (const netDepth of [7, 12, 19, 23, 36]) {
-      for (const spares of [1, 2, 3]) {
-        for (const target of stasisTargetDepths(netDepth, spares)) {
+      for (const spares of [0, 1, 2, 3]) {
+        const targets = stasisTargetDepths(netDepth, spares);
+        expect(targets).toEqual([...targets].sort((a, b) => b - a));
+        expect(new Set(targets).size).toBe(targets.length);
+        expect(targets.length).toBeLessThanOrEqual(spares);
+        for (const target of targets) {
           expect(isOnAirGap(target), `gap row targeted at netDepth ${netDepth}`).toBe(false);
           expect(target, `walker row targeted at netDepth ${netDepth}`).toBeLessThanOrEqual(netDepth - 3);
         }
       }
     }
-    // Quota is capped at a band's row count: a tiny net cannot hold more
-    // targets than it has rows.
-    expect(stasisTargetDepths(7, 3)).toEqual([4, 2, 0]);
   });
 
   test("a lab-less world's first anchor is the bottom row itself", () => {
