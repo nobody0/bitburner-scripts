@@ -7,15 +7,12 @@ import {
   emptyField,
   LAB_FIRST_PROBE,
   labPrior,
-  mergeLabFields,
   observeLab,
   readCoords,
   refuseEdge,
-  routePrior,
   type Cell,
   type Direction,
   type LabField,
-  type LabRouteBias,
 } from "../../shared/strategy/dnet/maze.ts";
 import type { AgentIo, Order, Report } from "./shared.ts";
 import { awaitDnetOperation } from "./timing.ts";
@@ -56,7 +53,7 @@ type OrderResult = Omit<Report, "id" | "kind" | "host" | "from">;
  * position is unknown until the first response. `labradar` costs the same
  * full authentication as a move and earns no charisma, so `decideLab` pays
  * for one only when its radius-3 window would decide the exit outright or
- * scout several of a seam's door candidates at once.
+ * resolve several of a seam's door candidates at once.
  *
  * **A wall refusal leaves the position UNCHANGED.** The engine tests the cell
  * BETWEEN us and the target and returns "You are still at X,Y" without
@@ -87,12 +84,7 @@ export async function runWalk(ns: NS, order: Order<"walk">, io: AgentIo): Promis
       detail: `${state.host} is not a labyrinth rung the walker knows`,
     };
   }
-  const basePrior = labPrior(stage);
-  // A scout order carries a route bias: it commits to the macro-route the
-  // unbiased finisher tends away from, and the lost-fallback below hands it
-  // back the unbiased prior if its route closes. The finisher stays at "any",
-  // for which routePrior returns basePrior unchanged.
-  let prior = routePrior(basePrior, (state.payload.route as LabRouteBias | undefined) ?? "any");
+  const prior = labPrior(stage);
   // Seed from the controller's shared field: the one piece of walk progress
   // that outlives a PID. A re-seeded walker starts with its predecessor's
   // map, so a replacement starts with everything its predecessor learned.
@@ -128,18 +120,7 @@ export async function runWalk(ns: NS, order: Order<"walk">, io: AgentIo): Promis
     if (at === undefined) {
       direction = LAB_FIRST_PROBE;
     } else {
-      // Fold in whatever the OTHER walker has published since our last look,
-      // then decide. Merging every step is cheap — a field tops out around
-      // two thousand slots — and it is what turns two walkers into one
-      // mapper rather than two strangers.
-      field = mergeLabFields(field, io.deps.labField(state.host));
-      let plan = decideLab(field, at, prior);
-      if (plan.kind === "lost" && prior !== basePrior) {
-        // The route bias closed every remaining path. Drop it for good and
-        // help wherever the map still has questions.
-        prior = basePrior;
-        plan = decideLab(field, at, prior);
-      }
+      const plan = decideLab(field, at, prior);
       if (plan.kind === "lost") {
         return {
           ok: false,
@@ -158,7 +139,7 @@ export async function runWalk(ns: NS, order: Order<"walk">, io: AgentIo): Promis
         radars++;
         count(seen.success ? "radar" : "radar-refused");
         if (seen.success) {
-          field = observeLab(field, at, String(seen.message ?? ""), basePrior) ?? field;
+          field = observeLab(field, at, String(seen.message ?? ""), prior) ?? field;
         }
         io.deps.publishLabField(state.host, field);
         beat(progress());
@@ -209,7 +190,7 @@ export async function runWalk(ns: NS, order: Order<"walk">, io: AgentIo): Promis
         detail: `${state.host}: could not read a position out of the response`,
       };
     }
-    const seen = observeLab(field, where, String(answer.data ?? ""), basePrior);
+    const seen = observeLab(field, where, String(answer.data ?? ""), prior);
     if (seen === undefined) {
       // Same verdict for a render that is no longer a centred odd square: a
       // walker that believed it would learn confident lies.

@@ -73,7 +73,6 @@ import {
   emptyField,
   labPrior,
   liveExitCandidates,
-  mergeLabFields,
   renderLabField,
   type LabField,
 } from "../../shared/strategy/dnet/maze.ts";
@@ -619,10 +618,7 @@ export async function main(ns: NS): Promise<void> {
     recordAttempt, recordLogDrain, recordCredential, recordLoose, recordProvisional,
     recordNeighbourPassword, recordFileEvidence,
     labField: (host) => labFields.get(host),
-    publishLabField: (host, field) => {
-      const held = labFields.get(host);
-      labFields.set(host, held === undefined ? field : mergeLabFields(held, field));
-    },
+    publishLabField: (host, field) => labFields.set(host, field),
   };
 
   // --- pricing --------------------------------------------------------------
@@ -952,25 +948,20 @@ export async function main(ns: NS): Promise<void> {
   };
 
   // --- projections (HoldHost / FarmHost from the flat entries) --------------
-  /** Every host with a walk running or staged, in map order, mapped to whether
-   * EVERY walk it carries is a mortal scout. `false` therefore means "carries
-   * the finisher", the flag the whole feature branches on: only the finisher is
-   * irreplaceable, and only the finisher holds the storm. */
-  const walkVantageRoles = (): Map<string, boolean> => {
-    const roles = new Map<string, boolean>();
-    const fold = (host: string, scout: boolean): void => {
-      roles.set(host, (roles.get(host) ?? true) && scout);
-    };
+  /** The host with the single walk running or staged, in map order. */
+  const walkVantage = (): string | undefined => {
+    let vantage: string | undefined;
     for (const entry of hosts.values()) {
       const active = entry.agent?.order;
-      if (active?.kind === "walk") fold(entry.hostname, active.payload.scout === true);
-      for (const o of entry.staged ?? []) if (o.kind === "walk") fold(entry.hostname, o.payload.scout === true);
+      if (active?.kind === "walk" || entry.staged?.some((order) => order.kind === "walk")) {
+        vantage = entry.hostname;
+      }
     }
-    return roles;
+    return vantage;
   };
 
   const projectHoldHosts = (at: number, expiry: ExpiryOpts): HoldHost[] => {
-    const walking = walkVantageRoles();
+    const walkerAt = walkVantage();
     return [...hosts.values()].map((entry) => {
       const view = planningView(entry, at, expiry);
       return {
@@ -990,10 +981,7 @@ export async function main(ns: NS): Promise<void> {
         ...(view.difficulty !== undefined ? { difficulty: view.difficulty } : {}),
         ...(view.maxRam !== undefined ? { maxRam: view.maxRam } : {}),
         freeGb: usableGb(entry.hostname, at, expiry),
-        // Only the FINISHER is irreplaceable. A mortal scout stamped here
-        // would claim the reserved walker stasis slot in `admitPins` and
-        // evict a held link for a walker whose death is already priced in.
-        ...(walking.get(entry.hostname) === false ? { irreplaceable: true } : {}),
+        ...(walkerAt === entry.hostname ? { irreplaceable: true } : {}),
       };
     });
   };
@@ -1104,12 +1092,7 @@ export async function main(ns: NS): Promise<void> {
   };
 
   const planHold = (at: number, expiry: ExpiryOpts): { tasks: HoldTask[]; report: DnetHoldReport; labWalked: boolean; labCandidate?: string } => {
-    // The finisher and the scouts are told apart by the ORDER's own flag, never
-    // by a proxy: a scout mistaken for the finisher would suppress the
-    // finisher's re-plan and hold the storm.
-    const roles = [...walkVantageRoles()];
-    const finisherAt = roles.filter(([, scout]) => !scout).map(([host]) => host).pop();
-    const scoutsAt = new Set(roles.filter(([, scout]) => scout).map(([host]) => host));
+    const walkerAt = walkVantage();
     const plan = planHoldFromView({
       hosts: projectHoldHosts(at, expiry),
       netDepth: netDepth ?? DEFAULT_NET_DEPTH,
@@ -1117,10 +1100,7 @@ export async function main(ns: NS): Promise<void> {
       stasisLinkedCount: stasisLinked.size,
       labExpected,
       charisma,
-      ...(finisherAt !== undefined ? { walkerAt: finisherAt } : {}),
-      ...(scoutsAt.size > 0 ? { scoutsAt } : {}),
-      scoutWalker: true,
-      maxScouts: 2,
+      ...(walkerAt !== undefined ? { walkerAt } : {}),
       walkGb: budgets["walk"],
       pinGb: budgets["pin"]!,
       induceGbPerThread: budgets["induce"],
@@ -1193,14 +1173,10 @@ export async function main(ns: NS): Promise<void> {
     const runner = hosts.get(task.from);
     if (!runner) return false;
     if (runner.agent === undefined && !processInbound(runner) && runner.ns === undefined) return false;
-    // A mortal scout keeps its prober and its ordinary recovery; only the
-    // finisher's host is consumed whole. `scout` is a second discriminant
-    // hiding inside `walk`, and the one thing the kind table cannot say.
-    const isScout = task.kind === "walk" && task.scout === true;
-    const takesWholeHost = JOBS[task.kind].consumesHost === true && !isScout;
+    const takesWholeHost = JOBS[task.kind].consumesHost === true;
     // A stasis edge is a remote recovery guarantee. Spend that host's RAM on
     // work, not spawn; unpin is the exception because success removes it.
-    const controllerManaged = (task.kind === "walk" && !isScout)
+    const controllerManaged = task.kind === "walk"
       || (stasisLinked.has(task.from) && !(task.kind === "pin" && task.unpin === true));
     const budget = priceOf(task.kind, task.needsRing === true);
     const room = usableGb(task.from, Date.now(), expiryOpts(), !takesWholeHost);
@@ -1269,10 +1245,7 @@ export async function main(ns: NS): Promise<void> {
             ...(task.unpin === true ? { unpin: true as const } : {}),
           };
         case "walk":
-          return {
-            ...(task.route !== undefined ? { route: task.route } : {}),
-            ...(isScout ? { scout: true as const } : {}),
-          };
+          return {};
         default:
           return {};
       }
@@ -1751,13 +1724,7 @@ export async function main(ns: NS): Promise<void> {
     };
 
     const pinsPending = holdPlan.tasks.some((t) => t.kind === "pin" && t.unpin !== true) || [...projectInFlight().values()].some((held) => held.some((job) => job.kind === "pin"));
-    // The storm's walker gate protects the FINISHER only. The mortal scout is
-    // explicitly sacrificial, so neither a running nor a planned scout may
-    // hold the fire.
-    const walking = new Set(
-      [...walkVantageRoles()].filter(([, scout]) => !scout).map(([host]) => host));
-    for (const task of holdPlan.tasks) if (task.kind === "walk" && task.scout !== true) walking.add(task.from);
-    const walkFrom = [...walking].pop();
+    const walkFrom = holdPlan.tasks.find((task) => task.kind === "walk")?.from ?? walkVantage();
     const stormCtx: StormContext = {
       now: at,
       vault: new Set(vault.keys()),

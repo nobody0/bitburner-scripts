@@ -22,8 +22,8 @@ export interface PairedComparison {
   ci95High: number;
 }
 
-/** Paired mean-difference with a normal-approximation 95% CI, the same shape
- * `compareLabRuns` reports. `lowerIsBetter` only affects the win/loss counts. */
+/** Paired mean-difference with a normal-approximation 95% CI.
+ * `lowerIsBetter` only affects the win/loss counts. */
 export function pairedComparison(
   baseline: { name: string; values: readonly number[] },
   candidate: { name: string; values: readonly number[] },

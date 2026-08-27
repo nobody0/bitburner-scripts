@@ -54,7 +54,6 @@
 
 import { reclaimForecast } from "./farm.ts";
 import { fresh, type DnetHost, type ExpiryOpts } from "./host.ts";
-import type { LabRouteBias } from "./maze.ts";
 import { INDUCE_WAIT_MS, isLabyrinth, isOnAirGap, labStage, NET_WIDTH } from "./rates.ts";
 
 /** What every policy here needs to know about one host. All of it is already in
@@ -287,14 +286,6 @@ export interface HoldTask {
   edge?: string;
   /** Pins only: release the link instead. */
   unpin?: boolean;
-  /** Walks only: the macro-route this walker's prior commits to. The finisher
-   *  stays unbiased; a scout is worth most on the route the finisher is not
-   *  on. */
-  route?: LabRouteBias;
-  /** Walks only: a MORTAL scout — a second, unpinned walker. Never stamped
-   *  irreplaceable, never reserves a stasis slot, keeps its prober, and its
-   *  death costs a re-plant rather than the walk (the shared field survives). */
-  scout?: true;
 }
 
 export interface HoldPlanInputs {
@@ -308,18 +299,8 @@ export interface HoldPlanInputs {
   /** Whether this world still expects a labyrinth to walk. */
   labExpected: boolean;
   charisma: number;
-  /** The vantage the FINISHER walk is already running or staged from, if any. */
+  /** The vantage the maze walk is already running or staged from, if any. */
   walkerAt?: string;
-  /** The vantages mortal scouts already walk from, if any. */
-  scoutsAt?: ReadonlySet<string>;
-  /** Field mortal scouts beside the finisher when further lab-adjacent
-   *  staffed vantages exist. The party benchmark's finding: a second PID in
-   *  the same maze shares the field and the charisma pool, either finishing
-   *  roots the lab, and even a short-lived scout beats solo (0.905x; two
-   *  scouts 0.854x). */
-  scoutWalker?: boolean;
-  /** How many scouts may walk at once. Defaults to 1 when `scoutWalker`. */
-  maxScouts?: number;
   /** One walker thread's allocation; undefined refuses the walk on room. */
   walkGb?: number;
   /** One pin job's allocation. */
@@ -364,7 +345,7 @@ interface WalkPlan {
  * pin, fresh blocked RAM, a zero block, a resident, and room for one legal
  * walker thread. Each stops the walk and names the one thing to fix next. */
 export function planWalk(
-  inputs: Pick<HoldPlanInputs, "hosts" | "charisma" | "walkerAt" | "scoutsAt" | "scoutWalker" | "maxScouts" | "walkGb" | "reclaimGb" | "vantageScoring">,
+  inputs: Pick<HoldPlanInputs, "hosts" | "charisma" | "walkerAt" | "walkGb" | "reclaimGb" | "vantageScoring">,
   refuse: (host: string, why: string, detail: string) => void,
 ): WalkPlan {
   const lab = inputs.hosts.find((h) => isLabyrinth(h.hostname, h.modelId) && h.gone !== true);
@@ -420,44 +401,6 @@ export function planWalk(
     }
     tasks.push({ kind: "walk", host: lab.hostname, from: vantage, threads: Math.floor(maxRam / inputs.walkGb), reason: `walk the maze from ${vantage}` });
     walkerAt = vantage;
-  }
-  // THE MORTAL SCOUTS: once a finisher walks, up to `maxScouts` more
-  // lab-adjacent staffed vantages may join it — unpinned, opportunistic
-  // (their absence refuses nothing), each biased to a route the unbiased
-  // finisher tends away from. A scout keeps its prober, so its threads come
-  // from FREE room, not the whole host.
-  if (inputs.scoutWalker === true && walkerAt !== undefined && inputs.walkGb !== undefined) {
-    const SCOUT_ROUTES: readonly LabRouteBias[] = ["southern", "eastern"];
-    const scoutsAt = inputs.scoutsAt ?? new Set<string>();
-    const taken = new Set([walkerAt, ...scoutsAt]);
-    let seat = scoutsAt.size;
-    const cap = Math.min(Math.max(0, inputs.maxScouts ?? 1), SCOUT_ROUTES.length);
-    while (seat < cap) {
-      const scout = chooseLabVantage(inputs.hosts.filter((h) =>
-        !taken.has(h.hostname)
-        && h.agentAlive
-        && h.gone !== true
-        // A pinned host is never a scout's seat: `chooseLabVantage` ranks
-        // stasis-linked candidates FIRST, so without this the sacrificial
-        // walker would preferentially settle on the one link this world can
-        // least afford to spend on something whose death is priced in.
-        && h.stasisLinked !== true
-        && h.neighbours?.includes(lab.hostname) === true
-        && h.hasCredential
-        && (h.freeGb ?? 0) >= inputs.walkGb!));
-      if (scout === undefined) break;
-      taken.add(scout.hostname);
-      tasks.push({
-        kind: "walk",
-        host: lab.hostname,
-        from: scout.hostname,
-        threads: Math.max(1, Math.floor((scout.freeGb ?? 0) / inputs.walkGb)),
-        route: SCOUT_ROUTES[seat % SCOUT_ROUTES.length]!,
-        scout: true,
-        reason: `mortal scout from ${scout.hostname}`,
-      });
-      seat++;
-    }
   }
   return { lab, ...(walkerAt !== undefined ? { candidate: walkerAt } : {}), tasks };
 }
@@ -526,9 +469,6 @@ export function planHold(inputs: HoldPlanInputs): HoldPlan {
   if (labCandidate) labCandidate.irreplaceable = true;
   for (const task of walk.tasks) {
     tasks.push(task);
-    // The scout is deliberately NOT irreplaceable: it never reserves a stasis
-    // slot and its death is priced in — the shared field survives it.
-    if (task.scout === true) continue;
     const standing = inputs.hosts.find((h) => h.hostname === task.from);
     if (standing) standing.irreplaceable = true;
   }

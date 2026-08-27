@@ -3,19 +3,14 @@ import {
   ahead,
   decideLab,
   emptyField,
-  emptyMaze,
   labPrior,
   liveExitCandidates,
-  markBlocked,
-  mergeLabFields,
   observeLab,
   renderLabField,
   readCoords,
   readExit,
   readSurroundings,
   refuseEdge,
-  routePrior,
-  stepMaze,
   type Cell,
   type LabField,
 } from "../shared/strategy/dnet/maze.ts";
@@ -23,18 +18,6 @@ import {
 /** Unit tests for the pure parser and decision boundary. Route performance is
  * measured only by `sim/tests/dnet-lab-benchmark.test.ts`, against the exact
  * stitched maze generator and paid-action model. */
-
-const render = (maze: readonly string[], at: Cell): string => {
-  const rows: string[] = [];
-  for (let y = at[1] - 1; y <= at[1] + 1; y++) {
-    let row = "";
-    for (let x = at[0] - 1; x <= at[0] + 1; x++) {
-      row += x === at[0] && y === at[1] ? "@" : (maze[y]?.[x] ?? " ");
-    }
-    rows.push(row);
-  }
-  return rows.join("\n");
-};
 
 describe("labyrinth wire format", () => {
   test("maps the centered 3x3 render to the four walls", () => {
@@ -70,29 +53,6 @@ describe("labyrinth decision boundary", () => {
     expect(ahead([3, 5], "east")).toEqual([5, 5]);
   });
 
-  test("does not choose a wall rendered around the current cell", () => {
-    const maze = ["#####", "#   #", "#####"];
-    const step = stepMaze(emptyMaze(), [1, 1], render(maze, [1, 1]), { width: 5, height: 3 });
-    expect(step.kind).toBe("go");
-    if (step.kind === "go") expect(step.direction).toBe("east");
-  });
-
-  test("a server-refused edge outranks a render that claims it is open", () => {
-    const at: Cell = [1, 1];
-    const lied = "   \n @ \n   ";
-    const first = stepMaze(emptyMaze(), at, lied, { width: 5, height: 5 });
-    expect(first.kind).toBe("go");
-    if (first.kind !== "go") return;
-    const corrected = markBlocked(first.known, at, first.direction);
-    const next = stepMaze(corrected, at, lied, { width: 5, height: 5 });
-    expect(next.kind).toBe("go");
-    if (next.kind === "go") expect(next.direction).not.toBe(first.direction);
-  });
-
-  test("reports a sealed cell as exhausted instead of looping", () => {
-    const step = stepMaze(emptyMaze(), [1, 1], "###\n#@#\n###", { width: 3, height: 3 });
-    expect(step).toMatchObject({ kind: "exhausted" });
-  });
 });
 
 describe("the planner's prior", () => {
@@ -120,36 +80,6 @@ describe("the planner's prior", () => {
     expect(prior.exitCandidates).toHaveLength(9);
     expect(prior.exitCandidates).toContain("59,39");
     expect(prior.exitCandidates).toContain("55,35");
-  });
-});
-
-describe("two walkers in one maze", () => {
-  test("a route bias hides only the OTHER route's unknown doors, and a seen door outranks it", () => {
-    const prior = labPrior({ mazeWidth: 20, mazeHeight: 14, offsetStartAndEnd: false });
-    const southern = routePrior(prior, "southern");
-    // Southern keeps left (2) and bottom (1); top (0) and right (3) vanish.
-    expect(southern.doorSets[0]).toEqual([]);
-    expect(southern.doorSets[3]).toEqual([]);
-    expect(southern.doorSets[1]).toEqual(prior.doorSets[1]);
-    expect(southern.doorSets[2]).toEqual(prior.doorSets[2]);
-    expect(Object.keys(southern.doorIndex)).toEqual(
-      Object.keys(prior.doorIndex).filter((slot) => [1, 2].includes(prior.doorIndex[slot]!)),
-    );
-    const eastern = routePrior(prior, "eastern");
-    expect(eastern.doorSets[1]).toEqual([]);
-    expect(eastern.doorSets[2]).toEqual([]);
-    expect(routePrior(prior, "any")).toBe(prior);
-  });
-
-  test("merging two fields is a union of facts, and either side's exit survives", () => {
-    const a: LabField = { slots: { "2,1": true, "4,1": false }, ruledOut: ["19,11"], radared: ["1,1"] };
-    const b: LabField = { slots: { "4,1": false, "1,2": true }, ruledOut: ["19,11", "17,11"], radared: ["3,3"], exit: "15,11" };
-    const merged = mergeLabFields(a, b);
-    expect(merged.slots).toEqual({ "2,1": true, "4,1": false, "1,2": true });
-    expect(merged.ruledOut.sort()).toEqual(["17,11", "19,11"]);
-    expect(merged.radared.sort()).toEqual(["1,1", "3,3"]);
-    expect(merged.exit).toBe("15,11");
-    expect(mergeLabFields(a, undefined)).toBe(a);
   });
 });
 

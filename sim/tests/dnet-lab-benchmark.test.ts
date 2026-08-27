@@ -4,14 +4,11 @@ import type { LabStage } from "../../shared/strategy/dnet/rates.ts";
 import { expForSkill } from "../../shared/formulas.ts";
 import { LAB_LADDER } from "../../shared/strategy/dnet/rates.ts";
 import {
-  biasedDfsRoute,
-  compareLabRuns,
   generateLabCase,
   generateLabCorpus,
   labAuthenticationMs,
   plannerRoute,
   runLabCase,
-  runLabParty,
   shortestLabPath,
   summarizeLabRuns,
   type LabCase,
@@ -73,21 +70,9 @@ describe("focused labyrinth arena", () => {
 
     expect(fast).toMatchObject({ solved: true, attempts: 1, moves: 1, blocked: 0, elapsedMs: 2_500 });
     expect(slow).toMatchObject({ solved: true, attempts: 2, moves: 1, blocked: 1, elapsedMs: 5_000 });
-    expect(compareLabRuns([fast], [slow])).toMatchObject({
-      candidateFaster: 0,
-      candidateSlower: 1,
-      attemptDelta: 1,
-      elapsedDeltaMs: 2_500,
-      elapsedRatio: 2,
-      meanElapsedDeltaMs: 2_500,
-      ci95LowMs: 2_500,
-      ci95HighMs: 2_500,
-    });
-    expect(() => compareLabRuns([fast], [{ ...slow, solved: false, reason: "stuck" }]))
-      .toThrow("cannot compare an unsolved lab run");
   });
 
-  test("radar and report each cost one authentication but award no movement XP", () => {
+  test("radar costs one authentication but awards no movement XP", () => {
     const lab: LabCase = {
       id: "vision",
       stage: TINY_STAGE,
@@ -98,18 +83,12 @@ describe("focused labyrinth arena", () => {
     const seen: LabObservation[] = [];
     const run = runLabCase(lab, actionRoute("look-then-go", [
       { kind: "radar" },
-      { kind: "report" },
       { kind: "move", direction: "east" },
     ], seen), 2_500);
 
-    expect(run).toMatchObject({ solved: true, attempts: 3, moves: 1, radars: 1, reports: 1, elapsedMs: 7_500 });
+    expect(run).toMatchObject({ solved: true, attempts: 2, moves: 1, radars: 1, elapsedMs: 5_000 });
     expect(seen[0]).toMatchObject({ kind: "radar" });
     expect(seen[0]!.kind === "radar" && seen[0].surroundings).toContain("X");
-    expect(seen[1]).toEqual({
-      kind: "report",
-      at: [1, 1],
-      open: { north: false, east: true, south: false, west: false },
-    });
   });
 
   test("failed moves award charisma XP before timing the following action", () => {
@@ -157,7 +136,7 @@ describe("focused labyrinth arena", () => {
 
   test("runs the deployed route against every rung without constructing a darknet world", () => {
     const cases = generateLabCorpus(Array.from({ length: 12 }, (_, index) => index + 1));
-    const route = biasedDfsRoute("north");
+    const route = plannerRoute();
     const runs = cases.map((lab) => runLabCase(lab, route));
     const summary = summarizeLabRuns(runs);
 
@@ -170,9 +149,8 @@ describe("focused labyrinth arena", () => {
     }
   });
 
-  test("the planner beats the DFS on the whole ladder and never bumps a wall mid-walk", () => {
+  test("the planner stays close to the oracle and never bumps a wall mid-walk", () => {
     const cases = generateLabCorpus(Array.from({ length: 8 }, (_, index) => index + 1));
-    const dfs = cases.map((lab) => runLabCase(lab, biasedDfsRoute("north")));
     const planned = cases.map((lab) => runLabCase(lab, plannerRoute()));
 
     const summary = summarizeLabRuns(planned);
@@ -185,11 +163,9 @@ describe("focused labyrinth arena", () => {
       expect(run.attempts).toBeGreaterThanOrEqual(run.shortestMoves);
     }
 
-    // The margin the tuning sweep left on the table is ~0.65; asserting 0.85
-    // keeps the test stable against small tuning drift while still refusing a
-    // planner that regressed to DFS territory.
-    const compared = compareLabRuns(dfs, planned);
-    expect(compared.elapsedRatio).toBeLessThan(0.85);
+    const attempts = planned.reduce((sum, run) => sum + run.attempts, 0);
+    const oracle = planned.reduce((sum, run) => sum + run.shortestMoves, 0);
+    expect(attempts / oracle).toBeLessThan(1.45);
   });
 
   test("a decisive radar names the exit instead of criss-crossing nine candidates", () => {
@@ -199,84 +175,18 @@ describe("focused labyrinth arena", () => {
     const deepRuns = deep.map((lab) => runLabCase(lab, plannerRoute()));
     const shallowRuns = shallow.map((lab) => runLabCase(lab, plannerRoute()));
     // A shallow rung's exit is known before the first move, so any radar there
-    // is a door scout — never the decisive exit radar the deep rungs pay for.
+    // is only checking doors, never the decisive exit radar the deep rungs pay for.
     expect(shallowRuns.every((run) => run.solved)).toBe(true);
     expect(deepRuns.every((run) => run.solved)).toBe(true);
     // Radar pays one authentication for the whole exit question (and the door
-    // scout a few more); it must stay an accent, not a habit.
+    // door checks a few more); it must stay an accent, not a habit.
     for (const run of [...shallowRuns, ...deepRuns]) expect(run.radars).toBeLessThanOrEqual(8);
-  });
-
-  test("a party of one is step-for-step the solo planner, so both arenas share a ruler", () => {
-    const cases = generateLabCorpus([2, 7, 11]);
-    for (const lab of cases) {
-      const solo = runLabCase(lab, plannerRoute());
-      const one = runLabParty(lab, [{ name: "finisher" }]);
-      expect(one.solved).toBe(true);
-      expect(one.attempts).toBe(solo.attempts);
-      expect(one.wallClockMs).toBeCloseTo(solo.elapsedMs, 6);
-    }
-  });
-
-  test("a second walker on the other macro-route beats a lone one on the deep rungs", () => {
-    // The engine facts that make this legal: the maze is global while positions
-    // are per PID, delays run in parallel, XP pools, and EITHER pid reaching
-    // the endpoint roots the lab. The scout commits to the southern door pair
-    // so the two do not shadow each other.
-    // Three seeds across the five deep rungs. The margin is ~10% and the
-    // per-case variance is far smaller than that, so fifteen paired cases carry
-    // the claim — and a party run of a 61x41 maze is expensive enough that the
-    // corpus size is what decides whether this suite fits a default timeout.
-    const deep = generateLabCorpus(
-      [1, 2, 3],
-      LAB_LADDER.filter((stage) => stage.offsetStartAndEnd),
-    );
-    let soloMs = 0;
-    let pairMs = 0;
-    for (const lab of deep) {
-      const solo = runLabCase(lab, plannerRoute());
-      const pair = runLabParty(lab, [{ name: "finisher" }, { name: "scout", route: "southern" }]);
-      expect(pair.solved).toBe(true);
-      soloMs += solo.elapsedMs;
-      pairMs += pair.wallClockMs;
-    }
-    expect(pairMs).toBeLessThan(soloMs);
-  });
-
-  test("a mortal, unpinned scout still helps — but not by enough to spend a stasis link on", () => {
-    // The stasis question, answered with the arena: a scout that dies every
-    // five minutes (a mutation ate its unpinned host; it respawns as a new PID
-    // at a fresh offset start, keeping only the shared field) still finishes
-    // the maze and still beats going alone in aggregate — but the margin it
-    // loses against an immortal scout is the most a second link could buy.
-    const deep = generateLabCorpus([1, 2, 3], LAB_LADDER.filter((stage) => stage.offsetStartAndEnd));
-    let soloMs = 0;
-    let mortalMs = 0;
-    for (const lab of deep) {
-      soloMs += runLabCase(lab, plannerRoute()).elapsedMs;
-      const run = runLabParty(lab, [
-        { name: "finisher" },
-        { name: "scout", route: "southern", lifetimeMs: 300_000 },
-      ]);
-      expect(run.solved).toBe(true);
-      mortalMs += run.wallClockMs;
-    }
-    expect(mortalMs).toBeLessThan(soloMs);
-  });
-
-  test("the party arena is deterministic, deaths and respawn offsets included", () => {
-    const lab = generateLabCase(LAB_LADDER[4]!, 23);
-    const party = [
-      { name: "finisher" },
-      { name: "scout", route: "southern" as const, lifetimeMs: 180_000 },
-    ];
-    expect(runLabParty(lab, party)).toEqual(runLabParty(lab, party));
   });
 
   test("the omniscient path is a real lower bound, including on a stitched cycle", () => {
     const lab = generateLabCase({ ...TINY_STAGE, mazeWidth: 20, mazeHeight: 14 }, 91);
     const shortest = shortestLabPath(lab.maze, lab.start, lab.exit);
-    const actual = runLabCase(lab, biasedDfsRoute("north"), 1_000);
+    const actual = runLabCase(lab, plannerRoute(), 1_000);
     expect(actual.solved).toBe(true);
     expect(shortest).toBeGreaterThan(0);
     expect(actual.attempts).toBeGreaterThanOrEqual(shortest);

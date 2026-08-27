@@ -51,8 +51,7 @@ export interface JobPolicy {
   readonly longLived?: true;
   /** Needs every byte and ends by leaving the host empty for the spread
    *  planner to re-plant, so the prober beside it is DISPLACED rather than
-   *  reserved around. A mortal `walk` scout is the one exception, and that is
-   *  a fact about the ORDER rather than the kind — `fileTask` excludes it. */
+   *  reserved around. */
   readonly consumesHost?: true;
   /** Earning work — LEFTOVERS. Filed only onto a host that is already spare,
    *  which is why no farm kind may preempt: it would cancel an order it cannot
@@ -83,7 +82,7 @@ const ROWS = {
     priority: -2_000,
     preempts: true, protectedActive: true, reroutable: true,
     releaseExempt: true, threadScaled: true, longLived: true,
-    consumesHost: true, perVantage: true,
+    consumesHost: true,
   },
   // The prober carries no self-revival, so a dead one is repaired at maximum
   // urgency — but it is one `exec`, so it takes the instant lane and cancels

@@ -16,7 +16,7 @@
  * `labradar` reveals more (radius 3 and the exit overlay) but costs another
  * full authentication and earns no charisma, so the deployed planner — the
  * second half of this file — pays for one only when a single render decides
- * the exit or scouts several seam-door candidates at once. This is the only
+ * the exit or resolves several seam-door candidates at once. This is the only
  * model in the feature whose feedback comes back through `authenticate`'s own
  * return value.
  *
@@ -32,21 +32,8 @@
  * a stasis link. None of that is this file's problem; this file is the part that
  * can be tested without a game.
  *
- * ## Two walkers
- *
- * `stepMaze` is the original corner-biased DFS. It is no longer deployed and is
- * kept for one job: it is the BASELINE the paired benchmark measures against
- * (`sim/dnet-lab.ts`'s `biasedDfsRoute`), which is what makes the improvement
- * below a number anyone can re-check rather than a claim in a comment. It costs
- * the game nothing to keep here — no game file imports it, so esbuild shakes it
- * out of the built artifact entirely, which is checkable by grepping
- * `build/dnet/controller.*.js` for one of its note strings.
- *
- * `decideLab` is what `game/dnet/orders.ts` actually walks with. It folds every
- * render into a wall-slot field, adds everything the generator's arithmetic
- * fixes before the first move (`labPrior`), and replans with A* each step —
- * ~0.65x the DFS's wall-clock over the whole ladder, and it never pays an
- * authentication to bump a wall.
+ * `decideLab` folds every response into a shared field and replans with A*.
+ * The fixed policy is regression-tested against the real stitched generator.
  *
  * Source: ../bitburner-src at 3162fd2590e221eadd0c0fbd46151913f7c4c41c
  *   src/DarkNet/effects/labyrinth.ts:17-20 (the direction vectors), :185-215
@@ -76,34 +63,11 @@ const EXIT = "X";
 
 export type Cell = readonly [number, number];
 
-/** What the walker has learned. Plain JSON so it can ride in a job's state.
- *
- * Keyed by string rather than by tuple because a `Map` with array keys compares
- * by identity, which would silently never hit. */
-export interface MazeKnowledge {
-  /** `"x,y"` of every position stood on. */
-  visited: string[];
-  /** `"x,y>direction"` -> whether that step is passable. */
-  edges: Record<string, boolean>;
-  /** The route back, as the positions we stepped from. Popped when a dead end
-   *  forces a retreat, which is what makes this a depth-first search rather than
-   *  a random walk that revisits forever. */
-  trail: string[];
-  /** The exit, once a render has actually shown it. */
-  exit?: string;
-}
-
-export function emptyMaze(): MazeKnowledge {
-  return { visited: [], edges: {}, trail: [] };
-}
-
 export const key = (at: Cell): string => `${at[0]},${at[1]}`;
 const parse = (k: string): Cell => {
   const [x, y] = k.split(",");
   return [Number(x), Number(y)];
 };
-const edgeKey = (at: Cell, direction: Direction): string => `${key(at)}>${direction}`;
-
 /** Where a step in `direction` lands. Two cells, per the move handler. */
 export function ahead(at: Cell, direction: Direction): Cell {
   const [dx, dy] = STEP[direction];
@@ -123,8 +87,7 @@ export function ahead(at: Cell, direction: Direction): Cell {
  * a wider render -- `labradar`'s radius-3 look, which `readExit` right below
  * this deliberately does handle -- would be read from its TOP-LEFT corner
  * instead of its centre and answer with a neighbouring cell's walls. That is
- * not a degraded reading, it is a confident wrong one, and `stepMaze` would
- * then choose a direction the engine refuses.
+ * not a degraded reading, it is a confident wrong one.
  */
 export function readSurroundings(render: string): Record<Direction, boolean> | undefined {
   const rows = render.split("\n");
@@ -159,136 +122,10 @@ export function readExit(render: string, at: Cell): Cell | undefined {
   return undefined;
 }
 
-/** Record that a step we believed open was REFUSED.
- *
- * The engine answers a blocked move by leaving the position unchanged, and the
- * render that made us choose that direction has not changed either -- so without
- * this the next call reaches the identical decision and the walker bumps the
- * same wall until its host dies. `stepMaze` reads it back through `edges`. */
-export function markBlocked(known: MazeKnowledge, at: Cell, direction: Direction): MazeKnowledge {
-  return { ...known, edges: { ...known.edges, [edgeKey(at, direction)]: false } };
-}
-
-export type MazeStep =
-  | { kind: "go"; direction: Direction; known: MazeKnowledge; note: string }
-  /** Every reachable cell has been stood on and none of them was the exit. That
-   *  is not a maze we failed to solve; it is a maze whose exit we cannot reach,
-   *  which means our model of it is wrong. */
-  | { kind: "exhausted"; reason: string }
-  | { kind: "blind"; reason: string };
-
-/** Where the exit is expected, from the maze's own dimensions.
- *
- * `labEndpoint` is `[width - 2 - offsetX, height - 2 - offsetY]` with each offset
- * a random 0, 2 or 4 (`labyrinth.ts:364-382`). So the exit is not known exactly,
- * but it is always within four cells of the bottom-right corner — which is
- * plenty to aim at. Aiming matters: these mazes reach 60x40, and a search that
- * spread out evenly would walk thousands of cells before reaching the far
- * corner. */
-function expectedExit(width: number, height: number): Cell {
-  return [width - 2, height - 2];
-}
-
-const manhattan = (a: Cell, b: Cell): number => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]);
-
-/** Choose the next move — THE RETIRED WALKER, kept as the benchmark baseline.
- * `decideLab` is what the game runs; see this file's header.
- *
- * A depth-first search over an unknown graph, biased toward the corner the exit
- * sits in. Unvisited neighbours first, nearest-to-the-exit among them; when a
- * position has none, retreat along the trail. Depth-first rather than
- * breadth-first for a mechanical reason, not a stylistic one: we cannot teleport
- * to a frontier cell, every "jump" would have to be walked back through the
- * maze, and each step costs a full authentication. Retreating one cell at a time
- * along a trail we already know is the cheap version of that.
- *
- * What it cannot do, and what the planner that replaced it does: it knows
- * nothing the render has not shown it, so it walks into the seams hoping for a
- * door, re-treads corridors a proof could have ruled out, and pays an
- * authentication every time the engine disagrees with a render it acted on.
- *
- * Deterministic given the same knowledge, so a resumed walk continues rather
- * than wandering. */
-export function stepMaze(
-  known: MazeKnowledge,
-  at: Cell,
-  surroundings: string,
-  bounds?: { width: number; height: number },
-): MazeStep {
-  const walls = readSurroundings(surroundings);
-  if (!walls) {
-    return { kind: "blind", reason: `surroundings ${JSON.stringify(surroundings.slice(0, 40))} are not a 3x3 render` };
-  }
-
-  const here = key(at);
-  const visited = known.visited.includes(here) ? known.visited : [...known.visited, here];
-  const edges = { ...known.edges };
-  for (const direction of DIRECTIONS) {
-    // A recorded refusal OUTRANKS the render, and this is the only thing that
-    // stops a bump repeating for ever: the render is what we chose on, so if the
-    // engine disagreed with it, choosing on the render again picks the same
-    // direction, and the same one after that. `markBlocked` is how the walker
-    // writes that disagreement down; here is where it is honoured, which is what
-    // makes `edges` load-bearing rather than a map nobody consults.
-    if (known.edges[edgeKey(at, direction)] === false) walls[direction] = false;
-    edges[edgeKey(at, direction)] = walls[direction];
-  }
-
-  const seenExit = readExit(surroundings, at);
-  const exit = known.exit ?? (seenExit ? key(seenExit) : undefined);
-  const aim: Cell = exit !== undefined
-    ? parse(exit)
-    : bounds
-      ? expectedExit(bounds.width, bounds.height)
-      : [at[0] + 1, at[1] + 1];
-
-  // Unvisited, passable, nearest the corner.
-  const options = DIRECTIONS
-    .filter((direction) => walls[direction])
-    .map((direction) => ({ direction, to: ahead(at, direction) }))
-    .filter((option) => !visited.includes(key(option.to)))
-    .sort((a, b) => manhattan(a.to, aim) - manhattan(b.to, aim)
-      || DIRECTIONS.indexOf(a.direction) - DIRECTIONS.indexOf(b.direction));
-
-  if (options.length > 0) {
-    const chosen = options[0]!;
-    return {
-      kind: "go",
-      direction: chosen.direction,
-      known: { visited, edges, trail: [...known.trail, here], ...(exit !== undefined ? { exit } : {}) },
-      note: `${chosen.direction} into new ground`,
-    };
-  }
-
-  // Dead end: walk back the way we came.
-  const trail = [...known.trail];
-  while (trail.length > 0) {
-    const back = trail.pop()!;
-    const target = parse(back);
-    const direction = DIRECTIONS.find((d) => key(ahead(at, d)) === back);
-    if (direction !== undefined && walls[direction]) {
-      return {
-        kind: "go",
-        direction,
-        known: { visited, edges, trail, ...(exit !== undefined ? { exit } : {}) },
-        note: `back ${direction} toward ${back}`,
-      };
-    }
-    // The trail entry is not adjacent — we have already retreated past it — so
-    // keep popping. `at` only ever moves one cell per call, so this converges.
-    if (direction === undefined && key(target) === here) continue;
-  }
-
-  return {
-    kind: "exhausted",
-    reason: `every route from ${here} has been walked (${visited.length} cells) without reaching the exit`,
-  };
-}
-
 /* ---------------------------------------------------------------------------
  * The planning walker.
  *
- * The DFS above needs nothing but the last render. This walker instead exploits
+ * The planner exploits
  * everything `generateMaze` fixes in advance (`labyrinth.ts:112-186`):
  *
  * - **Four quadrants, each a spanning tree PLUS one extra edge at its own
@@ -325,7 +162,7 @@ export function stepMaze(
  * unmapped ground really costs (~54% of a perfect maze's slots are open). The
  * first edge of any plan is always already known, because every response's free
  * radius-1 render reveals all four adjacent slots BEFORE the next choice — so
- * unlike the DFS this walker never pays an authentication to bump a wall.
+ * the walker never pays an authentication to bump a wall.
  * ------------------------------------------------------------------------- */
 
 /** The stage facts the planner exploits. A subset of `LabStage` so tests can
@@ -481,93 +318,11 @@ export function refuseEdge(field: LabField, at: Cell, direction: Direction): Lab
   return { ...field, slots: { ...field.slots, [key([at[0] + dx, at[1] + dy])]: false } };
 }
 
-/** Which macro-route through the four quadrants a walker commits to.
- *
- * The exit's quadrant is reachable through exactly two door pairs: the
- * "eastern" route crosses the vertical seam's TOP door and the horizontal
- * seam's RIGHT door, the "southern" route crosses the LEFT door and then the
- * vertical seam's BOTTOM door. A lone walker plans over both ("any"); a SECOND
- * walker sharing the same field is worth most when it commits to the route the
- * first one is not on, instead of shadowing it. */
-export type LabRouteBias = "any" | "eastern" | "southern";
-
-/** Shape a prior to one macro-route by treating the OTHER route's still-unknown
- * door candidates as wall.
- *
- * Sound and self-healing: `planStep` consults the shared field BEFORE the
- * prior, so a door the other walker has actually seen open is used no matter
- * what this bias says — the bias only stops the walker from HOPING its way
- * through doors it was told to leave to someone else. Should the bias ever
- * make a maze unroutable (it cannot on a real rung: the property test proves
- * every set holds a door), the caller falls back to the unbiased prior. */
-export function routePrior(prior: LabPrior, bias: LabRouteBias): LabPrior {
-  if (bias === "any" || prior.seamX === undefined) return prior;
-  // Door set order is fixed by `labPrior`: 0 top, 1 bottom, 2 left, 3 right.
-  const hidden = bias === "eastern" ? [1, 2] : [0, 3];
-  return {
-    ...prior,
-    doorSets: prior.doorSets.map((set, index) => (hidden.includes(index) ? [] : set)),
-    doorIndex: Object.fromEntries(
-      Object.entries(prior.doorIndex).filter(([, set]) => !hidden.includes(set)),
-    ),
-  };
-}
-
-/** Fold one walker's field into another's. Everything in a field is an
- * observed fact or a proof, so a merge is a union: slots (the newer walker's
- * reading wins a disagreement, though honest fields never disagree), disproved
- * exit candidates, spent radar vantages, and the exit itself from whichever
- * side has it. This is what lets two PID-bound walkers in ONE maze act as one
- * mapper: each folds the shared field in before deciding, and publishes its
- * own after observing. */
-export function mergeLabFields(base: LabField, extra: LabField | undefined): LabField {
-  if (extra === undefined) return base;
-  const ruledOut = [...base.ruledOut];
-  for (const held of extra.ruledOut) if (!ruledOut.includes(held)) ruledOut.push(held);
-  const radared = [...base.radared];
-  for (const held of extra.radared) if (!radared.includes(held)) radared.push(held);
-  const exit = base.exit ?? extra.exit;
-  return {
-    slots: { ...base.slots, ...extra.slots },
-    ruledOut,
-    radared,
-    ...(exit !== undefined ? { exit } : {}),
-  };
-}
-
-/** The planner's two dials, with the values the paired benchmark in
- * `sim/tests/dnet-lab-benchmark.test.ts` (and the sweep in
- * `tools/dnet-lab-benchmark.ts`) settled on. */
-export interface LabTuning {
-  /** What an UNKNOWN edge is priced at, against 1 for a known-open one. Above
-   *  1 because roughly half of a perfect maze's slots are wall, so unmapped
-   *  ground costs more than the map says. */
-  unknownCost: number;
-  /** Pay for a speculative radar when its window covers at least this many
-   *  live exit candidates. A DECISIVE radar — one whose window covers all, or
-   *  all but one, of the remaining candidates, so its answer names the exit
-   *  either way — always fires regardless of this dial. Infinity (the tuned
-   *  default) allows only the decisive one, which the sweep found strictly
-   *  better than paying for partial eliminations. */
-  radarMinCover: number;
-  /** Pay for a door-scouting radar when the window covers at least this many
-   *  UNKNOWN door-candidate slots of a seam whose door has not been found.
-   *  Infinity disables the scout. */
-  radarDoorCover: number;
-  /** Economic speculative radar: when the window covers 2+ live candidates and
-   *  the believed walk to the NEAREST of them costs at least this many
-   *  attempts, pay 1 attempt now to resolve them from here instead of walking
-   *  there to be disproved. Infinity (default) disables — the decisive radar
-   *  still always fires. */
-  radarEconomicCost?: number;
-  /** Price an unknown slot that CONTINUES a straight known-open corridor at
-   *  `unknownCost * corridorBias`. A randomized-DFS carve favours long
-   *  corridors, so straight-ahead unknowns are likelier open than the flat
-   *  prior says. 1 (default) disables. */
-  corridorBias?: number;
-}
-
-export const LAB_TUNING: LabTuning = { unknownCost: 2.5, radarMinCover: Infinity, radarDoorCover: 3 };
+/** Fixed policy selected by the paired corpus. These are implementation
+ * details, not runtime tuning surface: changing them requires re-running the
+ * benchmark and updating its committed regression ceiling. */
+const UNKNOWN_EDGE_COST = 2.5;
+const RADAR_DOOR_COVER = 3;
 
 /** The probe that opens every walk. The position is unknown until the first
  * response, so the first move is blind either way — but where the DFS probed
@@ -598,7 +353,7 @@ export type LabPlan =
  * wandering. Must be called only after `observeLab` has folded in a render
  * centred on `at` — that is what guarantees the first edge of the plan is
  * already known open. */
-export function decideLab(field: LabField, at: Cell, prior: LabPrior, tuning: LabTuning = LAB_TUNING): LabPlan {
+export function decideLab(field: LabField, at: Cell, prior: LabPrior): LabPlan {
   const here = key(at);
   // Standing here while still being asked to decide proves this is not the exit.
   let ruledOut = field.ruledOut;
@@ -618,31 +373,18 @@ export function decideLab(field: LabField, at: Cell, prior: LabPrior, tuning: La
       const [cx, cy] = parse(held);
       return Math.abs(cx - at[0]) <= 3 && Math.abs(cy - at[1]) <= 3;
     });
-    if (covered.length > 0 && (covered.length >= tuning.radarMinCover || covered.length >= remaining.length - 1)) {
+    if (covered.length >= remaining.length - 1) {
       return {
         kind: "radar",
         field: { ...field, ruledOut, radared: [...field.radared, here] },
         note: `radar covers ${covered.length} of ${remaining.length} exit candidates`,
       };
     }
-    // The ECONOMIC speculative radar: 2+ candidates in the window, and the
-    // believed walk to the nearest of them costs enough attempts that paying
-    // ONE now to resolve them from here beats walking there to be disproved.
-    if (covered.length >= 2 && Number.isFinite(tuning.radarEconomicCost ?? Infinity)) {
-      const toCovered = planStep(field, at, prior, covered, tuning.unknownCost);
-      if (toCovered !== undefined && toCovered.cost >= tuning.radarEconomicCost!) {
-        return {
-          kind: "radar",
-          field: { ...field, ruledOut, radared: [...field.radared, here] },
-          note: `radar resolves ${covered.length} candidates ${toCovered.cost.toFixed(1)} believed attempts away`,
-        };
-      }
-    }
   }
 
-  // A door-scouting radar, when enabled: reveal several still-unknown seam
+  // A door-finding radar reveals several still-unknown seam
   // door candidates in one authentication instead of crawling the seam.
-  if (Number.isFinite(tuning.radarDoorCover) && !field.radared.includes(here)) {
+  if (!field.radared.includes(here)) {
     let doors = 0;
     for (const [slotKey, set] of Object.entries(prior.doorIndex)) {
       if (field.slots[slotKey] !== undefined) continue;
@@ -651,11 +393,11 @@ export function decideLab(field: LabField, at: Cell, prior: LabPrior, tuning: La
       const [sx, sy] = parse(slotKey);
       if (Math.abs(sx - at[0]) <= 3 && Math.abs(sy - at[1]) <= 3) doors++;
     }
-    if (doors >= tuning.radarDoorCover) {
+    if (doors >= RADAR_DOOR_COVER) {
       return {
         kind: "radar",
         field: { ...field, ruledOut, radared: [...field.radared, here] },
-        note: `radar scouts ${doors} door candidates`,
+        note: `radar checks ${doors} door candidates`,
       };
     }
   }
@@ -665,7 +407,7 @@ export function decideLab(field: LabField, at: Cell, prior: LabPrior, tuning: La
   // decisive radar above fires from anywhere inside their corner — so there is
   // nothing to aim at but the candidates themselves.
   const targets = exit !== undefined ? [exit] : remaining;
-  const step = planStep(field, at, prior, targets, tuning.unknownCost, tuning.corridorBias ?? 1);
+  const step = planStep(field, at, prior, targets);
   if (step === undefined) {
     return { kind: "lost", reason: `no believable route from ${here} to ${targets.join(" or ")}` };
   }
@@ -722,7 +464,8 @@ export function liveExitCandidates(field: LabField, prior: LabPrior): string[] {
 
 /** A* from `at` to the cheapest target over everything known and inferable.
  *
- * Edge prices: known-open 1, known-wall impassable, unknown `unknownCost`.
+ * Edge prices: known-open 1, known-wall impassable, unknown at the fixed
+ * `UNKNOWN_EDGE_COST` selected by the regression corpus.
  * Two exact inferences close edges the walker has never seen:
  * - a seam slot outside its door candidates is wall, and a door found in an
  *   exclusive set closes the rest of that set;
@@ -737,8 +480,6 @@ function planStep(
   at: Cell,
   prior: LabPrior,
   targets: readonly string[],
-  unknownCost: number,
-  corridorBias = 1,
 ): { direction: Direction; target: string; cost: number } | undefined {
   const cols = (prior.width - 1) >> 1;
   const rows = (prior.height - 1) >> 1;
@@ -788,18 +529,6 @@ function planStep(
   const doorFound = prior.doorSets.map((set, index) =>
     prior.doorSetExclusive[index] === true && set.some((held) => field.slots[held] === true));
 
-  /** The DFS-carve corridor prior: an unknown slot that CONTINUES a straight
-   * known-open corridor (the next slot along the same axis, on either side, is
-   * observed open) is likelier open than the flat prior says. Clamped at 1 so
-   * the manhattan/2 heuristic stays admissible. */
-  const unknownPrice = (sx: number, sy: number): number => {
-    if (corridorBias >= 1) return unknownCost;
-    const continues = sx % 2 === 0
-      ? field.slots[`${sx - 2},${sy}`] === true || field.slots[`${sx + 2},${sy}`] === true
-      : field.slots[`${sx},${sy - 2}`] === true || field.slots[`${sx},${sy + 2}`] === true;
-    return continues ? Math.max(1, unknownCost * corridorBias) : unknownCost;
-  };
-
   const price = (sx: number, sy: number): number => {
     if (sx <= 0 || sy <= 0 || sx >= prior.width - 1 || sy >= prior.height - 1) return Infinity;
     const held = field.slots[`${sx},${sy}`];
@@ -807,7 +536,7 @@ function planStep(
     if (onSeam(sx, sy)) {
       const set = prior.doorIndex[`${sx},${sy}`];
       if (set === undefined || doorFound[set] === true) return Infinity;
-      return unknownPrice(sx, sy);
+      return UNKNOWN_EDGE_COST;
     }
     const a = sx % 2 === 0 ? nodeOf(sx - 1, sy) : nodeOf(sx, sy - 1);
     const b = sx % 2 === 0 ? nodeOf(sx + 1, sy) : nodeOf(sx, sy + 1);
@@ -815,9 +544,9 @@ function planStep(
       // Already connected: wall, unless this could still be the quadrant's one
       // cycle edge — incident to the quadrant's start, cycle not yet seen.
       if (cycleSeen[quadrantOf(sx, sy)] === true || !touchesQuadrantStart(sx, sy)) return Infinity;
-      return unknownCost;
+      return UNKNOWN_EDGE_COST;
     }
-    return unknownPrice(sx, sy);
+    return UNKNOWN_EDGE_COST;
     // NOTE, so the next tuner does not re-dig this hole: a "degree inference"
     // (three provable walls around a cell force its fourth slot open, priced 1)
     // was implemented and swept — byte-identical results over 480 paired cases.

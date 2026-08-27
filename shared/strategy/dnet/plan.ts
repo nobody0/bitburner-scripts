@@ -87,11 +87,6 @@ export interface Task {
   edge?: string;
   /** Pins only: release the link instead of applying one. */
   unpin?: boolean;
-  /** Walks only: the scout's route bias, carried verbatim to the walk body. */
-  route?: string;
-  /** Walks only: a mortal scout — keeps its prober, so the RAM sizing must
-   *  reserve it where the finisher's host is consumed whole. */
-  scout?: true;
   /** Which unattributed password an `attempt` task is spending, BY REFERENCE.
    *
    *  The password itself never enters this module. The controller matches a
@@ -648,11 +643,9 @@ export function deriveTasks(
   // each carries its own vantage, because `induceServerMigration` is the one
   // call in the feature that refuses the host it is running on.
   for (const entry of opts.hold ?? []) {
-    // Pushes AND walks dedup on (kind, target, VANTAGE). An induce target may
-    // be charged by SEVERAL vantages — the migration charge accumulates on the
-    // TARGET, so N pushers move it ~N× faster. A walk target likewise carries
-    // the finisher and, when one is admitted, a mortal scout, each from its
-    // own vantage. Every other hold kind keeps the plain per-target check.
+    // Per-vantage work dedups on (kind, target, vantage). Today that is induce:
+    // several callers may charge one target because its migration charge is
+    // additive. Every other hold kind keeps the plain per-target check.
     const perVantage = JOBS[entry.kind].perVantage === true;
     const alreadyPlanned = !perVantage && tasks.some((task) => task.kind === entry.kind && task.host === entry.host);
     const inFlight = perVantage
@@ -669,8 +662,6 @@ export function deriveTasks(
       ...(entry.threads !== undefined && entry.threads !== 1 ? { threads: entry.threads } : {}),
       ...(entry.edge !== undefined ? { edge: entry.edge } : {}),
       ...(entry.unpin === true ? { unpin: true } : {}),
-      ...(entry.route !== undefined ? { route: entry.route } : {}),
-      ...(entry.scout === true ? { scout: true } : {}),
     });
   }
 

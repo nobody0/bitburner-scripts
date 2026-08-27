@@ -204,6 +204,9 @@ describe("the walker", () => {
     const result = await runOrder(r.ns, makeOrder("walk", { host: LAB_LADDER[0]!.hostname, from: "dn-1" }, {}), makeIo());
     expect(result.ok, result.detail).toBe(true);
     expect(r.walked.length).toBeGreaterThan(0);
+    // This is the production policy's selected blind probe, not a simulator
+    // default: runWalk imports LAB_FIRST_PROBE and sends it to authenticate.
+    expect(r.walked[0]).toBe("east");
     // Every word it sent is one the engine's parser accepts. The direction word
     // IS the password: there is no move call.
     for (const word of r.walked) expect(["north", "east", "south", "west"]).toContain(word);

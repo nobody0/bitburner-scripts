@@ -138,8 +138,8 @@ describe("the maze the game actually builds", () => {
 
   test("standing positions are odd and the cells between them are wall slots", () => {
     // The carve steps two cells at a time from [1,1], which is what makes a
-    // step two cells with the wall as the one between. `stepMaze`'s `ahead`
-    // depends on it exactly.
+    // step two cells with the wall as the one between. The planner's `ahead`
+    // helper depends on it exactly.
     const maze = generateMaze(20, 14, mulberry32(13));
     expect(maze[1]![1]).toBe(MAZE_PATH);
     for (let y = 0; y < maze.length; y += 2) {

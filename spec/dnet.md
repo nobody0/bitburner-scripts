@@ -965,35 +965,22 @@ generator:
 
 The deployed walker (`decideLab`) folds every response's free radius-1 render
 into a slot map and replans with A* each step: known-open edges cost one
-authentication, provably-walled edges are impassable, unknown edges cost a
-tuned premium. The first edge of any plan is always already known, so it never
+authentication, provably-walled edges are impassable, and unknown edges cost
+the fixed premium selected by the regression corpus. The first edge of any
+plan is always already known, so it never
 pays an authentication to bump a wall (the blind first probe aside). It pays
 for a `labradar` only when the radius-3 window would decide the exit outright —
-show it, or rule out all-but-one candidates — or scout three or more unknown
+show it, or rule out all-but-one candidates — or resolve three or more unknown
 door candidates at once. `sim/tests/dnet-lab-benchmark.test.ts` and
-`bun run bench:sim:dnet-lab` hold the paired evidence: the planner solves the
-whole ladder in ~0.65x the DFS's wall-clock (attempts land ~1.4x the omniscient
-shortest path, against the DFS's ~2.2x).
+`bun run bench:sim:dnet-lab` hold the regression gate: on the committed
+64-seed corpus the production planner must solve every rung, bump no more than
+the unavoidable blind first edge, and stay within 1.45x the omniscient shortest
+path. The current policy lands at about 1.42x.
 
-### One pinned finisher, up to two mortal scouts
+### One pinned walker
 
 The maze is global (`DarknetState.labyrinth`) while position is per PID. Dnet
-runs exactly one FINISHER — the pinned, protected, full-host walker — and,
-when further lab-adjacent staffed vantages exist, up to two MORTAL SCOUTS
-beside it (southern then eastern route bias). A scout is everything the
-finisher is not: unpinned, opportunistic (its absence refuses nothing),
-prober kept, sized from free RAM rather than the whole host, and its walk is
-biased to a macro-route the unbiased finisher tends away from (`Order.route` →
-`routePrior`). All walkers share one `labFields` map and one charisma pool,
-and any PID reaching the endpoint roots the lab for everyone — the party
-benchmark's paired evidence is 0.905× wall-clock for one immortal scout,
-0.854× for two, and still under 1.0 for a scout that dies every five minutes,
-because a dead scout costs a re-plant while its map survives in the shared
-field. A scout never holds the storm: the `walker-unpinned` gate protects the
-finisher only.
-
-An earlier revision of this section concluded a second walker was not worth a
-host; the paired party benchmark overturned that.
+runs exactly one pinned, protected, full-host walker.
 
 Preparation is deliberately ordered:
 

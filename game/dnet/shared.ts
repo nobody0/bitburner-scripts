@@ -148,16 +148,7 @@ export interface OrderPayloads {
     /** Release the link instead of applying one. */
     unpin?: true;
   };
-  walk: {
-    /** The macro-route bias the walk body hands `routePrior` — set for a
-     *  mortal scout, absent (unbiased) for the finisher. */
-    route?: string;
-    /** A MORTAL scout rather than the pinned finisher. The controller cannot
-     *  tell the two apart from a live handle otherwise, and the difference
-     *  decides who is stamped irreplaceable, who holds the storm, and whose
-     *  absence re-plans a walk. */
-    scout?: true;
-  };
+  walk: Record<string, never>;
   storm: Record<string, never>;
   relaunchProbe: { proberFile: string };
 }
