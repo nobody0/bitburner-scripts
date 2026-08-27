@@ -227,6 +227,23 @@ function total(parts: EtaPart[]): number {
   return parts.reduce((sum, entry) => sum + (entry.hidden ? 0 : entry.sec), 0);
 }
 
+/** Sum without the hidden-part exclusion, for lists built before hiding. */
+function sumSec(parts: readonly EtaPart[]): number {
+  return parts.reduce((sum, entry) => sum + entry.sec, 0);
+}
+
+/** Compose an AND-parallel gate: the slower branch is the visible part, the
+ * faster one is emitted `hidden` so the marginals still price it (a masked
+ * dependency must never be worth zero) without it extending the total. */
+function pushParallelGate(parts: EtaPart[], label: string, money: EtaPart, skill: SkillGatePlan): void {
+  const [binding, masked] = money.sec >= skill.sec ? [[money], skill.parts] : [skill.parts, [money]];
+  for (const part of binding) parts.push({ ...part, what: `${label} (${part.what})` });
+  for (const part of masked) {
+    if (!(part.sec > 0)) continue;
+    parts.push({ ...part, what: `${label} (${part.what}, parallel)`, hidden: true });
+  }
+}
+
 function moneyGatePart(view: EndgameView, rates: RouteRates, afterReset: boolean): EtaPart {
   const gap = afterReset ? DAEDALUS_MONEY : Math.max(0, DAEDALUS_MONEY - view.money);
   const fallback = gap / (rates.moneyPerSec > 0 ? rates.moneyPerSec : FALLBACK_MONEY_PER_SEC);
@@ -288,7 +305,7 @@ export function regrowInstallOverride(input: {
   }
   const remainNowSec = (gate - input.hackingSkill) / input.rates.hackingSkillPerSec;
   const remainAfterSec = INSTALL_OVERHEAD_SEC
-    + postInstallRegrow(gate, input.rates).reduce((sum, part) => sum + part.sec, 0);
+    + sumSec(postInstallRegrow(gate, input.rates));
   return remainAfterSec < remainNowSec;
 }
 
@@ -362,10 +379,7 @@ export function postInstallRegrow(skill: number, rates: RouteRates, deepFuture =
   const committedMult = rates.hackingSkillMult !== undefined
     ? rates.hackingSkillMult * Math.max(1, rates.postInstallHackingSkillMult)
     : undefined;
-  const closed = !deepFuture && committedMult !== undefined
-    ? hackingClimbSec(skill, 0, committedMult, rates)
-    : undefined;
-  if (closed !== undefined && committedMult !== undefined) {
+  if (!deepFuture && committedMult !== undefined) {
     // The climb with what we HAVE, versus assembling more of the hacking
     // catalogue first: the curve is exponential in 1/mult, so once the
     // current stack prices the climb in days, acquisition is the real plan.
@@ -436,50 +450,19 @@ export function routeEtas(view: EndgameView, decision: EndgameDecision, rates: R
               hackingSkill: 1,
               lowestCombatSkill: 1,
             };
-            const postMoney = moneyGatePart(afterReset, rates, true);
-            const postSkill = skillPart(afterReset, rates, true);
-            const postSkillSec = postSkill.reduce((sum, part) => sum + part.sec, 0);
-            if (postMoney.sec >= postSkillSec) {
-              parts.push({ ...postMoney, what: `post-install invite gate (${postMoney.what})` });
-              for (const gatePart of postSkill) {
-                if (!(gatePart.sec > 0)) continue;
-                parts.push({ ...gatePart, what: `post-install invite gate (${gatePart.what}, parallel)`, hidden: true });
-              }
-            } else {
-              for (const gatePart of postSkill) {
-                parts.push({ ...gatePart, what: `post-install invite gate (${gatePart.what})` });
-              }
-              if (postMoney.sec > 0) {
-                parts.push({ ...postMoney, what: `post-install invite gate (${postMoney.what}, parallel)`, hidden: true });
-              }
-            }
+            pushParallelGate(parts, "post-install invite gate", moneyGatePart(afterReset, rates, true), skillPart(afterReset, rates, true));
           } else {
             // With the count gate already installed, money and the two skill
             // branches accrue in parallel from the live state.
             const skill = skillPart(view, rates);
-            const skillSec = skill.reduce((sum, part) => sum + part.sec, 0);
-            const liveMoney = moneyGatePart(view, rates, false);
-            if (liveMoney.sec >= skillSec) {
-              parts.push({ ...liveMoney, what: `invite gate (${liveMoney.what})` });
-              for (const gatePart of skill) {
-                if (!(gatePart.sec > 0)) continue;
-                parts.push({ ...gatePart, what: `invite gate (${gatePart.what}, parallel)`, hidden: true });
-              }
-            } else {
-              for (const gatePart of skill) {
-                parts.push({ ...gatePart, what: `invite gate (${gatePart.what})` });
-              }
-              if (liveMoney.sec > 0) {
-                parts.push({ ...liveMoney, what: `invite gate (${liveMoney.what}, parallel)`, hidden: true });
-              }
-            }
+            pushParallelGate(parts, "invite gate", moneyGatePart(view, rates, false), skill);
 
             const inviteNeeds: RouteNeed[] = [];
             if (view.money < DAEDALUS_MONEY) {
               inviteNeeds.push({ kind: "money", target: DAEDALUS_MONEY, have: view.money });
             }
             if (view.hackingSkill < DAEDALUS_HACKING && view.lowestCombatSkill < DAEDALUS_COMBAT) {
-              inviteNeeds.push(skill[skill.length - 1]!.resource === "combat"
+              inviteNeeds.push(skill.branch === "combat"
                 ? { kind: "combatSkills", target: DAEDALUS_COMBAT, have: view.lowestCombatSkill }
                 : { kind: "skill", subject: "hacking", target: DAEDALUS_HACKING, have: view.hackingSkill });
             }
@@ -510,42 +493,35 @@ export function routeEtas(view: EndgameView, decision: EndgameDecision, rates: R
           const donateUnlockGap = rates.daedalusDonateUnlockRepGap;
           const dollarsPerRep = rates.daedalusDonationDollarsPerRep ?? 0;
           const donationUnlocked = rates.daedalusDonationUnlocked === true;
-          // Rep resets at the favor-banking install, so the donation buys the
-          // full requirement; with donations already unlocked it buys only the
-          // remaining gap and no install is needed.
-          const donateRep = donationUnlocked ? Math.max(0, repGap) : RED_PILL_REP;
-          const donateParts: EtaPart[] | undefined =
-            donateUnlockGap !== undefined && dollarsPerRep > 0 && rates.moneyPerSec > 0
-              ? [
+          // One mode switch, two shapes. Donations spend the BANK, not just
+          // the flow: pricing the full amount against income made an already
+          // affordable donation look like hours whenever income dipped, and
+          // the route fell back to a 30h reputation grind.
+          const donationSec = (rep: number): EtaPart => ({
+            what: "daedalus reputation donation",
+            resource: "money",
+            sec: Math.max(0, rep * dollarsPerRep - view.money) / rates.moneyPerSec,
+            measured: false,
+          });
+          let donateParts: EtaPart[] | undefined;
+          if (donateUnlockGap !== undefined && dollarsPerRep > 0 && rates.moneyPerSec > 0) {
+            donateParts = donationUnlocked
+              // Already unlocked: current rep survives, buy only the gap.
+              ? [donationSec(Math.max(0, repGap))]
+              // Locked: earn the unlock rep, bank it at an extra install (the
+              // count install precedes the invite and cannot bank Daedalus
+              // favor), then rep is reset — buy the full requirement.
+              : [
                   {
                     what: "daedalus favor unlock reputation",
-                    resource: "reputation" as const,
-                    sec: (donationUnlocked ? 0 : Math.max(0, donateUnlockGap)) / repWorkRate,
+                    resource: "reputation",
+                    sec: Math.max(0, donateUnlockGap) / repWorkRate,
                     measured: measuredRepRate > 0,
                   },
-                  // The count install precedes the invite and so cannot bank
-                  // Daedalus favor: without unlocked donations the banking
-                  // install is always an extra reset after the unlock grind.
-                  ...(donationUnlocked
-                    ? []
-                    : [{
-                        what: "daedalus favor-banking install",
-                        resource: "install" as const,
-                        sec: INSTALL_OVERHEAD_SEC,
-                        measured: false,
-                      }]),
-                  {
-                    what: "daedalus reputation donation",
-                    resource: "money" as const,
-                    // Donations spend the BANK, not just the flow: pricing the
-                    // full amount against income made an already-affordable
-                    // donation look like hours whenever income dipped, and the
-                    // route fell back to a 30h reputation grind.
-                    sec: Math.max(0, donateRep * dollarsPerRep - view.money) / rates.moneyPerSec,
-                    measured: false,
-                  },
-                ]
-              : undefined;
+                  { what: "daedalus favor-banking install", resource: "install", sec: INSTALL_OVERHEAD_SEC, measured: false },
+                  donationSec(RED_PILL_REP),
+                ];
+          }
           if (donateParts && total(donateParts) < repWorkSec) {
             parts.push(...donateParts);
           } else {
@@ -643,7 +619,13 @@ export function routeEtas(view: EndgameView, decision: EndgameDecision, rates: R
 
 /** Daedalus accepts hacking 2500 OR all four combat skills at 1500 — whichever
  * climb is faster is the one the estimate prices. */
-function skillPart(view: EndgameView, rates: RouteRates, afterInstall = false): EtaPart[] {
+interface SkillGatePlan {
+  parts: EtaPart[];
+  sec: number;
+  branch: "hacking" | "combat";
+}
+
+function skillPart(view: EndgameView, rates: RouteRates, afterInstall = false): SkillGatePlan {
   const hackingGain = afterInstall ? Math.max(1, rates.postInstallHackingSkillMult) : 1;
   const combatGain = afterInstall ? Math.max(1, rates.postInstallCombatSkillMult) : 1;
   // For the same experience, skill is proportional to the direct stat
@@ -671,8 +653,10 @@ function skillPart(view: EndgameView, rates: RouteRates, afterInstall = false): 
     : undefined)
     ?? [curvePart("hacking skill", "hacking", hackTarget - 1, hackFallback, rates, view.hackingSkill > 1)];
   const combat = curvePart("combat skills", "combat", combatTarget - 1, combatFallback, rates, view.lowestCombatSkill > 1);
-  const hackSec = hackParts.reduce((sum, part) => sum + part.sec, 0);
-  return hackSec <= combat.sec ? hackParts : [combat];
+  const hackSec = sumSec(hackParts);
+  return hackSec <= combat.sec
+    ? { parts: hackParts, sec: hackSec, branch: "hacking" }
+    : { parts: [combat], sec: combat.sec, branch: "combat" };
 }
 
 // --- route choice -----------------------------------------------------------

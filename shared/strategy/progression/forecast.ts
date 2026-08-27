@@ -215,6 +215,12 @@ export interface InstallForecastView {
  * models unlock and player work as sequential inside unlockSec/repSec while
  * money production overlaps them. We retain those components separately for
  * diagnosis and take the critical path here. */
+/** The drain that converts bank to queued augmentations right before a reset —
+ * one definition for every branch that appends it. */
+function finalSweepComponent(sec = INSTALL_FINAL_SWEEP_SEC): Omit<ForecastComponent, "critical"> {
+  return { what: "final purchase and donation sweep", resource: "install", sec, measured: false, mode: "sequential" };
+}
+
 export function installForecast(now: number, view: InstallForecastView, basis: string): TimeForecast {
   if (view.installNow) return estimatedForecast(now, basis, []);
 
@@ -304,13 +310,7 @@ export function installForecast(now: number, view: InstallForecastView, basis: s
               mode: "parallel" as const,
             }]
           : []),
-        {
-          what: "final purchase and donation sweep",
-          resource: "install",
-          sec: INSTALL_FINAL_SWEEP_SEC,
-          measured: false,
-          mode: "sequential",
-        },
+        finalSweepComponent(),
       ]);
     }
     return unknownForecast(
@@ -321,25 +321,13 @@ export function installForecast(now: number, view: InstallForecastView, basis: s
   }
   if (!intent) {
     if (view.queuedCount > 0 && view.phase === "ending") {
-      return estimatedForecast(now, basis, [{
-        what: "final purchase and donation sweep",
-        resource: "install",
-        sec: view.finalSweepReady ? 0 : INSTALL_FINAL_SWEEP_SEC,
-        measured: false,
-        mode: "sequential",
-      }]);
+      return estimatedForecast(now, basis, [finalSweepComponent(view.finalSweepReady ? 0 : INSTALL_FINAL_SWEEP_SEC)]);
     }
     if (mandatoryComponents) return estimatedForecast(now, basis, mandatoryComponents);
     if (packageBound) {
       return estimatedForecast(now, basis, [
         packageBound,
-        {
-          what: "final purchase and donation sweep",
-          resource: "install",
-          sec: INSTALL_FINAL_SWEEP_SEC,
-          measured: false,
-          mode: "sequential",
-        },
+        finalSweepComponent(),
       ]);
     }
     return unknownForecast(now, basis, "no committed augmentation package yet");
@@ -358,13 +346,7 @@ export function installForecast(now: number, view: InstallForecastView, basis: s
           mode: "parallel" as const,
         }]
       : []),
-    {
-      what: "final purchase and donation sweep",
-      resource: "install",
-      sec: INSTALL_FINAL_SWEEP_SEC,
-      measured: false,
-      mode: "sequential",
-    },
+    finalSweepComponent(),
   ] as const;
   const economicSec = Math.max(workSec, Math.max(0, intent.moneySec), Math.max(0, view.cadenceSec ?? 0)) + INSTALL_FINAL_SWEEP_SEC;
   const mandatorySec = view.mandatory ? Math.max(0, view.mandatory.sec) + INSTALL_FINAL_SWEEP_SEC : Infinity;

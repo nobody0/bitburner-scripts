@@ -117,13 +117,18 @@ export class Clock {
     // 10 minutes keeps the footprint bounded; Bun.gc is absent outside bun.
     const gc = (globalThis as { Bun?: { gc?: (force: boolean) => void } }).Bun?.gc;
     let nextGcAt = 600_000;
+    // Wall floor too: the virtual trigger's wall frequency scales with sim
+    // throughput, so a faster simulator would otherwise spend an ever-larger
+    // share of wall time in forced synchronous collections.
+    let nextGcWallMs = realNowMs() + 2_000;
     for (;;) {
       await drain();
       if (until()) return "goal";
       const next = this.#takeNext(horizonMs);
       if (next === "empty" || next === "horizon") return next;
-      if (gc && this.now() >= nextGcAt) {
+      if (gc && this.now() >= nextGcAt && realNowMs() >= nextGcWallMs) {
         nextGcAt = this.now() + 600_000;
+        nextGcWallMs = realNowMs() + 2_000;
         gc(true);
       }
       next.fn();

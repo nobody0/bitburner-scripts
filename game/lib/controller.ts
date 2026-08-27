@@ -128,7 +128,6 @@ export async function runController(
       // the post-install boot home is empty and the exec succeeds; against a
       // busy farm the exec fails and the respawn retries exactly as it does
       // today, but never permanently.
-      if (process.env["DEBUG_PLACE"]) console.error(`PLACE fallback home min=${minGb} t=${Date.now()}`);
       return { host: "home", gb: minGb, release: () => {} };
     }
     const gb = Math.round(Math.min(preferredGb, host.freeGb) * 100) / 100;
@@ -149,7 +148,6 @@ export async function runController(
     const preferredLease = heap.reserveOn(host.hostname, gb, true);
     const lease = preferredLease ?? heap.reserveOn(host.hostname, minLeaseGb, true);
     if (!lease) {
-      if (process.env["DEBUG_PLACE"]) console.error(`PLACE min-lease failed host=${host.hostname} min=${minGb} t=${Date.now()}`);
       return { host: "home", gb: minGb, release: () => {} };
     }
     return { host: host.hostname, gb: preferredLease ? gb : minLeaseGb, release: () => lease.release() };

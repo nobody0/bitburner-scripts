@@ -1,17 +1,6 @@
 import { execSync } from "node:child_process";
 import { ScriptDeath } from "./ns/api.ts";
 
-// A prestige kill sweep rejects every killed script's pending delay with
-// ScriptDeath. Some of those rejections land on promise chains whose awaiting
-// script is itself mid-teardown and never observes them; bun then reports an
-// unhandled rejection and takes the whole seed process down with no result
-// written (measured twice on bn1-full: seeds died silently at 15.2h and
-// ~17h). A ScriptDeath landing nowhere is cancellation noise by construction;
-// anything else is a real bug and still crashes loudly.
-process.on("unhandledRejection", (reason) => {
-  if (reason instanceof ScriptDeath) return;
-  throw reason;
-});
 import { mkdirSync } from "node:fs";
 import { FEATURE_IDS, type FeatureId } from "../shared/features/ids.ts";
 import { only, type FeatureOverrides } from "../shared/features/profile.ts";
@@ -35,10 +24,23 @@ import { scenarioFingerprint } from "./scenario.ts";
 import { SimArtifactSession } from "./artifacts.ts";
 import { formatReport } from "./cost.ts";
 import {
+
   assertValidExperiment,
   type EntranceIdentity,
   type ExperimentIdentity,
 } from "../shared/experiment.ts";
+
+// A prestige kill sweep rejects every killed script's pending delay with
+// ScriptDeath. Some of those rejections land on promise chains whose awaiting
+// script is itself mid-teardown and never observes them; bun then reports an
+// unhandled rejection and takes the whole seed process down with no result
+// written (measured twice on bn1-full: seeds died silently at 15.2h and
+// ~17h). A ScriptDeath landing nowhere is cancellation noise by construction;
+// anything else is a real bug and still crashes loudly.
+process.on("unhandledRejection", (reason) => {
+  if (reason instanceof ScriptDeath) return;
+  throw reason;
+});
 
 export interface RunOptions {
   goal: Goal;

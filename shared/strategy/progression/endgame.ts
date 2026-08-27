@@ -118,6 +118,11 @@ export interface RouteNeed {
   subject?: string;
   target: number;
   have: number;
+  /** The route's TERMINAL blocker: satisfying it (and only it) ends the node,
+   * so it is worth the whole remaining horizon. Set where the route stage
+   * machine knows it, consumed wherever prerequisites are priced — never
+   * reconstructed from the poster's identity at a claim site. */
+  terminal?: true;
 }
 
 export interface MandatoryInstall {
@@ -315,6 +320,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
           subject: "w0r1d_d43m0n",
           target: 1,
           have: 0,
+          terminal: true,
         }],
         optionalInstall: false,
       };

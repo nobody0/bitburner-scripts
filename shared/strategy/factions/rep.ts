@@ -315,6 +315,13 @@ export function addRepToFavor(favor: number, playerReputation: number): number {
 
 // --- donation --------------------------------------------------------------
 
+/** Reputation still to EARN so favor crosses `targetFavor` at the next
+ * install: favor banks total earned rep, so current favor and current rep
+ * both count toward the threshold. */
+export function repUntilFavor(currentFavor: number, currentRep: number, targetFavor: number): number {
+  return Math.max(0, favorToRep(targetFavor) - favorToRep(currentFavor) - Math.max(0, currentRep));
+}
+
 export function favorNeededToDonate(favorToDonateMult: number): number {
   return Math.floor(BASE_FAVOR_TO_DONATE * favorToDonateMult);
 }

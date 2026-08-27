@@ -114,6 +114,9 @@ export interface Need {
   /** The threshold, in the game's own units. */
   target: number;
   have: number;
+  /** The posting route's TERMINAL blocker — worth the whole remaining
+   * horizon; see RouteNeed.terminal. */
+  terminal?: true;
   /** Worth of satisfying it, in the requester's own value units per second of
    *  the run it would unblock. Comparable across features only via this field —
    *  which is the whole point of normalising to "per second of unblocked run". */

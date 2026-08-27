@@ -140,11 +140,11 @@ function favorCanActivateBeforeGoal(view: FactionsView): boolean {
  * candidate ever targeted Daedalus's 462k unlock rep, the run ground to 459k
  * — 147 seconds short of the crossing — and stalled 13 minutes from
  * completing the node for the final 8 hours of the horizon. */
-function favorServesRouteTerminal(standing: FactionStanding, offered: readonly AugInfo[], view: FactionsView): boolean {
+export function favorServesRouteTerminal(standing: FactionStanding, offersRedPill: boolean, view: FactionsView): boolean {
   return (view.route === "daedalus" || view.route === "gang")
     && !view.owned.has("The Red Pill")
     && (standing.joined || standing.invited)
-    && offered.some((aug) => aug.name === "The Red Pill");
+    && offersRedPill;
 }
 
 export function packageValues(
@@ -234,7 +234,7 @@ export function favorValue(
     favorAfterInstall,
     future,
     view,
-    favorServesRouteTerminal(standing, allOffered, view),
+    favorServesRouteTerminal(standing, allOffered.some((aug) => aug.name === "The Red Pill"), view),
   );
 }
 
@@ -289,7 +289,7 @@ function targetCandidates(standing: FactionStanding, offered: readonly AugInfo[]
   // augmentations needed by the current route. Unlock an unjoined faction for
   // an actual augmentation first; after membership, favor competes normally.
   if ((standing.joined || standing.invited)
-    && (favorCanActivateBeforeGoal(view) || favorServesRouteTerminal(standing, offered, view))) {
+    && (favorCanActivateBeforeGoal(view) || favorServesRouteTerminal(standing, offered.some((aug) => aug.name === "The Red Pill"), view))) {
     const currentAfterInstall = addRepToFavor(standing.favor, standing.rep);
     const work = bestWorkType(standing.offers, view.person, standing.favor, view.repContext, true);
     const workReach = standing.rep + (work?.repPerSec ?? 0) * view.horizonSec;

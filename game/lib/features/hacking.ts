@@ -1460,6 +1460,16 @@ export interface ServerAccessPlan {
   concurrentBackdoor?: ServerAccessAction;
 }
 
+/** The board's route-terminal root need for this host, if any. The flag is
+ * set by the route stage machine (RouteNeed.terminal); both the write-vs-buy
+ * bypass and the claim escalation key off it, and they must move together —
+ * half-applying this condition is exactly how the measured 37-minute
+ * one-root-from-victory stall comes back. */
+function terminalRootNeed(board: Pick<ClaimContext, "board">["board"], host: string | undefined): boolean {
+  return host !== undefined
+    && board.open.some((need) => need.terminal === true && need.kind === "root" && need.subject === host);
+}
+
 export function serverAccessPlan(
   ctx: Pick<ClaimContext, "board" | "state" | "activeFeatures"> & Partial<Pick<ClaimContext, "horizons">>,
 ): ServerAccessPlan | undefined {
@@ -1477,8 +1487,7 @@ export function serverAccessPlan(
   // a $250m SQLInject as precious next to a "free" write that the slot never
   // actually schedules. Measured on bn1-full seed 2: the plan sat in write
   // limbo for the final 37 minutes, one root away from destroying the node.
-  const routeBlockingRoot = ctx.board.open.some((need) =>
-    need.by === "progression" && need.kind === "root" && need.subject === primary.host && need.urgency === "blocking");
+  const routeBlockingRoot = terminalRootNeed(ctx.board, primary.host);
   if (!program || routeBlockingRoot || !writeInsteadOfBuy(ctx, program)) return { primary };
   const concurrentBackdoor = candidates.find((entry) => entry.entry.action === "backdoor")?.entry;
   return {
@@ -2061,15 +2070,13 @@ export const hackingModule: FeatureModule = {
       const program = programForPortNeed(ctx.state, pending.server.numOpenPortsRequired ?? 0);
       if (program) {
         const purchaseCost = portOpenerPurchaseCost(ctx.state, pending.server.numOpenPortsRequired ?? 0);
-        // A BLOCKING root need from the route escalates the purchase above the
-        // faction reserve bands, exactly as backdoorClaimPriority escalates a
-        // route-critical backdoor. Measured on bn1-full seed 2: the node's
+        // A route-TERMINAL root need escalates the purchase above the
+        // faction reserve bands. Measured on bn1-full seed 2: the node's
         // LAST step (root w0r1d_d43m0n) needed a $280m opener while $120e12
         // sat in the bank, and the fixed band-65 claim was granted $0 for the
         // final 37 minutes of the horizon because aug-fund (90) and donate
         // (70) reserves drained the pool above it every pass.
-        const routeBlocking = ctx.board.open.some((need) =>
-          need.by === "progression" && need.kind === "root" && need.subject === pending.host && need.urgency === "blocking");
+        const routeBlocking = terminalRootNeed(ctx.board, pending.host);
         claims.push(
           {
             by: "hacking",

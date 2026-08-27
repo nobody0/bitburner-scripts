@@ -24,7 +24,7 @@ import {
   scoreAugMults,
   weightsFromMarginals,
 } from "../../../shared/strategy/factions/augs.ts";
-import { donationForRep, favorNeededToDonate, favorToRep, workRepPerSec, type WorkType } from "../../../shared/strategy/factions/rep.ts";
+import { donationForRep, favorNeededToDonate, repUntilFavor, workRepPerSec, type WorkType } from "../../../shared/strategy/factions/rep.ts";
 import { stepGang } from "../../../shared/strategy/gang/decide.ts";
 import { goDemands } from "../../../shared/strategy/go/demand.ts";
 import {
@@ -2625,69 +2625,9 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
         (ctx.state.topics.player?.money ?? 0) + Math.max(0, stockTopicForPrior.portfolioValue ?? 0),
       )
     : 0;
-  // Formula-projected Daedalus reputation economics. The measured tracker is
-  // zero until Daedalus work actually starts, which priced the 2.5m-rep leg
-  // at a flat fallback for the whole run. Project the work rate from the
-  // transcribed rep formulas at the invite gate's own floor (the leg cannot
-  // begin below the gate), and hand the ETA the donation route's numbers —
-  // earn only the favor-unlock reputation, bank it at an install, buy the
-  // rest with money — so it can take the cheaper of the two paths.
-  const playerTopic = ctx.state.topics.player;
-  const repFactionMult = (playerTopic?.mults as Record<string, number> | undefined)?.["faction_rep"] ?? 1;
-  const factionWorkRepGain = nodeMultsForPrior?.["FactionWorkRepGain"] ?? 1;
-  const daedalusStanding = ctx.state.topics.factions?.standings?.find((s) => s.name === "Daedalus");
-  const daedalusFavor = daedalusStanding?.favor ?? 0;
-  const invitePerson = {
-    skills: {
-      hacking: Math.max(view.hackingSkill, DAEDALUS_HACKING),
-      strength: view.lowestCombatSkill,
-      defense: view.lowestCombatSkill,
-      dexterity: view.lowestCombatSkill,
-      agility: view.lowestCombatSkill,
-      charisma: playerTopic?.skills?.charisma ?? 1,
-      intelligence: playerTopic?.skills?.intelligence ?? 0,
-    },
-    mults: { faction_rep: repFactionMult },
-  };
-  const projectedDaedalusRep = workRepPerSec(
-    "hacking",
-    invitePerson,
-    daedalusFavor,
-    {
-      factionWorkRepGain,
-      shareBonus: ctx.state.topics.fleet?.sharePower ?? 1,
-      sf15Level: sfLevel(ctx.caps.sourceFiles, 15),
-      hasFocusAug: false,
-    },
-    true,
-  );
-  // Aggregate hacking power still on the shelf: the product of every unowned
-  // catalogue augmentation's hacking-skill and hacking-exp multipliers, and
-  // how many distinct augmentations carry them. The route's regrow leg prices
-  // "assemble the stack, then climb" against "climb with what we have" — the
-  // skill curve is exponential in 1/mult, so without this the honest climb
-  // number is astronomically large and prescribes nothing.
-  const factionsTopic = ctx.state.topics.factions;
-  const ownedAugNames = new Set([
-    ...Object.keys(view.installedAugs ?? {}),
-    ...(view.queuedAugs ?? []),
-  ]);
-  const catalogAugs: { skillLn: number; expLn: number }[] = [];
-  for (const [name, meta] of Object.entries(factionsTopic?.augMeta ?? {})) {
-    if (ownedAugNames.has(name)) continue;
-    const skillMult = meta.mults?.["hacking"];
-    const expMult = meta.mults?.["hacking_exp"];
-    const skillLn = skillMult !== undefined && skillMult > 1 ? Math.log(skillMult) : 0;
-    const expLn = expMult !== undefined && expMult > 1 ? Math.log(expMult) : 0;
-    if (skillLn <= 0 && expLn <= 0) continue;
-    catalogAugs.push({ skillLn, expLn });
-  }
-  catalogAugs.sort((a, b) => (b.skillLn + b.expLn) - (a.skillLn + a.expLn));
-  const favorToDonate = ctx.state.topics.factions?.favorToDonate ?? favorNeededToDonate(1);
-  const donateUnlockRepGap = Math.max(
-    0,
-    favorToRep(favorToDonate) - favorToRep(daedalusFavor) - (daedalusStanding?.rep ?? 0),
-  );
+  const hackingExpPerSec = trackers.hackingExp.perSec();
+  const daedalus = projectedDaedalusEconomics(ctx, view, nodeMultsForPrior?.["FactionWorkRepGain"] ?? 1);
+  const catalogAugs = unownedHackingCatalog(ctx.state.topics.factions, view);
   return {
     moneyPerSec: measuredMoneyPerSec > 0 ? measuredMoneyPerSec : hackingPrior + marketPrior,
     hackingSkillPerSec: trackers.hacking.perSec(),
@@ -2695,17 +2635,11 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
     augsPerSec: augmentationAcquisitionRate(progressionMemory.augmentationCycles) || trackers.augs.perSec(),
     daedalusRepPerSec: trackers.daedalusRep.perSec(),
     ...(hackingExpNow !== undefined ? { hackingExp: hackingExpNow } : {}),
-    ...((): { hackingExpPerSec?: number } => {
-      const perSec = trackers.hackingExp.perSec();
-      return perSec > 0 ? { hackingExpPerSec: perSec } : {};
-    })(),
-    hackingSkillMult: ((playerTopic?.mults as Record<string, number> | undefined)?.["hacking"] ?? 1)
+    ...(hackingExpPerSec > 0 ? { hackingExpPerSec } : {}),
+    hackingSkillMult: ((ctx.state.topics.player?.mults as Record<string, number> | undefined)?.["hacking"] ?? 1)
       * (nodeMultsForPrior?.["HackingLevelMultiplier"] ?? 1),
     ...(catalogAugs.length > 0 ? { hackingCatalog: { augs: catalogAugs } } : {}),
-    ...(projectedDaedalusRep > 0 ? { daedalusRepPerSecProjected: projectedDaedalusRep } : {}),
-    daedalusDonateUnlockRepGap: donateUnlockRepGap,
-    daedalusDonationDollarsPerRep: donationForRep(1, repFactionMult, factionWorkRepGain),
-    daedalusDonationUnlocked: daedalusFavor >= favorToDonate,
+    ...daedalus,
     gangRepPerSec: trackers.gangRep.perSec(),
     blackOpsPerSec: trackers.blackOps.perSec(),
     bladeburnerRankPerSec: sampledRank > 0 ? sampledRank : plannedRank ?? 0,
@@ -2726,6 +2660,83 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
         }
       : {}),
   };
+}
+
+/** Formula-projected Daedalus reputation economics for the route ETA. The
+ * measured tracker is zero until Daedalus work actually starts, which priced
+ * the 2.5m-rep leg at a flat fallback for the whole run. Project the work
+ * rate from the transcribed rep formulas at the invite gate's own floor (the
+ * leg cannot begin below the gate), and hand the ETA the donation route's
+ * numbers — earn only the favor-unlock reputation, bank it at an install,
+ * buy the rest with money — so it can take the cheaper of the two paths. */
+function projectedDaedalusEconomics(
+  ctx: NeedContext,
+  view: EndgameView,
+  factionWorkRepGain: number,
+): Pick<RouteRates, "daedalusRepPerSecProjected" | "daedalusDonateUnlockRepGap" | "daedalusDonationDollarsPerRep" | "daedalusDonationUnlocked"> {
+  const playerTopic = ctx.state.topics.player;
+  const repFactionMult = (playerTopic?.mults as Record<string, number> | undefined)?.["faction_rep"] ?? 1;
+  const standing = ctx.state.topics.factions?.standings?.find((s) => s.name === "Daedalus");
+  const favor = standing?.favor ?? 0;
+  const invitePerson = {
+    skills: {
+      hacking: Math.max(view.hackingSkill, DAEDALUS_HACKING),
+      strength: view.lowestCombatSkill,
+      defense: view.lowestCombatSkill,
+      dexterity: view.lowestCombatSkill,
+      agility: view.lowestCombatSkill,
+      charisma: playerTopic?.skills?.charisma ?? 1,
+      intelligence: playerTopic?.skills?.intelligence ?? 0,
+    },
+    mults: { faction_rep: repFactionMult },
+  };
+  const projected = workRepPerSec(
+    "hacking",
+    invitePerson,
+    favor,
+    {
+      factionWorkRepGain,
+      shareBonus: ctx.state.topics.fleet?.sharePower ?? 1,
+      sf15Level: sfLevel(ctx.caps.sourceFiles, 15),
+      hasFocusAug: false,
+    },
+    true,
+  );
+  const favorToDonate = ctx.state.topics.factions?.favorToDonate ?? favorNeededToDonate(1);
+  return {
+    ...(projected > 0 ? { daedalusRepPerSecProjected: projected } : {}),
+    daedalusDonateUnlockRepGap: repUntilFavor(favor, standing?.rep ?? 0, favorToDonate),
+    daedalusDonationDollarsPerRep: donationForRep(1, repFactionMult, factionWorkRepGain),
+    daedalusDonationUnlocked: favor >= favorToDonate,
+  };
+}
+
+/** Aggregate hacking power still on the shelf: per-augmentation ln-mults of
+ * every unowned catalogue augmentation carrying hacking skill/exp
+ * multipliers, sorted strongest-first. The route's climb legs price
+ * "assemble the best k, then climb" against "climb with what we have" — the
+ * skill curve is exponential in 1/mult, so without this the honest climb
+ * number is astronomically large and prescribes nothing. */
+function unownedHackingCatalog(
+  factionsTopic: GameState["topics"]["factions"],
+  view: EndgameView,
+): { skillLn: number; expLn: number }[] {
+  const owned = new Set([
+    ...Object.keys(view.installedAugs ?? {}),
+    ...(view.queuedAugs ?? []),
+  ]);
+  const catalog: { skillLn: number; expLn: number }[] = [];
+  for (const [name, meta] of Object.entries(factionsTopic?.augMeta ?? {})) {
+    if (owned.has(name)) continue;
+    const skillMult = meta.mults?.["hacking"];
+    const expMult = meta.mults?.["hacking_exp"];
+    const skillLn = skillMult !== undefined && skillMult > 1 ? Math.log(skillMult) : 0;
+    const expLn = expMult !== undefined && expMult > 1 ? Math.log(expMult) : 0;
+    if (skillLn <= 0 && expLn <= 0) continue;
+    catalog.push({ skillLn, expLn });
+  }
+  catalog.sort((a, b) => (b.skillLn + b.expLn) - (a.skillLn + a.expLn));
+  return catalog;
 }
 
 /** Value product of the augmentations affordable right now: the product over
@@ -3882,6 +3893,7 @@ export const progressionModule: FeatureModule = {
       ...(need.subject !== undefined ? { subject: need.subject } : {}),
       target: need.target,
       have: need.have,
+      ...(need.terminal ? { terminal: true } : {}),
       weight: 5,
       urgency: "blocking",
     }));
