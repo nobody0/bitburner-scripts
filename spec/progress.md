@@ -1708,6 +1708,66 @@ process per registered case); multi-run cases like the stock ladder remain
 tolerable only because their assertions are medians and range checks rather
 than per-run economics.
 
+## BN15 route pricing and the two-node endgame pass (2026-08-27)
+
+The BN15 labyrinth route was priced as five flat 7200 s walks and nothing
+else. Verified against upstream v3.0.1 first: the BN15 pill is the FIFTH lab
+(EternalLab, charisma 3000, four installed prerequisite rewards), each walk
+move is one darknet authentication gated on the lab's charisma, the walk is
+script-driven (the player work slot stays free), and every reward install
+resets charisma to 1 — so the ladder is charisma-regrow -> walk -> install,
+five times, with the hacking regrow to the BN15 daemon gate (3000x2 at 0.6
+level mult) waiting after the pill. What landed, each named by the
+mis-estimated value it corrects:
+
+- **Charisma is a priced route resource.** New marginal channel, closed-form
+  ladder climbs (`stackedLadderPlan` — ONE shared "buy the best k charisma
+  augmentations" budget across all five stages, because the stack persists
+  through the installs and the experience does not), `charismaTarget`
+  nonlinear response for direct charisma multipliers near the final gate, and
+  `charisma`/`charisma_exp` in the field-sensitivity table. On the daedalus
+  route worth(charisma) measures ~0 and none of this prices anything — the
+  weight shift between routes is the measurement, not a switch.
+- **Walks scale with the produced maze** (LABYRINTH_SEC_PER_ROOM x rooms;
+  first lab 10x6 rooms, deep labs 30x20 — a ten-fold spread one constant
+  hid), and a live walker's measured pace against its A* remainder replaces
+  the guess for the current stage (`RouteRates.labyrinthWalks`).
+- **Optional installs pay for the route progress they erase**
+  (`optionalInstallErasedSec`): the definitive bn1-full run's seed 1 stood at
+  the Daedalus invite gate for its final twelve hours installing every
+  ~2,400 s — packages worth ~190 BN-seconds against a ~1,600 s erased
+  hacking re-climb plus the banked gate money. On BN15 the same rule defers
+  economic installs mid-charisma-climb and releases them right after each
+  lab reward queues.
+- **One city need at a time**: four simultaneous positional needs sent a
+  bn15-full run teleport-flapping several times a minute for an hour — no
+  invite ever landed (they need the body to stand still once a gate is met),
+  no job application ever outranked travel, so the company charisma engine
+  never started. The same all-cities-unsatisfied signature sits in every
+  bn1-full 24 h tail.
+- **Marginal perturbation blindness fixed**: perturbing the hacking channel
+  scaled only the level tracker, so the closed-form exp-rate legs — the
+  route's largest hacking dependencies — reported zero movement and fell to
+  the coarse linear floor.
+
+Definitive bn1-full at model 10 (rev 5d2fd3ff, pre-fixes): 3/3 valid, none
+reached in 24 h; seed 3 stood 3.3 h from the daemon (donation path armed,
+$132e12 banked). Ledger row updated. Speedrun guard after the charisma pass:
+80.7 m / 2.36 h / 2.68 h — seed 1 a new best (was 3.61 h), seed 2's 1.66 ->
+2.36 h regression bisects to the charisma commit (not the install veto —
+identical run at the pre-veto rev), cause not yet isolated.
+
+**BN15 remains unmeasurable end-to-end for a different reason: the darknet
+feature never boots in the simulator.** Hours of virtual time with zero
+darknet hosts observed, the controller session present but idle, backdoor
+churn errors (`Invalid host: 'dnet-1-x222'` — handled at the boundary as
+host-absent), while the dnet planner (`vantagesFor`, `candidatesFrom`,
+controller projections) burns the majority of the sim's wall clock and
+drives 20-60 GB allocation churn; the forced-GC pacing keys on VIRTUAL time,
+so when progress stalls the GC starves with it and the process spirals.
+Darknet internals are out of scope for the route layer; reported for the
+darknet owner with the CPU profile evidence.
+
 ## Known gaps in the current implementation
 
 Stated plainly rather than buried, because several features are implemented to
