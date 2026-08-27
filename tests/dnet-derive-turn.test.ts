@@ -92,7 +92,7 @@ function standProber(
       entry.seenAt.files = Date.now();
       entry.caches = [];
       entry.contracts = [];
-      entry.dirty.files = false;
+      delete entry.dirty.files;
     }
   }
   const borrowed = mockNs(undefined, host, exec);
@@ -231,14 +231,18 @@ describe("a fact derives in its own turn", () => {
     beachhead.seenAt.files = Date.now();
     beachhead.caches = [];
     beachhead.contracts = [];
-    beachhead.dirty.files = false;
+    delete beachhead.dirty.files;
     handle.deps.recordCredential({ hostname: VANTAGE, password: "", at: Date.now() });
     beachhead.pendingOrder = undefined;
     beachhead.inbound = undefined;
     handle.wake("inventory-finished");
     await settleMicrotasks();
 
-    expect(`${beachhead.pendingOrder?.kind}:${beachhead.pendingOrder?.host}`).toBe("phish:vantage");
+    // Re-read rather than reusing `beachhead`: it was assigned `undefined`
+    // above, so the local is narrowed to `never` even though the wake refills
+    // it. The entry in the map is the live one.
+    const staged = handle.hosts.get(VANTAGE)?.pendingOrder;
+    expect(`${staged?.kind}:${staged?.host}`).toBe("phish:vantage");
     expect(launches[1]?.[0]).toBe("dnet/agent.js");
   });
 
@@ -454,5 +458,87 @@ describe("a fact derives in its own turn", () => {
     const listing = (target.staged ?? []).find((order) => order.kind === "inventory");
     expect(listing, "the new resident was left waiting for a tick to be told to `ls`").toBeDefined();
     expect(listing!.from).toBe(TARGET);
+  });
+});
+
+describe("armour is resized at the order boundary", () => {
+  /** A prober can only change size at the instant the previous order's
+   * allocation has been freed and the next has not been launched. There is no
+   * other window: an agent is never idle, it dies and is replaced for its next
+   * job, and nothing may be interrupted to make one.
+   *
+   * These drive the REAL controller, so they pin the wiring rather than the
+   * policy — `tests/dnet-armour.test.ts` owns the policy. */
+
+  test("a deliberate prober kill is marked before the kill, so armour stands down", async () => {
+    const handle = await bootController();
+    standHands();
+    standProber(handle, TARGET, 900);
+    const entry = handle.hosts.get(TARGET)!;
+    expect(entry.prober?.pid).toBe(900);
+
+    // A replacement checking in. The controller retires the incumbent, and the
+    // mark has to be set BEFORE that kill because the victim's armour hook runs
+    // synchronously inside it — a mark set afterwards arrives too late.
+    standProber(handle, TARGET, 901);
+    expect(handle.hosts.get(TARGET)!.prober?.pid).toBe(901);
+    // The retired pid is exactly the one whose respawn must be refused.
+    expect(handle.announceProberRespawn(TARGET, 900, 1, () => {})).toBe(false);
+  });
+
+  test("an unmarked death is a real restart, and its respawn is admitted once", async () => {
+    const handle = await bootController();
+    standHands();
+    standProber(handle, TARGET, 900);
+
+    let withdrawn = 0;
+    expect(handle.announceProberRespawn(TARGET, 900, 7, () => { withdrawn++; })).toBe(true);
+    expect(withdrawn).toBe(0);
+
+    // The window is open, so nothing may exec a duplicate into the gap between
+    // the kill and the macrotask that lands the successor.
+    expect(handle.preparePlant(TARGET).reuseProber).toBe(true);
+
+    // The successor arrives and closes the window by checking in. Its
+    // descriptor was captured by the process itself, so there is nothing left
+    // to withdraw.
+    standProber(handle, TARGET, 902);
+    expect(handle.hosts.get(TARGET)!.proberRespawn).toBeUndefined();
+    expect(withdrawn).toBe(0);
+  });
+
+  test("a calm net never resizes a prober, so armour cannot churn", async () => {
+    // The expensive failure mode. `resizeProber` runs on EVERY dispatch, and an
+    // `exec` returning a pid only proves the process was admitted — so a policy
+    // that wanted armour the host could not keep, or a replacement that died
+    // before lending, would re-exec a prober on every order for ever. With no
+    // storm near and no backdoors held, nothing should ever be armed at all.
+    const handle = await bootController();
+    standHands();
+    const launches: unknown[][] = [];
+    standProber(handle, VANTAGE, 11, true, (...args) => {
+      launches.push(args);
+      return 100 + launches.length;
+    });
+    await settleMicrotasks();
+    handle.wake("test");
+    await settleMicrotasks();
+
+    expect(launches.length, "the derive launched nothing at all").toBeGreaterThan(0);
+    const probers = launches.filter((args) => args[0] === "dnet/prober.js");
+    expect(probers, "a calm net re-exec'd a prober").toEqual([]);
+    expect(handle.hosts.get(VANTAGE)?.prober?.armoured).toBeUndefined();
+  });
+
+  test("a mark is consumed, so it cannot suppress a later genuine restart", async () => {
+    const handle = await bootController();
+    standHands();
+    standProber(handle, TARGET, 900);
+
+    handle.markProberKill(TARGET, 900);
+    expect(handle.announceProberRespawn(TARGET, 900, 1, () => {})).toBe(false);
+    // The SAME pid asking again is a restart, not the kill we ordered. A mark
+    // left standing would make the host permanently undefendable.
+    expect(handle.announceProberRespawn(TARGET, 900, 2, () => {})).toBe(true);
   });
 });

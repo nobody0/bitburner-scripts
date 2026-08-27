@@ -55,7 +55,7 @@ import type { DarknetProfit } from "../../shared/telemetry/topics/dnet.ts";
  * and a build handoff leaves both on disk: an agent from the previous build
  * reading a global whose shape moved under it is a bug with no symptom.
  * Refusing by number makes it exit instead. */
-export const DNET_PROTOCOL = 12;
+export const DNET_PROTOCOL = 13;
 
 /** The script base every allocation starts from. Transcribed rather than read,
  * because a launcher sizes a process it has not started yet.
@@ -297,7 +297,33 @@ export interface HostEntry extends DnetHost {
   /** The permanent prober beside the agent. `pid: 0` marks a walk host whose
    *  prober was deliberately killed; `at` is the last report stamp (dead-prober
    *  detection compares it to the mutation clock). */
-  prober?: { pid: number; at: number; neighbours: string[]; epoch: number };
+  prober?: { pid: number; at: number; neighbours: string[]; epoch: number; armoured?: boolean };
+  /** The prober pid the controller has DELIBERATELY killed.
+   *
+   * An armoured prober respawns itself out of `atExit`, and `atExit` cannot
+   * tell a host restart from a kill we ordered — the engine runs it for both.
+   * Without this mark every replacement, every walk displacement and every
+   * resize would respawn the process it just retired, which is a respawn loop
+   * rather than a recovery.
+   *
+   * This is the remote-killer twin of the agent's local `deliberate` flag: the
+   * agent knows why it is exiting because it is the one exiting, while a prober
+   * is killed from outside and has to be TOLD. Set it before `kill`, never
+   * after — the handler runs inside the killer's own stack. */
+  proberKillMark?: number;
+  /** An armoured prober has scheduled its own replacement and is on its way
+   * out. The successor is a macrotask away, so for that gap the host has no
+   * lender and no process, and every repair path would otherwise read it as an
+   * empty host and launch a duplicate.
+   *
+   * `withdraw` releases the launch descriptor the dying prober published; it
+   * MUST be called if the successor never arrives, or the descriptor sits in
+   * the realm map for the rest of the run. */
+  proberRespawn?: { at: number; launchId: number; withdraw: () => void };
+  /** When a prober RESIZE was last exec'd here. An `exec` that returns a pid
+   *  only proves the process was admitted, so without this a replacement that
+   *  died before lending would be re-launched on every dispatch, for ever. */
+  proberResizeAt?: number;
   /** One exact prober launch is expected to publish a first report. Kept on
    * the host rather than as a launch callback so every caller observes the
    * same readiness barrier and an old prober cannot satisfy it. */
@@ -395,7 +421,22 @@ export interface ControllerHandle {
    *
    * The prober must hold no call of its own after this, or every borrowed call
    * throws CONCURRENCY ERROR. See `HostEntry.ns`. */
-  lend(host: string, borrowed: NS, pid: number, refresh?: DnetProbeRefresh): void;
+  lend(host: string, borrowed: NS, pid: number, refresh?: DnetProbeRefresh, armoured?: boolean): void;
+  /** An ARMOURED prober is dying and has scheduled its own replacement.
+   *
+   * Called from the dying prober's `atExit`, before the `spawn` that both
+   * schedules the successor and kills the caller. It opens the window every
+   * repair path checks, so nothing execs a duplicate into the gap between the
+   * kill and the macrotask that lands the successor.
+   *
+   * Returns false when the controller refuses the respawn — the pid was marked
+   * for a deliberate kill — in which case the caller must NOT spawn. */
+  announceProberRespawn(host: string, pid: number, launchId: number, withdraw: () => void): boolean;
+  /** Mark a prober pid as deliberately killed, so its armour stands down.
+   *
+   * MUST be called before the `kill`: the handler runs synchronously inside the
+   * killer's stack, so a mark set afterwards is set too late. */
+  markProberKill(host: string, pid: number): void;
   /** Resolve after every named order has reported. Used by a prequeued bleed
    * to follow a whole parallel authentication wave without polling. */
   afterOrders(ids: readonly string[]): Promise<void>;
@@ -527,6 +568,27 @@ export const KIND_CALLS: Readonly<Record<OrderKind, readonly string[]>> = {
  * controller decides, the prober's allocation pays. */
 export const PROBER_CALLS: readonly string[] = ["dnet.probe", "exec", "dnet.connectToSession"];
 
+/** The prober's ARMOURED surface: the host-bound calls, plus the one call that
+ * can outlive a host restart.
+ *
+ * `restartServer` kills through `killServerScripts`, which drives ONE live
+ * iterator across the host's running-script map and runs each `atExit`
+ * synchronously inside that loop. Anything a handler starts on this host —
+ * `exec`, `run`, or a zero-delay `spawn` — is appended to the very map being
+ * walked and is killed again by the same sweep. `exec` therefore cannot defend
+ * the host it stands on; it can only ever rebuild a NEIGHBOUR.
+ *
+ * `spawn` with a non-zero delay is the one exit. Upstream registers the
+ * `setTimeout` BEFORE it kills the caller and never cancels it, so the
+ * replacement lands as a macrotask — after the whole restart transaction,
+ * including the guaranteed replacement edge. One millisecond is enough; the
+ * number does not matter, only that it is not zero.
+ *
+ * This is why the surface is on the PROBER and never on the agent. An agent is
+ * thread-scaled and `ramOverride` is charged per thread, so 2 GB there is 2 GB
+ * times every thread an `authenticate` wanted. The prober is always one. */
+export const PROBER_ARMOURED_CALLS: readonly string[] = [...PROBER_CALLS, "spawn"];
+
 /** The controller's whole surface: the mutation clock, and nothing else.
  *
  * It is the one process in the darknet that BLOCKS — `dnet.nextMutation` costs
@@ -574,6 +636,18 @@ export const ORDER_PRICES: Readonly<Record<OrderKind, number>> = {
  * through it and those would otherwise be paid by every host in the net, for
  * ever. */
 export const PROBER_GB = 3.15;
+
+/** The armoured prober: `PROBER_GB` plus `spawn`.
+ *
+ *     3.15 + 2.0 spawn = 5.15
+ *
+ * The 2 GB buys immunity from `restartServer` for the one process the host
+ * cannot rebuild from the outside. It is NOT worth paying everywhere — the
+ * spread lane measured stranded capacity at 10.3% of what a blanket fleet
+ * reserve would cost (`spec/dnet.md`) — so `planArmour` spends it on the hosts
+ * whose hazard or value justifies it, and on the whole fleet for the seconds
+ * around a storm we are about to fire ourselves. */
+export const PROBER_ARMOURED_GB = 5.15;
 
 /** A STASIS-linked host's prober, without `exec`.
  *

@@ -752,15 +752,36 @@ export interface SpreadLimits {
   /** The constant prober, priced separately so a managed plant's bar is
    *  managed resident + prober rather than the unmanaged `agentRamGb`. */
   proberRamGb: number;
+  /** The prober a STASIS-linked host actually runs, which is not the same one.
+   *
+   *  It drops `exec` (1.3 GB): the engine's mutation guard exempts a linked
+   *  host, so it can never lose the processes `exec` exists to relaunch, and
+   *  `plantOne` already execs it at this smaller size. Pricing the managed
+   *  branch at the full `proberRamGb` demanded 1.3 GB that the plant was never
+   *  going to spend, and refused the deepest hosts we hold for want of it. */
+  managedProberRamGb: number;
   /** One thread of the spawn-free local reclaim bootstrap. */
   bootstrapRamGb: number;
 }
 
+/** The prices a caller that is NOT the controller plans against.
+ *
+ * The controller overrides every field from `game/dnet/shared.ts` at boot, so
+ * these serve the sim lanes and the planner tests — which is exactly why they
+ * must agree with it. They did not: `agentRamGb` and `residentRamGb` still
+ * carried the 2.0 GB `spawn` of a resident that has not launched its own
+ * successor since the controller started dispatching, and `proberRamGb` predated
+ * `exec` joining the prober's surface. `tests/ram-budget.test.ts` now pins each
+ * one against the constant it mirrors, so this cannot drift again.
+ *
+ * This layer may not import `game/`, which is why they are literals at all. */
 export const DEFAULT_SPREAD_LIMITS: SpreadLimits = {
-  agentRamGb: 5.4,
-  residentRamGb: 3.6,
+  agentRamGb: 4.75,
+  residentRamGb: 1.6,
   managedResidentRamGb: 1.6,
-  proberRamGb: 1.8,
+  // base 1.6 + exec 1.3 + dnet.probe 0.2 + dnet.connectToSession 0.05.
+  proberRamGb: 3.15,
+  managedProberRamGb: 1.85,
   bootstrapRamGb: 2.6,
 };
 
@@ -856,7 +877,7 @@ export function planSpread(
     }
     // A stasis target needs only its managed resident and optional prober.
     const needed = candidate.stasisManaged === true
-      ? limits.managedResidentRamGb + (candidate.omitProber ? 0 : limits.proberRamGb)
+      ? limits.managedResidentRamGb + (candidate.omitProber ? 0 : limits.managedProberRamGb)
       : candidate.omitProber
         ? limits.residentRamGb
         : limits.agentRamGb;
@@ -1093,6 +1114,16 @@ export interface StormPlan {
   /** The one admitted fire, when every gate is green. `from` is always the
    *  holder itself — the call takes no target. */
   fire?: { host: string; from: string; reason: string };
+  /** Every gate but the LAST one is green: a seed is in hand on a reachable
+   * host, the harvest is finished, the links are spent and the walker is safe,
+   * and all that remains is to land inside the dead phish window.
+   *
+   * That window opens on the next `.d.cache`, which is seconds away rather than
+   * minutes, and it is the only warning we will ever get that the whole movable
+   * fleet is about to be restarted at once. `planArmour` spends it arming.
+   * True whenever `fire` is set, because a storm in the air is the same
+   * certainty as one about to be. */
+  imminent: boolean;
   refused: StormRefusal[];
 }
 
@@ -1113,7 +1144,13 @@ export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormP
   if (ctx.lastStormFiredAt !== undefined && ctx.now - ctx.lastStormFiredAt < STORM_QUIET_MS) {
     const left = STORM_QUIET_MS - (ctx.now - ctx.lastStormFiredAt);
     refuse(NET, "storm-in-flight", `our own storm fired ${Math.round((ctx.now - ctx.lastStormFiredAt) / 1000)}s ago; quiet for ${Math.round(left / 1000)}s more`);
-    return { refused };
+    // Still imminent, and this is the load-bearing case rather than a
+    // courtesy: the controller stamps `lastStormFiredAt` PESSIMISTICALLY at
+    // claim time, seconds before the engine's own 5 s warning and the phase
+    // that actually restarts the fleet. The mass restart therefore lands
+    // INSIDE this quiet window, so standing armour down here would disarm
+    // everyone just before the only event it exists for.
+    return { imminent: true, refused };
   }
 
   // 2. Prefer a live, stasis-linked seed holder, then break ties by name.
@@ -1127,7 +1164,7 @@ export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormP
     });
   if (holders.length === 0) {
     refuse(NET, "no-seed", "no fresh STORM_SEED.exe sighting on any live host");
-    return { refused };
+    return { imminent: false, refused };
   }
   // Prefer a holder that can fire now; otherwise retain the sorted refusal target.
   const holder = holders.find((candidate) => candidate.agentAlive === true) ?? holders[0]!;
@@ -1135,7 +1172,7 @@ export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormP
   // 3. The fire job runs ON the holder; the file cannot be scp'd off it.
   if (holder.agentAlive !== true) {
     refuse(holder.hostname, "seed-unreachable", "the seed's host has no resident, and the seed cannot be moved; waiting for a plant");
-    return { refused };
+    return { imminent: false, refused };
   }
 
   const incomplete = hosts.find((host) => host.goneAt === undefined && host.isStationary !== true && (
@@ -1161,7 +1198,7 @@ export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormP
               ? `${incomplete.caches.length} cache file(s) remain unopened`
               : "authentication, reclaim, or cache work is still active";
     refuse(incomplete.hostname, "harvest-incomplete", detail);
-    return { refused };
+    return { imminent: false, refused };
   }
 
   // 5. Every slot spent, none mid-spend. The links ARE the preparation: what
@@ -1174,13 +1211,13 @@ export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormP
         ? `a stasis pin is in flight (${ctx.stasisLinkedCount}/${ctx.stasisLimit} linked); the storm waits for it to land`
         : `${ctx.stasisLinkedCount}/${ctx.stasisLimit} stasis links deployed; the survivors are the reconquest`,
     );
-    return { refused };
+    return { imminent: false, refused };
   }
 
   // 6. A running walker must be pinned before a reroll.
   if (!ctx.labWalked && ctx.walkInFlight && !ctx.walkerPinned) {
     refuse(holder.hostname, "walker-unpinned", "a finisher is mid-walk on an unpinned host; a restart costs the whole walk");
-    return { refused };
+    return { imminent: false, refused };
   }
 
   // 7. Fire into the dead phish window, not across an open one. Never having
@@ -1195,10 +1232,13 @@ export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormP
         ? "no .d.cache ever sighted; waiting to fire just after one lands"
         : `last .d.cache landed ${Math.round((ctx.now - ctx.lastPhishCacheAt) / 1000)}s ago; firing only within ${Math.round(overlapMs / 1000)}s of one`,
     );
-    return { refused };
+    // THE LAST GATE. Everything else is green, so the storm fires on the next
+    // `.d.cache` — which is the whole warning the fleet gets.
+    return { imminent: true, refused };
   }
 
   return {
+    imminent: true,
     fire: {
       host: holder.hostname,
       from: holder.hostname,

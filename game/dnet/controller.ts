@@ -15,6 +15,7 @@ import type {
   DnetControllerLaunch,
   DnetProbeRefresh,
   DnetProbeReport,
+  DnetProberLaunch,
 } from "./launch.ts";
 import {
   coverage,
@@ -30,6 +31,7 @@ import {
   type DnetKnowledge,
   type ExpiryOpts,
 } from "../../shared/strategy/dnet/host.ts";
+import { planArmour, type ArmourCandidate } from "../../shared/strategy/dnet/armour.ts";
 import {
   DEFAULT_SPREAD_LIMITS,
   candidatesFrom,
@@ -85,6 +87,7 @@ import {
   jobWatchdogExpired,
   priceOf,
   PROBER_GB,
+  PROBER_ARMOURED_GB,
   PROBER_STASIS_GB,
   CONTROLLER_GB,
   processSizeFor,
@@ -291,6 +294,9 @@ export async function main(ns: NS): Promise<void> {
   let detailsRefreshDue = false;
   let probeRefreshDue = false;
   let labCandidateHost: string | undefined;
+  /** Hosts `planArmour` wants carrying the `spawn` chain. An INTENT, acted on
+   *  only at an order boundary — see `resizeProber`. */
+  const armourWanted = new Set<string>();
 
   // --- derive wake ----------------------------------------------------------
   /** Derivation is FACT-driven, not tick-driven.
@@ -625,6 +631,9 @@ export async function main(ns: NS): Promise<void> {
       .filter((k): k is TaskKind => k !== "idle" && k !== "bootstrapReclaim")
       .map((kind) => [kind, priceOf(kind)]),
   ) as Record<TaskKind, number>;
+  /** What one host's armour costs: the `spawn` chain and nothing else. */
+  const ARMOUR_GB = PROBER_ARMOURED_GB - PROBER_GB;
+
   /** What this host reserves for its prober, which is not one number.
    *
    * - The LAB WALKER keeps none: its prober is displaced outright because the
@@ -633,14 +642,21 @@ export async function main(ns: NS): Promise<void> {
    *   exempts it (`openServer || isConnectedTo || hasStasisLink`), so it cannot
    *   lose its processes and never needs to relaunch them locally.
    * - Everything else keeps the full one, because `exec` is the only way a host
-   *   that lost its processes gets any back.
+   *   that lost its processes gets any back — and, when `planArmour` has armed
+   *   it, plus `spawn`, the only call that can outlive a restart of the host it
+   *   stands on.
    *
    * This feeds `usableGb`, so bytes a smaller prober does not hold are
    * immediately available to the worker as threads. */
-  const proberReserveGb = (host: string): number =>
-    host === labCandidateHost ? 0
-      : stasisLinked.has(host) ? PROBER_STASIS_GB
-        : PROBER_GB;
+  const proberReserveGb = (host: string): number => {
+    if (host === labCandidateHost) return 0;
+    if (stasisLinked.has(host)) return PROBER_STASIS_GB;
+    // Armour is part of the standing reserve while it is worn: the bytes are
+    // held by the prober's `ramOverride` exactly like `exec`'s are, and a
+    // planner that did not subtract them would hand a worker threads the host
+    // cannot give it.
+    return hosts.get(host)?.prober?.armoured === true ? PROBER_ARMOURED_GB : PROBER_GB;
+  };
   const heaviestJobGb = Math.max(
     ...TASK_KINDS.filter((kind) => JOBS[kind].routine).map((kind) => budgets[kind] ?? 0));
   const farmGbPerThread: Record<FarmKind, number> = {
@@ -692,8 +708,36 @@ export async function main(ns: NS): Promise<void> {
     const entry = hosts.get(host);
     const probe = entry?.prober;
     if (probe === undefined || probe.pid <= 0) return;
+    // Deliberate: this host is giving its prober slot to a walker or a pin.
+    // Mark before the kill, or an armoured prober respawns into the very RAM
+    // the displacement just freed.
+    entry!.proberKillMark = probe.pid;
     killPid(probe.pid);
     entry!.prober = { ...probe, pid: 0 };
+  };
+
+  /** How long a scheduled armour respawn may stay unclaimed.
+   *
+   * The successor is one macrotask away, so this is not a race budget — it is
+   * the answer to "did the spawn fail". It can: the host may have been DELETED
+   * in the same storm phase that restarted it, in which case upstream's
+   * `spawnCb` finds no server and throws into a timer nobody catches. Generous,
+   * because closing the window early costs a duplicate prober while closing it
+   * late costs one repair cycle. */
+  const PROBER_RESPAWN_GRACE_MS = 2_000;
+
+  /** Is an armoured successor still legitimately on its way?
+   *
+   * Reaps the window when it is not, and RELEASES the launch descriptor with
+   * it: a spawn that never landed leaves a live descriptor in the realm map,
+   * and nothing else will ever claim it. */
+  const proberRespawnPending = (entry: HostEntry, at: number): boolean => {
+    const respawn = entry.proberRespawn;
+    if (respawn === undefined) return false;
+    if (at - respawn.at <= PROBER_RESPAWN_GRACE_MS) return true;
+    respawn.withdraw();
+    entry.proberRespawn = undefined;
+    return false;
   };
 
   // --- report handling (the promise-driven core) ----------------------------
@@ -880,6 +924,58 @@ export async function main(ns: NS): Promise<void> {
     }
   };
 
+  /** Bring this host's prober to the size `planArmour` wants, if now is the
+   * moment and the host can afford the changeover. Returns true when a
+   * replacement was launched, which costs the caller this turn.
+   *
+   * There is no kill-then-relaunch here, and that is the point: the OLD prober
+   * execs the new one, and `lend` retires the old pid when the new one checks
+   * in. So the host is never without a lender, and the only cost is holding
+   * both allocations for the width of a boot.
+   *
+   * Refusing on RAM is not a failure. Hosts arm as their orders turn over, and
+   * a fleet that is only half armoured when a storm lands still re-cascades
+   * from every survivor — each one's `exec` reaches its own neighbours. */
+  const resizeProber = (entry: HostEntry, borrowed: NS): boolean => {
+    const host = entry.hostname;
+    const prober = entry.prober;
+    if (prober === undefined || prober.pid <= 0) return false;
+    // A stasis host is exempt from restart and the lab candidate holds no
+    // prober; neither has an armour question to answer.
+    if (host === labCandidateHost || stasisLinked.has(host)) return false;
+    const now = Date.now();
+    if (proberRespawnPending(entry, now)) return false;
+    const wanted = armourWanted.has(host);
+    if (wanted === (prober.armoured === true)) return false;
+    // One resize in flight at a time. `exec` returning a pid only proves the
+    // process was admitted; if it dies before it lends, the size never changes
+    // and every subsequent dispatch would exec another one. Bounded retry
+    // rather than a latch, so a genuinely lost launch still heals.
+    if (entry.proberResizeAt !== undefined && now - entry.proberResizeAt <= PROBER_RESPAWN_GRACE_MS) {
+      return false;
+    }
+    const targetGb = wanted ? PROBER_ARMOURED_GB : PROBER_GB;
+    // Room for the SECOND prober, on top of everything already standing. The
+    // incumbent is still holding its own reserve, which `heldGb` counts.
+    const view = planningView(entry, now, expiryOpts());
+    if (view.maxRam === undefined) return false;
+    const free = view.maxRam - (view.blockedRam ?? 0) - heldGb(entry);
+    if (free < targetGb) return false;
+    const offer = offerLaunch<DnetProberLaunch>({ kind: "dnet-prober", host, armoured: wanted });
+    let pid = 0;
+    try {
+      pid = borrowed["exec"](
+        proberFile, host, temporaryRunOptions({ threads: 1, ramOverride: targetGb }), offer.launchId,
+      );
+    } catch { pid = 0; }
+    if (pid === 0) {
+      offer.withdraw();
+      return false;
+    }
+    entry.proberResizeAt = now;
+    return true;
+  };
+
   /** START the next staged order on this host, through its lender.
    *
    * The launcher is the prober, not the worker: `exec` once per host instead of
@@ -897,6 +993,18 @@ export async function main(ns: NS): Promise<void> {
     if (standDown) return;
     const borrowed = entry.ns;
     if (borrowed === undefined) return;
+    // THE ORDER BOUNDARY, and the only place a prober can change size.
+    //
+    // A resident is never idle — it dies and is replaced for its next job — so
+    // there is no quiet moment to wait for. This is that moment: the previous
+    // order's allocation has just been freed and the next one has not been
+    // launched, which is the one instant the host has room for a second prober
+    // and nothing in flight to interrupt.
+    //
+    // It costs this host one dispatch turn. `reportProbe` signals a derive when
+    // the replacement checks in, so the order that was waiting goes out on the
+    // very next pass rather than on a timer.
+    if (resizeProber(entry, borrowed)) return;
     const next = takeNextOrder(entry);
     if (next === undefined) return;
     entry.pendingOrder = next;
@@ -1437,6 +1545,11 @@ export async function main(ns: NS): Promise<void> {
       if (host === labCandidateHost || entry.agent?.order.kind === "walk") continue;
       if (entry.agent === undefined) continue; // only a host with a resident can re-exec
       if (entry.agent?.order.kind === "relaunchProbe" || (entry.staged ?? []).some((o) => o.kind === "relaunchProbe")) continue;
+      // An armoured prober already scheduled its own successor. Filing a
+      // relaunch into that gap lands a SECOND prober a millisecond later, and
+      // `lend` would then kill one of the two — paying for a repair that was
+      // already paid for.
+      if (proberRespawnPending(entry, Date.now())) continue;
       fileTask({
         id: `relaunchProbe:${host}`,
         kind: "relaunchProbe",
@@ -1473,6 +1586,7 @@ export async function main(ns: NS): Promise<void> {
     residentRamGb: priceOf("idle"),
     managedResidentRamGb: priceOf("idle"),
     proberRamGb: PROBER_GB,
+    managedProberRamGb: PROBER_STASIS_GB,
     bootstrapRamGb: priceOf("bootstrapReclaim"),
   };
 
@@ -1762,6 +1876,46 @@ export async function main(ns: NS): Promise<void> {
       ...(lastStormFiredAt !== undefined ? { firedAt: lastStormFiredAt } : {}),
       ...(seedHunt ? { seedHunt: true } : {}),
     };
+
+    // WHO WEARS ARMOUR. Recomputed every derive because every input moves: the
+    // storm walks toward its last gate, backdoors are installed and cleared by
+    // the same restarts they invite, and capacity changes with every block
+    // ground down. `resizeProber` acts on this at the next order boundary — the
+    // only instant a prober can change size — so this set is a standing intent
+    // rather than a command.
+    armourWanted.clear();
+    const armourCandidates: ArmourCandidate[] = [];
+    for (const entry of hosts.values()) {
+      if (entry.goneAt !== undefined || entry.hostname === selfHost) continue;
+      // Free capacity beyond everything standing, spelled the same way
+      // `resizeProber` spells it so the two read the same host the same way.
+      // They ask different questions of it — the policy asks whether 2 GB is
+      // worth spending, the resize asks whether the changeover fits right now —
+      // and the resize's bar is the higher one, since it holds both probers for
+      // the width of a boot.
+      //
+      // NOT `durableRoomGb`: that already nets off the prober reserve, which
+      // `heldGb` counts too, so the pair would subtract it twice.
+      const view = planningView(entry, at, expiry);
+      const free = view.maxRam === undefined
+        ? undefined
+        // Add back the armour this host is already wearing, so an armoured host
+        // does not read as unable to afford the armour it already has.
+        : view.maxRam - (view.blockedRam ?? 0) - heldGb(entry)
+          + (entry.prober?.armoured === true ? ARMOUR_GB : 0);
+      armourCandidates.push({
+        hostname: entry.hostname,
+        ...(free !== undefined ? { usableGb: free } : {}),
+        proberStanding: entry.prober !== undefined && entry.prober.pid > 0,
+        stasisLinked: stasisLinked.has(entry.hostname),
+        backdoored: backdoors.has(entry.hostname),
+        omitProber: entry.hostname === labCandidateHost,
+      });
+    }
+    for (const host of planArmour(armourCandidates, {
+      stormImminent: stormPlan.imminent,
+      armourGb: ARMOUR_GB,
+    })) armourWanted.add(host);
 
     const looseTargets = [...hosts.keys()].map((hostname) => projectLooseTarget(hostname, at, expiry));
     guessFor.clear();
@@ -2087,8 +2241,20 @@ export async function main(ns: NS): Promise<void> {
       // Whichever prober reports most recently owns the slot. Retire the prior
       // pid BEFORE publishing the replacement, so a repair launch racing a
       // merely-late process still converges to one prober.
-      if (entry.prober?.pid !== pid) killPid(entry.prober?.pid);
-      entry.prober = { neighbours: [...neighbours], at, pid, epoch: rendezvous.mutationEpoch };
+      if (entry.prober?.pid !== pid) {
+        // Deliberate replacement: mark before the kill so the outgoing prober's
+        // armour does not schedule a successor to the process replacing it.
+        if (entry.prober !== undefined && entry.prober.pid > 0) entry.proberKillMark = entry.prober.pid;
+        killPid(entry.prober?.pid);
+      }
+      // Armour is a property of the LAUNCH, and a re-probe is not a launch, so
+      // the same pid keeps whatever it was sized with. A new pid gets its flag
+      // from `lend`, which is the only caller that knows.
+      const stillArmoured = entry.prober?.pid === pid && entry.prober.armoured === true;
+      entry.prober = {
+        neighbours: [...neighbours], at, pid, epoch: rendezvous.mutationEpoch,
+        ...(stillArmoured ? { armoured: true } : {}),
+      };
       if (refresh !== undefined && entry.probeRefresh === refresh) {
         entry.probeRefresh = undefined;
         refresh.settle({ host, neighbours: [...neighbours], at, pid });
@@ -2105,8 +2271,32 @@ export async function main(ns: NS): Promise<void> {
       if (entry?.probeRefresh === undefined || pid <= 0) return;
       entry.probeRefreshPid = pid;
     },
-    lend(host, borrowed, pid, refresh) {
+    announceProberRespawn(host, pid, launchId, withdraw) {
+      const entry = hosts.get(host);
+      if (entry === undefined) return false;
+      // A kill WE ordered. The mark is consumed here rather than left standing,
+      // so it can never suppress a later, genuine restart recovery.
+      if (entry.proberKillMark === pid) {
+        entry.proberKillMark = undefined;
+        return false;
+      }
+      // Standing down for the run: a respawn now would outlive the controller
+      // that is trying to retire the net.
+      if (standDown) return false;
+      entry.proberRespawn = { at: Date.now(), launchId, withdraw };
+      return true;
+    },
+    markProberKill(host, pid) {
+      const entry = hosts.get(host);
+      if (entry === undefined || pid <= 0) return;
+      entry.proberKillMark = pid;
+    },
+    lend(host, borrowed, pid, refresh, armoured) {
       const entry = ensureEntry(host);
+      // The successor has ARRIVED, so the window it was holding open is closed.
+      // Its descriptor was captured by this very process, so there is nothing
+      // left to withdraw.
+      entry.proberRespawn = undefined;
       // `darkweb` is seeded directly by home, so unlike every host reached by
       // a plant it never passes through `preparePlant`. Request its first file
       // listing here as part of establishing the lender. Without this, its
@@ -2120,10 +2310,19 @@ export async function main(ns: NS): Promise<void> {
       // and a late arrival cannot retract a newer one's `ns` on its way out
       // (its `atExit` compares identity).
       if (entry.prober !== undefined && entry.prober.pid > 0 && entry.prober.pid !== pid) {
+        // MARK BEFORE KILL. The victim's armour hook runs synchronously inside
+        // `killPid`, and a mark set afterwards would arrive after it had
+        // already scheduled a successor we do not want.
+        entry.proberKillMark = entry.prober.pid;
         killPid(entry.prober.pid);
       }
       entry.ns = borrowed;
       probeThrough(entry, pid, Date.now(), refresh);
+      // AFTER the probe: `reportProbe` rebuilds the record, and only this
+      // caller knows what the arriving process was sized for.
+      if (entry.prober?.pid === pid && armoured === true) {
+        entry.prober = { ...entry.prober, armoured: true };
+      }
     },
     preparePlant(host) {
       const entry = ensureEntry(host);
@@ -2148,6 +2347,10 @@ export async function main(ns: NS): Promise<void> {
       // `launch-refused` forever. A live LENDER is the proof one is standing —
       // a fact the prober published, not one we polled for.
       const proberPid = entry.prober?.pid;
+      // An armoured successor in the air counts as a standing prober. It is a
+      // millisecond away and it will `lend` on arrival; launching beside it
+      // spends the same 3.15 GB twice and leaves `lend` to kill one of them.
+      if (proberRespawnPending(entry, Date.now())) return { reuseProber: true };
       return { reuseProber: entry.ns !== undefined && proberPid !== undefined && proberPid > 0 };
     },
     abandonPlant(host) {
@@ -2395,7 +2598,8 @@ export async function main(ns: NS): Promise<void> {
         // blind. Drop the record but keep the neighbours it reported: they are
         // the last thing we knew, and `reviveProbers` files the replacement.
         if (entry.agent !== undefined && entry.prober !== undefined
-          && entry.prober.pid > 0 && !(await running(entry.prober.pid, entry.hostname))) {
+          && entry.prober.pid > 0 && !(await running(entry.prober.pid, entry.hostname))
+          && !proberRespawnPending(entry, at)) {
           entry.prober = { ...entry.prober, pid: 0, at: 0 };
         }
         // The AGENT is what makes a host a vantage, so it is what the sweep

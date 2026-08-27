@@ -958,7 +958,7 @@ Preparation is deliberately ordered:
 3. remove its prober and grind all remaining blocked RAM with a spawn-free
    local reclaimer at `floor(usableRam / 2.6)` threads, refreshing details and
    resizing after every call;
-4. once `blockedRam === 0`, plant only the 3.6 GB resident (no prober), then
+4. once `blockedRam === 0`, plant only the 1.6 GB resident (no prober), then
    replace it with the walker at `floor(maxRam / 2.0)` threads.
 
 The candidate is already mutation-immune during the grind. The full-RAM walk
@@ -1056,7 +1056,7 @@ Reports merge by observation time. A dnsLookup IP change replaces the complete l
 ### Mutation recovery and server identity
 
 Expiry is the fallback; `nextMutation()` is the prompt path. Each permanent
-1.8 GB prober keeps one edge-triggered waiter alive and publishes the event plus
+3.15 GB prober keeps one edge-triggered waiter alive and publishes the event plus
 its resident vantage's adjacency. The controller coalesces those reports and
 refreshes `getServerDetails(host)` for every known host once per
 mutation. On the same event it checks resident/job PIDs with
@@ -1116,7 +1116,8 @@ Queue lane, strategic priority, and preemption are separate policies in one
 module. Same-turn probe repair and inventory queue first but never cancel
 anything. Blocking work is ordered `walk`, `plant`, cache opening, `pin`, storm,
 `attempt`, `heartbleed`, reclaim, induce, phish, then promote. The permanent
-1.8 GB prober is reserved before this competition. Walk, plant, cache, pin and
+prober is reserved before this competition, at whichever of its three prices
+this host pays (3.15 GB ordinary, 1.85 GB stasis-linked, 5.15 GB armoured). Walk, plant, cache, pin and
 authenticate may preempt lower-value work; heartbleed is the first class that
 always waits for capacity. Walk, pin and storm are never victims.
 
@@ -1230,6 +1231,97 @@ any that has no entry or whose RAM facts have expired. That is the same survey
 replanting is one we hold a password for, so the remote replant fires on the
 first derive.
 
+### Surviving a restart
+
+A restart kills every script on a host and the prober cannot defend itself with
+`exec`. `killServerScripts` drives ONE live iterator across the host's
+running-script map and runs each `atExit` synchronously inside that loop, with
+`env.runningFn` cleared and `stopFlag` not yet set — so a replacement started
+from a handler is appended to the map being walked and is killed by the same
+sweep. `exec` can only ever rebuild a NEIGHBOUR.
+
+`ns.spawn` with any non-zero `spawnDelay` escapes it. Upstream registers
+`setTimeout(spawnCb, delay)` *before* killing the caller and nothing cancels
+that timer, so the successor lands as a macrotask — after the whole restart
+transaction, including `addGuaranteedConnection`. The cost is 2.0 GB, which puts
+an ARMOURED prober at 5.15 GB.
+
+The surface is on the prober and never on the agent. An agent is thread-scaled
+and `ramOverride` is billed per thread, so 2 GB there is 2 GB times every thread
+an `authenticate` wanted; the prober is always one thread.
+
+**Who pays** is `planArmour` (`shared/strategy/dnet/armour.ts`), and the default
+is no. Three arguments override it, and they are different kinds of argument:
+
+1. **A storm one gate from firing.** `StormPlan.imminent` is set when every gate
+   but `phish-window-open` is green, which means the storm fires on the next
+   `.d.cache`. This is a certainty rather than a rate —
+   `restartAllDarknetServers` restarts every movable survivor at once — so
+   everything that fits is armed, and stays armed through the burst.
+2. **A backdoor.** Upstream draws one restart victim from the backdoored pool
+   alone at 10% per tick and that branch `return`s, so with `B` backdoored hosts
+   each carries a flat `0.09/B` on top of its share of the generic draw over the
+   whole population. `msPerRestartOfHost` (`rates.ts`) splits the two terms;
+   a lone backdoor is more than an order of magnitude hotter than a plain host.
+There is deliberately **no third rung** weighing a host's capacity against its
+hazard. One was built and measured, and it lost. On the spread lane's full-Dnet
+seeds 665 of 692 occupied restarts were replanted in the same virtual instant off
+a surviving neighbour's probe and only 26 needed a later route, so the mean cost
+of a restart is a few seconds of one host's capacity. The farm lane then priced
+both arms on sixteen paired seeds: storm-only armour spent 4.80 GB-h to cut
+stranded capacity from 72.17 to 23.85 GB-h and unrecovered hosts from 3.9 to 0.9
+— better on 15 seeds of 16, mean delta `-48.32` GB-h, 95% CI `-70.65..-26.00`;
+on total cost (stranded plus armour) better on 14 of 16, `-43.53`, CI
+`-65.65..-21.41`. The capacity rung billed 264.70 GB-h and recovered nothing
+further: worse on total cost on 16 seeds of 16, `+216.63` GB-h, CI
+`184.21..249.04`. The arithmetic was sound; the quantity it acted on was not big
+enough to pay for itself, so it was **removed rather than left switched off**.
+If recovery ever gets slower, that is the thing to rebuild — these numbers are
+the baseline to beat.
+
+What armour does NOT buy is throughput, and this is worth stating because the
+smaller sample suggested otherwise. Caches per hour are flat (`+0.03`, CI
+`-6.84..6.90`). Money looked like `+$57m/h` on eight seeds; at sixteen it fell
+to `+$31m/h` with the interval still spanning zero (`-23.05..85.52`), which is
+what a noise term does when the sample grows. **The capacity ledger is the
+proven result. There is no measured earnings effect, and none should be
+claimed.** That is not an argument against the armour: the storm's mass restart
+is a real loss of the fleet's ability to act, and this lane's reconquest replants
+at zero virtual cost, so it prices the capacity and not the disruption.
+
+A stasis-linked host is never armoured: `isImmutable` is
+`openServer || isConnectedTo || hasStasisLink` and `restartServer` returns early
+on it, so the reserve could never be drawn on. The lab candidate carries no
+prober to armour.
+
+**Resizing** happens at the ORDER BOUNDARY and nowhere else. A resident is never
+idle — it dies and is replaced for its next job — so there is no quiet moment to
+wait for; the boundary is the one instant the previous allocation has been freed
+and the next has not been launched. `resizeProber` execs the replacement through
+the OLD prober's still-lent `ns` and `lend` retires the old pid when the new one
+checks in, so the host is never without a lender and no kill-then-relaunch
+window exists. It costs that host one dispatch turn, and `reportProbe` signals a
+derive when the replacement arrives so the waiting order goes out on the next
+pass. Refusing on RAM is not a failure: hosts arm as their orders turn over, and
+a half-armoured fleet still re-cascades from every survivor.
+
+**Deliberate kills must stand the armour down.** `atExit` cannot tell an ordered
+kill from a host restart — the engine runs it for both — so the controller marks
+the pid (`HostEntry.proberKillMark`) *before* every `kill`, since the handler
+runs inside the killer's own stack. Without it, replacement, walk displacement
+and resize each become a respawn loop. `HostEntry.proberRespawn` is the mirror
+image: the window during which a successor is scheduled but not yet standing,
+checked by `reviveProbers`, the dead-prober sweep and `preparePlant` so none of
+them execs a duplicate into the gap. It is reaped on a grace period, and the
+reap must `withdraw()` the launch descriptor or it leaks into the realm map.
+
+One known wart: a host DELETED in the same storm phase that restarted it still
+schedules its armour spawn, and at +1 ms upstream's `spawnCb` finds no server
+and throws. It is a thrown string in an uncancelled timer and there is no
+`window.onerror` in the game, so it is console noise rather than a modal or a
+crash. `sim/ns/api.ts` no-ops that case instead, so the arena does not reproduce
+the noise — a fidelity gap, not a behavioural one.
+
 ## What the engine actually guarantees about timing (v3.0.1)
 
 Read from the game's own source, because guessing at it cost a day.
@@ -1308,7 +1400,7 @@ the controller. It must not die, which means it can never `spawn` — `spawn` ki
 its caller — and it should not `exec` either, because `exec` leaves the caller
 alive and two allocations at once is usually RAM a darknet host does not have.
 So it launches nothing itself: it keeps a queue per host, and each ordinary
-host keeps exactly two workers. A 1.8 GB **prober** performs one immediate
+host keeps exactly two workers. A 3.15 GB **prober** performs one immediate
 host-local `probe()`, reports it, then waits on `nextMutation()` in its own lane.
 One **agent** is either an idle resident or the current order body. The resident
 starts an order by `spawn`ing the same artifact with `spawnDelay: 0`; the order
@@ -1488,11 +1580,15 @@ That is the whole reason a host's peak is a max rather than a sum, and it is the
 assumption to preserve — a future scheduler that co-resides two jobs on one host
 would make every authenticate slower and gain nothing.
 
-The exact ordinary allocations are: prober 1.8 GB, resident 3.6 GB, bootstrap
+The exact ordinary allocations are: prober 3.15 GB (base 1.6 + `exec` 1.3 +
+`dnet.probe` 0.2 + `dnet.connectToSession` 0.05), resident 1.6 GB, bootstrap
 reclaimer 2.6 GB/thread, authenticate solver 4.7 GB/thread, and lab walker
-2.0 GB/thread. Ordinary hosts reserve the prober, darkweb reserves both its
-controller and prober, and a prepared lab-walker host reserves nothing
-after its prober is killed. There is no safety margin; `ramOverride` is per
+2.0 GB/thread. The prober has three prices, not one: a stasis-linked host drops
+`exec` for 1.85 GB, because the engine's mutation guard means it can never lose
+the processes `exec` would relaunch, and an ARMOURED host adds `spawn` for
+5.15 GB (see *Surviving a restart*). Ordinary hosts reserve the prober, darkweb
+reserves both its controller and prober, and a prepared lab-walker host reserves
+nothing after its prober is killed. There is no safety margin; `ramOverride` is per
 thread.
 
 `tests/ram-budget.test.ts` is the executable form of this section: it prices a
@@ -1573,14 +1669,22 @@ every occupied, unpinned movable host would consume. This comparison is only
 arithmetic: the lane does not reserve RAM, preserve an agent, force a route, or
 otherwise change normal probes and planner actions.
 
-On four full-Dnet seeds, 3,742 induce waves made 320 relocations, 194 deeper
-landings, and 7 direct-progress landings: respectively `8.55%`, `5.18%`, and
-`0.19%` per wave. The same runs suffered 499 occupied restarts. The guaranteed
-edge exposed 433 (`86.8%`) immediately; 66 were initially lost, but ordinary
-plant cascading recovered 51 of those without advancing virtual time. Only 13
-needed a later route and 2 were still unrecovered at walker placement. The
-resulting 49.25 stranded GB-hours were `10.3%` of the hypothetical 478.76
-GB-hours a blanket 2 GB fleet reserve would have consumed.
+On four full-Dnet seeds, 5,016 induce waves made 398 relocations, 276 deeper
+landings, and 5 direct-progress landings: respectively `7.93%`, `5.50%`, and
+`0.10%` per wave. The same runs suffered 692 occupied restarts. The guaranteed
+edge exposed 597 (`86.3%`) immediately; 95 were initially lost, but ordinary
+plant cascading recovered 68 of those without advancing virtual time. Only 26
+needed a later route (122.6 s mean, 586.7 s worst) and 1 was still unrecovered
+at walker placement. The resulting 128.22 stranded GB-hours were `18.0%` of the
+hypothetical 710.86 GB-hours a blanket 2 GB fleet reserve would have consumed.
+
+These figures moved when the lane's prober price was corrected from 1.8 GB to
+the 3.15 GB production actually reserves — the old constant omitted `exec` and
+`connectToSession`, and so modelled a fleet 1.35 GB per host richer than the one
+we run. The conclusion did not move: a blanket reserve still costs several times
+what it saves, which is what makes armour a policy rather than a default. That
+`96%` of restarts recover in the same virtual instant is also the reason the
+standing capacity rung is off; see *Surviving a restart*.
 
 ### Farm regression lane
 
@@ -1588,13 +1692,27 @@ GB-hours a blanket 2 GB fleet reserve would have consumed.
 then measures two hours without resetting the world, RNG, charisma, or planner
 state. Resetting only counters prevents the initial RAM-block backlog from
 masquerading as stable cache throughput. The lane reports both means and p10
-rates for caches and money across paired seeds. Its only policy counterfactual
-is withholding the storm; the post-lab row is a lifecycle phase, not a tuning
-candidate. Production fixes the validated choices in code: depth-first cache
-hunting (capacity breaks depth ties), a ten-minute optional block-clear budget,
-and storm admission within thirty seconds of a phishing cache. The benchmark's
-real inventory path now exposes the current storm policy's lower-tail cost;
-that is an optimization target, not a reason to remove storm-seed farming.
+rates for caches and money across paired seeds. Its policy counterfactuals are
+withholding the storm and the armour arm; the post-lab row is a lifecycle
+phase, not a tuning candidate. Production fixes the validated choices in code:
+depth-first cache hunting (capacity breaks depth ties), a ten-minute optional
+block-clear budget, and storm admission within thirty seconds of a phishing
+cache. The benchmark's real inventory path now exposes the current storm
+policy's lower-tail cost; that is an optimization target, not a reason to remove
+storm-seed farming.
+
+**The lane models restarts, and did not always.** It used to drop a resident
+only when its host stopped existing, so a restart — which leaves the host, its
+files and its root intact and takes only what is standing on it — was invisible.
+That flattered every storm figure the lane ever produced, because the storm's
+own `restartAllDarknetServers` kills the entire movable fleet at once and this
+loop simply did not look. Detection is the spread lane's (the engine replaces
+`host.logs` wholesale, so an identity change plus the restart banner is the
+fact), and both the per-tick restarts and the storm's mass restart arrive
+through the same `darknetProcess` call. The restart ledger it now prints is as
+much the honest cost of the shipped policy as it is the armour's case: on eight
+paired seeds the shipped fleet takes ~316 occupied restarts per measured window,
+~27 of them from its own storm, stranding 72 GB-hours.
 
 The lane follows the live file-observation path: first authentication, a final
 RAM clear, and a winning phish invalidate cache facts, then a separate inventory

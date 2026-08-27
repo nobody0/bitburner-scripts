@@ -200,6 +200,8 @@ function rig(): Rig {
     announceLaunch: () => {},
     announceProbeRefresh: () => {},
     lend: () => {},
+    announceProberRespawn: () => false,
+    markProberKill: () => {},
     adopt: (hostname, handle) => {
       // What the real controller does with an adoption: the handle becomes THE
       // process on that host's entry, and its settle is observed.

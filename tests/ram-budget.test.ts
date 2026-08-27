@@ -5,6 +5,7 @@ import type { BitburnerConfig } from "../tools/config.ts";
 import { analyzeScriptRam, billableRamNames } from "../tools/ram-analysis.ts";
 import {
   ATTEMPT_LEAN_GB, CONTROLLER_CALLS, CONTROLLER_GB, KIND_CALLS, ORDER_PRICES,
+  PROBER_ARMOURED_CALLS, PROBER_ARMOURED_GB,
   PROBER_CALLS, PROBER_GB, PROBER_STASIS_CALLS, PROBER_STASIS_GB,
   SCRIPT_BASE_GB, orderCalls, priceOf, threadsFor, type OrderKind,
 } from "../game/dnet/shared.ts";
@@ -19,6 +20,7 @@ import { getFunctionRamCost } from "../sim/ns/ram-costs.ts";
 import { priceCall, UNKNOWN_CALL_GB } from "../game/lib/ns-proxy.ts";
 import { nsMainGlobal } from "../game/lib/ns-proxy-shared.ts";
 import { START_SCRIPT_GB } from "../game/lib/proxies.ts";
+import { DEFAULT_SPREAD_LIMITS } from "../shared/strategy/dnet/plan.ts";
 
 /** The order kinds that run as an ORDER (through the agent switch), i.e. every
  * kind except resident `idle` and the spawn-free `bootstrapReclaim`. */
@@ -760,6 +762,35 @@ describe("the written-down price table", () => {
     // the feature free to drift from the surface it is supposed to buy.
     expect(PROBER_STASIS_GB).toBe(priceOfCalls(PROBER_STASIS_CALLS));
     expect(PROBER_STASIS_CALLS).not.toContain("exec");
+    // The armoured prober is the plain one plus `spawn`, and the 2.0 GB gap
+    // between them IS the policy `planArmour` spends. Pinning both ends means a
+    // game update that repriced `spawn` fails here rather than silently making
+    // every armour threshold wrong.
+    expect(PROBER_ARMOURED_GB).toBe(priceOfCalls(PROBER_ARMOURED_CALLS));
+    expect(PROBER_ARMOURED_GB - PROBER_GB).toBeCloseTo(getFunctionRamCost("spawn"), 6);
+    expect(PROBER_ARMOURED_CALLS).toContain("spawn");
+    // A stasis host is exempt from the restart that armour defends against, so
+    // paying for it there would be pure waste.
+    expect(PROBER_STASIS_CALLS).not.toContain("spawn");
+  });
+
+  test("the planner's default limits mirror the controller's own prices", () => {
+    // `shared/strategy` may not import `game/`, so `DEFAULT_SPREAD_LIMITS` is
+    // literals — and literals drift. They had: the prober default said 1.8 GB
+    // (the price before `exec` joined its surface) and the two resident
+    // defaults still carried a 2.0 GB `spawn` no dispatched worker has owned
+    // for a long time. Every sim lane and planner test plans against these, so
+    // the drift silently modelled a fleet cheaper than the one we run.
+    //
+    // The controller spreads `DEFAULT_SPREAD_LIMITS` and overrides each field
+    // from these same constants (controller.ts `SPREAD_LIMITS`); this pins the
+    // defaults to what that override produces.
+    expect(DEFAULT_SPREAD_LIMITS.proberRamGb).toBe(PROBER_GB);
+    expect(DEFAULT_SPREAD_LIMITS.managedProberRamGb).toBe(PROBER_STASIS_GB);
+    expect(DEFAULT_SPREAD_LIMITS.residentRamGb).toBe(priceOf("idle"));
+    expect(DEFAULT_SPREAD_LIMITS.managedResidentRamGb).toBe(priceOf("idle"));
+    expect(DEFAULT_SPREAD_LIMITS.agentRamGb).toBe(priceOf("idle") + PROBER_GB);
+    expect(DEFAULT_SPREAD_LIMITS.bootstrapRamGb).toBe(priceOf("bootstrapReclaim"));
   });
 
   test("no worker carries a launcher, so there is only one price", () => {
@@ -767,7 +798,12 @@ describe("the written-down price table", () => {
     // `spawn`: a worker that had to become the next order carried its own
     // launcher, a controller-dispatched one did not. Every worker is dispatched
     // now — the controller execs it through the host's prober `ns` — so the
-    // distinction has nothing left to describe, and `spawn` appears nowhere.
+    // distinction has nothing left to describe.
+    //
+    // `spawn` survives in exactly one place, and it is not an order: the
+    // ARMOURED prober carries it to dodge `restartServer`, where it is bought
+    // once per host rather than once per thread. That is the whole reason it
+    // sits on the prober and not here.
     for (const [kind, methods] of Object.entries(KIND_CALLS)) {
       expect(methods, `${kind} still carries a launcher`).not.toContain("spawn");
     }

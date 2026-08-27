@@ -52,15 +52,22 @@ describe("every refusal to spread is named", () => {
 
   test("an ordinary cramped blocked host is refused, not bootstrapped", () => {
     // Bootstrap reclaim is reserved for the lab candidate that gates the walk.
+    // Sized RELATIVE to the bar rather than at a literal just under it: the
+    // literal was 5.3 against a 5.4 GB agent, and when the agent's real price
+    // fell to 4.75 the case silently stopped being cramped at all.
     const plan = planSpread([
-      candidate({ host: "blocked", usableRam: 5.3, blockedRam: 10 }),
+      candidate({ host: "blocked", usableRam: DEFAULT_SPREAD_LIMITS.agentRamGb - 0.1, blockedRam: 10 }),
     ], DEFAULT_SPREAD_LIMITS);
     expect(plan.plant).toEqual([]);
     expect(plan.refused[0]?.why).toBe("not-enough-ram");
   });
 
   test("a stasis-managed target is priced at managed resident + prober, not the full agent", () => {
-    // 3.5GB fits the managed resident beside its prober, but not a full agent.
+    // 3.5GB fits the managed resident (1.6) beside the STASIS prober (1.85),
+    // but not a full agent. The managed branch must price the prober the linked
+    // host actually runs — the one without `exec` — because that is the size
+    // `plantOne` execs it at. Pricing it at the full 3.15 put the bar at 4.75
+    // and refused exactly the deep, pinned hosts this plant exists to reach.
     const managed = planSpread([
       candidate({ host: "pinned", usableRam: 3.5, blockedRam: 10, stasisManaged: true }),
     ], DEFAULT_SPREAD_LIMITS);

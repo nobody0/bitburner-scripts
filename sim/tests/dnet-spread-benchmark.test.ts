@@ -4,11 +4,14 @@ import {
   assertFreshSpreadNet,
   crackAttemptsFor,
   generateNet,
+  PROBER_ARMOURED_SIM_GB,
   PROBER_GB,
+  PROBER_STASIS_GB,
   runSpreadCase,
   summarizeSpreadRuns,
 } from "../dnet-spread.ts";
 import { canPreempt, isSameTurn } from "../../shared/strategy/dnet/jobs.ts";
+import { PROBER_GB as PRODUCTION_PROBER_GB } from "../../game/dnet/shared.ts";
 
 /** The reach-the-lab lane's CI mirror: sane bounds on the production strategy
  * over seeded fresh Dnets, plus the pricing and priority facts the arena leans
@@ -33,7 +36,12 @@ describe("the reach-the-lab arena", () => {
       const vantage = net.system.record(run.walkerFrom!);
       expect(vantage?.stasisLinked).toBe(true);
       expect(vantage?.blockedRam).toBe(0);
-      expect(vantage?.sessions.size).toBeGreaterThan(0);
+      // ROOTED is the invariant; a live session is not. Sessions are PID-keyed
+      // and `removeExpiredSessions` prunes them as their holders exit, so
+      // whether one happens to be open at the final instant depends on which
+      // process last touched the host. Admin rights are what actually makes the
+      // walker's `exec` legal, and the stasis link keeps it reachable.
+      expect(net.world.servers.get(run.walkerFrom!)?.hasAdminRights).toBe(true);
     }
   });
 
@@ -91,9 +99,20 @@ describe("the reach-the-lab arena", () => {
   });
 
   test("the arena's prices come from the game's own table", () => {
-    // base 1.6 + probe 0.2: the reserve every host holds.
-    expect(PROBER_GB).toBe(1.8);
-    expect(ATTEMPT_GB).toBeGreaterThan(PROBER_GB);
+    // base 1.6 + probe 0.2 + exec 1.3 + connectToSession 0.05: the reserve
+    // every host holds. Priced from `PROBER_CALLS` rather than restated, so the
+    // arena cannot model a cheaper fleet than production runs — which it did,
+    // at 1.8 GB, for as long as this pin restated the number by hand.
+    expect(PROBER_GB).toBe(PRODUCTION_PROBER_GB);
+    expect(PROBER_GB).toBe(3.15);
+    // The prober is now the BIGGEST fixed cost on a host — bigger than a whole
+    // attempt worker — because `exec` (1.3 GB) is most of it. That is the
+    // reserve armour is measured against, and it is why armour is a policy
+    // rather than a default.
+    expect(PROBER_GB).toBeGreaterThan(ATTEMPT_GB);
+    expect(PROBER_STASIS_GB).toBeLessThan(PROBER_GB);
+    // Armour is exactly `spawn` on top, and nothing else.
+    expect(PROBER_ARMOURED_SIM_GB - PROBER_GB).toBeCloseTo(2, 6);
   });
 });
 

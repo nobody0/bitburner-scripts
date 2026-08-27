@@ -31,7 +31,10 @@ import {
   type DnetTimingProfile,
 } from "../shared/strategy/dnet/rates.ts";
 import { solverFor } from "../shared/strategy/dnet/solvers/index.ts";
-import { CONTROLLER_CALLS, KIND_CALLS, SCRIPT_BASE_GB } from "../game/dnet/shared.ts";
+import {
+  CONTROLLER_CALLS, KIND_CALLS, PROBER_ARMOURED_CALLS, PROBER_CALLS,
+  PROBER_STASIS_CALLS, SCRIPT_BASE_GB,
+} from "../game/dnet/shared.ts";
 
 /** Reach-the-lab arena: cold start on darkweb, spread, crack, grind, pin, and
  * measure when the lab walker could START at full threads.
@@ -63,7 +66,13 @@ export const price = (calls: readonly string[]): number => {
   return total;
 };
 
-export const PROBER_GB = price(["dnet.probe"]);
+/** The reserve every host holds, from the SAME call list production sizes it
+ * with. This used to be `price(["dnet.probe"])` — 1.8 GB — which quietly
+ * omitted the `exec` and `connectToSession` that make a host recoverable, and
+ * so modelled a fleet 1.35 GB per host cheaper than the one we actually run. */
+export const PROBER_GB = price(PROBER_CALLS);
+export const PROBER_ARMOURED_SIM_GB = price(PROBER_ARMOURED_CALLS);
+export const PROBER_STASIS_GB = price(PROBER_STASIS_CALLS);
 export const CONTROLLER_GB = price(CONTROLLER_CALLS);
 export const ATTEMPT_GB = price(KIND_CALLS.attempt);
 export const RECLAIM_GB = price(KIND_CALLS.reclaim);
@@ -393,14 +402,27 @@ export function runSpreadCase(
   };
 
   // What a JOB gets on this host: everything but the block and the prober's
-  // fixed reserve (plus the controller's own slice on darkweb). The job's
-  // per-thread price already includes the resident's spawn-back.
+  // reserve (plus the controller's own slice on darkweb). The job's per-thread
+  // price already includes the resident's spawn-back.
+  //
+  // The reserve is not one number, and modelling it as one made every
+  // stasis-linked host — the deepest and most valuable ones we hold — look
+  // 1.3 GB poorer than it is. `proberReserveGb` mirrors production's own
+  // branch: a linked host is exempt from the engine's restart and delete
+  // guard, so it pays for no `exec` it could never need.
   const jobFreeGb = (name: string): number => {
     const record = truth(name);
     if (!record) return 0;
-    const reserve = PROBER_GB + (name === "darkweb" ? CONTROLLER_GB : 0);
+    const reserve = proberReserveGb(name) + (name === "darkweb" ? CONTROLLER_GB : 0);
     return Math.max(0, maxRamOf(name) - record.blockedRam - reserve);
   };
+
+  /** Production's own two-branch prober reserve (`proberReserveGb`,
+   *  controller.ts): a stasis-linked host drops `exec`, because the engine's
+   *  mutation guard means it can never lose the processes `exec` would
+   *  relaunch. */
+  const proberReserveGb = (name: string): number =>
+    stasisLinked.has(name) ? PROBER_STASIS_GB : PROBER_GB;
 
   const plantAgent = (name: string, agent: Agent): void => {
     agents.set(name, agent);

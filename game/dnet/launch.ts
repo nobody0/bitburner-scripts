@@ -46,4 +46,12 @@ export interface DnetProberLaunch extends ScriptLaunch {
   /** The host-entry barrier this exact process must satisfy with its first
    * host-local adjacency report. */
   readonly refresh?: DnetProbeRefresh;
+  /** This launch paid the extra 2 GB for `spawn`, so it defends itself against
+   * a host restart by scheduling its own successor out of `atExit`.
+   *
+   * It is a property of the LAUNCH rather than of the host: the size was
+   * decided when the process was sized, and a process must never believe it
+   * carries a call its `ramOverride` did not buy — the engine bills the union
+   * of everything actually called and would kill it mid-`spawn`. */
+  readonly armoured?: boolean;
 }

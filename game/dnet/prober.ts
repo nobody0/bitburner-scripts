@@ -1,7 +1,14 @@
 import type { NS } from "@ns";
-import { captureLaunch } from "../lib/launch-shared.ts";
+import { captureLaunch, offerLaunch, temporaryRunOptions } from "../lib/launch-shared.ts";
 import type { DnetProberLaunch } from "./launch.ts";
-import { live } from "./shared.ts";
+import { live, PROBER_ARMOURED_GB } from "./shared.ts";
+
+/** This file, as the engine names it. A `spawn` takes a path, not a module. */
+const PROBER_FILE = "dnet/prober.js";
+
+/** Any non-zero delay dodges the restart sweep; this is the smallest one that
+ *  does, so the host is dark for as little time as possible. */
+const ARMOUR_SPAWN_DELAY_MS = 1;
 
 /** The prober: the one darknet process that MUST stand on its host, and the
  * host's whole standing cost.
@@ -32,13 +39,21 @@ import { live } from "./shared.ts";
  * the whole design rests on.
  *
  * `atExit` clears the lent `ns` and wakes the controller. The controller
- * launches replacements through neighbours; the prober never revives itself.
+ * launches replacements through neighbours — except when this launch was
+ * ARMOURED, which is the one case the prober does revive itself, because a host
+ * restart is the one death no neighbour can beat. See the armour hook below.
  *
- * The one rule it shares with `agent.ts`: no billable `ns` member beyond
- * `PROBER_CALLS` (`dnet.probe`, `exec`), because its cost is the `ramOverride`
- * its launcher declares, pinned by `tests/ram-budget.test.ts`. Note that it
- * REFERENCES neither — they are called through the lent object by someone
- * else — so the budget is a promise this file cannot keep on its own. */
+ * The one rule it shares with `agent.ts`: no billable `ns` member beyond what
+ * its launcher sized it for, because its cost is the `ramOverride` that launcher
+ * declares, pinned by `tests/ram-budget.test.ts`. There are two sizes:
+ * `PROBER_CALLS` (`dnet.probe`, `exec`, `dnet.connectToSession`) at
+ * `PROBER_GB`, and `PROBER_ARMOURED_CALLS` — the same plus `spawn` — at
+ * `PROBER_ARMOURED_GB`. The armour hook is the only place this file calls
+ * anything billable, and it is gated on `launch.armoured` for exactly that
+ * reason: a prober that spawned without having been sized for it would be
+ * killed mid-call by the engine's dynamic RAM check. Everything else here is
+ * called through the lent object by someone else, so the rest of the budget is
+ * a promise this file cannot keep on its own. */
 export async function main(ns: NS): Promise<void> {
   ns.disableLog("ALL");
 
@@ -59,10 +74,45 @@ export async function main(ns: NS): Promise<void> {
     live()?.wake("prober-died");
   }, "dnet-prober-checkout");
 
+  // ARMOUR, when this launch paid for it. Registered AFTER the checkout hook so
+  // the lent `ns` is retracted first and the successor cannot race a stale one.
+  //
+  // `exec` cannot save this host. `killServerScripts` drives ONE live iterator
+  // across the host's running-script map and runs each `atExit` synchronously
+  // inside that loop, so a replacement started here is appended to the map
+  // being walked and killed by the same sweep. `spawn` with a non-zero delay is
+  // the only way out: upstream registers its `setTimeout` before killing the
+  // caller and never cancels it, so the successor lands as a macrotask, after
+  // the whole restart transaction. One millisecond is enough — the number does
+  // not matter, only that it is not zero.
+  //
+  // The throw is expected: `spawn` raises ScriptDeath so nothing after it runs.
+  // The engine wraps EACH handler in its own try/catch, so this cannot stop the
+  // checkout hook above from running.
+  if (launch.armoured === true) {
+    ns.atExit(() => {
+      const g = live();
+      if (!g) return;
+      const offer = offerLaunch<DnetProberLaunch>({ kind: "dnet-prober", host, armoured: true });
+      // The controller is the only thing that knows whether this death was
+      // ordered. A deliberate kill must not respawn, or every replacement and
+      // every resize becomes a respawn loop.
+      if (!g.announceProberRespawn(host, ns.pid, offer.launchId, offer.withdraw)) {
+        offer.withdraw();
+        return;
+      }
+      ns["spawn"](
+        PROBER_FILE,
+        temporaryRunOptions({ threads: 1, ramOverride: PROBER_ARMOURED_GB, spawnDelay: ARMOUR_SPAWN_DELAY_MS }),
+        offer.launchId,
+      );
+    }, "dnet-prober-armour");
+  }
+
   // CHECK IN. The controller probes through the lent `ns` inside this call, so
   // a freshly planted host is on the map before this line returns — which is
   // what the plant's first-probe barrier is waiting for.
-  controller.lend(host, ns, ns.pid, launch.refresh);
+  controller.lend(host, ns, ns.pid, launch.refresh, launch.armoured === true);
 
   // Nothing else, for ever. Not `ns.asleep`: see above.
   await new Promise<never>(() => {});

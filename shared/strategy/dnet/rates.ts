@@ -210,13 +210,20 @@ export interface MutationBudget {
   restarted: number;
 }
 
+/** P(the tick got past `addRandomDarknetServers`' early-returning branch). */
+const SURVIVES_ADD = 0.9;
+/** The dedicated backdoored-pool restart draw, which picks ONE victim from that
+ *  pool and returns. Split out because the armour trade needs it per host, and
+ *  the pool it divides by is the backdoor count rather than the population. */
+const BACKDOOR_RESTART_CHANCE = 0.1;
+
 /** With no backdoored servers, the two backdoor branches cannot fire, so the
  * later rolls are reached more often. `backdoored` is therefore an input: it
  * makes the net measurably more violent, which is the cost the API docs
  * describe only as an authentication penalty. */
 export function mutationBudget(backdoored = 0): MutationBudget {
   // P(reaching the rolls after the early-return branches).
-  const survivesAdd = 0.9;
+  const survivesAdd = SURVIVES_ADD;
   const survivesBackdoorRestart = backdoored > 0 ? 0.9 : 1;
   const survivesBackdoorDelete = backdoored > 0 ? 0.95 : 1;
   const reachesLate = survivesAdd * survivesBackdoorRestart * survivesBackdoorDelete;
@@ -228,7 +235,7 @@ export function mutationBudget(backdoored = 0): MutationBudget {
     disconnected: reachesDisconnect * 0.5,
     connected: reachesLate * 0.5,
     deleted: 0.1 * batch + (backdoored > 0 ? survivesAdd * 0.9 * 0.05 : 0),
-    restarted: reachesLate * 0.2 + (backdoored > 0 ? survivesAdd * 0.1 : 0),
+    restarted: reachesLate * 0.2 + (backdoored > 0 ? survivesAdd * BACKDOOR_RESTART_CHANCE : 0),
   };
 }
 
@@ -265,6 +272,41 @@ export function msPerHostEventAny(
   const perTick = kinds.reduce((sum, kind) => sum + budget[kind], 0) * effectiveness;
   if (perTick <= 0) return Infinity;
   const perHostPerTick = perTick / expectedServerCount(netDepth);
+  return mutationIntervalMs(netDepth, bitNode) / perHostPerTick;
+}
+
+/** Expected milliseconds before a restart touches ONE NAMED host, told apart
+ * by whether we hold a backdoor on it.
+ *
+ * `msPerHostEvent` averages over the whole population, which is the right
+ * answer for an ordinary host and the wrong one for a backdoored host by an
+ * order of magnitude. Upstream runs two separate draws:
+ *
+ * - a 10% branch that picks one victim from the BACKDOORED pool alone, and
+ *   `return`s — so with `B` backdoored hosts each carries `0.09 / B` per tick,
+ *   and a lone backdoor is a flat 9%;
+ * - the ordinary 20% branch over every movable host, which is the term
+ *   `msPerHostEvent` already divides by the population.
+ *
+ * Rates add and times do not, so the two are combined as rates and inverted
+ * once. This is what makes "a backdoored host should wear armour" arithmetic
+ * rather than a hunch. */
+export function msPerRestartOfHost(
+  backdoored: boolean,
+  netDepth = DEFAULT_NET_DEPTH,
+  bitNode = 15,
+  backdoorCount = 0,
+): number {
+  const budget = mutationBudget(backdoorCount);
+  // The targeted branch contributes exactly this much of `budget.restarted`,
+  // and it is the ONLY part that divides by the backdoor pool instead of by the
+  // population.
+  const targetedPerTick = backdoorCount > 0 ? SURVIVES_ADD * BACKDOOR_RESTART_CHANCE : 0;
+  const genericPerTick = budget.restarted - targetedPerTick;
+  const effectiveness = mutationTickEffectiveness(netDepth);
+  const perHostPerTick = (genericPerTick * effectiveness) / expectedServerCount(netDepth)
+    + (backdoored && backdoorCount > 0 ? (targetedPerTick * effectiveness) / backdoorCount : 0);
+  if (perHostPerTick <= 0) return Infinity;
   return mutationIntervalMs(netDepth, bitNode) / perHostPerTick;
 }
 

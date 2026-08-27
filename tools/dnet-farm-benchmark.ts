@@ -27,6 +27,10 @@ const policies: FarmScenario[] = [
   SHIPPED_FARM,
   { ...SHIPPED_FARM, name: "no storm", stormEnabled: false },
   { ...SHIPPED_FARM, name: "post-lab (no walker)", labPresent: false },
+  // The armour arm: the case the arithmetic cannot refuse — the webstorm
+  // restarts every movable survivor at once, and this is the only policy with
+  // anything left standing afterwards.
+  { ...SHIPPED_FARM, name: "storm armour", armour: true },
 ];
 
 const seeds = Array.from({ length: seedCount }, (_, index) => index + 1);
@@ -59,21 +63,67 @@ console.table(policies.map((policy) => {
   };
 }));
 
+// The restart ledger. Until this lane modelled restarts at all it credited the
+// whole fleet with surviving the storm it fires itself, so these rows are the
+// honest cost of the shipped policy as much as they are the armour's case.
+process.stdout.write(
+  "\nRestart ledger: occupied restarts are residents the engine killed; the storm's own\n"
+  + "mass restart (every movable survivor) is broken out. `dodged` are hosts whose armoured\n"
+  + "prober outlived the kill and re-planted in the same instant. `stranded` and `armour GB-h`\n"
+  + "are the two sides of the trade, both integrated on the same clock.\n",
+);
+console.table(policies.map((policy) => {
+  const held = runs.get(policy.name)!;
+  const sum = (pick: (run: FarmRun) => number): number =>
+    held.reduce((total, run) => total + pick(run), 0) / held.length;
+  return {
+    policy: policy.name,
+    "restarts": sum((r) => r.occupiedRestarts).toFixed(1),
+    "of which storm": sum((r) => r.stormRestarts).toFixed(1),
+    "dodged": sum((r) => r.restartsDodged).toFixed(1),
+    "recovered": sum((r) => r.restartRecovered).toFixed(1),
+    "unrecovered": sum((r) => r.restartUnrecovered).toFixed(1),
+    "stranded GB-h": (sum((r) => r.restartLostGbMs) / 3_600_000).toFixed(2),
+    "armour GB-h": (sum((r) => r.armourGbMs) / 3_600_000).toFixed(2),
+    "armour peak": sum((r) => r.armourPeak).toFixed(1),
+  };
+}));
+
 const cachesOf = (held: readonly FarmRun[]): number[] => held.map((run) => run.cachesPerHour);
 const moneyOf = (held: readonly FarmRun[]): number[] => held.map((run) => run.moneyPerHour / 1e6);
 const baseline = runs.get(SHIPPED_FARM.name)!;
 const noStorm = runs.get("no storm")!;
+const strandedOf = (held: readonly FarmRun[]): number[] =>
+  held.map((run) => run.restartLostGbMs / 3_600_000);
+/** What the policy actually costs the fleet: capacity stranded by restarts PLUS
+ *  the capacity armour holds. One number, so the trade cannot be read one-sided. */
+const totalCostOf = (held: readonly FarmRun[]): number[] =>
+  held.map((run) => (run.restartLostGbMs + run.armourGbMs) / 3_600_000);
+const stormArmour = runs.get("storm armour")!;
+const against = (
+  metric: string,
+  candidate: readonly FarmRun[],
+  name: string,
+  pick: (held: readonly FarmRun[]) => number[],
+  lowerIsBetter: boolean,
+): { metric: string; result: ReturnType<typeof pairedComparison> } => ({
+  metric,
+  result: pairedComparison(
+    { name: SHIPPED_FARM.name, values: pick(baseline) },
+    { name, values: pick(candidate) },
+    lowerIsBetter,
+  ),
+});
 const comparisons = [
-  { metric: "caches/h", result: pairedComparison(
-    { name: SHIPPED_FARM.name, values: cachesOf(baseline) },
-    { name: "no storm", values: cachesOf(noStorm) },
-    false,
-  ) },
-  { metric: "money/h ($m)", result: pairedComparison(
-    { name: SHIPPED_FARM.name, values: moneyOf(baseline) },
-    { name: "no storm", values: moneyOf(noStorm) },
-    false,
-  ) },
+  against("caches/h", noStorm, "no storm", cachesOf, false),
+  against("money/h ($m)", noStorm, "no storm", moneyOf, false),
+  // The armour arms, paired on the same seeds as everything else. `stranded`
+  // and `total cost` are the two that decide it: earnings move slowly against
+  // seed noise, while the capacity ledger is what armour directly changes.
+  against("caches/h", stormArmour, "storm armour", cachesOf, false),
+  against("money/h ($m)", stormArmour, "storm armour", moneyOf, false),
+  against("stranded GB-h", stormArmour, "storm armour", strandedOf, true),
+  against("total cost GB-h", stormArmour, "storm armour", totalCostOf, true),
 ];
 console.table(comparisons.map(({ metric, result }) => {
   return {

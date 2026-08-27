@@ -5,6 +5,7 @@ import {
   crackAttemptsFor,
   price,
   PROBER_GB,
+  PROBER_STASIS_GB,
   RECLAIM_GB,
   WALK_GB,
   type SpreadNet,
@@ -30,6 +31,7 @@ import {
   type Task,
 } from "../shared/strategy/dnet/plan.ts";
 import { planFarm, type FarmHost } from "../shared/strategy/dnet/farm.ts";
+import { planArmour, type ArmourCandidate } from "../shared/strategy/dnet/armour.ts";
 import {
   authenticateWaitMs,
   isLabyrinth,
@@ -39,7 +41,11 @@ import {
   STORM_COOLDOWN_MS,
   type DnetTimingProfile,
 } from "../shared/strategy/dnet/rates.ts";
-import { KIND_CALLS } from "../game/dnet/shared.ts";
+import { KIND_CALLS, PROBER_ARMOURED_GB, PROBER_GB as PRODUCTION_PROBER_GB } from "../game/dnet/shared.ts";
+
+/** What one host's armour costs: the `spawn` chain and nothing else. */
+const ARMOUR_GB = PROBER_ARMOURED_GB - PRODUCTION_PROBER_GB;
+
 
 /** Earn-in-a-full-net arena: an established darknet — spread done, lab vantage
  * pinned, a walker mid-walk — mining caches and money over hours of virtual
@@ -68,6 +74,15 @@ export interface FarmScenario {
    *  lab is unfinished). False models the post-lab net. */
   labPresent?: boolean;
   charisma?: number;
+  /** Run `planArmour`, so the fleet wears the `spawn` chain that dodges
+   * `restartServer` while a storm is one gate from firing.
+   *
+   * False is the shipped fleet today and the honest baseline. Only the storm
+   * rung can be exercised here: `planArmour`'s other rung is a backdoor, and
+   * `#backdoored()` excludes stasis-linked hosts while a stasis link is the
+   * only thing in either arena that sets `backdoorInstalled` — so that pool is
+   * always empty. `tests/dnet-armour.test.ts` covers it instead. */
+  armour?: boolean;
 }
 
 export const SHIPPED_FARM: FarmScenario = { name: "shipped", stormEnabled: true, labPresent: true };
@@ -93,6 +108,25 @@ export interface FarmRun {
    *  work. The whole point of the storm gating is that this stays 0. */
   walkerInterruptions: number;
   walkerAttempts: number;
+  /** Restarts that killed one of our residents. The storm's own mass restart
+   *  (`restartAllDarknetServers`, every movable survivor at once) is the bulk
+   *  of these, which is exactly why the lane could not price the storm honestly
+   *  while it ignored them. */
+  occupiedRestarts: number;
+  /** Occupied restarts that arrived inside a storm burst. */
+  stormRestarts: number;
+  /** Restarted hosts whose armoured prober dodged the kill and re-planted in
+   *  the same virtual instant. */
+  restartsDodged: number;
+  /** Restarted hosts that had to wait for a neighbour to replant them. */
+  restartRecovered: number;
+  restartUnrecovered: number;
+  /** Usable resident capacity stranded while restarted hosts had no agent. */
+  restartLostGbMs: number;
+  /** What armour actually cost: 2 GB per armoured host per unit of time. */
+  armourGbMs: number;
+  /** Peak simultaneously-armoured hosts, for reading the policy's reach. */
+  armourPeak: number;
 }
 
 interface Job {
@@ -150,6 +184,10 @@ export function runFarmCase(
   const knowledge: DnetHosts = new Map();
   const vault = new Set<string>();
   const stasisLinked = new Set<string>();
+  /** Hosts whose prober carries the `spawn` chain right now. Membership costs
+   *  `ARMOUR_GB` of job capacity and buys a same-instant recovery from a
+   *  restart; `applyMutation` is the only reader that matters. */
+  const armoured = new Set<string>();
   const agents = new Map<string, Agent>();
   const tried = new Map<string, number>();
   const crackCost = new Map<string, number | undefined>();
@@ -177,6 +215,14 @@ export function runFarmCase(
     inventoryCalls: 0,
     walkerInterruptions: 0,
     walkerAttempts: 0,
+    occupiedRestarts: 0,
+    stormRestarts: 0,
+    restartsDodged: 0,
+    restartRecovered: 0,
+    restartUnrecovered: 0,
+    restartLostGbMs: 0,
+    armourGbMs: 0,
+    armourPeak: 0,
   };
 
   const maxRamOf = (name: string): number => world.servers.get(name)?.maxRam ?? 0;
@@ -187,10 +233,32 @@ export function runFarmCase(
   const jobFreeGb = (name: string): number => {
     const record = truth(name);
     if (!record) return 0;
-    const reserve = PROBER_GB + (name === "darkweb" ? CONTROLLER_GB : 0);
+    const reserve = (stasisLinked.has(name) ? PROBER_STASIS_GB : PROBER_GB)
+      + (armoured.has(name) ? ARMOUR_GB : 0)
+      + (name === "darkweb" ? CONTROLLER_GB : 0);
     return Math.max(0, maxRamOf(name) - record.blockedRam - reserve);
   };
   const expiry = (): ExpiryOpts => ({ netDepth, bitNode: 15, stasisLinked });
+
+  /** A host whose resident a restart killed, and when. Closed by the replant
+   *  that puts an agent back on it. */
+  const restartOutages = new Map<string, { at: number; usableGb: number }>();
+
+  /** Put an agent on a host, closing any restart outage it was carrying.
+   *
+   * Every path that stands a resident goes through here, so the recovery
+   * accounting cannot be forgotten by a new caller — the spread lane learned
+   * that the same way. */
+  const plantAgent = (name: string, agent: Agent): void => {
+    agents.set(name, agent);
+    const outage = restartOutages.get(name);
+    if (outage === undefined) return;
+    const recoveryMs = clock - outage.at;
+    run.restartRecovered++;
+    run.restartLostGbMs += outage.usableGb * recoveryMs;
+    restartOutages.delete(name);
+  };
+
 
   const observeHost = (name: string, mode: "details" | "inventory" = "details"): ReportHost => {
     const withFiles = mode === "inventory";
@@ -328,12 +396,94 @@ export function runFarmCase(
       if (name === walkerHost) continue;
       if (!truth(name)) continue;
       if (maxRamOf(name) - truth(name)!.blockedRam < DEFAULT_SPREAD_LIMITS.agentRamGb) continue;
-      agents.set(name, {});
+      plantAgent(name, {});
     }
-    agents.set("darkweb", {});
+    plantAgent("darkweb", {});
   }
 
   let moneyStart = world.player.money;
+
+  let stormImminent = false;
+
+  /** Move the fleet's armour toward what `planArmour` wants.
+   *
+   * Production can only resize a prober at an order boundary — the microtask
+   * between one job dying and the next being dispatched — because that is the
+   * only instant the host's RAM is free and nothing is interrupted. This lane
+   * has the same constraint for the same reason, so a host with a job in the
+   * air keeps whatever armour it already has and is revisited next derive.
+   *
+   * That partial coverage is not a defect of the policy, it is the policy: a
+   * storm that finds half the fleet armoured still re-cascades from every
+   * survivor, and each survivor's `exec` reaches its own neighbours. */
+  const applyArmourPolicy = (): void => {
+    if (policy.armour !== true) return;
+    const candidates: ArmourCandidate[] = [];
+    for (const [name, agent] of agents) {
+      if (agent.bootstrap || name === walkerHost || !truth(name)) continue;
+      candidates.push({
+        hostname: name,
+        // What arming would have to come OUT of: the free capacity this host
+        // has on top of the armour it is already wearing.
+        usableGb: jobFreeGb(name) + (armoured.has(name) ? ARMOUR_GB : 0),
+        proberStanding: true,
+        stasisLinked: stasisLinked.has(name),
+      });
+    }
+    const wanted = planArmour(candidates, { stormImminent, armourGb: ARMOUR_GB });
+    for (const [name, agent] of agents) {
+      // An order boundary only. A host mid-job is not resizable.
+      if (agent.job !== undefined) continue;
+      if (wanted.has(name)) armoured.add(name);
+      else armoured.delete(name);
+    }
+    run.armourPeak = Math.max(run.armourPeak, armoured.size);
+  };
+
+  /** Advance the engine one mutation step and settle what it did to our
+   * residents.
+   *
+   * A restart is the one mutation that leaves the HOST intact and takes only
+   * what is standing on it, so nothing else in this lane notices it: `truth()`
+   * still answers, the files are still there, and the agent map would happily
+   * keep crediting work to a process the engine killed. That blind spot
+   * flattered every storm number this lane has ever produced, because
+   * `restartAllDarknetServers` kills the entire movable fleet at once and this
+   * loop simply did not look.
+   *
+   * Detection is the spread lane's: the engine replaces `host.logs` wholesale
+   * on a restart, so an identity change plus the restart banner is the fact.
+   * Both the ordinary per-tick restarts and the storm's mass restart arrive
+   * through `darknetProcess`, so one hook covers both. */
+  const applyMutation = (): void => {
+    const logRefs = new Map([...system.hosts].map(([name, host]) => [name, host.logs] as const));
+    const inStorm = system.stormActive();
+    system.darknetProcess(mutationCycles);
+    const restarted = [...system.hosts.values()].filter((host) =>
+      logRefs.get(host.hostname) !== host.logs
+      && host.logs[0]?.includes("Server restarting, terminating scripts"));
+    for (const host of restarted) {
+      const name = host.hostname;
+      const agent = agents.get(name);
+      if (agent === undefined) continue;
+      run.occupiedRestarts++;
+      if (inStorm || system.stormActive()) run.stormRestarts++;
+      // ARMOUR. The prober's delayed `spawn` lands after the whole restart
+      // transaction, so the host still has the one process that can `exec`
+      // locally and its resident is back in the same virtual instant. The
+      // agent's own in-flight job is still lost — the armour saves the host's
+      // ability to act, never the work that was in the air.
+      if (armoured.has(name)) {
+        run.restartsDodged++;
+        agents.set(name, {});
+        continue;
+      }
+      // Unarmoured: the host has nothing left standing and must wait for a
+      // surviving neighbour to plant it again.
+      restartOutages.set(name, { at: clock, usableGb: jobFreeGb(name) });
+      agents.delete(name);
+    }
+  };
 
   const observationSweep = (): void => {
     const reports: ReportHost[] = [];
@@ -371,7 +521,7 @@ export function runFarmCase(
       let planted = 0;
       for (const plant of planSpread(candidates, DEFAULT_SPREAD_LIMITS).plant) {
         if (plant.host === walkerHost || agents.has(plant.host) || !truth(plant.host)) continue;
-        agents.set(plant.host, plant.bootstrapReclaim === true ? { bootstrap: true } : {});
+        plantAgent(plant.host, plant.bootstrapReclaim === true ? { bootstrap: true } : {});
         fold([
           observeHost(plant.host),
           { hostname: plant.host, at: clock, present: true, neighbours: system.probeFrom(plant.host) },
@@ -471,7 +621,9 @@ export function runFarmCase(
       if (storm.fire) {
         hold.push({ kind: "storm", host: storm.fire.host, from: storm.fire.from, reason: storm.fire.reason });
       }
+      stormImminent = storm.imminent;
     }
+    applyArmourPolicy();
 
     const agentFreeGb = new Map<string, number>();
     for (const name of agents.keys()) agentFreeGb.set(name, jobFreeGb(name));
@@ -625,6 +777,19 @@ export function runFarmCase(
     run.inventoryCalls = 0;
     run.walkerInterruptions = 0;
     run.walkerAttempts = 0;
+    run.occupiedRestarts = 0;
+    run.stormRestarts = 0;
+    run.restartsDodged = 0;
+    run.restartRecovered = 0;
+    run.restartUnrecovered = 0;
+    run.restartLostGbMs = 0;
+    run.armourGbMs = 0;
+    run.armourPeak = armoured.size;
+    // An outage opened during the warmup would otherwise charge its warmup
+    // milliseconds to the measured window when it finally recovers. Re-stamp
+    // rather than discard: the host really is still down, and pretending it
+    // recovered at the boundary would understate the cost.
+    for (const outage of restartOutages.values()) outage.at = clock;
   };
 
   while (clock < capMs) {
@@ -650,6 +815,10 @@ export function runFarmCase(
     for (const agent of agents.values()) {
       if (agent.job && agent.job.doneAt < next) next = agent.job.doneAt;
     }
+    // What armour costs, integrated the way the spread lane integrates the
+    // capacity a restart strands — so the two sides of the trade are measured
+    // on the same clock and in the same unit.
+    run.armourGbMs += ARMOUR_GB * armoured.size * (Math.min(next, capMs) - clock);
     clock = Math.min(next, capMs);
     if (clock >= capMs) break;
     // Keep the warmed world and RNG position, but measure only the steady
@@ -661,7 +830,7 @@ export function runFarmCase(
       nextWalkerAttemptAt = clock + walkerAuthMs();
     }
     if (clock >= nextMutationAt) {
-      system.darknetProcess(mutationCycles);
+      applyMutation();
       nextMutationAt += mutationEveryMs;
       observationSweep();
       deriveDue = true;
@@ -673,6 +842,13 @@ export function runFarmCase(
       }
     }
   }
+
+  // Outages still open at the cap never recovered; charge their capacity to
+  // the end of the run so an unrecovered host is not silently free.
+  for (const outage of restartOutages.values()) {
+    run.restartLostGbMs += outage.usableGb * (clock - outage.at);
+  }
+  run.restartUnrecovered = restartOutages.size;
 
   run.moneyEarned = world.player.money - moneyStart;
   run.moneyPerHour = run.moneyEarned / hours;
