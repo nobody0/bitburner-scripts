@@ -1782,6 +1782,25 @@ The isolation evidence, for the darknet owner:
 Darknet internals are out of scope for the route layer; the route side stays
 estimation-pure and is unit-pinned up to the boundary.
 
+**Losing A/B: the combat-gate weight split (85f567b2, reverted).** Some
+factions post their combat gate as four one-stat requirements, and the four
+needs at full weight quadruple-priced one gate (Mug outbid the measured
+charisma channel 3,820:1,222 on bn15-full). Splitting the weight across the
+four stats was the principled correction — and it collapsed bn1-full seed 3
+from 12 augs / 3 installs at 6 h to 6 augs / 2 installs at 24 h. Bisected
+cleanly: charisma pass, install veto and city serialization each measure 12
+augs at 6 h; the split alone measures 6. The distortion is real but its
+correction re-times the early game into a LATENT DEADLOCK BASIN that is the
+deeper defect: with the aug portfolio empty, objective selection fell to an
+11.3 h Sector-12 favor grind whose work rate sat below the passive-rep
+crossover, so factions idled while HOLDING the slot for 21 hours; no rep ->
+nothing fundable -> the count tranche never opened installs -> money flowed
+to infrastructure forever (`moneyGranted: 0` on every factions plan). Full
+evidence: runs/1787861955283-sim-bn1s3-head-* (install3 carries the whole
+stall with telemetry). Any early-game perturbation can presumably trip this
+basin; pricing one gate four times stays a known, now-documented distortion
+until the basin is fixed.
+
 ## Known gaps in the current implementation
 
 Stated plainly rather than buried, because several features are implemented to
