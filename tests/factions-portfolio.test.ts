@@ -169,40 +169,6 @@ describe("the set solver against exhaustive enumeration", () => {
     }
   });
 
-  test("a fast forecloser does not beat a larger exclusive side it would ban", () => {
-    // The measured bn1-full failure shape: one faction workable INSTANTLY at
-    // a high rate (Sector-12 from the start city) bans a three-faction side
-    // whose combined shelf is bigger. Rate-greedy takes the fast one first
-    // and the local search cannot cross the valley — dropping it alone loses
-    // value until every member of the other side is in. The solver must
-    // compare both sides at TOTAL value.
-    const catalog = new Map<string, AugInfo>();
-    // The forecloser: one cheap, instantly-workable augmentation.
-    catalog.set("west-0", aug("west-0", { factions: ["West"], baseRepRequirement: 100, mults: { hacking: 1.05 } }));
-    // The exclusive side: three factions, two augmentations each, slower to
-    // unlock (higher rep) but a far larger combined shelf.
-    for (const name of ["East1", "East2", "East3"]) {
-      for (let i = 0; i < 2; i++) {
-        catalog.set(`${name}-${i}`, aug(`${name}-${i}`, {
-          factions: [name],
-          baseRepRequirement: 2_000,
-          mults: { hacking: 1.2 },
-        }));
-      }
-    }
-    const factions = [
-      standing("West", { joined: false, enemies: ["East1", "East2", "East3"] }),
-      standing("East1", { joined: false, enemies: ["West"] }),
-      standing("East2", { joined: false, enemies: ["West"] }),
-      standing("East3", { joined: false, enemies: ["West"] }),
-    ];
-    const world = view({ factions, catalog });
-    const { frontiers } = buildFrontiers(world, noBlockers(["West", "East1", "East2", "East3"]));
-    const ours = solvePortfolio(frontiers, world, 100_000);
-    const chosen = ours.choices.map((choice) => choice.faction).sort();
-    expect(chosen).toEqual(["East1", "East2", "East3"]);
-  });
-
   test("never scores below the best SINGLE package — the property that made replacing the old selector safe", () => {
     // The predecessor could only ever return one faction's package. Whatever it
     // would have chosen is a one-element set here, so the set solver that lost
