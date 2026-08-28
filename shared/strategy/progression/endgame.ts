@@ -544,16 +544,10 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
       stage: view.ownsRedPill ? tail.stage : queuedReward ? "labyrinth-install" : `labyrinth-${stageIndex + 1}`,
       needs: view.ownsRedPill ? tail.needs : needs,
       ...(mandatoryInstall ? { mandatoryInstall } : {}),
-      // Pre-pill, optional installs are ALLOWED and priced, not banned. The
-      // blanket false here starved the first full-horizon BN15 run of every
-      // install for 24 hours: the verdict screamed install (15.5M BN-seconds
-      // realizable) while $7.9e12 sat unspent, no faction augmentation was
-      // ever bought, and the whole economy never compounded (hacking 265 at
-      // the horizon). What a reset genuinely erases on this route — the
-      // charisma climb toward the current gate, an invested walk, the darknet
-      // rebuild — is the cadence's erased-progress veto's job to price
-      // (optionalInstallErasedSec), in the same BN-seconds the package is
-      // scored in, not a policy switch.
+      // Pre-pill, optional installs are ALLOWED and priced, not banned: what a
+      // reset erases on this route (the charisma climb, an invested walk) is
+      // optionalInstallErasedSec's job to price. A blanket false starved a
+      // 24h BN15 run of every install and every faction augmentation.
       optionalInstall: (view.ownsRedPill ? tail.optionalInstall : undefined) ?? true,
     });
   }

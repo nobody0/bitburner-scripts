@@ -3300,17 +3300,12 @@ function progressionRefresh(ctx: NeedContext): void {
   }
   // An optional reset also ERASES the selected route's current-stage
   // reset-sensitive progress — banked gate money, a live hacking or charisma
-  // climb — which the flat overhead term cannot see. Price the exchange
-  // directly, in the same BN-seconds the package score uses: the install
-  // activates `resetValueMult`; the reset re-earns `erasedSec`. Measured on
-  // the definitive bn1-full run (2026-08-27, seed 1): the run stood at the
-  // Daedalus invite gate for its final twelve hours taking economic installs
-  // every ~2,400s whose packages were worth ~190s each, while every reset
-  // erased a ~1,600s hacking re-climb and the banked money — the invite
-  // never landed. Route-mandatory installs and an already-open transaction
-  // are untouched, and favor-banked reputation is deliberately not counted
-  // as erased (a crossing install converts it; bankedFavorActivationValue
-  // already prices that).
+  // climb — which the flat overhead term cannot see. The exchange is priced
+  // in the same BN-seconds the package score uses: the install activates
+  // `resetValueMult`, the reset re-earns `erasedSec`. Without it a run stood
+  // at the invite gate for twelve hours installing ~190s packages that each
+  // erased a ~1,600s re-climb. Route-mandatory installs and an already-open
+  // transaction are untouched.
   const erasedSec = optionalInstallErasedSec(selectedEta?.needs ?? selectedStatus?.needs, view, rates, choice?.route);
   if (marginalInstall === true && !routeRequiresInstall && !pastPointOfNoReturn && resetValueMult < erasedSec) {
     marginalInstall = false;

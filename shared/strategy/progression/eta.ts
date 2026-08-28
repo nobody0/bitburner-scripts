@@ -126,13 +126,12 @@ export interface RouteRates {
    * the reputation leg before any Daedalus work has been measured. Derived by
    * the driver from the transcribed rep formulas; never a live measurement. */
   daedalusRepPerSecProjected?: number;
-  /** d ln(faction-work rep rate) / d ln(hacking skill), from the transcribed
-   * work-rep formula at the CURRENT skills — hacking enters every work type
-   * close to linearly. Without this coupling, perturbing the hacking rate
-   * moved no reputation leg and worth(hacking) read 3-7k BN-seconds while
-   * worth(reputation) read 107-189k on a run whose reputation was earned BY
-   * hacking skill: the multipliers that accelerate the route's dominant
-   * channel were priced as if they touched only the skill gates. */
+  /** d ln(faction-work rep rate) / d ln(hacking skill), by finite difference
+   * of the transcribed work-rep formula at the CURRENT skills. Reputation is
+   * earned BY hacking skill (near-linearly, every work type); without this
+   * coupling a hacking perturbation moved no reputation leg and the
+   * multipliers that accelerate the route's dominant channel were priced as
+   * if they touched only the skill gates. */
   repRateHackingElasticity?: number;
   /** Reputation still to EARN at Daedalus (over current rep and favor) for
    * favor to cross the donation threshold at the next install. 0 when the

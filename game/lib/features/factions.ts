@@ -1258,14 +1258,11 @@ function needs(ctx: NeedContext): Need[] {
     });
   }
   // Positional needs are EXCLUSIVE — one body, one city — and a met gate
-  // needs the body to STAND STILL until its invite fires. Measured on
-  // bn15-full (2026-08-27, seed 1): four simultaneous city needs sent the
-  // run teleport-flapping several times a minute for over an hour; every
-  // arrival satisfied one city need instantly and the next city immediately
-  // demanded travel, so no invite ever landed and no job was ever taken.
-  // Post at most ONE city need — the most valuable — and none at all while
-  // any unjoined gate stands fully met, because that invite is exactly what
-  // standing still buys.
+  // needs the body to STAND STILL until its invite fires. Several city needs
+  // at once sent a run teleport-flapping (every arrival satisfied one need
+  // and the next city instantly demanded travel; no invite ever landed).
+  // Post at most ONE city need, and none while any unjoined gate stands
+  // fully met — that invite is exactly what standing still buys.
   const inviteImminent = Object.values(gates).some(
     (gate) => !gate.joined && !gate.invited && gate.missing.length === 0,
   );

@@ -134,12 +134,10 @@ const STAND_DOWN_POLL_MS = 250;
  * a real timer. `deriveQueued` clears before the pass runs, so a
  * write-through INSIDE a pass legitimately queues the next — but a pass that
  * always produces a fact then chains forever on bare microtasks with no
- * timer anywhere. Under the simulator's virtual clock that freezes time
- * itself (measured: 200,000+ chained passes at one instant, the GC starved
- * with the clock, 66 GB RSS, seed killed by the OS); in the live game the
- * same loop is a silent CPU spin. Thirty-two mirrors the controller sleep's
- * wake-race bound — the proven cutoff for this storm class — and a fact
- * filed during the rest still derives, one rest later. */
+ * timer anywhere: a silent CPU spin live, a frozen virtual clock (and with
+ * it the forced GC) in the simulator. Thirty-two mirrors the controller
+ * sleep's wake-race bound; a fact filed during the rest derives one rest
+ * later. */
 const DERIVE_CHAIN_BOUND = 32;
 const DERIVE_CHAIN_REST_MS = 200;
 /** How long a QUIET net may go without a planning pass.

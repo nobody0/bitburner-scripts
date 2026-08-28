@@ -1886,7 +1886,12 @@ Every phase but the regrow is REPUTATION-bound: the intent stream shows
   difference of that same formula and the marginal scales the Daedalus
   rep rates by it under hacking perturbations, so the multipliers that
   accelerate the route's dominant channel are finally priced at what
-  they buy.
+  they buy. A/B on seed 3 at 12 h: 40 augs / 6 installs / hacking 1263 /
+  route ETA 6.7 h remaining, vs 31 / 5 / 1062 without it. The trade is
+  surplus income ($1.5e12 vs $51e12 banked — both far past every money
+  gate), which shows up as a 19-113% cost on the MONEY-goal bn1-speedrun
+  fixture; the ledger note there says not to read that as a route
+  regression.
 
 ## Known gaps in the current implementation
 

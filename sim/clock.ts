@@ -52,8 +52,6 @@ export function drainMicrotasks(): Promise<void> {
  * code because its engine ticks in wall time regardless. A legitimate burst
  * (a 200 ms wake pump over a 24k-worker fleet, a prestige kill sweep) is tens
  * of thousands of same-instant events; a million is nothing but a loop.
- * Measured: darknet-enabled runs froze at one virtual instant for 30+ wall
- * minutes at 100% CPU and 20-66 GB RSS with no diagnostic at all.
  * `SIM_STALL_BOUND` overrides it for stall diagnosis, where a tighter bound
  * names the loop within seconds instead of after a million planner passes. */
 export const SAME_INSTANT_EVENT_BOUND = (() => {

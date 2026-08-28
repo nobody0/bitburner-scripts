@@ -48,23 +48,25 @@
       "history": [
         "Before 2026-08-20: zero installs, zero augmentations, route ETA 1,137.7h at four hours. Three chained defects -- an early count tranche demanding a quarter of the whole gate, an unanchored power-law extrapolation, and faction work never announcing the augmentations it produces. See spec/progress.md, BN1 route ledger seventh pass.",
         "2026-08-27 (model 10, rev 5d2fd3ff, definitive 3-seed run): 3/3 valid, none reached in 24h. First/second installs 0.45h/1.20h (seed 3), 16 unique augmentations by 5.6h (seed 2), route ETA 30.9h at 4h (seed 2). Seeds at horizon: s1 53 augs/15 installs but $0.8b (install thrash on the invite money gate), s2 36 augs/hacking 683, s3 51 augs/hacking 2374/$132e12 with 3.3h remaining.",
-        "2026-08-28 (model 10, rev 45fc4fda: charisma pass + install veto + city serialization + upstream armour fixes): seed 3 installed the Red Pill at 21.4h (56 augs, 8 installs before the pill) and entered the final regrow, ~2.5h priced at the horizon. Seed 2: 54 augs/9 installs/hacking 2285, still at the invite money gate. Seed 1 lost to the zero-delay clock stall at vt 14.5h while on a ~18.6h completion trajectory."
+        "2026-08-28 (model 10, rev 45fc4fda: charisma pass + install veto + city serialization + upstream armour fixes): seed 3 installed the Red Pill at 21.4h (56 augs, 8 installs before the pill) and entered the final regrow, ~2.5h priced at the horizon. Seed 2: 54 augs/9 installs/hacking 2285, still at the invite money gate. Seed 1 lost to the zero-delay clock stall at vt 14.5h while on a ~18.6h completion trajectory.",
+        "2026-08-28 (model 10, rev 6b26f0b9, rep-elasticity 12h A/B on seed 3): 40 augs / 6 installs / hacking 1263 / route ETA 6.7h remaining at 12h, vs 31 / 5 / 1062 without the coupling — reputation is what every pre-regrow phase is bound by, and hacking finally prices the reputation it earns."
       ]
     },
     "bn1-speedrun": {
       "goal": "earn:1e9",
       "horizonHours": 8,
-      "seed1Hours": 1.34,
-      "seed3Hours": 2.54,
+      "seed1Hours": 1.29,
+      "seed3Hours": 1.87,
       "what": "The cheap regression guard: $1b on the small deterministic early-game fixture.",
       "note": "All three seeds now reach. The archived 2.43-2.46h generation predates the coding-contract runtime and the upstream batcher invariants; under model-10 semantics the honest-ETA strategy layer beats the previously recorded 6.23h/5.01h/DNF on every seed. The remaining spread (1.66h-3.61h) is decision-timing sensitivity worth studying.",
       "history": [
         "2026-08-20: seed 1 7.44h without the cold-start install fixes, 6.23h with them.",
         "2026-08-20 (model 5): seed 1 6.23h, seed 3 5.01h, seed 2 not reached. 2026-08-27 (model 10, after the route/arbiter pass): all three seeds reach \u2014 3.61h / 1.66h / 2.54h.",
         "2026-08-27 (model 10, after the upstream dnet/batcher merge and the charisma pass): 80.7m / 2.36h / 2.68h \u2014 seed 1 a new best. Seed 2's recorded 1.66h predates the merge: at rev 5d2fd3ff (pre-charisma) seed 2 HANGS at vt 2.075h (frozen clock, dnet-implicated \u2014 see spec/progress.md), so 2.36h at HEAD is the best CURRENT-generation observation, kept out of the headline per the improving-direction rule.",
-        "2026-08-28 (model 10, rev 48c6b55c, post-revert + upstream armour fixes): 80.6m / DNF / 2.68h. Seed 1's 80.6-80.7m repeats across three guard generations and takes the headline. Seed 2's DNF is the zero-delay clock stall (now a diagnosable crash via the clock tripwire), not a strategy result."
+        "2026-08-28 (model 10, rev 48c6b55c, post-revert + upstream armour fixes): 80.6m / DNF / 2.68h. Seed 1's 80.6-80.7m repeats across three guard generations and takes the headline. Seed 2's DNF is the zero-delay clock stall (now a diagnosable crash via the clock tripwire), not a strategy result.",
+        "2026-08-28 (model 10, rev 6b26f0b9~1, derive-chain bound landed): 77.3m / 1.58h / 1.87h — every seed a new best. WITH the rep-elasticity coupling (6b26f0b9): 1.65h / 1.76h / 3.98h — this fixture's goal is MONEY, and the coupling deliberately trades surplus income for route reputation; the bn1-full route metric improved 31 -> 40 augs at 12h on the same change. The headline keeps the money-goal bests; do not read the coupling's cost here as a route regression."
       ],
-      "seed2Hours": 1.66
+      "seed2Hours": 1.58
     }
   }
 }
