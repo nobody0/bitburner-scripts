@@ -194,9 +194,6 @@ function rig(): Rig {
     mutationEpoch: 0,
     noteMutation: () => 0,
     wake: (cause) => void wakes.push(cause),
-    // The real controller settles this at the end of the derive its caller's
-    // report triggers; the stub has no derive, so it settles at once.
-    derived: () => Promise.resolve(),
     announceLaunch: () => {},
     announceProbeRefresh: () => {},
     lend: () => {},

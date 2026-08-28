@@ -85,7 +85,20 @@ function standProber(
   pid = 900,
   cold = false,
   exec?: (...args: unknown[]) => number,
+  armoured = false,
 ): NS {
+  if (!handle.hosts.has(host)) {
+    const seen = net.get(host);
+    handle.hosts.set(host, {
+      hostname: host,
+      identity: `ip-${host}`,
+      lastSeenAt: Date.now(),
+      seenAt: {},
+      dirty: {},
+      staged: [],
+      ...(seen ? { maxRam: seen.maxRam, blockedRam: seen.blockedRam, depth: seen.depth, neighbours: [...seen.neighbours] } : {}),
+    });
+  }
   if (!cold) {
     const entry = handle.hosts.get(host);
     if (entry !== undefined) {
@@ -96,7 +109,7 @@ function standProber(
     }
   }
   const borrowed = mockNs(undefined, host, exec);
-  handle.lend(host, borrowed, pid);
+  handle.lend(host, borrowed, pid, undefined, armoured);
   return borrowed;
 }
 
@@ -109,20 +122,27 @@ function standProber(
  * of every prober paying for them for ever. With no resident the controller
  * describes nothing — the real cold-start state, and why this is the other
  * thing every case does first. */
-function standHands(): NS {
+function standHands(leasedCall?: (path: string, ...args: unknown[]) => Promise<unknown>): NS {
   const borrowed = mockNs();
+  const call = ((path: string, ...args: unknown[]) => {
+    const fn = path.split(".").reduce<unknown>(
+      (held, key) => (held as Record<string, unknown> | undefined)?.[key],
+      borrowed as unknown,
+    );
+    if (typeof fn !== "function") throw new Error(`mock ns has no ${path}`);
+    return Promise.resolve((fn as (...a: unknown[]) => unknown)(...args));
+  }) as ((path: string, ...args: unknown[]) => Promise<unknown>) & {
+    guaranteeFit(
+      paths: readonly string[],
+      use: (resident: (path: string, ...args: unknown[]) => Promise<unknown>) => unknown,
+    ): Promise<unknown>;
+  };
+  call.guaranteeFit = (_paths, use) => Promise.resolve(use(leasedCall ?? call));
   (globalThis as Record<string, unknown>)["ns_proxy"] = {
     // `nsp("a.b", ...args)` resolves the dotted path against a real `ns` and
     // calls it. The stub does exactly that against the mock, so a test drives
     // the same code path the resident does.
-    call: (path: string, ...args: unknown[]) => {
-      const fn = path.split(".").reduce<unknown>(
-        (held, key) => (held as Record<string, unknown> | undefined)?.[key],
-        borrowed as unknown,
-      );
-      if (typeof fn !== "function") throw new Error(`mock ns has no ${path}`);
-      return Promise.resolve((fn as (...a: unknown[]) => unknown)(...args));
-    },
+    call,
   };
   return borrowed;
 }
@@ -130,6 +150,7 @@ function standHands(): NS {
 /** Start the real controller and stop at its first `await`. */
 async function bootController(recovery?: DnetRecoveryState): Promise<ControllerHandle> {
   const { main } = await import("../game/dnet/controller.ts");
+  let bootError: unknown;
   // Exactly the real handoff: the controller captures its descriptor inside
   // the launcher's own turn, which is what acknowledges the launch.
   await handoffLaunch(
@@ -141,10 +162,11 @@ async function bootController(recovery?: DnetRecoveryState): Promise<ControllerH
       charisma: 1_000,
       ...(recovery ? { recovery } : {}),
     },
-    (launchId) => { void main(mockNs(launchId)).catch(() => {}); return 1; },
+    (launchId) => { void main(mockNs(launchId)).catch((error) => { bootError = error; }); return 1; },
   );
+  await Promise.resolve();
   const handle = dnetRealm().dnet_controller;
-  expect(handle, "the controller never published its rendezvous").toBeDefined();
+  expect(handle, `the controller never published its rendezvous: ${String(bootError)}`).toBeDefined();
   return handle!;
 }
 
@@ -157,15 +179,7 @@ const settleMicrotasks = async (): Promise<void> => {
   for (let turn = 0; turn < 500; turn++) await Promise.resolve();
 };
 
-/** A host as production actually has it: a live PROBER lending its `ns`, and
- * no agent until the controller execs one for a specific order.
- *
- * This used to adopt a fake handle carrying an `idle` order, "exactly as an
- * agent registers one". No agent has registered that way since the resident
- * was absorbed into the prober — an agent boots with one order and exits — so
- * the fixture was standing up a state the code can no longer produce, and it
- * was the only reason these cases passed while a real prober-only host was
- * being refused every task. */
+/** A live prober lending its `ns`; no agent exists until an order launches. */
 function standHost(handle: ControllerHandle, host: string, pid = 900): HostEntry {
   standProber(handle, host, pid);
   return handle.hosts.get(host)!;
@@ -251,6 +265,8 @@ describe("a fact derives in its own turn", () => {
     standHands();
     standProber(first, VANTAGE);
     standHost(first, VANTAGE, 11);
+    first.reportProbe(VANTAGE, [TARGET], Date.now(), 11);
+    await settleMicrotasks();
     adoptAgent(first, VANTAGE, 12, {
       id: "induce:target",
       kind: "induce",
@@ -308,6 +324,7 @@ describe("a fact derives in its own turn", () => {
     standProber(handle, VANTAGE);
     const vantage = standHost(handle, VANTAGE, 11);
     handle.reportProbe(VANTAGE, [TARGET], Date.now(), 11);
+    await settleMicrotasks();
 
     handle.deps.recordCredential({ hostname: TARGET, password: "1234", at: Date.now() });
     await settleMicrotasks();
@@ -333,6 +350,7 @@ describe("a fact derives in its own turn", () => {
       charisma: 1_000,
       stasisSnapshot: { hosts: [REMOTE], at },
     });
+    await settleMicrotasks();
     handle.deps.recordCredential({ hostname: REMOTE, password: "1234", at });
     await settleMicrotasks();
 
@@ -351,6 +369,7 @@ describe("a fact derives in its own turn", () => {
     const frontier = ["a.corp", "b.corp", "c.corp", "d.corp"];
     for (const host of frontier) net.set(host, { maxRam: 32, blockedRam: 0, depth: 1, neighbours: [VANTAGE] });
     handle.reportProbe(VANTAGE, frontier, Date.now(), 11);
+    await settleMicrotasks();
     for (const host of frontier) {
       handle.deps.recordCredential({ hostname: host, password: "1234", at: Date.now() });
     }
@@ -528,6 +547,95 @@ describe("armour is resized at the order boundary", () => {
     const probers = launches.filter((args) => args[0] === "dnet/prober.js");
     expect(probers, "a calm net re-exec'd a prober").toEqual([]);
     expect(handle.hosts.get(VANTAGE)?.prober?.armoured).toBeUndefined();
+  });
+
+  test("an order sized before armour is fitted against the prober now standing", async () => {
+    const handle = await bootController();
+    standHands();
+    net.get(TARGET)!.maxRam = 16;
+    const target: HostEntry = {
+      hostname: TARGET,
+      lastSeenAt: Date.now(),
+      seenAt: { files: Date.now() },
+      dirty: {},
+      staged: [],
+      caches: [],
+      contracts: [],
+    };
+    handle.hosts.set(TARGET, target);
+    const launches: unknown[][] = [];
+    standProber(handle, TARGET, 900, false, (...args) => {
+      launches.push(args);
+      return 1_000 + launches.length;
+    }, true);
+
+    // This was sized while a 3.15 GB prober stood here: six 2 GB threads fit.
+    // By its final launch boundary the replacement is the 5.15 GB armoured
+    // prober, so only five threads still fit.
+    const order: Order<"attempt"> = {
+      id: "attempt:armour-fit",
+      kind: "attempt",
+      host: TARGET,
+      from: TARGET,
+      ramOverrideGb: 2,
+      threads: 6,
+      priority: 30,
+      longLived: false,
+      label: "fit after armour",
+      payload: {},
+    };
+    target.staged = [order];
+    handle.configure({
+      charisma: 1_000,
+      labExpected: false,
+      backdoors: [{ hostname: TARGET, installedAt: Date.now() }],
+    });
+    await settleMicrotasks();
+
+    const agent = launches.find((args) => args[0] === "dnet/agent.js");
+    expect(agent?.[2]).toMatchObject({ threads: 5, ramOverride: 2 });
+    expect(handle.hosts.get(TARGET)?.pendingOrder?.threads).toBe(5);
+  });
+
+  test("a stasis host launches its neighbour plant through one retried proxy lease", async () => {
+    const handle = await bootController();
+    const leaseCalls: string[][] = [];
+    let leaseAttempt = 0;
+    standHands(async (path, ..._args) => {
+      if (path === "dnet.connectToSession") {
+        leaseAttempt++;
+        leaseCalls.push([]);
+      }
+      const calls = leaseCalls[leaseAttempt - 1] ??= [];
+      calls.push(path);
+      if (path === "dnet.connectToSession") return { success: true, code: 200, message: "connected" };
+      if (path === "exec") return leaseAttempt === 1 ? 0 : 700;
+      throw new Error(`unexpected leased call ${path}`);
+    });
+
+    net.set(REMOTE, { maxRam: 16, blockedRam: 0, depth: 1, neighbours: [VANTAGE] });
+    net.get(VANTAGE)!.neighbours = [REMOTE];
+    standProber(handle, VANTAGE, 900);
+    handle.reportProbe(VANTAGE, [REMOTE], Date.now(), 900);
+    await settleMicrotasks();
+    handle.deps.recordCredential({ hostname: VANTAGE, password: "", at: Date.now() });
+    handle.deps.recordCredential({ hostname: REMOTE, password: "5678", at: Date.now() });
+    handle.configure({
+      charisma: 1_000,
+      labExpected: false,
+      stasisSnapshot: { hosts: [VANTAGE], at: Date.now() },
+    });
+    await settleMicrotasks();
+
+    expect(leaseAttempt).toBe(2);
+    expect(leaseCalls).toEqual([
+      ["dnet.connectToSession", "exec"],
+      ["dnet.connectToSession", "exec"],
+    ]);
+    const pending = handle.hosts.get(VANTAGE)?.pendingOrder;
+    expect(pending).toMatchObject({ kind: "plant", from: VANTAGE });
+    expect(pending?.kind === "plant" ? pending.payload.targets.map((target) => target.host) : []).toContain(REMOTE);
+    expect(handle.hosts.get(VANTAGE)?.inbound?.pid).toBe(700);
   });
 
   test("a mark is consumed, so it cannot suppress a later genuine restart", async () => {

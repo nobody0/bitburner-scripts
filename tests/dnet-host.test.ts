@@ -3,13 +3,13 @@ import type { ReportHost, AttemptOutcome } from "../shared/strategy/dnet/courier
 import {
   compareDepthDesc,
   coverage,
+  discoverReports,
   emptyHost,
   expiryMs,
   fieldGroup,
   foldAttempts,
   foldLogDrain,
   foldReports,
-  forgetMs,
   usableRam,
   fresh,
   groupFresh,
@@ -26,7 +26,13 @@ import { mutationIntervalMs, msPerHostEvent } from "../shared/strategy/dnet/rate
 /** One host as a job saw it. `at` is the observation time, which is the whole
  *  reason the fold can order two residents that ran seconds apart. */
 function report(hostname: string, at: number, facts: Record<string, unknown> = {}): ReportHost {
-  return { hostname, at, present: true, ...facts } as ReportHost;
+  return {
+    hostname,
+    at,
+    present: true,
+    ...(hostname === "darkweb" ? {} : { identity: `${hostname}:identity` }),
+    ...facts,
+  } as ReportHost;
 }
 
 function absent(hostname: string, at: number): ReportHost {
@@ -36,7 +42,7 @@ function absent(hostname: string, at: number): ReportHost {
 function mapOf(...reports: ReportHost[]): DnetHosts {
   const hosts: DnetHosts = new Map();
   const now = Math.max(0, ...reports.map((r) => r.at));
-  foldReports(hosts, reports, now);
+  discoverReports(hosts, reports, now);
   return hosts;
 }
 
@@ -66,7 +72,7 @@ describe("darknet mutation rates, transcribed", () => {
 describe("every group carries an observation time", () => {
   test("the fold stamps the time the JOB looked, not the time home drained", () => {
     const hosts: DnetHosts = new Map();
-    foldReports(hosts, [report("dn-1", 1_000, { depth: 2, modelId: "TopPass" })], 2_000);
+    discoverReports(hosts, [report("dn-1", 1_000, { depth: 2, modelId: "TopPass" })], 2_000);
     const host = hosts.get("dn-1")!;
     expect(host.depth).toBe(2);
     expect(host.seenAt.position).toBe(1_000);
@@ -120,7 +126,7 @@ describe("every group carries an observation time", () => {
     const hosts: DnetHosts = new Map();
     const newer = report("dn-1", 5_000, { depth: 9 });
     const older = report("dn-1", 1_000, { depth: 1 });
-    const { superseded } = foldReports(hosts, [newer, older], 6_000);
+    const { superseded } = discoverReports(hosts, [newer, older], 6_000);
     expect(hosts.get("dn-1")!.depth).toBe(9);
     expect(hosts.get("dn-1")!.seenAt.position).toBe(5_000);
     expect(superseded).toBeGreaterThan(0);
@@ -200,13 +206,13 @@ describe("every group carries an observation time", () => {
   test("an absence older than the newest sighting cannot delete the live host", () => {
     const hosts = mapOf(report("dn-1", 2_000, { identity: "10.0.0.2", depth: 2 }));
     foldReports(hosts, [absent("dn-1", 1_000)], 3_000);
-    expect(hosts.get("dn-1")!.goneAt).toBeUndefined();
+    expect(hosts.get("dn-1")).toBeDefined();
     expect(hosts.get("dn-1")!.identity).toBe("10.0.0.2");
   });
 
   test("a future timestamp is clamped rather than trusted", () => {
     const hosts: DnetHosts = new Map();
-    foldReports(hosts, [report("dn-1", 999_999, { depth: 1 })], 1_000);
+    discoverReports(hosts, [report("dn-1", 999_999, { depth: 1 })], 1_000);
     // Otherwise a clock we do not control could make a fact immortal.
     expect(hosts.get("dn-1")!.seenAt.position).toBe(1_000);
   });
@@ -246,47 +252,40 @@ describe("host immunity freezes its lifetime, not its neighbours", () => {
     expect(fresh<string[]>(host, "neighbours", later)).toBeUndefined();
   });
 
-  test("an immune host is never forgotten, because it is never deleted", () => {
-    const hosts = mapOf(
-      report("darkweb", 0, { isStationary: true }),
-      report("dn-1", 0, { depth: 1 }),
-    );
-    const later = forgetMs() + 1;
-    const { hostsForgotten } = foldReports(hosts, [], later);
-    expect(hostsForgotten).toEqual(["dn-1"]);
-    expect(hosts.get("darkweb")).toBeDefined();
-  });
 });
 
-describe("a host that goes away is forgotten, not remembered for ever", () => {
-  test("absence wipes identity, because a returning host is a new host", () => {
+describe("authoritative absence removes a host", () => {
+  test("routine reports update existing entries but never create them", () => {
     const hosts: DnetHosts = new Map();
-    foldReports(hosts, [
+    foldReports(hosts, [report("dn-1", 1_000, { depth: 3 })], 1_000);
+    expect(hosts.has("dn-1")).toBe(false);
+
+    discoverReports(hosts, [report("dn-1", 2_000, { depth: 3 })], 2_000);
+    foldReports(hosts, [report("dn-1", 3_000, { depth: 4 })], 3_000);
+    expect(hosts.get("dn-1")?.depth).toBe(4);
+  });
+
+  test("absence deletes the whole lifetime immediately", () => {
+    const hosts: DnetHosts = new Map();
+    const outcome = discoverReports(hosts, [
       report("dn-1", 1_000, { modelId: "TopPass", depth: 3 }),
       absent("dn-1", 2_000),
     ], 2_000);
-    const host = hosts.get("dn-1")!;
-    expect(host.goneAt).toBe(2_000);
-    // Upstream, a server that reappears is cleaned and given a NEW password, so
-    // keeping the old identity would be worse than knowing nothing.
-    expect(host.modelId).toBeUndefined();
-    expect(host.depth).toBeUndefined();
-    expect(fresh<string>(host, "modelId", 2_000)).toBeUndefined();
+    expect(outcome.hostsRemoved).toEqual(["dn-1"]);
+    expect(hosts.has("dn-1")).toBe(false);
   });
 
-  test("seeing it again overrides the note that it was gone", () => {
+  test("a newer discovery after absence creates a new lifetime", () => {
     const hosts: DnetHosts = new Map();
-    foldReports(hosts, [absent("dn-1", 1_000), report("dn-1", 2_000, { depth: 4 })], 2_000);
-    expect(hosts.get("dn-1")!.goneAt).toBeUndefined();
+    discoverReports(hosts, [absent("dn-1", 1_000), report("dn-1", 2_000, { depth: 4 })], 2_000);
     expect(fresh<number>(hosts.get("dn-1"), "depth", 2_000)).toBe(4);
   });
 
-  test("a host unseen past the forget window is dropped from the map", () => {
-    const hosts = mapOf(report("dn-1", 0, { depth: 1 }));
-    const later = forgetMs() + 1;
-    const { hostsForgotten } = foldReports(hosts, [], later);
-    expect(hostsForgotten).toEqual(["dn-1"]);
-    expect(hosts.get("dn-1")).toBeUndefined();
+  test("a delayed report cannot recreate a deleted lifetime", () => {
+    const hosts = mapOf(report("dn-1", 1_000, { depth: 3 }));
+    foldReports(hosts, [absent("dn-1", 2_000)], 2_000);
+    foldReports(hosts, [report("dn-1", 1_500, { depth: 9 })], 3_000);
+    expect(hosts.has("dn-1")).toBe(false);
   });
 
   test("coverage separates what we hold from what we still believe", () => {
@@ -371,8 +370,7 @@ describe("the fields the spreading agents added", () => {
     hosts.get("dn-1")!.credentialKnown = true;
 
     foldReports(hosts, [absent("dn-1", 2_000)], 2_000);
-    expect(hosts.get("dn-1")!.attempts).toBeUndefined();
-    expect(hosts.get("dn-1")!.credentialKnown).toBeUndefined();
+    expect(hosts.has("dn-1")).toBe(false);
   });
 
   test("usableRam retains durable capacity without runtime occupancy", () => {
@@ -449,23 +447,6 @@ describe("home and the controller count an attempt the same way", () => {
     // A missing host is a host that disappeared between the job and the drain:
     // nothing to count against.
     expect(() => foldAttempts(undefined, [outcome()])).not.toThrow();
-  });
-
-  test("a gone host's ledger stays dropped", () => {
-    // The fold discards cracking progress when a host disappears, because a
-    // returning host is a new host with a new password. An attempt outcome that
-    // lands in the same drain as the gone report — the job saw the host die —
-    // must not resurrect counts that belong to the dead identity.
-    const gone: DnetHost = { ...emptyHost("dn-2", 0), goneAt: 5_000 };
-    foldAttempts(gone, [{
-      at: 6_000,
-      modelId: "TopPass",
-      status: "implemented",
-      code: 401,
-      success: false,
-      candidateIndex: 0,
-    }]);
-    expect(gone.attempts).toBeUndefined();
   });
 
   test("verifying a credential prunes cracking history but preserves ring scheduling", () => {

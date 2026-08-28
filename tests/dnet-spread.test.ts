@@ -1,11 +1,25 @@
 import { describe, expect, test } from "bun:test";
 import { classifyPlantRoute, DEFAULT_SPREAD_LIMITS, allocateCredentialChecks, candidatesFrom, deriveTasks, planSpread, type RefusalReason, type SpreadCandidate } from "../shared/strategy/dnet/plan.ts";
 import { choosePreemptionVantage } from "../shared/strategy/dnet/priority.ts";
-import { foldReports, type DnetHosts } from "../shared/strategy/dnet/host.ts";
+import { discoverReports, foldReports, type DnetHosts } from "../shared/strategy/dnet/host.ts";
 import type { ReportHost } from "../shared/strategy/dnet/courier.ts";
 import { msPerHostEvent } from "../shared/strategy/dnet/rates.ts";
+import { fitOrderThreads } from "../shared/strategy/dnet/jobs.ts";
 
 const NOW = 10_000_000;
+
+describe("orders are fitted at their final launch boundary", () => {
+  test("thread-scaled work shrinks to the room left by current infrastructure", () => {
+    expect(fitOrderThreads("attempt", 6, 2, 10.85)).toBe(5);
+    expect(fitOrderThreads("phish", 20, 3.7, 11.1)).toBe(3);
+  });
+
+  test("atomic work launches whole or is refused", () => {
+    expect(fitOrderThreads("plant", 1, 4.2, 4.2)).toBe(1);
+    expect(fitOrderThreads("plant", 1, 4.2, 4.19)).toBe(0);
+    expect(fitOrderThreads("inventory", 1, 2.55, Number.NaN)).toBe(0);
+  });
+});
 
 function candidate(over: Partial<SpreadCandidate> & { host: string }): SpreadCandidate {
   return { from: "darkweb", hasCredential: true, agentAlive: false, usableRam: 16, depth: 0, ...over };
@@ -20,13 +34,14 @@ function reports(hosts: Seen[], at = NOW): ReportHost[] {
     hostname: host.hostname,
     at,
     present: host.present,
+    ...(host.present && host.hostname !== "darkweb" ? { identity: `${host.hostname}:identity` } : {}),
     ...(host.present ? host.facts : {}),
   } as ReportHost));
 }
 
 function fold(hosts: Seen[], at = NOW): DnetHosts {
   const knowledge: DnetHosts = new Map();
-  foldReports(knowledge, reports(hosts, at), at);
+  discoverReports(knowledge, reports(hosts, at), at);
   return knowledge;
 }
 
@@ -36,7 +51,6 @@ describe("every refusal to spread is named", () => {
    * to "why" — so each is asserted individually rather than as "not planted". */
 
   test.each([
-    ["gone", { host: "dead", goneAt: NOW - 1, usableRam: 0, hasCredential: false }, []],
     ["no-credential", { host: "locked", hasCredential: false }, ["attempt, not a plant"]],
     ["unknown-ram", { host: "unknown", usableRam: undefined }, []],
     ["not-enough-ram", { host: "blocked", usableRam: 1 }, ["1.00GB usable", "memoryReallocation"]],
@@ -63,7 +77,7 @@ describe("every refusal to spread is named", () => {
   });
 
   test("a stasis-managed target is priced at managed resident + prober, not the full agent", () => {
-    // 3.5GB fits the managed resident (1.6) beside the STASIS prober (1.85),
+    // 3.5GB fits the managed resident (1.6) beside the STASIS prober (1.8),
     // but not a full agent. The managed branch must price the prober the linked
     // host actually runs — the one without `exec` — because that is the size
     // `plantOne` execs it at. Pricing it at the full 3.15 put the bar at 4.75
@@ -130,7 +144,6 @@ describe("every refusal to spread is named", () => {
     // what is NOT here — there is no refusal for having been planted before.
     const named = new Set<string>();
     for (const plan of [
-      planSpread([candidate({ host: "a", goneAt: NOW - 1 })], DEFAULT_SPREAD_LIMITS),
       planSpread([candidate({ host: "b", agentAlive: true })], DEFAULT_SPREAD_LIMITS),
       planSpread([candidate({ host: "c", hasCredential: false })], DEFAULT_SPREAD_LIMITS),
       planSpread([candidate({ host: "d", usableRam: undefined })], DEFAULT_SPREAD_LIMITS),
@@ -140,7 +153,6 @@ describe("every refusal to spread is named", () => {
     }
     expect([...named].sort()).toEqual([
       "agent-alive",
-      "gone",
       "no-credential",
       "not-enough-ram",
       "unknown-ram",
@@ -893,11 +905,11 @@ describe("a plant task is a FRONTIER, and `host` is only its name", () => {
   const at = 1_000_000;
   const seen: ReportHost[] = [
     { hostname: "darkweb", at, present: true, depth: -1, maxRam: 64, blockedRam: 0, neighbours: ["a.corp", "b.corp", "c.corp"] },
-    { hostname: "a.corp", at, present: true, depth: 0, maxRam: 32, blockedRam: 0 },
-    { hostname: "b.corp", at, present: true, depth: 1, maxRam: 32, blockedRam: 0 },
-    { hostname: "c.corp", at, present: true, depth: 2, maxRam: 32, blockedRam: 0 },
+    { hostname: "a.corp", identity: "a", at, present: true, depth: 0, maxRam: 32, blockedRam: 0 },
+    { hostname: "b.corp", identity: "b", at, present: true, depth: 1, maxRam: 32, blockedRam: 0 },
+    { hostname: "c.corp", identity: "c", at, present: true, depth: 2, maxRam: 32, blockedRam: 0 },
   ];
-  foldReports(knowledge, seen, at, {});
+  discoverReports(knowledge, seen, at, {});
 
   const plantable = candidatesFrom(knowledge, at, {
     standing: new Set(["darkweb"]),

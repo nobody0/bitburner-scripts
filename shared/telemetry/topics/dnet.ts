@@ -47,9 +47,6 @@ export interface DarknetAgentDigest {
 export interface DarknetKnownHost {
   hostname: string;
   lastSeenAt: number;
-  /** Set when an observation found it gone. Its identity facts are dropped with
-   *  it, because a host that returns is a new host with a new password. */
-  goneAt?: number;
   /** OMITTED when unknown. `-1` is darkweb's real depth, so it cannot double as
    *  "no idea" without putting the root of the net in the unplaced row. */
   depth?: number;
@@ -123,7 +120,7 @@ export interface DarknetKnownHost {
   credentialKnown?: boolean;
   /** Decided once, controller-side, so the map and the table can never disagree
    *  about a host's status. */
-  authState?: "session" | "authenticated" | "auth-required" | "no-connection" | "offline";
+  authState?: "session" | "authenticated" | "auth-required" | "no-connection";
 }
 
 export interface DarknetKnowledgeDigest {
@@ -132,7 +129,6 @@ export interface DarknetKnowledgeDigest {
   hosts: DarknetKnownHost[];
   truncated?: boolean;
   totalHosts?: number;
-  gone: number;
   mutationsSeen?: number;
   /** Model ids the game produced and our transcription does not know. A
    *  non-empty value here is a game update or a hole in `models.ts`, and both
@@ -239,7 +235,7 @@ export interface DarknetState {
    *  tick before the direct probe landed; they stay optional for that reason,
    *  and the driver has always read its own copy that way (`remaining.ts`,
    *  `stasisLinked ?? []`). Everything darkweb-specific home used to read here
-   *  is gone: the resident on darkweb probes it on the mutation clock and
+   *  is gone: darkweb's prober observes it on the mutation clock and
    *  includes the result in its snapshot, so the darknet has exactly one prober. */
   stasisLinkLimit?: number;
   stasisLinked?: string[];
@@ -379,7 +375,6 @@ export interface DarknetState {
     known: number;
     adjacencyKnown: number;
     freshFraction: number;
-    gone: number;
     /** Hosts we hold a credential for. */
     cracked?: number;
     /** ...of which have believable room for an agent. The gap between the two

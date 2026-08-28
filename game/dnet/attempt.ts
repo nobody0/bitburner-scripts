@@ -93,7 +93,7 @@ export async function runAttempt(ns: NS, order: Order<"attempt">, io: AgentIo): 
   // charged 0.1 GB on EVERY THREAD of this job to re-learn it. On the one kind
   // whose whole speed is its thread count, that came directly out of the crack.
   const details = knownHost(state.host);
-  if (details === undefined || details.goneAt !== undefined) {
+  if (details === undefined) {
     return { ok: false, targetState: 'gone', hosts: [{ hostname: state.host, at: Date.now(), present: false }], codes: { "503": 1 } };
   }
   const entry = modelEntry(details.modelId);
@@ -216,9 +216,8 @@ export async function runAttempt(ns: NS, order: Order<"attempt">, io: AgentIo): 
     if (answer.success) {
       // Migration outranks harvesting a ring whose credential is already won.
       // Write through BEFORE the next await: the controller's derive rides a
-      // microtask, and this success path takes none, so the plant is staged on
-      // this vantage before the exit chain below reaches `stageSuccessor` and
-      // spawns into it. The `.d` hint file waiting on the opened host names a
+      // microtask, and this success path takes none, so the plant is staged in
+      // the same engine turn as the successful attempt. The `.d` hint file names a
       // neighbour as of THIS instant and stops being readable as one the moment
       // a mutation lands, so a tick of slack here is a lost credential.
       deps.recordCredential({

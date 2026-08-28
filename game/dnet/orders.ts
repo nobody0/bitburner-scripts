@@ -10,6 +10,7 @@ import {
   priceOf,
   PROBER_GB,
   PROBER_STASIS_GB,
+  SCRIPT_BASE_GB,
   processSizeFor,
   type AgentIo,
   type ControllerDeps,
@@ -357,16 +358,12 @@ async function plantOne(
   }
   // The probe has landed, so the controller has already derived what this host
   // should do first — its own `ls`, and the frontier its fresh adjacency just
-  // revealed. Take that order and size the exec for it, and the new process
-  // starts ON it. Handing it back to the queue instead cost a boot, an adopt
-  // and a spawn before anything happened, which is what made the net open in
-  // visible waves rather than continuously.
+  // revealed. Take that order and size the exec for it so the new process
+  // starts on useful work immediately.
   const claimed = controller?.claimPlanted(target.host);
-  // Sized exactly as the spawn chain sizes itself. The order carries its own
-  // price, and that price already knows whether this process needs `spawn`.
   const { threads: agentThreads, ramOverride: agentRam } = processSizeFor(
     claimed,
-    priceOf("idle"),
+    SCRIPT_BASE_GB,
   );
   const pid = await execWithGrace((outcome) => handoffLaunch<DnetAgentLaunch>(
     {
@@ -389,7 +386,7 @@ async function plantOne(
     return diagnose(
       `${lastOutcome.uncaptured === true ? "resident started but never captured its descriptor" : "engine refused the resident exec"}`
       + ` (asked ${(agentRam * agentThreads).toFixed(1)}GB as ${agentThreads}x${agentRam.toFixed(1)}`
-      + ` for ${claimed?.kind ?? "idle"}, host ${blockNow()}, prober ${proberPid})`,
+      + ` for ${claimed?.kind ?? "no queued order"}, host ${blockNow()}, prober ${proberPid})`,
       "launch-refused",
     );
   }
@@ -641,8 +638,7 @@ async function relaunchProbeOrder(jobNs: NS, order: Order<"relaunchProbe">): Pro
   };
 }
 
-/** Exhaustive order dispatch. Process modes such as `idle` and
- * `bootstrapReclaim` are not task kinds. */
+/** Exhaustive task dispatch. The bootstrap reclaimer never enters this path. */
 export function runOrder(ns: NS, order: Order, io: AgentIo): Promise<OrderResult> {
   switch (order.kind) {
     case "attempt": return runAttempt(ns, order, io);

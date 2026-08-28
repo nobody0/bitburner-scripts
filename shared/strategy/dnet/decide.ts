@@ -5,7 +5,6 @@
 export interface DarknetServer {
   hostname: string;
   depth: number;
-  isOnline: boolean;
   requiredCharisma: number;
   stasisLinked: boolean;
   /** Neighbours, for the reachability search. */
@@ -40,8 +39,7 @@ export function reachableFrom(servers: readonly DarknetServer[], linked: Readonl
     const name = stack.pop()!;
     if (seen.has(name)) continue;
     const server = byName.get(name);
-    // A server that has gone offline is only traversable while held in stasis.
-    if (!server || (!server.isOnline && !linked.has(name))) continue;
+    if (!server) continue;
     seen.add(name);
     for (const neighbour of server.neighbours ?? []) stack.push(neighbour);
   }

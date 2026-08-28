@@ -51,10 +51,11 @@ through the launch rendezvous (`game/lib/launch-shared.ts`) and then parks. The
 proxy (`game/lib/ns-proxy.ts`) holds that object and calls through it, so every
 call is billed to the resident's allocation instead of to `start.js`.
 
-Nothing serializes. Every script is an ES module in one browser realm, so the
+Nothing is serialized through ports or files. Every script is an ES module in one browser realm, so the
 `ns` crosses as a live reference and a proxied call is an ordinary in-realm
 function call — results, thrown errors and pending promises all pass through
-unchanged, and `await` is native.
+unchanged, and `await` is native. Calls on one resident are still serialized by
+its promise tail, because Netscript permits only one active call per PID.
 
 Per call:
 
@@ -103,14 +104,35 @@ else. That process never returns, so it is the one long-lived `ns` in the realm
 Every resident is launched through `nsMain.exec`, and every proxied `exec`
 routes straight back to it. Two consequences:
 
-- **The bundle pays for `exec` exactly once**, and residents never pay for it
-  at all. `nsMain.exec` in `game/lib/ns-proxy.ts` is the ONE deliberately
+- **The bundle pays for ordinary proxied `exec` exactly once**, and residents
+  normally never pay for it. `nsMain.exec` in `game/lib/ns-proxy.ts` is the ONE deliberately
   dotted ns member in the whole home-side bundle.
 - **Every proxied `exec` is issued from home**, which holds the TOR edge to
   `darkweb`. The dodger needed a `pinHost` escape hatch for exactly that case
   (a stub the broker placed elsewhere would `scp` fine and then get a silent
   `0` from `exec`). That hatch is gone, because the property now holds by
   construction. `ns.scp` was always distance-free and never needed it.
+
+### Atomic resident leases for PID-bound authority
+
+Some APIs grant authority to the calling PID. BN15's
+`dnet.connectToSession(host, password)` is the important case: routing the next
+`exec` through `nsMain`, or recycling the proxy between the two calls, loses the
+session even though both calls succeeded independently.
+
+`nsp.guaranteeFit(paths, callback)` is the explicit exception to ordinary exec
+routing. It prices the declared union before the callback begins, respawns at a
+large enough allocation when necessary, and occupies the resident's serial tail
+for the entire callback. The callback receives a lease-local call surface which:
+
+- runs every declared call, including `exec`, on that exact resident PID;
+- rejects undeclared paths instead of risking a dynamic-RAM overrun; and
+- cannot be interrupted by another proxy call, recycle, or `free()`.
+
+The dnet controller declares `dnet.connectToSession + exec` as one lease when it
+starts a job on a stasis-linked host. If the engine refuses the exec, the
+controller retries the whole pair, so the retry obtains a fresh session on the
+resident that performs that retry's exec.
 
 ### Two residents
 

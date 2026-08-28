@@ -88,7 +88,6 @@ export interface HoldHost {
   irreplaceable?: boolean;
   /** Home-side equivalent of irreplaceable, derived from the drained walker. */
   protected?: boolean;
-  gone?: boolean;
 }
 
 export interface HoldView {
@@ -187,7 +186,6 @@ export function holdHostFrom(
     ...(neighbours !== undefined ? { neighbours } : {}),
     ...(fresh<boolean>(standing, "isStationary", opts.at, opts.expiry) === true ? { isStationary: true } : {}),
     ...(opts.stasisLinked ? { stasisLinked: true } : {}),
-    ...(standing.goneAt !== undefined ? { gone: true } : {}),
   };
 }
 
@@ -315,7 +313,7 @@ export function planWalk(
   inputs: Pick<HoldPlanInputs, "hosts" | "charisma" | "walkerAt" | "walkGb" | "reclaimGb">,
   refuse: (host: string, why: string, detail: string) => void,
 ): WalkPlan {
-  const lab = inputs.hosts.find((h) => isLabyrinth(h.hostname, h.modelId) && h.gone !== true);
+  const lab = inputs.hosts.find((h) => isLabyrinth(h.hostname, h.modelId));
   if (lab === undefined) return { tasks: [] };
   if (lab.hasCredential) {
     refuse(lab.hostname, "lab-walked", "we already hold this lab's password, so its maze has been finished");
@@ -504,7 +502,7 @@ export interface BackdoorPlan {
  * cache. Missing resource facts refuse rather than masquerading as empty. */
 export function planBackdoors(view: HoldView): BackdoorPlan {
   const refused: HoldRefusal[] = [];
-  const live = view.hosts.filter((host) => !host.gone);
+  const live = view.hosts;
   const allowance = BACKDOOR_RECYCLER_LIMIT;
   // Only the TAXED pool: `getBackdooredDarknetServers` excludes stasis-linked
   // hosts, so a pinned host's backdoor is free and must not eat the allowance.
@@ -715,7 +713,7 @@ function depthBands(netDepth: number, through: number): { rows: number[]; mass: 
 export function unconqueredBands(view: Pick<HoldView, "hosts" | "netDepth">): number[][] {
   return depthBands(view.netDepth, view.netDepth - 1)
     .filter((band) => !view.hosts.some((host) =>
-      host.gone !== true && host.agentAlive
+      host.agentAlive
       && host.depth !== undefined && band.rows.includes(host.depth)))
     .map((band) => band.rows)
     .sort((a, b) => b[0]! - a[0]!);
@@ -735,7 +733,7 @@ export function openSpareTargets(view: Pick<HoldView, "hosts" | "spareTargets">)
   const slack = STASIS_TARGET_SLACK;
   const open = [...(view.spareTargets ?? [])].sort((a, b) => b - a);
   for (const held of view.hosts) {
-    if (held.gone || held.stasisLinked !== true || held.irreplaceable) continue;
+    if (held.stasisLinked !== true || held.irreplaceable) continue;
     const index = open.findIndex((target) => nearTarget(held.depth, target, slack));
     if (index >= 0) open.splice(index, 1);
   }
@@ -767,7 +765,7 @@ export function openSpareTargets(view: Pick<HoldView, "hosts" | "spareTargets">)
  * evicts only a held link that serves NO target at all. */
 export function planStasis(view: HoldView): StasisPlan {
   const refused: HoldRefusal[] = [];
-  const live = view.hosts.filter((host) => !host.gone);
+  const live = view.hosts;
   const linked = live.filter((host) => host.stasisLinked);
   const open = openSpareTargets(view);
 
@@ -1022,7 +1020,7 @@ export interface InducePlan {
 export function planInduce(view: HoldView): InducePlan {
   const refused: HoldRefusal[] = [];
   const bottom = view.netDepth - 1;
-  const live = view.hosts.filter((host) => !host.gone);
+  const live = view.hosts;
 
   const labPool: HoldHost[] = [];
   const seatPool: HoldHost[] = [];

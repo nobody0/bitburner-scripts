@@ -269,8 +269,7 @@ export function deriveTasks(
   const views = new Map<string, DnetHost>();
   for (const host of hosts.values()) views.set(host.hostname, planningView(host, now, expiry));
   const netHasUncrackedMovable = [...views.values()].some((candidate) =>
-    candidate.goneAt === undefined
-    && candidate.isStationary !== true
+    candidate.isStationary !== true
     && !vault.has(candidate.hostname));
 
   /** Every attempt this pass wants, with a total ordering across targets.
@@ -298,7 +297,6 @@ export function deriveTasks(
     / Math.max(1, host.requiredCharisma ?? 1);
 
   for (const host of views.values()) {
-    if (host.goneAt !== undefined) continue;
     const vantages = vantagesFor(host, views, opts);
     if (vantages.length === 0) continue;
     const from = vantages[0]!;
@@ -738,7 +736,6 @@ export interface SpreadCandidate {
   hasCredential: boolean;
   /** A live agent is already here. */
   agentAlive: boolean;
-  goneAt?: number;
 }
 
 export interface SpreadLimits {
@@ -781,13 +778,12 @@ export const DEFAULT_SPREAD_LIMITS: SpreadLimits = {
   managedResidentRamGb: 1.6,
   // base 1.6 + exec 1.3 + dnet.probe 0.2 + dnet.connectToSession 0.05.
   proberRamGb: 3.15,
-  managedProberRamGb: 1.85,
+  managedProberRamGb: 1.8,
   bootstrapRamGb: 2.6,
 };
 
 /** Every refusal is a fact about the host in front of us. */
 export type RefusalReason =
-  | "gone"
   | "agent-alive"
   | "no-credential"
   | "not-enough-ram"
@@ -818,17 +814,9 @@ export interface SpreadPlan {
 
 /** Decide where agents go next: everywhere we can, deepest first.
  *
- * Order matters twice over, and neither is arbitrary.
- *
- * **The refusal order.** The cheapest and most certain refusals come first, so a
- * host that is simply gone is never reported as "not enough RAM" — a refusal
- * that sends someone looking at the wrong problem is worse than no refusal at
- * all.
- *
  * **The candidate order: DEEPEST first.** A deep host is the SCARCE vantage —
  * it is the only place a still-deeper host can be reached from, its adjacency
- * expires faster, and it is the one most likely to be gone by the next
- * derivation. A shallow host is reachable again in a moment from anywhere.
+ * expires faster. A shallow host is reachable again in a moment from anywhere.
  *
  * Ties go to the host with the most room — it will hold the heaviest job — then
  * by name, so the plan is deterministic. A host whose depth we cannot place
@@ -855,10 +843,6 @@ export function planSpread(
       refused.push({ host: candidate.host, why, detail });
     };
 
-    if (candidate.goneAt !== undefined) {
-      refuse("gone", "the host is offline; darknet hosts go permanently");
-      continue;
-    }
     if (candidate.agentAlive) {
       refuse("agent-alive", "an agent is already standing here");
       continue;
@@ -995,7 +979,6 @@ export function candidatesFrom(
       ...(opts.stasisLinked?.has(host.hostname) ? { stasisManaged: true } : {}),
       hasCredential: opts.vault.has(host.hostname),
       agentAlive: false,
-      ...(raw?.goneAt !== undefined ? { goneAt: raw.goneAt } : {}),
     });
   }
   return out;
@@ -1164,7 +1147,7 @@ export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormP
 
   // 2. Prefer a live, stasis-linked seed holder, then break ties by name.
   const holders = hosts
-    .filter((host) => host.goneAt === undefined && host.stormSeed === true)
+    .filter((host) => host.stormSeed === true)
     .sort((a, b) => {
       const aPinned = ctx.stasisLinked.has(a.hostname) ? 0 : 1;
       const bPinned = ctx.stasisLinked.has(b.hostname) ? 0 : 1;
@@ -1184,7 +1167,7 @@ export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormP
     return { imminent: false, refused };
   }
 
-  const incomplete = hosts.find((host) => host.goneAt === undefined && host.isStationary !== true && (
+  const incomplete = hosts.find((host) => host.isStationary !== true && (
     !ctx.vault.has(host.hostname)
     || host.blockedRam === undefined
     // A block the farm refused ON BUDGET does not hold the fire: it was never

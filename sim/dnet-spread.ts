@@ -8,7 +8,7 @@ import { getFunctionRamCost } from "./ns/ram-costs.ts";
 import { SimWorld } from "./world.ts";
 import { expForSkill, skillFromExp } from "../shared/formulas.ts";
 import type { ReportHost } from "../shared/strategy/dnet/courier.ts";
-import { foldReports, planningView, type DnetHosts, type ExpiryOpts } from "../shared/strategy/dnet/host.ts";
+import { discoverReports, foldReports, planningView, type DnetHosts, type ExpiryOpts } from "../shared/strategy/dnet/host.ts";
 import { chooseLabVantage, holdHostFrom, planHold, type HoldHost } from "../shared/strategy/dnet/hold.ts";
 import { planFarm, type FarmHost } from "../shared/strategy/dnet/farm.ts";
 import { modelEntry, type PasswordFacts } from "../shared/strategy/dnet/models.ts";
@@ -66,10 +66,14 @@ export const price = (calls: readonly string[]): number => {
   return total;
 };
 
-/** The reserve every host holds, from the SAME call list production sizes it
- * with. This used to be `price(["dnet.probe"])` — 1.8 GB — which quietly
+/** Each reserve comes from the SAME call list production sizes it with.
+ * Ordinary hosts need local `exec + connectToSession`; stasis hosts deliberately
+ * keep only the 1.8 GB topology observer and launch jobs through the shared
+ * resident's atomic authority lease.
+ *
+ * This used to be `price(["dnet.probe"])` for the entire fleet, which quietly
  * omitted the `exec` and `connectToSession` that make a host recoverable, and
- * so modelled a fleet 1.35 GB per host cheaper than the one we actually run. */
+ * so modelled an ordinary fleet 1.35 GB per host cheaper than the one we actually run. */
 export const PROBER_GB = price(PROBER_CALLS);
 export const PROBER_ARMOURED_SIM_GB = price(PROBER_ARMOURED_CALLS);
 export const PROBER_STASIS_GB = price(PROBER_STASIS_CALLS);
@@ -445,6 +449,7 @@ export function runSpreadCase(
     if (!record) return { hostname: name, at: clock, present: false };
     return {
       hostname: name,
+      ...(world.servers.get(name)?.ip ? { identity: world.servers.get(name)!.ip } : {}),
       at: clock,
       present: true,
       depth: record.depth,
@@ -469,6 +474,9 @@ export function runSpreadCase(
   const fold = (reports: ReportHost[]): void => {
     foldReports(knowledge, reports, clock, expiry());
   };
+  const discover = (reports: ReportHost[]): void => {
+    discoverReports(knowledge, reports, clock, expiry());
+  };
 
   /** Probe from every standing host, then details for every name we know —
    * `getServerDetails` answers from any distance once a name is held, exactly
@@ -486,7 +494,7 @@ export function runSpreadCase(
     }
     const known = new Set([...knowledge.keys(), ...reports.flatMap((r) => r.neighbours ?? [])]);
     for (const name of known) reports.push(observeHost(name));
-    fold(reports);
+    discover(reports);
   };
 
   const crackAttempts = (name: string): number | undefined => {
@@ -904,7 +912,7 @@ export function runSpreadCase(
 
   // --- boot: the controller and first agent stand on darkweb -----------------
   agents.set("darkweb", {});
-  fold([
+  discover([
     observeHost("darkweb"),
     { hostname: "darkweb", at: clock, present: true, neighbours: system.probeFrom("darkweb") },
   ]);

@@ -13,6 +13,7 @@ import {
 import { expForSkill, skillFromExp } from "../shared/formulas.ts";
 import type { ReportHost } from "../shared/strategy/dnet/courier.ts";
 import {
+  discoverReports,
   foldReports,
   planningView,
   stormWipe,
@@ -291,6 +292,7 @@ export function runFarmCase(
     }
     return {
       hostname: name,
+      ...(world.servers.get(name)?.ip ? { identity: world.servers.get(name)!.ip } : {}),
       at: clock,
       present: true,
       depth: record.depth,
@@ -313,6 +315,9 @@ export function runFarmCase(
   };
   const fold = (reports: ReportHost[]): void => {
     foldReports(knowledge, reports, clock, expiry());
+  };
+  const discover = (reports: ReportHost[]): void => {
+    discoverReports(knowledge, reports, clock, expiry());
   };
 
   // --- the walker: a fixed metronome on a pinned vantage --------------------
@@ -353,7 +358,7 @@ export function runFarmCase(
     }
     reports.push(observeHost("darkweb", "inventory"));
     reports.push({ hostname: "darkweb", at: clock, present: true, neighbours: system.probeFrom("darkweb") });
-    fold(reports);
+    discover(reports);
 
     if (labPresent && labHost !== undefined) {
       // The lab vantage was pinned and fully harvested before the walker took
@@ -515,7 +520,7 @@ export function runFarmCase(
     }
     const known = new Set([...knowledge.keys(), ...reports.flatMap((r) => r.neighbours ?? [])]);
     for (const name of known) reports.push(observeHost(name));
-    fold(reports);
+    discover(reports);
   };
 
   // --- one derive pass -------------------------------------------------------
@@ -537,7 +542,7 @@ export function runFarmCase(
       for (const plant of planSpread(candidates, DEFAULT_SPREAD_LIMITS).plant) {
         if (plant.host === walkerHost || agents.has(plant.host) || !truth(plant.host)) continue;
         plantAgent(plant.host, plant.bootstrapReclaim === true ? { bootstrap: true } : {});
-        fold([
+        discover([
           observeHost(plant.host),
           { hostname: plant.host, at: clock, present: true, neighbours: system.probeFrom(plant.host) },
         ]);

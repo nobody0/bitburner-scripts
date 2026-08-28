@@ -97,7 +97,7 @@ export interface DnetLabReport {
 /** Version of the private, in-realm controller checkpoint. This is deliberately
  * independent of the agent protocol: a build may keep its process handshake
  * while changing what can safely be restored into a new controller. */
-export const DNET_RECOVERY_VERSION = 1 as const;
+export const DNET_RECOVERY_VERSION = 2 as const;
 
 /** Durable controller-owned state. No process handles, promises, borrowed NS
  * objects, queues, or launch windows may enter this shape. It may contain

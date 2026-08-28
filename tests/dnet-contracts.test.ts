@@ -9,7 +9,7 @@ import {
 } from "../game/lib/contracts.ts";
 import { syncDarknetContracts } from "../game/lib/features/dnet.ts";
 import type { GameState } from "../game/lib/state.ts";
-import { emptyKnowledge, foldKnowledgeReports } from "../shared/strategy/dnet/host.ts";
+import { discoverReports, emptyKnowledge, foldKnowledgeReports } from "../shared/strategy/dnet/host.ts";
 
 const observed: ContractQueueEntry = {
   host: "dn-1",
@@ -75,13 +75,14 @@ describe("darknet contract queue", () => {
       topics: {}, dirty: new Set(), mirrors: {}, mirrorDirty: new Set(),
       probeFailures: {}, featureLastRun: {},
     } as GameState;
-    let knowledge = foldKnowledgeReports(emptyKnowledge("run"), [{
+    let knowledge = emptyKnowledge("run");
+    discoverReports(knowledge.hosts, [{
       hostname: "dn-1",
       identity: "10.0.0.1",
       at: 1_000,
       present: true,
       contracts: ["alpha.cct"],
-    }], 1_000, { bitNode: 15, netDepth: 5 }).knowledge;
+    }], 1_000, { bitNode: 15, netDepth: 5 });
     syncDarknetContracts(state, knowledge, 1_000, { bitNode: 15, netDepth: 5 });
     expect(state.contractQueue?.map(contractKey)).toEqual(["dn-1\0alpha.cct"]);
 
@@ -105,10 +106,11 @@ describe("darknet contract queue", () => {
       topics: {}, dirty: new Set(), mirrors: {}, mirrorDirty: new Set(),
       probeFailures: {}, featureLastRun: {},
     } as GameState;
-    let knowledge = foldKnowledgeReports(emptyKnowledge("run"), [{
+    let knowledge = emptyKnowledge("run");
+    discoverReports(knowledge.hosts, [{
       hostname: "dn-1", identity: "10.0.0.1", at: 1_000, present: true,
       contracts: ["alpha.cct"],
-    }], 1_000, { bitNode: 15, netDepth: 5 }).knowledge;
+    }], 1_000, { bitNode: 15, netDepth: 5 });
     syncDarknetContracts(state, knowledge, 1_000, { bitNode: 15, netDepth: 5 });
     state.darknetContractHandledAt = { ["dn-1\0alpha.cct"]: 1_000 };
     state.contractQuarantine = { ["dn-1\0bad.cct"]: {

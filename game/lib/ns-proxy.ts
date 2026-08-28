@@ -104,10 +104,24 @@ type NsResult<F> =
 /** Call one ns function by dotted path on a resident. Awaiting the result
  * flattens the engine's own promise, so `await nsp("hack", host)` is a number
  * exactly as `await ns.hack(host)` would be. */
-export type NsProxy = <P extends string, F = GetPath<NS, P>>(
+export type NsProxyLease = <P extends string, F = GetPath<NS, P>>(
   path: AutoPath<NS, P>,
   ...args: NsArgs<F>
 ) => Promise<NsResult<F>>;
+
+/** The ordinary proxy call surface plus an atomic, resident-bound lease.
+ *
+ * `exec` normally routes through `nsMain`, because that bundle has already paid
+ * for it. A lease is the deliberate exception: some APIs grant authority to
+ * the CALLING PID, so a follow-up `exec` must run through that exact resident.
+ * `guaranteeFit` prices the declared union before the callback begins and then
+ * prevents any other proxy call or recycle from interleaving with it. */
+export interface NsProxy extends NsProxyLease {
+  guaranteeFit<T>(
+    paths: readonly string[],
+    use: (resident: NsProxyLease) => T | Promise<T>,
+  ): Promise<T>;
+}
 
 // ---------------------------------------------------------------------------
 // Costs and retry
@@ -307,6 +321,84 @@ class Resident {
     return turn;
   }
 
+  guaranteeFit<T>(
+    paths: readonly string[],
+    use: (resident: NsProxyLease) => T | Promise<T>,
+  ): Promise<T> {
+    const turn = this.#tail.then(() => this.#guaranteeFit(paths, use));
+    this.#tail = turn.catch(() => {});
+    return turn;
+  }
+
+  /** Price a whole authority-sensitive sequence BEFORE its first call, then
+   * expose only those prepaid members against this exact resident. Since the
+   * callback itself occupies `#tail`, ordinary calls queue behind it rather
+   * than filling the resident or forcing a recycle between its steps. */
+  async #guaranteeFit<T>(
+    paths: readonly string[],
+    use: (resident: NsProxyLease) => T | Promise<T>,
+  ): Promise<T> {
+    const declared = [...new Set(paths)];
+    if (declared.length === 0) throw new Error("nsp.guaranteeFit requires at least one declared path");
+    const costs = new Map(declared.map((path) => [path, priceCall(path)]));
+    const declaredGb = [...costs.values()].reduce((sum, cost) => sum + cost, 0);
+    const missingGb = declared.reduce(
+      (sum, path) => sum + (this.#ns !== undefined && this.#paid.has(path) ? 0 : costs.get(path)!),
+      0,
+    );
+
+    if (!this.#ns || this.#paidGb + missingGb > this.#budgetGb) {
+      const reason = !this.#ns ? "cold" : declaredGb + PRICE_MARGIN_GB > this.#budgetGb ? "grow" : "full";
+      if (this.#ns) {
+        proxyEventSink?.("proxy.recycle", {
+          label: this.#label,
+          path: declared.join("+"),
+          reason,
+          paidGb: this.#paidGb,
+        });
+        const workingSetGb = this.#paidGb + missingGb + PRICE_MARGIN_GB;
+        if (workingSetGb > this.#preferredGb) {
+          this.#preferredGb = Math.min(workingSetGb, MAX_BUDGET_GB);
+        }
+      }
+      await this.#respawn(reason, declaredGb + PRICE_MARGIN_GB);
+    }
+
+    // A placer may grant less than the preferred working set, but never less
+    // than the declared union passed as `needGb` above.
+    for (const path of declared) {
+      if (this.#paid.has(path)) continue;
+      this.#paid.set(path, resolvePath(this.#ns!, path));
+      this.#paidGb += costs.get(path)!;
+    }
+
+    const allowed = new Set(declared);
+    let memberFailed = false;
+    const leased = (async (path: string, ...args: unknown[]) => {
+      if (!allowed.has(path)) {
+        throw new Error(`nsp.guaranteeFit call to undeclared ns.${path}`);
+      }
+      const fn = this.#paid.get(path);
+      if (fn === undefined) throw new Error(`nsp.guaranteeFit did not pay for ns.${path}`);
+      try {
+        return await fn(...args);
+      } catch (error) {
+        memberFailed = true;
+        throw error;
+      }
+    }) as NsProxyLease;
+    try {
+      return await use(leased);
+    } catch (error) {
+      // A call through a process killed outside the proxy may throw instead of
+      // settling. Clear that exact resident before the caller retries its whole
+      // authority sequence; otherwise the next lease would reuse a dead `ns`.
+      // Callback errors and undeclared-path errors do not poison the resident.
+      if (memberFailed) await this.#killProcess();
+      throw error;
+    }
+  }
+
   async #invoke(path: string, args: unknown[]): Promise<unknown> {
     // `exec` is the one member start.js owns statically (1.3 GB, paid once).
     // Routing it through nsMain keeps it off every resident's budget, and home
@@ -378,10 +470,17 @@ class Resident {
   }
 
   /** Kill the resident and hand its host back. */
-  async free(): Promise<void> {
-    await this.#killProcess();
-    this.#placement?.release();
-    this.#placement = undefined;
+  free(): Promise<void> {
+    // A recycle requested during `guaranteeFit` must wait for the authority
+    // sequence to finish. Killing the resident between connectToSession and
+    // exec would invalidate the PID-bound session the lease exists to protect.
+    const turn = this.#tail.then(async () => {
+      await this.#killProcess();
+      this.#placement?.release();
+      this.#placement = undefined;
+    });
+    this.#tail = turn.catch(() => {});
+    return turn;
   }
 
   /** Exec one resident into an ALREADY-HELD placement and complete the
@@ -511,6 +610,7 @@ class Resident {
 export function createNsProxy(options: NsProxyOptions): NsProxyHandle {
   const resident = new Resident(options);
   const call = ((path: string, ...args: unknown[]) => resident.call(path, args)) as NsProxy;
+  call.guaranteeFit = (paths, use) => resident.guaranteeFit(paths, use);
   return {
     call,
     setPlacer: (place) => resident.setPlacer(place),

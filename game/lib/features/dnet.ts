@@ -21,7 +21,6 @@ import {
   knowledgeCoverage,
   emptyKnowledge,
   expiryMs,
-  forgetMs,
   fresh,
   isImmune,
   type DnetKnowledge,
@@ -114,14 +113,9 @@ export function syncDarknetContracts(
   for (const hostname of Object.keys(listings)) {
     const host = knowledge.hosts.get(hostname);
     if (!host || host.dirty.files === true) delete listings[hostname];
-    else if (host.goneAt !== undefined) retireHost(hostname);
   }
 
   for (const host of [...knowledge.hosts.values()].sort((a, b) => a.hostname.localeCompare(b.hostname))) {
-    if (host.goneAt !== undefined) {
-      retireHost(host.hostname);
-      continue;
-    }
     const observedAt = host.seenAt.files;
     if (observedAt === undefined || host.contracts === undefined || host.dirty.files === true) continue;
     if (listings[host.hostname]?.identity !== undefined
@@ -195,7 +189,7 @@ interface DnetHomeState {
    *  the terminal's current server, so home is the only thing that can install
    *  one — and reading `backdoorInstalled` back costs 2 GB for a fact we
    *  already hold. A restart clears the backdoor (~9%/tick), so the set is
-   *  trimmed whenever a host is seen to have gone. */
+   *  trimmed whenever authoritative discovery removes the host. */
   backdoored: Map<string, number>;
   /** Last exact JSON written to dnet-vault.txt. Used only to avoid rewriting an
    * unchanged zero-RAM state file on every five-second feature tick. */
@@ -272,18 +266,6 @@ function bootstrapRecovery(
   vault: readonly VaultEntry[] = [],
 ): DnetRecoveryState {
   const knowledge = emptyKnowledge(generation);
-  for (const entry of vault) {
-    if (knowledge.hosts.has(entry.hostname)) continue;
-    const observedAt = entry.at ?? capturedAt;
-    knowledge.hosts.set(entry.hostname, {
-      hostname: entry.hostname,
-      ...(entry.identity !== undefined ? { identity: entry.identity } : {}),
-      lastSeenAt: observedAt,
-      seenAt: {},
-      dirty: {},
-      credentialKnown: true,
-    });
-  }
   return {
     version: DNET_RECOVERY_VERSION,
     generation,
@@ -304,7 +286,8 @@ function recoveryFromHome(generation: string, at: number): DnetRecoveryState {
   const recovery = home.recovery?.generation === generation
     && home.recovery.version === DNET_RECOVERY_VERSION
     ? home.recovery
-    : bootstrapRecovery(generation, at);
+    : bootstrapRecovery(generation, at,
+      home.recovery?.generation === generation ? home.recovery.vault : []);
   return { ...recovery, ...homeOverlay() };
 }
 
@@ -369,24 +352,6 @@ export function parsePersistedDnetState(
   } catch {
     return { vault: [], backdoors: [] };
   }
-}
-
-/** Persisted backdoors disproved by authoritative fold evidence.
- *
- * Absence from knowledge is not evidence after reload: the crawler may simply
- * not have rediscovered the host yet. A gone observation, an identity
- * replacement, or the fold finally forgetting a previously-gone host is
- * conclusive and releases the slot. */
-export function invalidatedPersistedBackdoors(
-  entries: ReadonlyMap<string, number>,
-  knowledge: DnetKnowledge,
-  replacedOrForgotten: readonly string[],
-): string[] {
-  const invalidated = new Set(replacedOrForgotten);
-  for (const hostname of entries.keys()) {
-    if (knowledge.hosts.get(hostname)?.goneAt !== undefined) invalidated.add(hostname);
-  }
-  return [...invalidated].filter((hostname) => entries.has(hostname)).sort();
 }
 
 function persistDnetState(ns: NS, generation: string): void {
@@ -571,35 +536,25 @@ const dnet: FeatureDriver = {
       // events, reconciled by observation time above.
       stasisLinked: new Set(home.stasisLinked),
     };
-    for (const hostname of invalidatedPersistedBackdoors(
-      home.backdoored,
-      knowledge,
-      [],
-    )) {
-      home.backdoored.delete(hostname);
-    }
     syncDarknetContracts(ctx.state, knowledge, now, expiry);
     // The writer compares exact JSON first, so unchanged five-second ticks
     // perform no file write; credential and backdoor changes do.
     persistDnetState(ctx.ns, generation);
-    const agentRetentionMs = forgetMs(expiry);
     for (const [hostname, agent] of [...home.agents]) {
       const host = knowledge.hosts.get(hostname);
-      if (host === undefined || host.goneAt !== undefined
-        || now - agent.lastBeatAt > agentRetentionMs) home.agents.delete(hostname);
+      if (host === undefined || now - agent.lastBeatAt > DNET_PROCESS_STALE_MS) home.agents.delete(hostname);
     }
     // Same rule for the volatile RAM samples: a churning net would otherwise
     // accumulate one per hostname that ever existed, for the whole install.
     for (const hostname of [...home.ram.keys()]) {
       const host = knowledge.hosts.get(hostname);
-      if (host === undefined || host.goneAt !== undefined) home.ram.delete(hostname);
+      if (host === undefined) home.ram.delete(hostname);
     }
     const cover = knowledgeCoverage(knowledge, now, expiry);
     // From the FOLD, for the same reason `topologyComplete` is: `probe()` is
     // HOST-LOCAL, so home's own probe sees `darkweb` and nothing else and this
     // could never be anything but darkweb's own depth of -1.
     const deepest = [...knowledge.hosts.values()].reduce((found, host) => {
-      if (host.goneAt !== undefined) return found;
       const depth = fresh<number>(host, "depth", now, {
         ...expiry,
         immune: isImmune(host, { stasisLinked: expiry.stasisLinked }),
@@ -634,8 +589,7 @@ const dnet: FeatureDriver = {
       labCache = {
         host: host.hostname,
         filename,
-        openable: host.goneAt === undefined
-          && resident !== undefined
+        openable: resident !== undefined
           && now - resident.lastBeatAt < DNET_PROCESS_STALE_MS,
       };
       break;
@@ -753,7 +707,6 @@ const dnet: FeatureDriver = {
           // A missing value means "not known", and the strategy only ever
           // compares it as a capacity, so treat it as none.
           blockedRam: fresh<number>(host, "blockedRam", now, expiry) ?? 0,
-          isOnline: host.goneAt === undefined,
           requiredCharisma: fresh<number>(host, "requiredCharisma", now, expiry) ?? 0,
           stasisLinked: expiry.stasisLinked?.has(host.hostname) === true,
           ...(neighbours ? { neighbours } : {}),
@@ -1079,7 +1032,7 @@ export function darknetRoute(
   for (let index = 0; index < queue.length && !parents.has(target); index++) {
     const current = queue[index]!;
     const host = knowledge.hosts.get(current);
-    if (!host || host.goneAt !== undefined) continue;
+    if (!host) continue;
     const neighbours = fresh<string[]>(host, "neighbours", now, expiry);
     // A hop whose adjacency has expired is not a hop. Skipping it rather than
     // trusting it is the whole safety property here.
@@ -1183,7 +1136,7 @@ async function serveDarknetBackdoors(
   let backdoorsChanged = false;
   for (const [hostname, installedAt] of [...home.backdoored]) {
     const host = knowledge.hosts.get(hostname);
-    if (!host || host.goneAt !== undefined || now - installedAt > backdoorLife) {
+    if (!host || now - installedAt > backdoorLife) {
       home.backdoored.delete(hostname);
       backdoorsChanged = true;
     }

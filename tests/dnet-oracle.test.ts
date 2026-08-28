@@ -385,11 +385,10 @@ describe("unattributed passwords", () => {
     expect(guesses[0]!.password).toBe("4821");
   });
 
-  test("owned, stationary, and gone hosts are excluded", () => {
+  test("owned and stationary hosts are excluded", () => {
     expect(looseCandidates(["4821"], [
       host({ hostname: "owned", hasCredential: true }),
       host({ hostname: "darkweb", isStationary: true }),
-      host({ hostname: "gone", gone: true }),
     ])).toEqual([]);
   });
 

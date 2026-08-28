@@ -403,7 +403,6 @@ describe("tab rendering", () => {
       knowledge: {
         at: 1_000,
         generation: "15:0",
-        gone: 1,
         truncated: true,
         totalHosts: 220,
         agents: { live: 1, seenEver: 1, lostSinceBoot: 0 },
@@ -430,7 +429,6 @@ describe("tab rendering", () => {
               ram: { jobGb: 12, proberGb: 3.15, controllerGb: 0 },
             },
           },
-          { hostname: "dn-gone", lastSeenAt: 1_000, goneAt: 1_000, facts: {}, authState: "offline" },
         ],
       },
       plan: {
@@ -567,10 +565,6 @@ describe("tab rendering", () => {
     // ...and the exit, which on this rung is known before the first move.
     expect(rendered).toContain("19,11");
 
-    // `offline` is a real auth state that the servers table used to omit while
-    // the map rendered it, so a host that answered "I am not there" was blank.
-    expect(rendered).toContain("(offline)");
-
     // Solver progress: spent against a budget DERIVED from the published
     // password facts, plus the phase. A multi-hundred-attempt solve used to be
     // indistinguishable from an idle host.
@@ -644,7 +638,6 @@ describe("tab rendering", () => {
       knowledge: {
         at: 1_000,
         generation: "15:0",
-        gone: 0,
         agents: { live: 0, seenEver: 0, lostSinceBoot: 0 },
         hosts: [{ hostname: "darkweb", lastSeenAt: 1_000, isDarkweb: true, depth: -1, facts: {} }],
       },
@@ -675,7 +668,6 @@ describe("tab rendering", () => {
           credentialKnown: true,
           authState: "authenticated",
         }],
-        gone: 0,
         agents: { live: 0, seenEver: 0, lostSinceBoot: 0 },
       },
       maxDepth: -1,
@@ -696,7 +688,7 @@ describe("tab rendering", () => {
       return TABS.dnet.render(state);
     };
     const knowledge = {
-      at: 1_000, generation: "15:0", gone: 0,
+      at: 1_000, generation: "15:0",
       agents: { live: 1, seenEver: 1, lostSinceBoot: 0 },
       hosts: [{ hostname: "dn-1", depth: 1, lastSeenAt: 1_000, facts: { depth: 1_000 }, authState: "auth-required" }],
     };

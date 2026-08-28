@@ -22,14 +22,12 @@ import { nsMainGlobal } from "../game/lib/ns-proxy-shared.ts";
 import { START_SCRIPT_GB } from "../game/lib/proxies.ts";
 import { DEFAULT_SPREAD_LIMITS } from "../shared/strategy/dnet/plan.ts";
 
-/** The order kinds that run as an ORDER (through the agent switch), i.e. every
- * kind except resident `idle` and the spawn-free `bootstrapReclaim`. */
-const JOB_KINDS = (Object.keys(KIND_CALLS) as OrderKind[]).filter((k) => k !== "idle" && k !== "bootstrapReclaim");
+/** The order kinds that run through the agent switch. */
+const JOB_KINDS = (Object.keys(KIND_CALLS) as OrderKind[]).filter((k) => k !== "bootstrapReclaim");
 /** The heaviest thing a host does as a matter of course (excludes one-off pins). */
 const ROUTINE_JOB_KINDS: readonly OrderKind[] = ["inventory", "bleed", "attempt", "plant", "cache", "reclaim", "phish"];
-/** Back-compat aliases so the assertions below read unchanged. */
+/** Short local names used by the price assertions below. */
 const CONTROLLER_METHODS = CONTROLLER_CALLS;
-const RESIDENT_METHODS = KIND_CALLS.idle;
 const PROBER_METHODS = PROBER_CALLS;
 const BOOTSTRAP_RECLAIM_METHODS = KIND_CALLS.bootstrapReclaim;
 const JOB_METHODS = KIND_CALLS as Readonly<Record<string, readonly string[]>>;
@@ -208,7 +206,6 @@ describe("in-game static RAM budget", () => {
   test("start.js stays within its fresh-game budget", async () => {
     const [start] = await buildScripts(config, { telemetry: true, minifyNames: false });
     const { total, members } = staticRam(start!.content);
-    console.log(`start.js dynamic RAM <=${total.toFixed(2)}GB via ${members.join(", ")}`);
     expect(total).toBeLessThanOrEqual(START_BUDGET_GB + 1e-9);
     // start.js's whole billable surface, exhaustively, because the ns proxy's
     // entire value is that this list does not grow. Each entry is deliberate:
@@ -413,14 +410,13 @@ describe("in-game static RAM budget", () => {
     }
   });
 
-  test("the darknet prober carries only its probe surface — 1.8 GB, no safety net", async () => {
+  test("the darknet prober bundle is empty; launch contracts buy each exact surface", async () => {
     const artifacts = await buildScripts(config, { telemetry: true });
     const prober = artifacts.find((a) => a.filename === "dnet/prober.js")!;
     const analysis = analyzeScriptRam(prober.content);
 
-    // The prober stands on its host for ONE reason — `probe()` is host-local — and
-    // its ONLY billed call is that. `nextMutation` (its clock) is 0 GB, so it is a
-    // NOTHING. The prober does not make calls — it LENDS them.
+    // The prober stands on its host because `probe()` and ordinary-host `exec`
+    // are host-local. It does not make those calls itself — it LENDS them.
     //
     // Its source references no billable member at all, because every one of
     // them is invoked by the controller through the `ns` this process publishes.
@@ -589,11 +585,9 @@ describe("in-game static RAM budget", () => {
     }
   });
 
-  test("a resident and the heaviest job both fit a darknet host", () => {
+  test("the controller, prober, and heaviest routine job fit darkweb", () => {
     // `darkweb` is the one darknet host guaranteed a clear 16 GB, and it has to
-    // hold the controller AND a resident at once. After that a host holds one
-    // agent at a time, because a job SPAWNS from the resident rather than
-    // running beside it.
+    // hold the controller, prober, and one agent at once.
     //
     // Priced through `getFunctionRamCost`, which is what `priceAgent` itself
     // calls. The local table above has no `dnet.*` entries and its `?? 0`
@@ -607,18 +601,10 @@ describe("in-game static RAM budget", () => {
     };
     const controllerGb = cost(CONTROLLER_METHODS);
     const proberGb = BASE_GB + getFunctionRamCost("dnet.probe");
-    const residentGb = cost(RESIDENT_METHODS);
     const plantGb = cost(JOB_METHODS["plant"]!);
 
-    expect(controllerGb + proberGb + residentGb).toBeLessThanOrEqual(16);
+    expect(controllerGb + proberGb + SCRIPT_BASE_GB).toBeLessThanOrEqual(16);
     expect(controllerGb + proberGb + plantGb).toBeLessThanOrEqual(16);
-
-    // And the whole reason for spawning rather than exec'ing: a resident that
-    // exec'd its jobs would need BOTH at once. Spawn costs 2.0 against exec's
-    // 1.3 but frees the caller first, so a host's peak is a max, not a sum.
-    const execPeak = cost([...RESIDENT_METHODS.filter((method) => method !== "spawn"), "exec"])
-      + cost(JOB_METHODS["plant"]!.filter((method) => method !== "spawn"));
-    expect(plantGb).toBeLessThan(execPeak);
 
     // Every ROUTINE kind has to fit beside the controller and dedicated prober
     // on `darkweb`, because
@@ -637,9 +623,7 @@ describe("in-game static RAM budget", () => {
       for (const method of new Set(methods)) total += getFunctionRamCost(method);
       return total;
     };
-    // A resident is a bare script now — 1.6 and nothing else — because there is
-    // no resident. The kind survives only as a price nothing launches.
-    expect(cost(RESIDENT_METHODS)).toBe(1.6);
+    expect(SCRIPT_BASE_GB).toBe(1.6);
     expect(BASE_GB + getFunctionRamCost("dnet.probe")).toBe(1.8);
     expect(cost(BOOTSTRAP_RECLAIM_METHODS)).toBe(2.6);
     // 4.75 is the CONVERSATIONAL price: a solve that must read the target's
@@ -662,7 +646,7 @@ describe("in-game static RAM budget", () => {
     // `spawn`, so its 2.0 GB left the PER-THREAD price entirely: it is paid once
     // per host by the prober's `exec` instead of once per thread here. Threads
     // are the only thing that shortens an `authenticate`.
-    // SIX, where the spawn-chained worker managed three. `attempt` is now base
+    // Six threads fit because `attempt` is now base
     // plus its one call and nothing else: no `spawn` (the controller launches
     // it), no `connectToSession` (instant, and the controller tries it through
     // a prober before dispatching anything), no `getServerDetails` (the
@@ -672,7 +656,7 @@ describe("in-game static RAM budget", () => {
     const ordinaryRoom = 16 - PROBER_GB;
     expect(ATTEMPT_LEAN_GB).toBe(BASE_GB + getFunctionRamCost("dnet.authenticate"));
     expect(threadsForJob(ordinaryRoom, ATTEMPT_LEAN_GB, true)).toBe(6);
-    expect(threadsForJob(16 - 1.8, 4.15, true), "the old spawn-chained price").toBe(3);
+    expect(threadsForJob(16 - 1.8, 4.15, true), "a 4.15 GB/thread solver").toBe(3);
     expect(threadsForJob(16, cost(JOB_METHODS["walk"]!), true)).toBe(8);
   });
 
@@ -756,10 +740,9 @@ describe("the written-down price table", () => {
     expect(Object.keys(ORDER_PRICES).sort()).toEqual(Object.keys(KIND_CALLS).sort());
     expect(PROBER_GB).toBe(priceOfCalls(PROBER_CALLS));
     expect(CONTROLLER_GB).toBe(priceOfCalls(CONTROLLER_CALLS));
-    // The stasis prober drops `exec`: the engine's mutation guard exempts a
-    // linked host, so it can never lose its processes and never needs to
-    // relaunch them locally. This pin was missing, which left the one price in
-    // the feature free to drift from the surface it is supposed to buy.
+    // The stasis prober drops `exec`: managed jobs arrive through an atomic
+    // shared-resident connectToSession+exec lease. The permanent process needs
+    // only the topology call it alone can make from this host.
     expect(PROBER_STASIS_GB).toBe(priceOfCalls(PROBER_STASIS_CALLS));
     expect(PROBER_STASIS_CALLS).not.toContain("exec");
     // The armoured prober is the plain one plus `spawn`, and the 2.0 GB gap
@@ -787,9 +770,9 @@ describe("the written-down price table", () => {
     // defaults to what that override produces.
     expect(DEFAULT_SPREAD_LIMITS.proberRamGb).toBe(PROBER_GB);
     expect(DEFAULT_SPREAD_LIMITS.managedProberRamGb).toBe(PROBER_STASIS_GB);
-    expect(DEFAULT_SPREAD_LIMITS.residentRamGb).toBe(priceOf("idle"));
-    expect(DEFAULT_SPREAD_LIMITS.managedResidentRamGb).toBe(priceOf("idle"));
-    expect(DEFAULT_SPREAD_LIMITS.agentRamGb).toBe(priceOf("idle") + PROBER_GB);
+    expect(DEFAULT_SPREAD_LIMITS.residentRamGb).toBe(SCRIPT_BASE_GB);
+    expect(DEFAULT_SPREAD_LIMITS.managedResidentRamGb).toBe(SCRIPT_BASE_GB);
+    expect(DEFAULT_SPREAD_LIMITS.agentRamGb).toBe(SCRIPT_BASE_GB + PROBER_GB);
     expect(DEFAULT_SPREAD_LIMITS.bootstrapRamGb).toBe(priceOf("bootstrapReclaim"));
   });
 

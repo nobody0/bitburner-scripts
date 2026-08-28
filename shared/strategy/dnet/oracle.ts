@@ -485,7 +485,6 @@ export interface LooseTarget {
   passwordFormat?: string;
   hasCredential: boolean;
   isStationary?: boolean;
-  gone?: boolean;
 }
 
 export interface LooseGuess {
@@ -501,7 +500,7 @@ export function looseCandidates(loose: readonly string[], hosts: readonly LooseT
   for (const password of loose) {
     const format = getPasswordType(password);
     for (const host of hosts) {
-      if (host.gone || host.hasCredential || host.isStationary) continue;
+      if (host.hasCredential || host.isStationary) continue;
       if (host.passwordLength !== undefined && host.passwordLength !== password.length) continue;
       if (host.passwordFormat !== undefined && host.passwordFormat !== format) continue;
       const key = `${host.hostname}\u0000${password}`;

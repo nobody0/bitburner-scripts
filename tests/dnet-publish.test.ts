@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   emptyKnowledge,
+  discoverReports,
   foldKnowledgeReports,
   type DnetKnowledge,
 } from "../shared/strategy/dnet/host.ts";
@@ -25,9 +26,12 @@ function fold(hosts: Seen[], at = NOW): DnetKnowledge {
     hostname: host.hostname,
     at,
     present: host.present,
+    ...(host.present && host.hostname !== "darkweb" ? { identity: `${host.hostname}:identity` } : {}),
     ...(host.present ? host.facts : {}),
   } as ReportHost));
-  return foldKnowledgeReports(emptyKnowledge(GEN), reports, at).knowledge;
+  const knowledge = emptyKnowledge(GEN);
+  discoverReports(knowledge.hosts, reports, at);
+  return knowledge;
 }
 
 describe("the wire carries only what cannot be derived", () => {
@@ -279,17 +283,10 @@ describe("the map's layout inputs are unambiguous", () => {
     expect(state(["shallow"], "deepest")).toBe("no-connection");
   });
 
-  test("a gone host keeps its name and its death, and loses everything else", () => {
+  test("an offline host is removed from the published live map", () => {
     let knowledge = fold([{ hostname: "dn-1", present: true, facts: { depth: 0, modelId: "TopPass" } }]);
     knowledge = foldKnowledgeReports(knowledge, [{ hostname: "dn-1", at: NOW + 1, present: false }], NOW + 1).knowledge;
-    const host = publishKnowledge(knowledge, NOW + 1).hosts[0]!;
-    expect(host.goneAt).toBe(NOW + 1);
-    expect(host.authState).toBe("offline");
-    // Identity facts die with the host: one that returns is a NEW host with a
-    // new password, so keeping its model would be fabricating a map.
-    expect(host.modelId).toBeUndefined();
-    expect(host.facts).toEqual({});
-    expect(publishKnowledge(knowledge, NOW + 1).gone).toBe(1);
+    expect(publishKnowledge(knowledge, NOW + 1).hosts).toEqual([]);
   });
 });
 
@@ -338,9 +335,8 @@ describe("what the panel still needs the controller to decide", () => {
     // The sample carries `at`; the panel can say how old it is.
     expect(publishKnowledge(knowledge, NOW + 60 * 60_000, { ram }).hosts[0]!.ram)
       .toEqual(ram.get("dn-1"));
-    // A host that is gone keeps nothing.
-    knowledge.hosts.get("dn-1")!.goneAt = NOW;
-    expect(publishKnowledge(knowledge, NOW, { ram }).hosts[0]!.ram).toBeUndefined();
+    foldKnowledgeReports(knowledge, [{ hostname: "dn-1", at: NOW + 1, present: false }], NOW + 1);
+    expect(publishKnowledge(knowledge, NOW + 1, { ram }).hosts).toEqual([]);
   });
 });
 

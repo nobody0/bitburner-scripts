@@ -47,7 +47,6 @@ describe("the hosts that must never wear it", () => {
 
   test("a host with no prober standing is left to the plant that sizes it", () => {
     expect(armoured(host({ proberStanding: false }), ctx({ stormImminent: true }))).toBe(false);
-    expect(armoured(host({ goneAt: 500 }), ctx({ stormImminent: true }))).toBe(false);
   });
 
   test("unknown RAM never reads as room", () => {

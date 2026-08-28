@@ -1,4 +1,3 @@
-import { msPerHostEvent } from "./rates.ts";
 import { conclusiveAttempt, type AttemptOutcome, type DnetFactGroup, type LogDrainOutcome, type ReportHost } from "./courier.ts";
 import type { PasswordEvidence } from "./evidence.ts";
 
@@ -59,8 +58,6 @@ export interface DnetHost {
   // ---- lifecycle ----
   /** Newest observation of this host by anything, for any field. */
   lastSeenAt: number;
-  /** Set when an observation reported the host gone. Identity fields die here. */
-  goneAt?: number;
   /** When each group was last observed. The freshness authority. */
   seenAt: Partial<Record<DirtyGroup, number>>;
   /** When the identity fields were first/last confirmed, for the panel's age
@@ -131,7 +128,7 @@ export function emptyHost(hostname: string, lastSeenAt: number): DnetHost {
  * Not host knowledge, because it is about US rather than about the host, and it
  * must not expire on the mutation clock — a dictionary we have already walked
  * stays walked. It IS discarded when the host disappears, because a host that
- * returns is a new host with a new password (see the `goneAt` branch in the fold). */
+ * returns is discovered as a new host with a new password. */
 export interface AttemptLedger {
   /** The model the ledger was built against. A different model id means the
    *  host was replaced and the count below means nothing. */
@@ -179,11 +176,7 @@ export function foldAttempts(
   host: DnetHost | undefined,
   outcomes: readonly AttemptOutcome[],
 ): void {
-  // A gone host's ledger stays dropped: the fold discards cracking progress on
-  // disappearance because a returning host is a new host with a new password,
-  // and an outcome that lands in the same drain as the gone report must not
-  // resurrect counts that belong to the dead identity.
-  if (!host || host.goneAt !== undefined) return;
+  if (!host) return;
   for (const attempt of outcomes) {
     const ledger = host.attempts ?? { tried: 0, probes: 0 };
     const history = ledger.history ??= [];
@@ -226,7 +219,7 @@ export function foldAttempts(
 
 /** Fold a completed or deferred ring read into the target-owned ledger. */
 export function foldLogDrain(host: DnetHost | undefined, outcome: LogDrainOutcome | undefined): void {
-  if (!host || host.goneAt !== undefined || outcome === undefined) return;
+  if (!host || outcome === undefined) return;
   const ring = host.ring ?? { pendingAuthRecords: 0 };
   ring.pendingAuthRecords = outcome.pendingAuthRecords;
   if (outcome.attemptedAt !== undefined) {
@@ -250,7 +243,7 @@ export function foldLogDrain(host: DnetHost | undefined, outcome: LogDrainOutcom
 
 /** A verified credential makes cracking history dead weight. */
 export function markCredentialKnown(host: DnetHost | undefined): void {
-  if (!host || host.goneAt !== undefined) return;
+  if (!host) return;
   host.credentialKnown = true;
   delete host.attempts;
 }
@@ -336,15 +329,14 @@ export function groupStaleness(
   };
 }
 
-/** True when a group is believable: observed and not dirty. A gone host
- * believes nothing. */
+/** True when a group is believable: observed and not dirty. */
 export function groupFresh(
   host: DnetHost | undefined,
   group: DirtyGroup,
   now: number,
   opts: ExpiryOpts = {},
 ): boolean {
-  if (!host || host.goneAt !== undefined) return false;
+  if (!host) return false;
   if (host.dirty[group] === true) return false;
   const state = groupStaleness(host, group, now, opts);
   return state !== undefined && !state.stale;
@@ -359,7 +351,7 @@ export function fresh<T>(
   now: number,
   opts: ExpiryOpts = {},
 ): T | undefined {
-  if (!host || host.goneAt !== undefined) return undefined;
+  if (!host) return undefined;
   const group = fieldGroup(key);
   if (group === undefined) return undefined;
   const value = (host as unknown as Record<string, unknown>)[key] as T | undefined;
@@ -368,19 +360,13 @@ export function fresh<T>(
 }
 
 /** Shallow copy with every non-fresh group's fields removed, so planners can
- * branch on `!== undefined` and stale reads as unknown. Identity fields and the
- * ours-fields survive; a gone host keeps only its lifecycle stamps. */
+ * branch on `!== undefined` and stale reads as unknown. */
 export function planningView(host: DnetHost, now: number, opts: ExpiryOpts = {}): DnetHost {
   const view: DnetHost = { ...host };
   const expiry = hostExpiry(host, opts);
   const strip = (group: DirtyGroup) => {
     for (const key of GROUP_FIELDS[group]) delete (view as unknown as Record<string, unknown>)[key];
   };
-  if (host.goneAt !== undefined) {
-    for (const group of DIRTY_GROUPS) strip(group);
-    for (const key of IDENTITY_FIELDS) delete (view as unknown as Record<string, unknown>)[key];
-    return view;
-  }
   for (const group of DIRTY_GROUPS) {
     if (!groupFresh(host, group, now, expiry)) strip(group);
   }
@@ -390,11 +376,11 @@ export function planningView(host: DnetHost, now: number, opts: ExpiryOpts = {})
 export interface FoldOutcome {
   /** Group observations that lost to a newer observation of the same group. */
   superseded: number;
-  hostsForgotten: string[];
+  hostsRemoved: string[];
   hostsReplaced: string[];
 }
 
-/** Merge reported hosts into the map, IN PLACE.
+/** Merge reports into hosts that are already known, IN PLACE.
  *
  * In place because the map is the live global: runtime handles (agents,
  * probers, staged orders) hang off the same entries, and replacing objects
@@ -410,12 +396,37 @@ export function foldReports(
   hosts: DnetHosts,
   reports: readonly ReportHost[],
   now: number,
-  opts: ExpiryOpts = {},
+  _opts: ExpiryOpts = {},
+): FoldOutcome {
+  return fold(hosts, reports, now, false);
+}
+
+/** Fold authoritative discoveries. Only initial darkweb and results from the
+ * controller's probe/details/dns path may create host entries. */
+export function discoverReports(
+  hosts: DnetHosts,
+  reports: readonly ReportHost[],
+  now: number,
+  _opts: ExpiryOpts = {},
+): FoldOutcome {
+  return fold(hosts, reports, now, true);
+}
+
+function fold(
+  hosts: DnetHosts,
+  reports: readonly ReportHost[],
+  now: number,
+  allowCreate: boolean,
 ): FoldOutcome {
   let superseded = 0;
+  const hostsRemoved: string[] = [];
   const hostsReplaced: string[] = [];
 
-  for (const seen of reports) {
+  const ordered = [...reports].sort((a, b) => {
+    const byTime = Math.min(a.at, now) - Math.min(b.at, now);
+    return byTime !== 0 ? byTime : Number(b.present) - Number(a.present);
+  });
+  for (const seen of ordered) {
     const { hostname, identity, present, at } = seen;
     // A clock we do not control can hand us the future; treat it as now.
     const observedAt = Math.min(at, now);
@@ -439,26 +450,33 @@ export function foldReports(
       host.identity = identity;
       host.lastSeenAt = observedAt;
     }
+    if (!present) {
+      if (!host) continue;
+      if (identity !== undefined && host.identity !== undefined && identity !== host.identity) {
+        superseded++;
+        continue;
+      }
+      if (observedAt < host.lastSeenAt) {
+        superseded++;
+        continue;
+      }
+      hosts.delete(hostname);
+      hostsRemoved.push(hostname);
+      continue;
+    }
     if (!host) {
+      if (!allowCreate) continue;
+      if (hostname !== "darkweb" && identity === undefined) continue;
       host = emptyHost(hostname, observedAt);
       if (identity !== undefined) host.identity = identity;
       hosts.set(hostname, host);
     }
-    if (identity !== undefined && host.identity === undefined) host.identity = identity;
-    if (observedAt >= host.lastSeenAt) host.lastSeenAt = observedAt;
-
-    if (!present) {
-      // Absence is itself an observation, and a newer one wins. A host that
-      // comes back is a different host with a different password, so its
-      // identity fields must not survive the gap.
-      if (observedAt >= host.lastSeenAt && (host.goneAt === undefined || observedAt > host.goneAt)) {
-        resetLifetime(host);
-        host.goneAt = observedAt;
-      }
+    if (identity === undefined && host.identitySeenAt !== undefined && observedAt < host.identitySeenAt) {
+      superseded++;
       continue;
     }
-    // Seeing it present is newer evidence than the note that it was gone.
-    if (host.goneAt !== undefined && observedAt >= host.goneAt) delete host.goneAt;
+    if (identity !== undefined && host.identity === undefined) host.identity = identity;
+    if (observedAt >= host.lastSeenAt) host.lastSeenAt = observedAt;
 
     const record = host as unknown as Record<string, unknown>;
     const carries = (keys: readonly string[]) =>
@@ -490,22 +508,13 @@ export function foldReports(
       host.seenAt[group] = observedAt;
       delete host.dirty[group];
     }
-    for (const group of seen.invalidates ?? []) host.dirty[group] = true;
-  }
-
-  // A deleted identity can disappear from the graph and later be reused.
-  // Forget absent movable hosts so published knowledge describes the live net;
-  // stationary hosts cannot be deleted and therefore remain known.
-  const hostsForgotten: string[] = [];
-  for (const [name, host] of hosts) {
-    const reference = host.goneAt ?? host.lastSeenAt;
-    if (now - reference > forgetMs(hostExpiry(host, opts)) && !isImmune(host, opts)) {
-      hostsForgotten.push(name);
-      hosts.delete(name);
+    for (const group of seen.invalidates ?? []) {
+      const prior = host.seenAt[group];
+      if (prior === undefined || observedAt >= prior) host.dirty[group] = true;
     }
   }
 
-  return { superseded, hostsForgotten, hostsReplaced };
+  return { superseded, hostsRemoved, hostsReplaced };
 }
 
 /** Home-side adapter around the same in-place fold the controller uses. */
@@ -531,18 +540,9 @@ function resetLifetime(host: DnetHost): void {
   host.dirty = {};
   delete host.identitySeenAt;
   delete host.identity;
-  delete host.goneAt;
   delete host.attempts;
   delete host.ring;
   delete host.credentialKnown;
-}
-
-/** A host unseen for this long is dropped. Scaled off deletion rather than
- * movement: the question "is it gone" is answered by the deletion clock — and
- * an immune host is never deleted, so it is never forgotten either. */
-export function forgetMs(opts: ExpiryOpts = {}): number {
-  if (opts.immune === true) return Infinity;
-  return msPerHostEvent("deleted", opts.netDepth, opts.bitNode, opts.backdoored);
 }
 
 /** What a webstorm invalidates, applied the moment the burst is believed over.
@@ -556,8 +556,8 @@ export function forgetMs(opts: ExpiryOpts = {}): number {
  * not disagree about what a storm destroys. The rule is upstream's own victim
  * pool: everything OUTSIDE `isStationary`/stasis can be deleted, moved and
  * restarted, so a non-immune host keeps only what survives all three — its
- * IDENTITY fields (a survivor's are still true; a deleted host's die by the
- * ordinary goneAt path when re-surveys report it missing) and its credential
+ * IDENTITY fields (a survivor's are still true; a deleted host is removed by
+ * the ordinary details sweep) and its credential
  * (restart and move change no password; only a delete retires an identity, and
  * that path clears the vault entry elsewhere). Position, topology and file/ram
  * fields are dropped outright, and the log ring goes with them — a restart
@@ -596,7 +596,6 @@ export interface KnowledgeCoverage {
   adjacencyKnown: number;
   /** Share of held groups that are still believable. */
   freshFraction: number;
-  gone: number;
   /** Hosts we hold a credential for. The frontier we have already opened. */
   cracked: number;
   /** Hosts we could put an agent on right now: a credential, plus believable
@@ -615,14 +614,9 @@ export function coverage(
   let total = 0;
   let stale = 0;
   let adjacencyKnown = 0;
-  let gone = 0;
   let cracked = 0;
   let plantable = 0;
   for (const host of hosts.values()) {
-    if (host.goneAt !== undefined) {
-      gone++;
-      continue;
-    }
     const expiry = hostExpiry(host, opts);
     if (fresh<string[]>(host, "neighbours", now, expiry) !== undefined) adjacencyKnown++;
     if (host.credentialKnown === true) {
@@ -637,10 +631,9 @@ export function coverage(
     }
   }
   return {
-    known: hosts.size - gone,
+    known: hosts.size,
     adjacencyKnown,
     freshFraction: total === 0 ? 0 : (total - stale) / total,
-    gone,
     cracked,
     plantable,
   };
@@ -663,7 +656,7 @@ export function usableRam(
   now: number,
   opts: ExpiryOpts = {},
 ): number {
-  if (!host || host.goneAt !== undefined) return 0;
+  if (!host) return 0;
   const expiry = hostExpiry(host, opts);
   const maxRam = host.maxRam;
   if (maxRam === undefined) return 0;

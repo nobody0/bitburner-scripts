@@ -47,13 +47,12 @@ interface StormView {
 function planStorm(view: StormView) {
   const linked = new Set(view.hosts.filter((host) => host.stasisLinked).map((host) => host.hostname));
   const vault = new Set(view.hosts.filter((host) => host.hasCredential).map((host) => host.hostname));
-  const hosts = view.hosts.map((source): DnetHost => {
-    const { hasCredential: _credential, harvestBusy, stasisLinked: _linked, gone, ...fields } = source;
+  const hosts = view.hosts.filter((source) => !source.gone).map((source): DnetHost => {
+    const { hasCredential: _credential, harvestBusy, stasisLinked: _linked, gone: _gone, ...fields } = source;
     return {
       ...emptyHost(source.hostname, view.now),
       ...fields,
       ...(harvestBusy ? { busy: new Set(["reclaim"]) } : {}),
-      ...(gone ? { goneAt: view.now } : {}),
     };
   });
   return planLiveStorm(hosts, {

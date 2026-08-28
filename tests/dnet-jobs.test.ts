@@ -20,11 +20,11 @@ describe("the darknet job table", () => {
       expect(ORDER_PRICES[kind], `${kind} has no price`).toBeGreaterThan(0);
       expect(KIND_CALLS[kind], `${kind} has no declared surface`).toBeDefined();
     }
-    // The extra keys are the two PROCESS MODES — a price and a surface, no
-    // scheduling facts, never planned and never dispatched to a body.
+    // The extra key is the private bootstrap call: priced, but never planned
+    // or dispatched through the order switch.
     const priced = new Set(Object.keys(ORDER_PRICES));
     for (const kind of TASK_KINDS) priced.delete(kind);
-    expect([...priced].sort()).toEqual(["bootstrapReclaim", "idle"]);
+    expect([...priced].sort()).toEqual(["bootstrapReclaim"]);
   });
 
   test("priorities are unique, so queue order never depends on the tie-break", () => {
@@ -36,14 +36,11 @@ describe("the darknet job table", () => {
     }
   });
 
-  test("a process mode is not schedulable work", () => {
-    // `priorityOf` answering +Infinity is what keeps them out of every
-    // comparison, rather than each caller remembering to exclude them.
-    for (const mode of ["idle", "bootstrapReclaim"]) {
-      expect(priorityOf(mode)).toBe(Number.POSITIVE_INFINITY);
-      expect(isSameTurn(mode)).toBe(false);
-      expect(canPreempt(mode, "promote")).toBe(false);
-    }
+  test("the bootstrap call is not schedulable work", () => {
+    // `priorityOf` answering +Infinity keeps it out of every comparison.
+    expect(priorityOf("bootstrapReclaim")).toBe(Number.POSITIVE_INFINITY);
+    expect(isSameTurn("bootstrapReclaim")).toBe(false);
+    expect(canPreempt("bootstrapReclaim", "promote")).toBe(false);
   });
 
   test("exactly four kinds may cancel running work", () => {

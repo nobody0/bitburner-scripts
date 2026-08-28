@@ -150,7 +150,6 @@ export function publishHost(
     values[key] = value;
   }
 
-  const gone = host.goneAt !== undefined;
   const isDarkweb = host.hostname === "darkweb";
   const depth = values["depth"] as number | undefined;
   const maxRam = values["maxRam"] as number | undefined;
@@ -163,13 +162,11 @@ export function publishHost(
   // and `blocked` has its own dirty bit — so a 60s cutoff hid the whole RAM
   // readout, durable fields included, over one volatile one. The sample is
   // replaced when a newer one arrives and carries `at` so the panel can say
-  // how old it is. A gone host keeps nothing.
-  const liveRam = gone ? undefined : ram;
+  // how old it is.
 
   return {
     hostname: host.hostname,
     lastSeenAt: host.lastSeenAt,
-    ...(gone ? { goneAt: host.goneAt } : {}),
     ...(isDarkweb ? { isDarkweb: true } : {}),
     // `depth` is OMITTED when unknown rather than sent as -1. The map lays out
     // by depth, and -1 already means "darkweb" — one sentinel cannot mean both
@@ -218,8 +215,8 @@ export function publishHost(
       : {}),
     credentialKnown: opts.vault?.has(host.hostname) === true || host.credentialKnown === true,
     ...(opts.agents?.[host.hostname] ? { agent: opts.agents[host.hostname] } : {}),
-    ...(liveRam ? { ram: liveRam } : {}),
-    authState: authStateOf(host, gone, isDarkweb, reachable, opts),
+    ...(ram ? { ram } : {}),
+    authState: authStateOf(host, isDarkweb, reachable, opts),
   };
 }
 
@@ -234,12 +231,10 @@ export function publishHost(
  *   src/DarkNet/ui/ServerSummary.tsx:26-31 */
 function authStateOf(
   host: DnetHost,
-  gone: boolean,
   isDarkweb: boolean,
   reachable: ReadonlySet<string>,
   opts: PublishOptions,
 ): DarknetKnownHost["authState"] {
-  if (gone) return "offline";
   // darkweb is authenticated by construction: the session check short-circuits
   // for it upstream, so it is never "auth required" no matter what we hold.
   if (isDarkweb) return "session";
@@ -268,11 +263,10 @@ function reachableFrom(
   expiryFor: (host: DnetHost) => ExpiryOpts,
 ): Set<string> {
   const held = (host: DnetHost): boolean =>
-    host.goneAt === undefined
-    && (host.hostname === "darkweb"
+    host.hostname === "darkweb"
       || opts.agents?.[host.hostname]?.alive === true
       || opts.vault?.has(host.hostname) === true
-      || host.credentialKnown === true);
+      || host.credentialKnown === true;
   // A stale neighbour list still names real hosts. The net rewires, but a host
   // that WAS beside darkweb a minute ago is a far better guess at the frontier
   // than no guess at all, and the box's own staleness fade already says how much
@@ -304,7 +298,7 @@ export function publishKnowledge(
 ): DarknetKnowledgeDigest {
   const all = [...knowledge.hosts.values()];
   // Sorted by depth then name so the panel is stable frame to frame: an
-  // insertion-ordered list would reshuffle whenever a host was forgotten, and a
+  // insertion-ordered list would reshuffle whenever membership changes, and a
   // map that shimmers is a map nobody reads.
   const sorted = [...all].sort((a, b) => {
     const da = a.depth ?? Number.MAX_SAFE_INTEGER;
@@ -321,7 +315,6 @@ export function publishKnowledge(
     immune: isImmune(host, opts),
   }));
   const hosts = sorted.slice(0, KNOWLEDGE_MAX_HOSTS).map((host) => publishHost(host, now, opts, reachable));
-  const gone = all.filter((host) => host.goneAt !== undefined).length;
   const live = Object.values(opts.agents ?? {}).filter((agent) => agent.alive).length;
 
   // Stripped on the way out. The host records above are built from an explicit
@@ -333,7 +326,6 @@ export function publishKnowledge(
     generation: knowledge.generation,
     hosts,
     ...(sorted.length > hosts.length ? { truncated: true, totalHosts: sorted.length } : {}),
-    gone,
     mutationsSeen: knowledge.mutationsSeen,
     ...(opts.unknownModels && Object.keys(opts.unknownModels).length > 0
       ? { unknownModels: { ...opts.unknownModels } }

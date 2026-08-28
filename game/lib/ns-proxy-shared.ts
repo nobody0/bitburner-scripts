@@ -71,9 +71,12 @@ export function proxyHandle(slot: keyof ProxyGlobals): NsProxyHandle {
  * safe to hold `nsp` in a local or pass it down: a cold boot retires the
  * handles and `initProxies` publishes new ones, so anything that had captured
  * a `.call` would go on talking to a retired resident. */
-const forward = (slot: keyof ProxyGlobals): NsProxy =>
-  ((path: string, ...args: unknown[]) =>
+const forward = (slot: keyof ProxyGlobals): NsProxy => {
+  const call = ((path: string, ...args: unknown[]) =>
     (proxyHandle(slot).call as (p: string, ...a: unknown[]) => Promise<unknown>)(path, ...args)) as NsProxy;
+  call.guaranteeFit = (paths, use) => proxyHandle(slot).call.guaranteeFit(paths, use);
+  return call;
+};
 
 /** The general-purpose surface. */
 export const nsp: NsProxy = forward("ns_proxy");

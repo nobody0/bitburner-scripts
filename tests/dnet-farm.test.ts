@@ -107,12 +107,6 @@ describe("the ladder is strict, and takes the top rung it can", () => {
     expect(plan.tasks.filter((t) => t.host === "dn-b")).toHaveLength(1);
   });
 
-  test("a gone host is refused first and nothing else is said about it", () => {
-    const plan = planFarm([host({ goneAt: NOW - 1, caches: ["x.cache"], blockedRam: 9 })], inputs());
-    expect(plan.tasks).toEqual([]);
-    expect(reasonsOf(plan)).toEqual(["gone"]);
-  });
-
   test("work already in flight refuses by name rather than stacking a second job", () => {
     const plan = planFarm(
       [host({ caches: ["x.cache"], blockedRam: 4, busy: new Set<FarmKind>(["cache"]) })],

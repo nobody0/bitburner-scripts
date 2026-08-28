@@ -520,8 +520,6 @@ canvas.microchart { height: 88px; }
 .netmap .node.auth-no-connection .box { stroke: var(--bb-well-light); stroke-dasharray: 3 3; }
 /* Answered, and answered that it is not there. Distinct from no-connection,
    which is us being unable to ask. */
-.netmap .node.auth-offline .box { stroke: var(--critical); stroke-dasharray: 1 3; }
-.netmap .node.gone .box { stroke: var(--critical); stroke-dasharray: 3 3; fill: var(--bb-background); }
 .netmap .node.sel .box { stroke: var(--bb-white); stroke-width: 2; }
 .netmap .node .stasis { fill: var(--series-5); }
 /* Where our residents stand. Solid = alive; hollow = the host dropped it, which
@@ -535,13 +533,11 @@ canvas.microchart { height: 88px; }
 
 .netmap .node text { font-size: 9px; fill: var(--text-secondary); }
 .netmap .node .host { font-size: 10px; fill: var(--text-primary); }
-.netmap .node.gone .host { fill: var(--muted); text-decoration: line-through; }
 .netmap .node .glyph { font-size: 11px; fill: var(--bb-secondary); }
 .netmap .node .fixed { font-size: 9px; fill: var(--bb-secondary-dark); text-anchor: end; }
 .netmap .node .meta { fill: var(--muted); }
 .netmap .node .status { fill: var(--bb-secondary); }
 .netmap .node.auth-session .status { fill: var(--good); }
-.netmap .node.gone .status { fill: var(--critical-text); }
 .netmap .node .ramtext { fill: var(--muted); }
 
 /* Our live use, idle capacity, and the owner's separately grindable block. */
@@ -570,8 +566,6 @@ canvas.microchart { height: 88px; }
 .netkey .sw.auth-session { border-color: var(--good); border-width: 2px; }
 .netkey .sw.auth-authenticated { border-color: var(--bb-primary-dark); }
 .netkey .sw.auth-no-connection { border-style: dashed; }
-.netkey .sw.auth-offline { border-color: var(--critical); border-style: dotted; }
-.netkey .sw.gone { border-color: var(--critical); border-style: dashed; background: var(--bb-background); }
 /* The node draws stasis as a left bar, so the key does too — it used to fill a
    whole swatch in a colour the box never takes. */
 .netkey .sw.stasis { border-left: 3px solid var(--series-5); }

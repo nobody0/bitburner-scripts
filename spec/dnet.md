@@ -665,16 +665,15 @@ These are **two independent axes**, and the routing keeps them separate.
   targets whose route was classified against the vantage it left. A plant
   still passes through `routeUrgentTasks` to preempt a lesser order for its
   slot.
-- **Durability** (may the resident skip its defensive self-spawn chain).
+- **Durability** (which launch path restores an agent).
   `targetControllerManaged` is set from the target's STASIS state alone, never
-  inferred from `remote`, `sessionOnly`, or an ordinary backdoor. A merely
-  backdoored host keeps the ordinary spawn chain: a restart can kill its
-  scripts and clear its backdoor together, and the agent was sized (adoption,
-  respawn arming) for that. Only stasis's durability makes a controller-managed
-  agent safe.
+  inferred from `remote`, `sessionOnly`, or an ordinary backdoor. Ordinary
+  hosts launch locally through their prober. Stasis hosts use one atomic shared
+  proxy lease for `connectToSession` plus `exec`; only stasis guarantees that
+  remote path remains available through server mutations.
 
 Durability also sets the plant's RAM bar: `planSpread` prices a stasis-linked
-target at the spawn-free managed resident plus the prober
+target at the base agent plus the topology-only prober
 (`managedResidentRamGb + proberRamGb` ≈ 3.4 GB), rather than the unmanaged
 `agentRamGb` (≈ 5.4 GB).
 
@@ -714,8 +713,8 @@ ordinary backdoors therefore consume the same two planner slots they held before
 the reload; stasis links remain separate, exactly as in the engine's pool. The
 generation is bitNode:lastAugReset, so either a BitNode transition or an
 augmentation install invalidates the whole payload. Within one generation,
-fresh fold evidence that a host is gone, replaced by a new identity, or finally
-forgotten removes its restored backdoor before planning and rewrites the file.
+an authoritative offline result or a new identity removes its restored
+backdoor before planning and rewrites the file.
 
 So backdoors are the expendable frontier, and a stasis link keeps one HOST
 alive rather than keeping the graph reachable. What most deserves one is the
@@ -972,8 +971,7 @@ One constraint follows, and it shapes the whole solver:
   `labyrinth.ts:334-338`; the manual UI occupies pid `-1`). One process must walk
   a whole maze — a dead PID abandons its progress, and the next one is re-seeded
   at a randomly offset start. That is the one job in this feature that must NOT
-  spawn, which puts it at odds with the resident model in
-  [the shape that follows](#the-shape-that-follows-an-controller-residents-and-a-spawn-chain).
+  restart, which is why the controller never preempts or resizes it mid-walk.
 
 ### The climb
 
@@ -1051,7 +1049,13 @@ The live knowledge model is shared/strategy/dnet/host.ts:
 
 Restart is not a RAM/file invalidator: upstream preserves blocked RAM, programs, caches, and contracts. It kills scripts, clears sessions and logs, and removes the backdoor. Stationary and stasis-linked hosts keep position; their topology can still change through mutable neighbours.
 
-Reports merge by observation time. A dnsLookup IP change replaces the complete lifetime, preventing a reused hostname from inheriting credentials, cracking state, or resources. Hosts unseen past the deletion-derived forget window are removed. tests/dnet-host.test.ts pins these rules.
+Reports merge by observation time. The map contains live hosts only: initial
+darkweb and authoritative details+DNS discovery may create entries; ordinary
+job reports only update an existing entry. An authoritative offline result
+deletes the entry, credential, and runtime state immediately. A delayed job
+report therefore cannot recreate it. A dnsLookup IP change replaces the
+complete lifetime, preventing a reused hostname from inheriting credentials,
+cracking state, or resources. `tests/dnet-host.test.ts` pins these rules.
 
 ### Mutation recovery and server identity
 
@@ -1117,7 +1121,7 @@ module. Same-turn probe repair and inventory queue first but never cancel
 anything. Blocking work is ordered `walk`, `plant`, cache opening, `pin`, storm,
 `attempt`, `heartbleed`, reclaim, induce, phish, then promote. The permanent
 prober is reserved before this competition, at whichever of its three prices
-this host pays (3.15 GB ordinary, 1.85 GB stasis-linked, 5.15 GB armoured). Walk, plant, cache, pin and
+this host pays (3.15 GB ordinary, 1.8 GB stasis-linked, 5.15 GB armoured). Walk, plant, cache, pin and
 authenticate may preempt lower-value work; heartbleed is the first class that
 always waits for capacity. Walk, pin and storm are never victims.
 
@@ -1137,39 +1141,29 @@ count is part of the strategy.
 Cancellation is cooperative FIRST and hard SECOND. Fresh adjacency settles
 impossible pending work and sets a cancellation reason on active work; attempt
 conversations, atomic migration orders and maze walks stop at a safe boundary, then
-the job's `finally` restores the resident. But a body seconds deep in a
+the job exits. But a body seconds deep in a
 blocking call cannot look at the flag — the engine's concurrency lock blocks
 every `ns.*` call while one is in flight — so on the next derive pass the controller's
-`hardCancelSweep` kills an ARMORED job still carrying a reason, via
+`hardCancelSweep` kills a cancellable job still carrying a reason, via
 `ns.kill(pid)`, which works globally by pid with no host relationship.
 
-What makes that safe is an engine invariant this design now leans on: a kill
-runs the victim's `atExit` callbacks synchronously in the killer's stack,
-AFTER the concurrency lock is released and BEFORE the script is marked
-stopped, so inside `atExit` every ns function is callable — and
-`ns.spawn(..., {spawnDelay: 0})` there frees the dying allocation and launches
-the replacement within the same `ns.kill` call. The agent arms exactly that
-hook before running a job (settle the job `cancelled`, clear `queue.active`,
-respawn the resident) and stamps `job.armored` as proof; the sweep kills
-nothing unarmored, so a pre-armor agent build is never shot without its safety
-net. The job's own `catch`/`finally` still runs afterwards as a zombie
-continuation in which every ns call throws — which is why the respawn lives in
-`atExit` and a `murdered` guard keeps the zombie from double-booking. The hook
-is disarmed before every DELIBERATE exit (the spawn into a job, the spawn back,
-a dead-rendezvous return), or those would respawn forever.
+The agent's `atExit` hook settles a killed order, clears its handle and wakes
+the controller. It never launches a successor. The killed body's suspended
+continuation may still resume after the hook as a zombie whose Netscript calls
+throw; object-identity guards prevent that continuation from changing the slot
+owned by a replacement. The controller alone launches the next order after the
+old allocation has actually been released.
 
 Two kinds are hard-cancel exempt: `pin`, because killing it would abandon an
 atomic 12 GB link operation, and `walk`, because maze position is keyed by PID
 and unrecoverable while its loop already polls the flag at every move. Both
 still register settlement cleanup; neither is licensed for a controller kill.
 
-A host-wide restart is deliberately different from a controller-marked kill.
-Pinned v3.0.1's `killServerScripts` iterates the live per-host PID map and runs
-each `atExit` before removing that PID. A zero-delay replacement inserted by
-the callback is therefore visible to the same iterator and can be killed again,
-forming a respawn loop. An unmarked restart/delete exit settles and clears its
-queue but does not spawn. The mutation transaction immediately derives a
-replant from a surviving vantage; a deleted host simply has no legal target.
+A host-wide restart is deliberately allowed to kill every local process. Each
+agent settles and wakes the controller without spawning, while an armoured
+prober alone may schedule its own delayed replacement. The mutation transaction
+then derives any required replant from a surviving vantage; a deleted host has
+no legal target and is removed immediately.
 
 Credentials have the same lifetime discipline. Plaintext parsed from a log is
 only a provisional candidate, even when the line names a host; it enters the
@@ -1364,8 +1358,8 @@ Read from the game's own source, because guessing at it cost a day.
 - **`ns.spawn` with `spawnDelay: 0` skips `setTimeout` entirely** — the 0 case
   is special-cased — but it kills the CALLER first and only then calls
   `spawnCb()` inline. The successor's `main` still waits on the same
-  `await compile(...)`. So there is always a gap between a spawn chain
-  clearing its slot and the successor adopting, and `HostEntry.inboundAt`
+  `await compile(...)`. So there is always a gap between `spawn` clearing its
+  caller's slot and the successor adopting, and a placing window
   exists to make that gap visible as "a process is on its way" rather than as
   an unstaffed host. Any nonzero `spawnDelay` registers the `setTimeout`
   BEFORE the kill, so the caller dies at once and the replacement lands a
@@ -1404,7 +1398,7 @@ Read from the game's own source, because guessing at it cost a day.
   free. A failed self-respawn is therefore invisible by construction; the only
   observable trace is a host that never adopts.
 
-## The shape that follows: a controller, probers, agents, and a spawn chain
+## The shape that follows: a controller, probers, and one-order agents
 
 Two processes share the word "controller", so this document names them: the
 **home driver** is `start.js`'s dnet feature driver, pinned inside home's 3.6 GB
@@ -1426,24 +1420,24 @@ netDepth, bitNode and direct stasis facts).
 the controller. It must not die, which means it can never `spawn` — `spawn` kills
 its caller — and it should not `exec` either, because `exec` leaves the caller
 alive and two allocations at once is usually RAM a darknet host does not have.
-So it launches nothing itself: it keeps a queue per host, and each ordinary
-host keeps exactly two workers. A 3.15 GB **prober** performs one immediate
-host-local `probe()`, reports it, then waits on `nextMutation()` in its own lane.
-One **agent** is either an idle resident or the current order body. The resident
-starts an order by `spawn`ing the same artifact with `spawnDelay: 0`; the order
-runs and spawns back. The labyrinth walker is the deliberate exception: it runs
-alone, with no prober and no spawn replacement. Darkweb adds the controller to
-its ordinary prober + agent pair.
+It keeps a queue per host and launches through other processes' Netscript
+slots. A 3.15 GB **prober** performs the host-local `probe()`, reports it, lends
+its otherwise-unused `ns`, and lets the controller use that lender for local
+`exec`.
+An **agent** runs one exact order and exits. Its atExit wake lets the controller
+start the next queued order after the engine returns its RAM. The labyrinth
+walker is the deliberate exception: it runs alone and keeps its PID for the
+whole maze. Darkweb adds the controller to its ordinary prober + current agent.
 
-`spawn` costs 2.0 GB against `exec`'s 1.3, and every job pays that tax on the
-way back. It is still the cheap option, because the alternative is holding two
-allocations at once — and because a host left with no resident cannot be
-repaired from an adjacent resident, or remotely while a stamped backdoor or
-stasis-link fact remains believable.
+Ordinary agents launch through the host's prober lender. A stasis prober is
+probe-only; its agents launch through one atomic shared-proxy lease that
+prepays `connectToSession` and `exec`, runs both on the same resident PID, and
+prevents a recycle between them. If that resident dies, the controller retries
+the entire pair on a fresh proxy process.
 
 **The rule that nearly makes this impossible.** A session belongs to the PID,
-and `spawn` ends the PID, so a job that authenticates cannot hand its session to
-the next process. `connectToSession(host, password)` re-opens one at any
+so one process cannot authenticate on behalf of another.
+`connectToSession(host, password)` re-opens one at any
 distance, with no delay and no connection requirement, for **0.05 GB**. That
 single cheap call is what makes the whole chain affordable. Its one
 precondition: it passes `requireAdminRights`, which only a successful
@@ -1455,10 +1449,8 @@ that a plant consumes. A remote recovery job is session-only: if
 so the job stops and forces identity reconciliation when a verified password is
 rejected.
 
-The controller pays for `getHostname`, `isRunning` liveness reconciliation,
-`kill` for the hard-cancel sweep, and its synchronous map reads. It does not
-hold a blocking `nextMutation` call; the probers deliver that event through the
-rendezvous, leaving the controller's Netscript slot free. It stages orders as
+The controller holds the blocking mutation clock and makes all other calls
+through prober lenders or the shared proxy. It stages orders as
 data; `game/dnet/orders.ts` dispatches them through one direct switch and reaches
 Netscript through bracket notation, so the analyser charges the agent's declared
 `ramOverride` instead. `tests/ram-budget.test.ts` checks the declared method
@@ -1521,39 +1513,35 @@ compensate for.
 
 End to end, because the design lives in three file headers and nowhere as one
 story. `game/lib/features/dnet.ts` is the home driver, `game/dnet/controller.ts`
-the controller, `game/dnet/agent.ts` both agent modes, `game/dnet/orders.ts` the
+the controller, `game/dnet/agent.ts` the one-order agent and bootstrap path,
+`game/dnet/orders.ts` the
 bodies, `game/dnet/shared.ts` the contract between them.
 
-1. **Home seeds.** The driver `scp`s all three artifacts to `darkweb` in ONE call
-   and `exec`s the controller, dedicated prober, then darkweb's resident — each with an explicit
-   `ramOverride` from `priceAgent`, which is why neither artifact's *static* cost
-   is binding (unlike `start.js`, which the game autoexecs with no override). The
-   stub is pinned to `home` because `ns.exec` evaluates its direct-connection
-   requirement BEFORE the darkweb early-out. A failed seed backs off
-   exponentially; a live controller is left strictly alone, because it holds the
-   only live scheduling copy of the map. The prober's launch carries a
-   controller-owned `probeRefresh` promise; home awaits the actual first
-   `{host, neighbours, at, pid}` report before it launches the resident.
+1. **Home seeds.** The driver `scp`s all three artifacts to `darkweb` in one call
+   and `exec`s the controller and dedicated prober with explicit RAM overrides.
+   The stub is pinned to `home` because `ns.exec` evaluates its direct-connection
+   requirement before the darkweb early-out. A failed seed backs off
+   exponentially; a live controller is left alone because it holds the only
+   scheduling copy of the map. The prober's launch carries a controller-owned
+   `probeRefresh` promise, and home awaits the first identity-bearing
+   `{host, neighbours, at, pid}` report before considering darkweb ready.
 2. **The controller derives and files.** On mutation, probe, credential or job
    completion — with a bounded watchdog only as recovery — it sweeps dead
    queues, retires impossible work, derives spread/farm/hold/guesses, routes
    urgent tasks across all legal vantages, and files them in queue-lane order.
-   Same-turn housekeeping (`inventory`, `relaunchProbe`) runs first once an
-   agent is free; numeric priority orders work that can consume game time.
-   It then hard-kills the selected armored victims in that same scheduling
-   transaction, so their `atExit` callbacks consume the work just filed.
-3. **The resident takes it.** The resident stamps its beat and takes the first
-   pending order. The controller already sized that order from fresh capacity
-   minus fixed infrastructure: one prober on ordinary hosts, controller plus
-   prober on darkweb, and neither for the walker. The resident pays for no
-   second RAM read.
-4. **`spawn` becomes the job.** `ns.spawn(scriptName, {threads, ramOverride,
-   spawnDelay: 0}, host)` kills the resident and starts the same file. The live
-   host queue identifies the active job; no positional mission protocol or
-   migration parser remains. `ramOverride` is charged PER THREAD, which is why
-   both fit checks compare `budgetGb * threads`. At actual order-process start,
-   one timestamp is written to both `Order.startedAt` and
-   `AgentHandle.startedAt`; merely staging a successor never stamps it.
+   Same-turn housekeeping runs first; numeric priority orders work that can
+   consume game time. If a higher-priority order needs a busy host, the
+   controller releases and then kills the selected cancellable process.
+3. **The controller dispatches one order.** It removes the first legal queued
+   order, re-fits its threads against the host's current block and prober, and
+   stores it in `pendingOrder`. An ordinary host's prober lends its local `ns`
+   for `exec`. A stasis host instead uses one atomic shared-proxy lease that
+   performs `connectToSession` and `exec` on the same PID; failure retries that
+   complete pair. The launched process is sized for exactly this order.
+4. **The agent adopts it.** The new agent consumes `pendingOrder`, stamps one
+   start time into both `Order.startedAt` and `AgentHandle.startedAt`, and runs
+   no other kind. `ramOverride` is charged per thread, so the final fit compares
+   `ramOverrideGb * threads` with the room that still exists at launch time.
 5. **The body runs**, reaching ns only through bracket notation on the ns it was
    handed, and returns data — never live objects. Immediately before each
    delayed dnet call it calculates from cached inputs and publishes
@@ -1562,66 +1550,59 @@ bodies, `game/dnet/shared.ts` the contract between them.
    call restamps independently. It is neither a whole-job lifetime nor a hard
    kill instant; the watchdog adds conservative grace and falls back to recent
    boundary progress when timing inputs are incomplete.
-6. **It settles and hands the host back.** Settlement folds the result into the
-   controller's map synchronously, before resolving its reporting promise. The
-   dying process's `atExit` therefore sees the resulting highest-priority job
-   and spawns directly into it at delay zero, falling back to resident mode only
-   when no work is ready. Promise continuations, the first probe, the first
-   inventory (`ls`, reads, and removals), and the next spawn all complete through
-   microtasks without yielding back to the game task queue.
+6. **It settles and exits.** Settlement folds the result into the controller's
+   map synchronously. The agent clears its handle and exits; its `atExit` wake is
+   deferred into the controller's next derive microtask so the engine has freed
+   the old allocation before another `exec` is attempted. No idle agent and no
+   agent-to-agent handoff exists.
 
-All automation-owned `exec` and `spawn` calls set `temporary: true`, so these
-short job chains do not inflate the save's completed-script history.
+All automation-owned `exec` and armour `spawn` calls set `temporary: true`, so
+these short-lived processes do not inflate the save's completed-script history.
 
-Both ordinary modes arm `atExit` before the first await. Natural completion and
-a controller-marked hard cancellation select and launch the next job inside the
-exit callback; the caller that invokes `kill` never launches a replacement.
-Job mode stamps `job.armored`, the controller's licence to hard-kill it at all.
-An unmarked host restart/delete performs settlement only, for the live-map
-iterator reason above, and leaves immediate replanting to the controller.
+Every normal agent arms `atExit` before its first await. Natural completion and
+hard cancellation both settle and wake the controller; neither selects or
+launches its successor. Restart and deletion use the same cleanup path.
 
 Three kinds break the pattern, and all are encoded:
 
-- **`pin` never respawns.** `setStasisLink` alone is 12 GB;
-  with the 2.0 GB spawn back it would not fit a 16 GB host at all. Its process
-  ends and leaves the host empty for `planSpread` to re-plant — which is safe
-  only because the pin has just made that host immutable, and which the controller
-  refuses by name when no neighbour could re-plant it.
+- **`pin` is release-exempt.** `setStasisLink` is an atomic 12 GB operation, so
+  cancellation waits for it to finish. Its process then exits normally and the
+  controller launches later work through the newly immutable stasis host.
 - **`walk` is long-lived.** It holds its host for the whole maze because
   `DarknetState.labLocations` is keyed by PID. Every move/radar publishes its
   awaited-operation estimate and every result beats at the cooperative boundary,
   so the watchdog follows progress rather than a fixed whole-walk timeout.
-- **bootstrap reclaim is not a queued resident job.** It is the same agent
-  artifact launched in a 2.6 GB/thread, spawn-free mode for one
+- **bootstrap reclaim is not a queued order.** It is the same agent artifact
+  launched in a 2.6 GB/thread mode for one
   `memoryReallocation(host)` call. Completion wakes the controller, which refreshes
   details and relaunches at the newly legal thread count. Below 2.6 GB free, an
-  authenticated adjacent resident opens the first tranche remotely.
+  authenticated adjacent host opens the first tranche remotely.
 
 **One whole-RAM job at a time, and the serialization is a feature.** Several
 `ns.dnet` calls block the host for seconds at a stretch, so splitting a host's
 RAM between two processes buys no parallelism — it only halves what each can ask
 for. Since `authenticate` gets faster with threads (`threadsFactor = 1 / (1 +
 0.2 * (threads - 1))`), the right shape is the opposite of sharing: queue the
-work, chain it with `spawn`, and give each job as much of the host as it can use.
-That is the whole reason a host's peak is a max rather than a sum, and it is the
-assumption to preserve — a future scheduler that co-resides two jobs on one host
-would make every authenticate slower and gain nothing.
+work, run one exact agent, and give it as much of the host as it can use. A
+future scheduler that co-resides two jobs on one host would make every
+authenticate slower and gain nothing.
 
 The exact ordinary allocations are: prober 3.15 GB (base 1.6 + `exec` 1.3 +
-`dnet.probe` 0.2 + `dnet.connectToSession` 0.05), resident 1.6 GB, bootstrap
-reclaimer 2.6 GB/thread, authenticate solver 4.7 GB/thread, and lab walker
-2.0 GB/thread. The prober has three prices, not one: a stasis-linked host drops
-`exec` for 1.85 GB, because the engine's mutation guard means it can never lose
-the processes `exec` would relaunch, and an ARMOURED host adds `spawn` for
+`dnet.probe` 0.2 + `dnet.connectToSession` 0.05), bootstrap reclaimer
+2.6 GB/thread, authenticate solver 4.7 GB/thread, and lab walker
+2.0 GB/thread. The prober has three prices, not one: a stasis-linked host keeps
+only `dnet.probe` for 1.8 GB. Its jobs are launched remotely through one atomic
+shared-resident lease which prepays `connectToSession + exec` and holds both on
+the same PID. The launched plant agent still carries its own `exec`, so a
+stasis host can originate a plant to its neighbour. An ARMOURED host adds `spawn` for
 5.15 GB (see *Surviving a restart*). Ordinary hosts reserve the prober, darkweb
 reserves both its controller and prober, and a prepared lab-walker host reserves
 nothing after its prober is killed. There is no safety margin; `ramOverride` is per
 thread.
 
-`tests/ram-budget.test.ts` is the executable form of this section: it prices a
-resident and the heaviest job against a 16 GB host, checks `JOB_METHODS` against
-the calls each body actually makes (per kind, not merely as a union), and pins
-`pin` as the one kind whose list omits `spawn`.
+`tests/ram-budget.test.ts` is the executable form of this section: it prices the
+fixed infrastructure and every routine order against a 16 GB host, and checks
+each kind's declared calls against the members its body actually references.
 
 ### Observability
 

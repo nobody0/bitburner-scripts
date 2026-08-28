@@ -47,7 +47,6 @@ export interface ArmourCandidate {
   /** A prober is standing here to armour. An empty host has nothing to resize —
    *  the plant that arrives will size its own. */
   proberStanding?: boolean;
-  goneAt?: number;
   /** The lab candidate carries no prober at all. */
   omitProber?: boolean;
 }
@@ -70,7 +69,6 @@ export function planArmour(
 ): Set<string> {
   const armour = new Set<string>();
   for (const candidate of candidates) {
-    if (candidate.goneAt !== undefined) continue;
     if (candidate.stasisLinked === true) continue;
     if (candidate.omitProber === true) continue;
     if (candidate.proberStanding !== true) continue;

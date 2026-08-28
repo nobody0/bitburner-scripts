@@ -709,14 +709,13 @@ const FAMILY_GLYPH: Record<string, string> = {
  *
  * Keyed by the UNION rather than by `string`, and exported, because this was
  * enumerated twice — once here and once inline in the servers table — and the
- * second copy was missing `offline`. A total record fails the build if the union
- * grows and this does not, which is the only version of this that stays true. */
+ * second copy had drifted. A total record fails the build if the union grows
+ * and this does not. */
 export const AUTH_LABEL: Record<NonNullable<DarknetKnownHost["authState"]>, string> = {
   session: "● session",
   authenticated: "[ authenticated ]",
   "auth-required": "[ auth required ]",
   "no-connection": "(no connection)",
-  offline: "(offline)",
 };
 
 /** How old one published fact is, and what is left of its life.
@@ -806,7 +805,6 @@ function titleOf(host: DarknetKnownHost, options: MapOptions): string {
   }
   const why = host.agent === undefined ? options.why?.[host.hostname] : undefined;
   if (why !== undefined) parts.push(`not planted — ${why}`);
-  if (host.goneAt !== undefined) parts.push("gone");
   if (isStale(host, options.now, options.expiry)) {
     parts.push("stale — one or more observations are no longer confirmed");
   }
@@ -870,7 +868,6 @@ function nodeMarkup(entry: Placed, options: RenderOptions): string {
   const { selected, query } = options;
   const { host, x, y } = entry;
   const classes = ["node", `auth-${host.authState ?? "no-connection"}`];
-  if (host.goneAt !== undefined) classes.push("gone");
   if (isStale(host, options.now, options.expiry)) classes.push("stale");
   if (host.hostname === selected) classes.push("sel");
   if (options.focusNeighbours?.has(host.hostname)) classes.push("neighbour");
@@ -1102,8 +1099,6 @@ export function netLegend(): string {
     + swatch("auth-authenticated", "cracked")
     + swatch("auth-auth-required", "auth required")
     + swatch("auth-no-connection", "no connection")
-    + swatch("auth-offline", "offline")
-    + swatch("gone", "gone")
     // `stasis`, not `linked`: the node draws a left bar (`<rect class="stasis">`)
     // and never carried a `linked` class that anything styled, so the swatch was
     // describing a class the map does not render.
@@ -1209,9 +1204,8 @@ export function netMap(hosts: readonly DarknetKnownHost[], options: MapOptions):
     positionDoubt: (hostname) => {
       const host = known.get(hostname);
       if (!host) return 3;
-      // A host we have watched die is the first thing to sink; then one whose
-      // depth we no longer believe; then one we have no depth for at all.
-      if (host.goneAt !== undefined) return 3;
+      // A host whose depth we no longer believe sinks below a confirmed one;
+      // one we have never placed sinks below both.
       const life = factLife(host, "depth", options.now, options.expiry);
       if (life === undefined) return 2;
       return life.stale ? 1 : 0;

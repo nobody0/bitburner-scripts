@@ -231,7 +231,7 @@ describe("layout puts the net on the game's grid", () => {
     // a real decision, and the answer is the ones we doubt least.
     const hosts = [
       ...Array.from({ length: 8 }, (_, i) => host({ hostname: `live-${i}`, depth: 0 })),
-      ...Array.from({ length: 3 }, (_, i) => host({ hostname: `ghost-${i}`, depth: 0, goneAt: 1 })),
+      ...Array.from({ length: 3 }, (_, i) => host({ hostname: `ghost-${i}`, depth: 0 })),
     ];
     const layout = layoutNet(hosts, {
       positionDoubt: (name) => (name.startsWith("ghost") ? 3 : 0),
@@ -621,7 +621,6 @@ describe("the panel at the scale the game actually reaches", () => {
       knowledge: {
         at: 1_000,
         generation: "15:0",
-        gone: 0,
         agents: { live: 1, seenEver: 3, lostSinceBoot: 2 },
         hosts: [
           {
@@ -678,8 +677,6 @@ describe("the key describes the map, and not something near it", () => {
     host({ hostname: "dn-auth", depth: 0, authState: "authenticated" }),
     host({ hostname: "dn-locked", depth: 0, authState: "auth-required" }),
     host({ hostname: "dn-unreached", depth: 1, authState: "no-connection" }),
-    host({ hostname: "dn-offline", depth: 1, authState: "offline" }),
-    host({ hostname: "dn-gone", depth: 1, goneAt: NOW }),
     host({ hostname: "dn-pinned", depth: 2, stasisLinked: true }),
     // A host the publisher can actually emit: `describeHost` sends the identity
     // fields with every report, so the old `facts: { depth: 1 }` fixture was a

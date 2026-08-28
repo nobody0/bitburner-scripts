@@ -59,7 +59,7 @@ export async function main(ns: NS): Promise<void> {
     live()?.wake("agent-died-before-arming");
   }, "dnet-boot-guard");
 
-  // A host too cramped for the ordinary prober + resident runs this deliberately
+  // A host too cramped for the ordinary prober + agent runs this deliberately
   // tiny mode: every byte is action threads, no probe, no details, no spawn net.
   if (launch?.bootstrapReclaim === true) {
     const finish = (): void => live()?.bootstrapDone(host);

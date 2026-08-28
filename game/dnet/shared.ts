@@ -2,7 +2,7 @@ import type { NS } from "@ns";
 import type { DnetProbeRefresh } from "./launch.ts";
 import type { AttemptOutcome, LogDrainOutcome, ReportHost, VaultEntry } from "../../shared/strategy/dnet/courier.ts";
 import type { DnetHost } from "../../shared/strategy/dnet/host.ts";
-import type { ProcessMode, TaskKind } from "../../shared/strategy/dnet/jobs.ts";
+import type { TaskKind } from "../../shared/strategy/dnet/jobs.ts";
 import type { DnetTimingProfile } from "../../shared/strategy/dnet/rates.ts";
 import type { DnetInputs, DnetSnapshot } from "./wire.ts";
 import type { DarknetProfit } from "../../shared/telemetry/topics/dnet.ts";
@@ -19,14 +19,12 @@ import type { DarknetProfit } from "../../shared/telemetry/topics/dnet.ts";
  *   `hosts` map (knowledge AND runtime), the credentials, and the staged work
  *   per host. It never spawns and never execs, because it must not die and
  *   `spawn` kills its caller.
- * - Each darknet host holds exactly one **agent** process, also long-lived. As
- *   a resident it beats and waits; when the controller stages an order it
- *   `spawn`s into it with `spawnDelay: 0`, which kills the resident and starts
- *   the ordered work on the same host. The work settles, then atExit spawns
- *   directly into the next staged order or back to resident mode.
- * - A permanent 1.8 GB **prober** sits beside the agent on every planted host,
- *   because `probe()` is host-local. It carries no self-revival; the agent's
- *   spawn chain is its safety net, and the controller re-execs it when both die.
+ * - Each darknet host holds at most one **agent** process. The controller
+ *   launches it for one exact order; it reports and exits when that order ends.
+ * - A permanent **prober** sits beside the agent on every planted host because
+ *   `probe()` is host-local: 3.15 GB ordinarily, 1.8 GB when stasis-linked, or
+ *   5.15 GB with restart armour. The controller re-execs ordinary losses;
+ *   armour alone carries its delayed self-revival.
  *
  * So a host holds at most two of our scripts — the prober and one agent — and
  * the agent's peak RAM is the largest single order rather than the sum.
@@ -64,10 +62,9 @@ export const SCRIPT_BASE_GB = 1.6;
 
 // --- orders and reports: DATA, never closures --------------------------------
 
-/** Every kind a PROCESS can be: the kinds of WORK, plus the two modes that
- * are not work at all. Only the price and call tables are keyed by this — an
- * `Order` is always real work, so it is keyed by `TaskKind`. */
-export type OrderKind = TaskKind | ProcessMode;
+/** Every priced agent action: queued tasks plus the private bootstrap call.
+ * An `Order` is always queued work and is keyed by `TaskKind`. */
+export type OrderKind = TaskKind | "bootstrapReclaim";
 
 /** One host on a plant's frontier, carrying everything its launch needs so the
  * body never reaches back into the controller for a per-target fact. */
@@ -76,8 +73,8 @@ export interface PlantJobTarget {
   password: string;
   /** The identity the credential was verified against, if we hold one. */
   identity?: string;
-  /** Stasis-linked: boot the spawn-free managed resident and hand dispatch to
-   *  the controller. Never inferred from `remote`. */
+  /** Stasis-linked: launch later jobs through the controller. Never inferred
+   *  from `remote`. */
   controllerManaged?: boolean;
   /** Reached by REMOTE exec (a backdoor or stasis link) rather than across a
    *  believed edge. Every plant is session-only now — it holds the credential
@@ -85,7 +82,7 @@ export interface PlantJobTarget {
    *  ROUTED: which decides whether losing the edge invalidates it, and whether
    *  a refused launch should discredit the backdoor we trusted. */
   remote?: boolean;
-  /** Launch the minimal spawn-free self reclaimer, not prober+resident. */
+  /** Launch the minimal self reclaimer without a prober or normal agent. */
   bootstrapReclaim?: boolean;
   bootstrapThreads?: number;
   /** The pinned lab candidate never shares RAM with a prober. */
@@ -172,7 +169,7 @@ export interface OrderBase {
   startedAt?: number;
   /** Current completion estimate, used only to choose the least-cost victim. */
   expectedDoneAt?: number;
-  /** Run without spawn; the controller remotely restores this stasis host. */
+  /** Launch through the controller's shared proxy on a stasis host. */
   controllerManaged?: boolean;
 }
 
@@ -333,19 +330,16 @@ export interface HostEntry extends DnetHost {
    * barrier. This replaced a deadline: "has the launcher died between exec and
    * settle" is a question about a process, and the engine answers it. */
   probeRefreshPid?: number;
-  /** THE process on this host. `order.kind === "idle"` is resident mode. */
+  /** The one order process currently running on this host. */
   agent?: AgentHandle;
   /** A process has been launched for this host but has not adopted yet. It
    * counts as standing and clears on adoption, retirement, or confirmed death. */
   inbound?: {
     /** Announcement time for diagnostics only; no decision uses it. */
     at: number;
-    /** WHICH launch announced it. The two paths fail for opposite reasons and
-     * want opposite fixes: a `spawn` is announced by the dying agent and is
-     * refused SILENTLY when the successor no longer fits, while a plant's
-     * `exec` is announced by a live vantage and fails visibly unless its child
-     * dies before its first line. A lost launch is only worth logging if the
-     * log says which one it was. */
+    /** WHICH launch announced it: the initial plant or a later controller
+     * dispatch. A lost launch is only useful diagnostically when its source is
+     * preserved. */
     via: "plant" | "plant-exec";
     /** The child, once there IS one. Undefined means the launcher has not
      * exec'd yet and still owns the window — it closes it itself, through
@@ -356,12 +350,10 @@ export interface HostEntry extends DnetHost {
   };
   /** A spawn-free local reclaimer — not an agent, and must not be staged to. */
   bootstrap?: { pid: number; startedAt: number };
-  /** Pending orders, kept priority-sorted; the agent consumes `staged[0]`. */
+  /** Pending orders, kept priority-sorted; the next agent consumes one. */
   staged?: Order[];
-  /** The order the NEXT-spawned process should run. A resident (or a finishing
-   *  order) sets this from `staged` just before its zero-delay `spawn`; the
-   *  booting process reads and clears it. Absent means the successor runs as a
-   *  resident. This is the whole order handoff — no closures, just data. */
+  /** The order reserved for a process that has been launched but not adopted.
+   *  This is the whole handoff: data rather than a cross-process closure. */
   pendingOrder?: Order;
   completed?: number;
   failed?: number;
@@ -382,9 +374,7 @@ export interface ControllerHandle {
   readonly startedAt: number;
   lastBeatAt: number;
   /** The one map: hostname → everything known and running. Agents read their
-   *  own entry here (their staged order, their wake latch); the controller
-   *  owns every write. Keyed by hostname — the thing that has one agent and one
-   *  RAM budget. */
+   *  own entry here; the controller owns every write. */
   hosts: DnetHostEntries;
   /** Monotonic network generation, advanced once per nextMutation turn. */
   mutationEpoch: number;
@@ -392,15 +382,6 @@ export interface ControllerHandle {
   noteMutation(at: number): number;
   /** Wake the controller's derive race — a probe, an adopt, a home order. */
   wake(cause: string): void;
-  /** Resolve once the next derive pass has finished.
-   *
-   * What an exiting order awaits before choosing its successor. Publishing a
-   * report and deriving its consequences are two microtask hops apart, so a
-   * body that picked its successor synchronously after settling always looked
-   * at the queue the controller had not filled yet: it spawned a resident, the
-   * derive staged the real order a beat later, and the fresh resident spawned
-   * AGAIN. Two spawns per order, and `[dnet:spin]` is that second one. */
-  derived(): Promise<void>;
   /** An agent registers itself the instant it boots. */
   adopt(host: string, handle: AgentHandle): void;
   /** Name the process a launcher just started, so the placing window it opened
@@ -453,7 +434,7 @@ export interface ControllerHandle {
   /** Plant calls this after the first probe and immediately before the agent
    * `exec`: it closes the placing window and hands back the order the derive
    * staged in it for the new process to adopt. The `exec` is sized from that
-   * order by `processSizeFor`, exactly as the spawn chain sizes its own. */
+   * order by `processSizeFor`. */
   claimPlanted(host: string): Order | undefined;
   /** Close the placing window without launching anything. */
   abandonPlant(host: string): void;
@@ -520,8 +501,6 @@ const DETAILS = ["dnet.getServerDetails"] as const;
  * and the game expresses as the script dying on its first uncovered call.
  * `tests/ram-budget.test.ts` pins that the agent's per-arm surface matches. */
 export const KIND_CALLS: Readonly<Record<OrderKind, readonly string[]>> = {
-  // Resident mode: spawn, and nothing else.
-  idle: [],
   // The dedicated list job: one `ls` of the host it stands on.
   inventory: ["dnsLookup", "ls", "read", "rm", ...DETAILS],
   bleed: ["dnet.heartbleed", ...DETAILS],
@@ -599,17 +578,12 @@ export const PROBER_ARMOURED_CALLS: readonly string[] = [...PROBER_CALLS, "spawn
 export const CONTROLLER_CALLS: readonly string[] = ["dnet.nextMutation"];
 
 /** Fixed per-kind RAM prices. `tests/ram-budget.test.ts` checks each literal
- * against `KIND_CALLS` and the game's `getFunctionRamCost` table.
- *
- * `spawning` keeps its own `spawn` chain (2.0 GB of it); `managed` is the
- * spawn-free price a controller-dispatched process pays. `pin` and `walk` are
- * identical in both because neither ever spawns. */
+ * against `KIND_CALLS` and the game's `getFunctionRamCost` table. */
 export const ORDER_PRICES: Readonly<Record<OrderKind, number>> = {
   attempt: 2.6,
   bleed: 2.3,
   bootstrapReclaim: 2.6,
   cache: 4.55,
-  idle: 1.6,
   induce: 5.7,
   inventory: 2.55,
   phish: 3.7,
@@ -649,18 +623,19 @@ export const PROBER_GB = 3.15;
  * around a storm we are about to fire ourselves. */
 export const PROBER_ARMOURED_GB = 5.15;
 
-/** A STASIS-linked host's prober, without `exec`.
+/** A STASIS-linked host's topology-only prober.
  *
  * `exec` is on the prober so a host can be relaunched locally after its
  * processes die. A stasis host cannot lose them: the engine's own mutation
  * guard is `openServer || isConnectedTo || hasStasisLink`, so neither the
  * restart nor the delete path will ever touch it. It is also remotely
  * exec-able for exactly as long as the link holds, so the controller can
- * always reach it from a neighbour. Paying 1.3 GB for a recovery that cannot
- * be needed is the definition of a reserve that should not exist. */
-export const PROBER_STASIS_GB = 1.85;
-/** The stasis prober's surface: no `exec`, for the reason above. */
-export const PROBER_STASIS_CALLS: readonly string[] = ["dnet.probe", "dnet.connectToSession"];
+ * always reach it through the shared ns proxy. Paying for either `exec` or
+ * `connectToSession` here would reserve a launch path the controller no longer
+ * uses; the atomic proxy lease owns both calls instead. */
+export const PROBER_STASIS_GB = 1.8;
+/** The stasis prober's exact surface: observe topology and nothing else. */
+export const PROBER_STASIS_CALLS: readonly string[] = ["dnet.probe"];
 /** The controller's own reserve on darkweb: base + a free mutation clock. */
 export const CONTROLLER_GB = 1.6;
 
@@ -673,7 +648,7 @@ export const CONTROLLER_GB = 1.6;
  * log ring, which only `heartbleed` reads back, and splitting that across jobs
  * races the 200-line ring. A one-shot candidate or a known password has no
  * response to read — its ring is drained by an ordinary `bleed`, on a second
- * vantage or on this agent's next spawn. */
+ * vantage or in a later agent. */
 export const ATTEMPT_LEAN_GB = 2.0;
 
 /** One kind's price. `needsRing` selects the full or lean attempt surface. */
@@ -681,9 +656,7 @@ export function priceOf(kind: OrderKind, needsRing = true): number {
   return kind === "attempt" && !needsRing ? ATTEMPT_LEAN_GB : ORDER_PRICES[kind];
 }
 
-/** The prober's exact allocation: base + its one billable call, no margin. */
-/** Convert usable host RAM into the exact thread count the engine can admit.
- * `ramOverride` is charged once per thread, base and spawn-back included. */
+/** Convert usable host RAM into the exact thread count the engine can admit. */
 export function threadsFor(roomGb: number, perThreadGb: number, scaled: boolean, requested = 1): number {
   if (!Number.isFinite(roomGb) || !Number.isFinite(perThreadGb) || roomGb <= 0 || perThreadGb <= 0) return 0;
   return scaled ? Math.floor(roomGb / perThreadGb) : requested;
@@ -696,43 +669,18 @@ export function hostsOf(order: Order): readonly string[] {
   return order.payload.targets.map((target) => target.host);
 }
 
-/** Take the next order off a host's queue — the one answer both hand-off paths
- * use.
- *
- * `spawn` and `exec` do the same three things: decide the job, start a process
- * sized for it, have that process adopt it. They differ in exactly one, and it
- * is a sizing detail the ORDER already carries: a spawn-chained process pays
- * 2 GB for `spawn` where a controller `exec` does not, which
- * `orderCalls(kind, controllerManaged)` priced into `ramOverrideGb` when the
- * order was filed. Everything before that is common.
- *
- * It was not common, and the two copies drifted. The `exec` side learned to
- * refuse orders the `spawn` side accepted, and a MANAGED host — the one host
- * with no spawn to fall back on — was left booting a resident that could not
- * reach its own queue, clearing itself, and being replanted into the same dead
- * end forever.
- *
- * `accepts` is the only knob and it is about REACHABILITY, never sizing: which
- * orders this particular hand-off is able to deliver. */
-/** How to size the process that will run `order` — or a bare resident when
- * there is none.
- *
- * The second half of the shared hand-off, beside `takeNextOrder`. `spawn` and
- * `exec` both decide a job, start a process sized for it, and let that process
- * adopt it; the ONE thing that differs is that a spawn-chained process must
- * pay 2 GB for `spawn` and an exec'd one must not — and that is already priced
- * into the order's own `ramOverrideGb` by `orderCalls(kind, controllerManaged)`
- * when the order was filed. So there is nothing left for the two paths to
- * disagree about, and this is where they stop being able to. */
+/** Size the process that will run `order`, or a bare base process when there
+ * is no immediate order. */
 export function processSizeFor(
   order: Order | undefined,
-  residentGb: number,
+  fallbackGb: number,
 ): { threads: number; ramOverride: number } {
   return order === undefined
-    ? { threads: 1, ramOverride: residentGb }
+    ? { threads: 1, ramOverride: fallbackGb }
     : { threads: order.threads, ramOverride: order.ramOverrideGb };
 }
 
+/** Take the first order this launch path can deliver from a host's queue. */
 export function takeNextOrder(
   entry: HostEntry,
   accepts: (order: Order) => boolean = () => true,

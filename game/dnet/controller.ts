@@ -19,6 +19,7 @@ import type {
 } from "./launch.ts";
 import {
   coverage,
+  discoverReports,
   foldLogDrain,
   foldAttempts,
   foldReports,
@@ -46,7 +47,7 @@ import {
   type TaskKind,
 } from "../../shared/strategy/dnet/plan.ts";
 import { choosePreemptionVantage, compareQueuedDnetWork, type PreemptionCandidate } from "../../shared/strategy/dnet/priority.ts";
-import { JOBS, TASK_KINDS, isSameTurn, priorityOf } from "../../shared/strategy/dnet/jobs.ts";
+import { JOBS, TASK_KINDS, fitOrderThreads, isSameTurn, priorityOf } from "../../shared/strategy/dnet/jobs.ts";
 import { planFarm, type FarmEconomics, type FarmHost, type FarmKind, type PromoteSymbol } from "../../shared/strategy/dnet/farm.ts";
 import { holdHostFrom, planHold as planHoldFromView, type HoldHost, type HoldTask } from "../../shared/strategy/dnet/hold.ts";
 import { modelEntry } from "../../shared/strategy/dnet/models.ts";
@@ -80,7 +81,6 @@ import {
 } from "../../shared/strategy/dnet/maze.ts";
 import {
   DNET_PROTOCOL,
-  KIND_CALLS,
   controllerIsLive,
   dnetRealm,
   hostsOf,
@@ -89,6 +89,7 @@ import {
   PROBER_GB,
   PROBER_ARMOURED_GB,
   PROBER_STASIS_GB,
+  SCRIPT_BASE_GB,
   CONTROLLER_GB,
   processSizeFor,
   takeNextOrder,
@@ -207,7 +208,10 @@ export async function main(ns: NS): Promise<void> {
    * runtime fields are optional), so the same map serves both. */
   const knowledge = hosts as unknown as DnetHosts;
   let mutationsSeen = restored?.knowledge.mutationsSeen ?? 0;
-  const vault = new Map<string, VaultEntry>((restored?.vault ?? []).map((entry) => [entry.hostname, cloneData(entry)]));
+  const vault = new Map<string, VaultEntry>();
+  /** Credentials restored from a checkpoint or disk are quarantined until an
+   * authoritative details+DNS observation proves the same server lifetime. */
+  const pendingVault = new Map<string, VaultEntry>((restored?.vault ?? []).map((entry) => [entry.hostname, cloneData(entry)]));
   const codes: Record<string, number> = { ...(restored?.codes ?? {}) };
   let spread: DnetSpreadReport | undefined = restored?.spread ? cloneData(restored.spread) : undefined;
   let farm: DnetFarmReport | undefined = restored?.farm ? cloneData(restored.farm) : undefined;
@@ -291,7 +295,7 @@ export async function main(ns: NS): Promise<void> {
    * re-run. Two bits because the two refreshes cost differently —
    * `getServerDetails` is a local read, a probe is a process on the host — and
    * nothing may conflate them. Set by the mutation, cleared by the refresh. */
-  let detailsRefreshDue = false;
+  let detailsRefreshDue = hosts.size > 0;
   let probeRefreshDue = false;
   let labCandidateHost: string | undefined;
   /** Hosts `planArmour` wants carrying the `spawn` chain. An INTENT, acted on
@@ -304,9 +308,8 @@ export async function main(ns: NS): Promise<void> {
    * Every write-through — a verified credential, a probe report, an adopted
    * agent, a settled order, a mutation — files its consequences on a microtask,
    * in the same engine turn as the fact. That is what lets a winning
-   * `authenticate` reach the vantage's staged queue BEFORE the same process's
-   * exit chain reads it (`agent.ts` `stageSuccessor`), so the plant runs on the
-   * spawn the attempt itself performs. It has to be that prompt: a `.d` hint
+   * `authenticate` reach the vantage's staged queue in the same engine turn as
+   * the completed attempt. It has to be that prompt: a `.d` hint
    * file names a neighbour as of the authenticate INSTANT, and
    * `exactNeighbourClueEpoch` discards it the moment a mutation lands between
    * the crack and the new host's first `ls`.
@@ -319,32 +322,16 @@ export async function main(ns: NS): Promise<void> {
    * and beat sweeps, watchdog cancellation, telemetry) plus a bounded re-derive
    * in case a fact was ever missed. */
   let deriveQueued = false;
-  /** Resolvers waiting for the pass this signal will run. Settled whether or
-   * not the pass actually derived, so a stood-down controller can never leave
-   * an exiting order parked on a promise. */
-  let deriveWaiters: (() => void)[] = [];
   const signalDerive = (): void => {
     if (deriveQueued) return;
     deriveQueued = true;
     void Promise.resolve().then(async () => {
       deriveQueued = false;
-      // A derive that throws must still release everything waiting on it: an
-      // exiting order parks on `derived()` and would never be woken.
-      try { if (!standDown) await fileWork(Date.now()); } catch { /* waiters below still run */ }
-      const waiting = deriveWaiters;
-      deriveWaiters = [];
-      for (const resolve of waiting) resolve();
+      try { if (!standDown) await fileWork(Date.now()); } catch {}
     });
   };
 
   // --- helpers --------------------------------------------------------------
-  const ensureEntry = (host: string): HostEntry => {
-    const existing = hosts.get(host);
-    if (existing) { existing.staged ??= []; return existing; }
-    const created: HostEntry = { hostname: host, lastSeenAt: Date.now(), seenAt: {}, dirty: {}, staged: [] };
-    hosts.set(host, created);
-    return created;
-  };
   /** Every host we can act FROM: one with a process, a lent `ns`, or a launch
    * on its way.
    *
@@ -444,8 +431,8 @@ export async function main(ns: NS): Promise<void> {
     if (pid === undefined || pid <= 0 || pid === ns.pid) return;
     void nsp("kill", pid).catch(() => { /* host gone */ });
   };
-  const retireVantage = (hostname: string, reason: string): void => {
-    const entry = hosts.get(hostname);
+  const retireVantage = (hostname: string, reason: string, detached?: HostEntry): void => {
+    const entry = hosts.get(hostname) ?? detached;
     if (entry !== undefined) {
       entry.inbound = undefined;
       if (entry.agent !== undefined) {
@@ -473,10 +460,11 @@ export async function main(ns: NS): Promise<void> {
     bootstrapDoneSet.delete(hostname);
     needsInventory.delete(hostname);
   };
-  const retireLifetime = (hostname: string, reason: string): void => {
+  const retireLifetime = (hostname: string, reason: string, detached?: HostEntry): void => {
     retireOrders(hostname, reason, () => true);
-    retireVantage(hostname, reason);
+    retireVantage(hostname, reason, detached);
     vault.delete(hostname);
+    pendingVault.delete(hostname);
     migrationCharge.delete(hostname);
     invalidateBackdoor(hostname);
     if (stasisLinked.has(hostname)) recordStasis(hostname, false);
@@ -498,11 +486,16 @@ export async function main(ns: NS): Promise<void> {
   const recordCredential = (entry: VaultEntry): void => {
     if (entry.hostname.length === 0) return;
     const host = hosts.get(entry.hostname);
-    if (host?.goneAt !== undefined) return;
+    if (!host) {
+      pendingVault.set(entry.hostname, { ...entry });
+      signalDerive();
+      return;
+    }
     const identity = entry.identity ?? host?.identity;
     if (entry.identity !== undefined && host?.identity !== undefined && entry.identity !== host.identity) return;
     const verified = { ...entry, ...(identity !== undefined ? { identity } : {}) };
     vault.set(entry.hostname, verified);
+    pendingVault.delete(entry.hostname);
     markCredentialKnown(host);
     removePendingFor(provisionalPool, entry.hostname);
     retireCracking(entry.hostname, "credential verified; cracking retired");
@@ -522,7 +515,7 @@ export async function main(ns: NS): Promise<void> {
   const recordProvisional = (entry: ProvisionalCredential): void => {
     if (entry.hostname.length === 0) return;
     const host = hosts.get(entry.hostname);
-    if (host?.goneAt !== undefined || vault.has(entry.hostname)) return;
+    if (!host || vault.has(entry.hostname)) return;
     const identity = entry.identity ?? host?.identity;
     const candidate = { ...entry, ...(identity !== undefined ? { identity } : {}) };
     const existing = provisionalPool.findIndex((h) => h.hostname === candidate.hostname && h.password === candidate.password && h.identity === candidate.identity);
@@ -540,7 +533,6 @@ export async function main(ns: NS): Promise<void> {
       ...(view?.passwordFormat !== undefined ? { passwordFormat: view.passwordFormat } : {}),
       hasCredential: vault.has(hostname),
       ...(view?.isStationary === true ? { isStationary: true } : {}),
-      ...(host?.goneAt !== undefined ? { gone: true } : {}),
     };
   };
   const recordNeighbourPassword = (source: string, password: string, at: number): void => {
@@ -553,10 +545,7 @@ export async function main(ns: NS): Promise<void> {
     }
   };
   const recordFileEvidence = (hostname: string, evidence: PasswordEvidence): void => {
-    if (hosts.get(hostname) === undefined) {
-      const named: ReportHost = { hostname, at: evidence.at, present: true };
-      foldReports(knowledge, [named], evidence.at, expiryOpts());
-    }
+    if (hosts.get(hostname) === undefined) return;
     const pendingAuthRecords = hosts.get(hostname)?.ring?.pendingAuthRecords ?? 0;
     const outcome: LogDrainOutcome = { pendingAuthRecords, evidence: [evidence] };
     foldLogDrain(hosts.get(hostname), outcome);
@@ -581,7 +570,7 @@ export async function main(ns: NS): Promise<void> {
       ? fresh<string[]>(hosts.get(request.from), "neighbours", Date.now(), expiryOpts())
       : undefined;
     const knownRefusal = knownDnetRefusalWaitMs(request.operation, {
-      targetGone: target?.goneAt !== undefined,
+      targetGone: target === undefined,
       ...(direct && neighbours !== undefined && request.host !== request.from ? { direct: neighbours.includes(request.host) } : {}),
       selfTarget: request.host === request.from,
       stationary: target?.isStationary,
@@ -626,10 +615,8 @@ export async function main(ns: NS): Promise<void> {
   };
 
   // --- pricing --------------------------------------------------------------
-  const budgets: Record<TaskKind, number> = Object.fromEntries(
-    (Object.keys(KIND_CALLS) as (keyof typeof KIND_CALLS)[])
-      .filter((k): k is TaskKind => k !== "idle" && k !== "bootstrapReclaim")
-      .map((kind) => [kind, priceOf(kind)]),
+  const budgets = Object.fromEntries(
+    TASK_KINDS.map((kind) => [kind, priceOf(kind)]),
   ) as Record<TaskKind, number>;
   /** What one host's armour costs: the `spawn` chain and nothing else. */
   const ARMOUR_GB = PROBER_ARMOURED_GB - PROBER_GB;
@@ -638,9 +625,9 @@ export async function main(ns: NS): Promise<void> {
    *
    * - The LAB WALKER keeps none: its prober is displaced outright because the
    *   walk needs every byte and leaves the host empty for `planSpread` anyway.
-   * - A STASIS host keeps a prober WITHOUT `exec`. The engine's mutation guard
+   * - A STASIS host keeps a topology-only prober. The engine's mutation guard
    *   exempts it (`openServer || isConnectedTo || hasStasisLink`), so it cannot
-   *   lose its processes and never needs to relaunch them locally.
+   *   lose its processes and managed agents are relaunched through `nsp`.
    * - Everything else keeps the full one, because `exec` is the only way a host
    *   that lost its processes gets any back — and, when `planArmour` has armed
    *   it, plus `spawn`, the only call that can outlive a restart of the host it
@@ -681,8 +668,8 @@ export async function main(ns: NS): Promise<void> {
     const view = planningView(host, at, expiry);
     if (view.maxRam === undefined) return 0;
     const blocked = view.blockedRam ?? 0;
-    // Darkweb keeps BOTH pieces of infrastructure beside its spawn-chain
-    // agent. Ordinary hosts keep only the prober; the lab walker keeps neither.
+    // Darkweb keeps the controller beside its prober and current agent.
+    // Ordinary hosts keep only the prober; the lab walker keeps neither.
     const fixedReserve = reserveProber ? proberReserveGb(hostname) + (hostname === selfHost ? CONTROLLER_GB : 0) : 0;
     return Math.max(0, view.maxRam - blocked - fixedReserve);
   };
@@ -693,7 +680,7 @@ export async function main(ns: NS): Promise<void> {
    * occupancy. Undefined when the host is gone. */
   const durableRoomGb = (host: string): number | undefined => {
     const entry = hosts.get(host);
-    if (entry === undefined || entry.goneAt !== undefined) return undefined;
+    if (entry === undefined) return undefined;
     const at = Date.now();
     const expiry = expiryOpts();
     const maxRam = fresh<number>(entry, "maxRam", at, expiry);
@@ -741,19 +728,31 @@ export async function main(ns: NS): Promise<void> {
   };
 
   // --- report handling (the promise-driven core) ----------------------------
+  const applyHostReports = (reports: readonly ReportHost[], at: number, discovery = false): void => {
+    const prior = new Map(reports.map((report) => [report.hostname, hosts.get(report.hostname)]));
+    const folded = discovery
+      ? discoverReports(knowledge, reports, at, expiryOpts())
+      : foldReports(knowledge, reports, at, expiryOpts());
+    for (const hostname of folded.hostsReplaced) {
+      retireLifetime(hostname, "server identity replaced", prior.get(hostname));
+    }
+    for (const hostname of folded.hostsRemoved) {
+      retireLifetime(hostname, "server is offline", prior.get(hostname));
+    }
+    for (const report of reports) {
+      if (!report.present || report.neighbours === undefined) continue;
+      const entry = hosts.get(report.hostname);
+      if (entry) {
+        retireLostEdgeOrders(entry, report.hostname, report.neighbours);
+        retireLostPin(entry, report.hostname, report.neighbours);
+      }
+    }
+  };
+
   const absorb = (result: Report): void => {
     const at = Date.now();
     if (result.hosts && result.hosts.length > 0) {
-      const folded = foldReports(knowledge, result.hosts, at, expiryOpts());
-      for (const hostname of folded.hostsReplaced) retireLifetime(hostname, "server identity replaced");
-      for (const hostname of folded.hostsForgotten) retireLifetime(hostname, "expired server tombstone forgotten");
-      for (const h of result.hosts) {
-        if (!h.present) retireLifetime(h.hostname, "server is gone");
-        else if (h.neighbours !== undefined) {
-          const entry = hosts.get(h.hostname);
-          if (entry) { retireLostEdgeOrders(entry, h.hostname, h.neighbours); retireLostPin(entry, h.hostname, h.neighbours); }
-        }
-      }
+      applyHostReports(result.hosts, at);
       if (result.hosts.some((h) => h.neighbours !== undefined)) signalDerive();
     }
     for (const [code, count] of Object.entries(result.codes ?? {})) note(Number(code), count);
@@ -821,7 +820,15 @@ export async function main(ns: NS): Promise<void> {
 
   const onReport = (report: Report): void => {
     const order = orderById.get(report.id);
-    absorb(report);
+    const attributed = order?.targetIdentity === undefined || report.hosts === undefined
+      ? report
+      : {
+        ...report,
+        hosts: report.hosts.map((host) => host.hostname === report.host && host.identity === undefined
+          ? { ...host, identity: order.targetIdentity }
+          : host),
+      };
+    absorb(attributed);
     // The migration-charge estimate, from the engine's own response readback.
     // A completed move reports 0 (the engine resets on landing); a target's
     // identity death clears it in `retireLifetime`.
@@ -843,9 +850,13 @@ export async function main(ns: NS): Promise<void> {
     }
     const reportedGone = report.hosts?.some((h) => h.hostname === report.host && !h.present) === true;
     if (report.targetState === "gone" && !reportedGone) {
-      const gone: ReportHost = { hostname: report.host, at: Date.now(), present: false };
-      foldReports(knowledge, [gone], gone.at, expiryOpts());
-      retireLifetime(report.host, "server reported gone");
+      const gone: ReportHost = {
+        hostname: report.host,
+        ...(order?.targetIdentity !== undefined ? { identity: order.targetIdentity } : {}),
+        at: Date.now(),
+        present: false,
+      };
+      applyHostReports([gone], gone.at);
     } else if (report.targetState === "replaced"
       && report.hosts?.some((h) => h.hostname === report.host && h.present && h.identity !== undefined && h.identity !== order?.targetIdentity) !== true) {
       retireLifetime(report.host, "server identity changed");
@@ -889,10 +900,8 @@ export async function main(ns: NS): Promise<void> {
     }
     // A game kill of a live process: count the loss and let the next derive replant.
     if (report.died === true) {
-      if (report.kind !== "idle") {
-        residentsLost++;
-        note(LOCAL_CODE.JobDied);
-      }
+      residentsLost++;
+      note(LOCAL_CODE.JobDied);
       const e = hosts.get(report.from);
       if (e && e.agent?.order.id === report.id) e.agent = undefined;
       invalidateBackdoor(report.from);
@@ -900,25 +909,21 @@ export async function main(ns: NS): Promise<void> {
     } else if (report.ok === false && report.targetState === undefined) {
       note(LOCAL_CODE.JobDied);
     }
-    // Per-host work accounting, for the panel and the beat. `idle` is not
-    // work, and a retired STAGED order never ran on anyone.
-    if (report.kind !== "idle") {
-      const runner = hosts.get(report.from);
-      if (runner !== undefined) {
-        if (report.ok) runner.completed = (runner.completed ?? 0) + 1;
-        else {
-          runner.failed = (runner.failed ?? 0) + 1;
-          if (report.detail !== undefined) runner.lastError = report.detail.slice(0, 200);
-        }
+    // Per-host work accounting, for the panel and the beat. A retired staged
+    // order never reports and therefore never reaches this path.
+    const runner = hosts.get(report.from);
+    if (runner !== undefined) {
+      if (report.ok) runner.completed = (runner.completed ?? 0) + 1;
+      else {
+        runner.failed = (runner.failed ?? 0) + 1;
+        if (report.detail !== undefined) runner.lastError = report.detail.slice(0, 200);
       }
     }
     orderById.delete(report.id);
     settleCompletion(report.id);
-    // A finished order does NOT need the net re-planned: `stageSuccessor` hands
-    // the agent whatever is queued here, and that is the whole of "what next".
-    // The planner is needed for one thing — filling a queue that has run dry —
-    // so derive only when THIS vantage has nothing left. Facts that open work
-    // elsewhere wake it themselves.
+    // A queued successor needs no new planning: atExit wakes dispatch after
+    // this process frees its RAM. Replan only when this vantage ran dry; facts
+    // that open work elsewhere wake the controller themselves.
     if (report.died !== true && (hosts.get(report.from)?.staged ?? []).length === 0) {
       signalDerive();
     }
@@ -976,7 +981,29 @@ export async function main(ns: NS): Promise<void> {
     return true;
   };
 
-  /** START the next staged order on this host, through its lender.
+  /** Re-fit a queued order against the host at the last responsible moment.
+   * Armour and owner-block RAM may have changed since derivation sized it. */
+  const fitQueuedOrder = (entry: HostEntry, order: Order): boolean => {
+    const room = durableRoomGb(entry.hostname);
+    if (room === undefined) return false;
+    const fitted = fitOrderThreads(order.kind, order.threads, order.ramOverrideGb, room);
+    if (fitted < 1) {
+      retireStaged(order, "cancelled", `no longer fits ${entry.hostname} beside its current block and prober`);
+      return false;
+    }
+    order.threads = fitted;
+    return true;
+  };
+
+  const restoreRefusedLaunch = (entry: HostEntry, order: Order, offer: { withdraw(): void }): void => {
+    offer.withdraw();
+    if (entry.pendingOrder === order) entry.pendingOrder = undefined;
+    entry.inbound = undefined;
+    const staged = entry.staged ??= [];
+    if (!staged.some((held) => held.id === order.id)) staged.unshift(order);
+  };
+
+  /** START the next staged order on an ordinary host, through its lender.
    *
    * The launcher is the prober, not the worker: `exec` once per host instead of
    * `spawn` once per THREAD, which would charge 2 GB on every thread for a
@@ -988,18 +1015,17 @@ export async function main(ns: NS): Promise<void> {
    *
    * Synchronous throughout, which is what makes it safe to call from `stage` —
    * two dispatches for the same host cannot interleave. */
-  const dispatch = (entry: HostEntry): void => {
+  const dispatchLocal = (entry: HostEntry): void => {
     if (entry.agent !== undefined || processInbound(entry)) return;
     if (standDown) return;
+    if (stasisLinked.has(entry.hostname)) return;
     const borrowed = entry.ns;
     if (borrowed === undefined) return;
     // THE ORDER BOUNDARY, and the only place a prober can change size.
     //
-    // A resident is never idle — it dies and is replaced for its next job — so
-    // there is no quiet moment to wait for. This is that moment: the previous
-    // order's allocation has just been freed and the next one has not been
-    // launched, which is the one instant the host has room for a second prober
-    // and nothing in flight to interrupt.
+    // Each agent runs one order and exits. This boundary, after the previous
+    // allocation is gone and before the next launch, is the safe time to resize
+    // the prober without interrupting work.
     //
     // It costs this host one dispatch turn. `reportProbe` signals a derive when
     // the replacement checks in, so the order that was waiting goes out on the
@@ -1007,6 +1033,7 @@ export async function main(ns: NS): Promise<void> {
     if (resizeProber(entry, borrowed)) return;
     const next = takeNextOrder(entry);
     if (next === undefined) return;
+    if (!fitQueuedOrder(entry, next)) return;
     entry.pendingOrder = next;
     entry.inbound = { at: Date.now(), via: "plant-exec" };
     const offer = offerLaunch<DnetAgentLaunch>({ kind: "dnet-agent", host: entry.hostname });
@@ -1022,14 +1049,78 @@ export async function main(ns: NS): Promise<void> {
     if (pid === 0) {
       // Nothing started. Put the order back where the next pass will find it
       // rather than leaving it in a handoff slot nobody is coming for.
-      offer.withdraw();
-      entry.pendingOrder = undefined;
-      entry.inbound = undefined;
-      const staged = entry.staged ??= [];
-      staged.unshift(next);
+      restoreRefusedLaunch(entry, next, offer);
       return;
     }
     entry.inbound = { ...entry.inbound, pid };
+  };
+
+  /** A stasis prober deliberately carries no `exec`. Start its next body from
+   * the shared ns resident instead: connectToSession and exec must run on ONE
+   * PID, because the session belongs to the caller. `guaranteeFit` prepays and
+   * locks that pair; retries cover an externally killed resident and the
+   * engine's transient zero while a prior allocation is being reaped. */
+  const MANAGED_DISPATCH_ATTEMPTS = 3;
+  const dispatchManaged = async (entry: HostEntry): Promise<void> => {
+    if (!stasisLinked.has(entry.hostname)) return;
+    if (entry.agent !== undefined || processInbound(entry) || standDown) return;
+    // Keep the permanent topology observer beside the managed body. A missing
+    // prober is repaired by spreading; launching work alone would leave the
+    // host unable to reveal or validate its neighbour edges.
+    if (entry.ns === undefined || entry.prober === undefined || entry.prober.pid <= 0) return;
+    const credential = vault.get(entry.hostname);
+    if (credential === undefined) return;
+    const next = takeNextOrder(entry);
+    if (next === undefined) return;
+    if (!fitQueuedOrder(entry, next)) return;
+
+    entry.pendingOrder = next;
+    entry.inbound = { at: Date.now(), via: "plant-exec" };
+    const offer = offerLaunch<DnetAgentLaunch>({ kind: "dnet-agent", host: entry.hostname });
+    let pid = 0;
+    let failureCode = 0;
+    for (let attempt = 0; attempt < MANAGED_DISPATCH_ATTEMPTS && pid === 0; attempt++) {
+      try {
+        const outcome = await nsp.guaranteeFit(
+          ["dnet.connectToSession", "exec"],
+          async (resident) => {
+            const connected = await resident("dnet.connectToSession", entry.hostname, credential.password);
+            if (!connected.success) return { pid: 0, code: connected.code };
+            const launched = await resident(
+              "exec",
+              agentFile,
+              entry.hostname,
+              temporaryRunOptions(processSizeFor(next, next.ramOverrideGb)),
+              offer.launchId,
+            );
+            return { pid: launched, code: launched === 0 ? 0 : 200 };
+          },
+        );
+        pid = outcome.pid;
+        failureCode = outcome.code;
+        if (failureCode === 401 || failureCode === 503) break;
+      } catch {
+        // The whole authority pair is the retry unit. A resident killed from
+        // outside the proxy loses its PID-bound session with it.
+      }
+    }
+
+    if (pid > 0) {
+      if (entry.agent === undefined) entry.inbound = { ...(entry.inbound ?? { at: Date.now(), via: "plant-exec" }), pid };
+      return;
+    }
+
+    restoreRefusedLaunch(entry, next, offer);
+    if (failureCode === 503) {
+      retireLifetime(entry.hostname, "stasis target was unavailable during managed dispatch");
+    } else if (failureCode === 401) {
+      // This order cannot be launched remotely without the rejected password;
+      // retire it rather than preserve a queue that can never drain.
+      const staged = entry.staged ?? [];
+      entry.staged = staged.filter((held) => held.id !== next.id);
+      retireStaged(next, "cancelled", "credential rejected during managed dispatch");
+      retireRejectedCredential(entry.hostname);
+    }
   };
 
   const stage = (entry: HostEntry, order: Order): boolean => {
@@ -1058,8 +1149,8 @@ export async function main(ns: NS): Promise<void> {
     staged.push(order);
     // Staging and starting are one act. The controller holds the launcher, so
     // the only reason not to start is that the host is already busy — which
-    // `dispatch` checks for itself.
-    dispatch(entry);
+    // each dispatch path checks for itself.
+    if (!stasisLinked.has(entry.hostname)) dispatchLocal(entry);
     return true;
   };
 
@@ -1144,7 +1235,6 @@ export async function main(ns: NS): Promise<void> {
         freeGb: usableGb(entry.hostname, at, expiry),
         ...(view.caches !== undefined ? { caches: view.caches } : {}),
         isLab: isLabyrinth(entry.hostname, view.modelId),
-        ...(entry.goneAt !== undefined ? { goneAt: entry.goneAt } : {}),
         busy,
       });
     }
@@ -1152,7 +1242,7 @@ export async function main(ns: NS): Promise<void> {
       if (entry.agent !== undefined || entry.bootstrap !== undefined || !vault.has(entry.hostname)) continue;
       const view = planningView(entry, at, expiry);
       if (view.blockedRam === undefined || view.blockedRam <= 0) continue;
-      if (view.isStationary === true || entry.goneAt !== undefined) continue;
+      if (view.isStationary === true) continue;
       const busy = new Set<FarmKind>();
       for (const job of inFlight.get(entry.hostname) ?? []) if (job.kind === "reclaim") busy.add("reclaim");
       farmHosts.push({
@@ -1183,7 +1273,7 @@ export async function main(ns: NS): Promise<void> {
       const order = entry.agent?.order;
       if (order === undefined || order.kind !== "attempt" || vault.has(order.host)) continue;
       const target = hosts.get(order.host);
-      if (target === undefined || target.goneAt !== undefined) continue;
+      if (target === undefined) continue;
       const list = modelEntry(target.modelId)?.candidates?.({
         passwordLength: target.passwordLength,
         passwordFormat: target.passwordFormat,
@@ -1426,7 +1516,7 @@ export async function main(ns: NS): Promise<void> {
    * prober is permanent. */
   const probeEveryLender = (at: number): void => {
     for (const entry of [...hosts.values()]) {
-      if (entry.ns === undefined || entry.goneAt !== undefined) continue;
+      if (entry.ns === undefined) continue;
       probeThrough(entry, entry.prober?.pid ?? 0, at);
     }
   };
@@ -1509,11 +1599,11 @@ export async function main(ns: NS): Promise<void> {
     if (detailsRefreshDue) {
       detailsRefreshDue = false;
       for (const entry of [...hosts.values()]) {
-        if (entry.goneAt !== undefined || entry.hostname === selfHost || covered.has(entry.hostname)) continue;
+        if (entry.hostname === selfHost || covered.has(entry.hostname)) continue;
         cover(await describeThrough(entry.hostname, undefined, at));
       }
     }
-    if (observed.length > 0) absorb({ id: "probe-drain", kind: "inventory", host: selfHost, from: selfHost, ok: true, hosts: observed });
+    if (observed.length > 0) applyHostReports(observed, at, true);
     for (const h of newlySeen) needsInventory.add(h);
   };
 
@@ -1530,7 +1620,7 @@ export async function main(ns: NS): Promise<void> {
     const observed = described.filter((h): h is ReportHost => h !== undefined);
     for (const h of bootstrapDoneSet) needsInventory.add(h);
     bootstrapDoneSet.clear();
-    if (observed.length > 0) absorb({ id: "bootstrap-done", kind: "inventory", host: selfHost, from: selfHost, ok: true, hosts: observed });
+    if (observed.length > 0) applyHostReports(observed, at, true);
   };
 
   /** Every prober, on every mutation. The net changed, so the whole net is
@@ -1543,7 +1633,7 @@ export async function main(ns: NS): Promise<void> {
     for (const entry of hosts.values()) {
       const host = entry.hostname;
       if (host === labCandidateHost || entry.agent?.order.kind === "walk") continue;
-      if (entry.agent === undefined) continue; // only a host with a resident can re-exec
+      if (entry.agent === undefined) continue; // only an active local process can re-exec
       if (entry.agent?.order.kind === "relaunchProbe" || (entry.staged ?? []).some((o) => o.kind === "relaunchProbe")) continue;
       // An armoured prober already scheduled its own successor. Filing a
       // relaunch into that gap lands a SECOND prober a millisecond later, and
@@ -1582,9 +1672,9 @@ export async function main(ns: NS): Promise<void> {
 
   const SPREAD_LIMITS = {
     ...DEFAULT_SPREAD_LIMITS,
-    agentRamGb: priceOf("idle") + PROBER_GB,
-    residentRamGb: priceOf("idle"),
-    managedResidentRamGb: priceOf("idle"),
+    agentRamGb: SCRIPT_BASE_GB + PROBER_GB,
+    residentRamGb: SCRIPT_BASE_GB,
+    managedResidentRamGb: SCRIPT_BASE_GB,
     proberRamGb: PROBER_GB,
     managedProberRamGb: PROBER_STASIS_GB,
     bootstrapRamGb: priceOf("bootstrapReclaim"),
@@ -1599,7 +1689,7 @@ export async function main(ns: NS): Promise<void> {
     const backdoorLife = msPerHostEventAny(["restarted", "deleted"], netDepth ?? DEFAULT_NET_DEPTH, bitNode ?? 15, backdoors.size);
     for (const [hostname, installedAt] of backdoors) {
       const host = hosts.get(hostname);
-      if (host !== undefined && host.goneAt === undefined && at - installedAt <= backdoorLife) set.add(hostname);
+      if (host !== undefined && at - installedAt <= backdoorLife) set.add(hostname);
     }
     return set;
   };
@@ -1611,16 +1701,29 @@ export async function main(ns: NS): Promise<void> {
    * behind `unknown-ram` waiting for an adjacency that never comes. */
   const surveyRemoteTargets = async (at: number, expiry: ExpiryOpts): Promise<void> => {
     const surveyed: ReportHost[] = [];
+    for (const [hostname, saved] of [...pendingVault]) {
+      const described = await describeThrough(hostname, undefined, at);
+      if (described === undefined) continue;
+      if (!described.present || (saved.identity !== undefined && described.identity !== saved.identity)) {
+        pendingVault.delete(hostname);
+        if (!described.present) applyHostReports([described], at, true);
+        continue;
+      }
+      applyHostReports([described], at, true);
+      if (described.identity !== undefined && hosts.get(hostname)?.identity === described.identity) {
+        recordCredential({ ...saved, identity: described.identity });
+      }
+    }
     for (const hostname of vault.keys()) {
       if (!stasisLinked.has(hostname) && !backdoors.has(hostname)) continue;
       const entry = hosts.get(hostname);
-      if (entry?.goneAt !== undefined || entry?.agent !== undefined) continue;
+      if (entry?.agent !== undefined) continue;
       if (entry !== undefined && fresh<number>(entry, "maxRam", at, expiry) !== undefined) continue;
       const described = await describeThrough(hostname, undefined, at);
       if (described !== undefined) surveyed.push(described);
     }
     if (surveyed.length === 0) return;
-    absorb({ id: "remote-survey", kind: "inventory", host: selfHost, from: selfHost, ok: true, hosts: surveyed });
+    applyHostReports(surveyed, at, true);
   };
 
   /** Give every admitted plant the BEST vantage that can reach it.
@@ -1683,9 +1786,9 @@ export async function main(ns: NS): Promise<void> {
     }
   };
 
-  /** Close a placing window nothing ever arrived through: a spawn refused for
-   * RAM, an `exec`'d child that died before its first line, a plant killed
-   * between `preparePlant` and its resident exec — all three leave an entry
+  /** Close a placing window nothing ever arrived through: an `exec` refusal,
+   * a child that died before its first line, or a plant killed between
+   * `preparePlant` and its agent exec all leave an entry
    * saying a process is coming, and no process. `processInbound` asks the
    * engine, so the host rejoins the plant pool on the very next pass rather
    * than after a window lapses. */
@@ -1712,9 +1815,8 @@ export async function main(ns: NS): Promise<void> {
    * `deriveTasks` skips re-deriving that work onto a vantage that could run it.
    *
    * Three hosts are exempt, because on each the work is genuinely waiting for a
-   * launcher that exists: a STASIS host (no spawn, so a staged order IS the
-   * hand-off contract), a host inside its placing window, and a host that still
-   * has its LENDER. */
+   * launcher that exists: a stasis host with its proxy path, a host inside its
+   * placing window, and a host that still has its lender. */
   const releaseStranded = (): void => {
     for (const entry of hosts.values()) {
       if (entry.agent !== undefined || processInbound(entry)) continue;
@@ -1776,7 +1878,7 @@ export async function main(ns: NS): Promise<void> {
       } as DnetHost;
     });
 
-    const seedHolder = stormHosts.find((h) => h.goneAt === undefined && h.stormSeed === true);
+    const seedHolder = stormHosts.find((h) => h.stormSeed === true);
     const labWalkedNow = [...hosts.values()].some((entry) => isLabyrinth(entry.hostname, fresh<string>(entry, "modelId", at, expiry)) && vault.has(entry.hostname));
     const seedHunt = seedHolder === undefined && (labWalkedNow || stasisLinked.size >= stasisLimit) && (lastStormFiredAt === undefined || at - lastStormFiredAt > STORM_COOLDOWN_MS);
     // Hold BEFORE farm: the farm's gang grind is aimed at the hold plan's lab
@@ -1814,7 +1916,7 @@ export async function main(ns: NS): Promise<void> {
     // unexplained. Name it here, where both the routes and the map are in hand.
     const routed = new Set(spreadCandidates.map((candidate) => candidate.host));
     const routeless: Refusal[] = [...hosts.values()]
-      .filter((entry) => entry.hostname !== selfHost && entry.goneAt === undefined
+      .filter((entry) => entry.hostname !== selfHost
         && entry.agent === undefined && vault.has(entry.hostname) && !routed.has(entry.hostname))
       .map((entry): Refusal => {
         // A host inside its placing window is skipped for the RIGHT reason — it
@@ -1825,7 +1927,7 @@ export async function main(ns: NS): Promise<void> {
             host: entry.hostname,
             why: "launching",
             detail: entry.bootstrap !== undefined
-              ? "a local reclaimer holds this host; no resident is planted until it exits"
+              ? "a local reclaimer holds this host; no agent launches until it exits"
               : `a process was announced ${at - (entry.inbound?.at ?? at)}ms ago and has not adopted yet`,
           };
         }
@@ -1833,7 +1935,7 @@ export async function main(ns: NS): Promise<void> {
           host: entry.hostname,
           why: "no-route",
           detail: remoteExec.has(entry.hostname)
-            ? "remote exec is believable but no resident is standing anywhere to launch from"
+            ? "remote exec is believable but no launch vantage is standing"
             : "no vantage's adjacency still names it, and no fresh backdoor or stasis fact to reach it without one",
         };
       });
@@ -1886,7 +1988,7 @@ export async function main(ns: NS): Promise<void> {
     armourWanted.clear();
     const armourCandidates: ArmourCandidate[] = [];
     for (const entry of hosts.values()) {
-      if (entry.goneAt !== undefined || entry.hostname === selfHost) continue;
+      if (entry.hostname === selfHost) continue;
       // Free capacity beyond everything standing, spelled the same way
       // `resizeProber` spells it so the two read the same host the same way.
       // They ask different questions of it — the policy asks whether 2 GB is
@@ -1932,7 +2034,7 @@ export async function main(ns: NS): Promise<void> {
       const host = hosts.get(candidate.hostname);
       const stale = at - candidate.at > provisionalLife;
       const replaced = candidate.identity !== undefined && host?.identity !== undefined && candidate.identity !== host.identity;
-      if (stale || replaced || host?.goneAt !== undefined || vault.has(candidate.hostname)) { provisionalPool.splice(index, 1); continue; }
+      if (stale || replaced || host === undefined || vault.has(candidate.hostname)) { provisionalPool.splice(index, 1); continue; }
       if (spentGuesses.has(`${candidate.hostname} ${candidate.password}`)) continue;
       const id = looseId(candidate.password);
       guessFor.set(id, candidate.password);
@@ -1990,7 +2092,10 @@ export async function main(ns: NS): Promise<void> {
     // so this only catches hosts that became free since — a worker exited, a
     // refused launch was put back, a lender arrived on a host that was already
     // holding orders.
-    for (const entry of [...hosts.values()]) dispatch(entry);
+    for (const entry of [...hosts.values()]) {
+      if (stasisLinked.has(entry.hostname)) await dispatchManaged(entry);
+      else dispatchLocal(entry);
+    }
     return tasks;
   };
 
@@ -2056,19 +2161,19 @@ export async function main(ns: NS): Promise<void> {
     const expiry = expiryOpts();
     const staleReason = (order: Order): string | undefined => {
       // A plant is judged per TARGET, never by `order.host` — which names only
-      // the first of them. One gone, replaced or already-resident target costs
+      // the first of them. One gone, replaced or already-running target costs
       // the frontier that stop; the order dies only when every stop is gone.
       if (order.kind === "plant") {
         order.payload.targets = order.payload.targets.filter((target) => {
           const host = hosts.get(target.host);
-          if (host === undefined || host.goneAt !== undefined) return false;
+          if (host === undefined) return false;
           if (target.identity !== undefined && host.identity !== undefined && target.identity !== host.identity) return false;
           return host.agent === undefined;
         });
         return order.payload.targets.length === 0 ? "nothing left on the frontier to reach" : undefined;
       }
       const host = hosts.get(order.host);
-      if (!host || host.goneAt !== undefined) return "target is gone";
+      if (!host) return "target is gone";
       if (order.targetIdentity !== undefined && host.identity !== undefined && order.targetIdentity !== host.identity) return "target identity changed";
       if (order.kind === "attempt" && vault.has(order.host)) return "credential already verified";
       if (order.kind === "cache" && !(fresh<string[]>(host, "caches", at, expiry) ?? []).includes(order.payload.filename)) {
@@ -2085,7 +2190,7 @@ export async function main(ns: NS): Promise<void> {
       }
       entry.staged = keep;
       // The handoff slot goes stale by the same rules. A `pendingOrder` whose
-      // spawn died is otherwise never inspected again, and `projectInFlight`
+      // launch died is otherwise never inspected again, and `projectInFlight`
       // reads it as busy FOREVER — a plant target silently barred from the pool.
       const pending = entry.pendingOrder;
       if (pending !== undefined) {
@@ -2095,9 +2200,8 @@ export async function main(ns: NS): Promise<void> {
           retireStaged(pending, "cancelled", reason);
         } else if (entry.agent === undefined && entry.bootstrap === undefined
           && !processInbound(entry)) {
-          // Still a valid order, but nothing is coming to adopt it: its spawn
-          // died with it in hand, or the exec was refused. Hand the order back;
-          // the next resident (or a re-plant) picks it up at its own price.
+          // Still a valid order, but nothing is coming to adopt it: the child
+          // died or exec was refused. Return it for the next dispatch or plant.
           entry.pendingOrder = undefined;
           (entry.staged ??= []).unshift(pending);
         }
@@ -2169,16 +2273,13 @@ export async function main(ns: NS): Promise<void> {
       return rendezvous.mutationEpoch;
     },
     wake() { signalDerive(); },
-    derived() {
-      return new Promise<void>((resolve) => {
-        deriveWaiters.push(resolve);
-        // The caller has just settled its report, so `onReport` is already
-        // queued ahead of this signal's pass and the pass will see it.
-        signalDerive();
-      });
-    },
     adopt(host, handle) {
-      const entry = ensureEntry(host);
+      const entry = hosts.get(host);
+      if (entry === undefined) {
+        handle.settle({ id: handle.order.id, kind: handle.order.kind, host: handle.order.host, from: handle.order.from, ok: false, died: true, detail: "host is no longer tracked" });
+        return;
+      }
+      entry.staged ??= [];
       agentHostsSeen.add(host);
       entry.inbound = undefined;
       entry.agent = handle;
@@ -2199,7 +2300,11 @@ export async function main(ns: NS): Promise<void> {
       });
     },
     async beginProbeRefresh(host) {
-      const entry = ensureEntry(host);
+      const entry = hosts.get(host);
+      if (entry === undefined) {
+        const refresh: DnetProbeRefresh = { refreshed: Promise.resolve(undefined), settle() {} };
+        return { refresh, launch: false };
+      }
       if (entry.probeRefresh !== undefined) {
         // A barrier is worth joining while the prober behind it is alive. No
         // pid means the plant that opened it has not exec'd yet and still owns
@@ -2237,7 +2342,8 @@ export async function main(ns: NS): Promise<void> {
       refresh.settle(undefined);
     },
     reportProbe(host, neighbours, at, pid, refresh) {
-      const entry = ensureEntry(host);
+      const entry = hosts.get(host);
+      if (entry === undefined) { refresh?.settle(undefined); return; }
       // Whichever prober reports most recently owns the slot. Retire the prior
       // pid BEFORE publishing the replacement, so a repair launch racing a
       // merely-late process still converges to one prober.
@@ -2292,7 +2398,8 @@ export async function main(ns: NS): Promise<void> {
       entry.proberKillMark = pid;
     },
     lend(host, borrowed, pid, refresh, armoured) {
-      const entry = ensureEntry(host);
+      const entry = hosts.get(host);
+      if (entry === undefined) { refresh?.settle(undefined); killPid(pid); return; }
       // The successor has ARRIVED, so the window it was holding open is closed.
       // Its descriptor was captured by this very process, so there is nothing
       // left to withdraw.
@@ -2325,12 +2432,12 @@ export async function main(ns: NS): Promise<void> {
       }
     },
     preparePlant(host) {
-      const entry = ensureEntry(host);
+      const entry = hosts.get(host);
+      if (entry === undefined) return { reuseProber: true };
       // Only while the files group is actually UNKNOWN — never seen, or
       // dirtied by an action whose `ls` has not landed. Re-arming on every
-      // plant regardless is a livelock: a controller-MANAGED resident has no
-      // spawn, so it exits whenever something is queued, so the spread
-      // replants it, forever. Gating on the fact itself terminates, because
+      // plant regardless is a livelock: spread keeps planting a host whose
+      // inventory is already known. Gating on the fact itself terminates because
       // the inventory that runs clears the dirty flag and the next plant asks
       // for nothing. The dirty case has to be here as well as in `onReport`:
       // `retireVantage` drops the pending request with the agent, and without
@@ -2343,7 +2450,7 @@ export async function main(ns: NS): Promise<void> {
       entry.inbound = { at: Date.now(), via: "plant" };
       // A live, tracked prober is reusable on ANY host. Launching a second
       // beside a survivor wastes 1.8 GB, and in the band where usableRam admits
-      // one prober but not two it makes the resident exec fail with
+      // one prober but not two it makes the agent exec fail with
       // `launch-refused` forever. A live LENDER is the proof one is standing —
       // a fact the prober published, not one we polled for.
       const proberPid = entry.prober?.pid;
@@ -2370,26 +2477,20 @@ export async function main(ns: NS): Promise<void> {
       }
     },
     claimPlanted(host) {
-      const entry = ensureEntry(host);
+      const entry = hosts.get(host);
+      if (entry === undefined) return undefined;
       // REFRESH the placing window, never close it. The plant has not exec'd
-      // the resident yet, and a host reading agentless AND unclaimed lets the
+      // the agent yet, and a host reading agentless AND unclaimed lets the
       // derive `releaseStranded` the very order it was three lines from
       // launching. `adopt` closes the window; `abandonPlant` closes it on
       // failure. Nothing else may.
       entry.inbound = { at: Date.now(), via: "plant-exec" };
-      // WHAT this window may hand over depends on whether the host can reach
-      // its own queue afterwards.
-      //
-      // A MANAGED (stasis) host cannot: it has no spawn, so a resident that
-      // boots and finds work queued exits for the controller to re-exec it WITH
-      // that order. Refusing to claim here is a dead end, not a conservative
-      // choice.
-      //
-      // An ORDINARY host has its spawn chain, so it takes only the same-turn
-      // housekeeping this window exists for: the `ls` that must run inside the
-      // mutation epoch the host was planted in, while its `.d` hint file still
-      // names an attributable neighbour. Anything heavier only inflates the
-      // `exec`'s ask, losing the agent outright to save it one spawn.
+      // A stasis target may claim any queued order because the plant already
+      // holds the remote authority needed to launch it. An ordinary target
+      // claims only same-turn housekeeping: its first `ls` must land inside
+      // the mutation epoch in which the host was planted, while the `.d` hint
+      // still names an attributable neighbour. Later work can use the local
+      // prober's ordinary dispatch path.
       const managed = stasisLinked.has(host);
       const claimable = (order: Order): boolean => managed || isSameTurn(order.kind);
       // A pending order we may not claim is not ours to overwrite either —
@@ -2403,17 +2504,9 @@ export async function main(ns: NS): Promise<void> {
         // A thread-scaled order shrinks to the room; anything else is RETIRED —
         // never re-queued at the head, where it would block a queue only remote
         // plants can drain.
-        const free = durableRoomGb(host);
-        if (free !== undefined && next.ramOverrideGb > 0) {
-          if (JOBS[next.kind].threadScaled) {
-            const fit = Math.floor(free / next.ramOverrideGb);
-            if (fit >= 1 && fit < next.threads) next.threads = fit;
-          }
-          if (next.ramOverrideGb * next.threads > free) {
-            retireStaged(next, "cancelled", `no longer fits ${host} beside its block and prober`);
-            entry.pendingOrder = undefined;
-            next = undefined;
-          }
+        if (!fitQueuedOrder(entry, next)) {
+          entry.pendingOrder = undefined;
+          next = undefined;
         }
       }
       if (next === undefined) return undefined;
@@ -2421,7 +2514,7 @@ export async function main(ns: NS): Promise<void> {
       entry.pendingOrder = next;
       return next;
     },
-    registerBootstrap(host, pid) { ensureEntry(host).bootstrap = { pid, startedAt: Date.now() }; },
+    registerBootstrap(host, pid) { const entry = hosts.get(host); if (entry) entry.bootstrap = { pid, startedAt: Date.now() }; },
     bootstrapDone(host) { const e = hosts.get(host); if (e) e.bootstrap = undefined; bootstrapDoneSet.add(host); signalDerive(); },
     deps,
     snapshot(requestedAt = Date.now()): DnetSnapshot {
@@ -2435,7 +2528,7 @@ export async function main(ns: NS): Promise<void> {
       const expiry = expiryOpts();
       const ram: DnetRamSnapshot[] = [...hosts.values()].flatMap((entry) => {
         const total = fresh<number>(entry, "maxRam", requestedAt, expiry);
-        if (total === undefined || entry.goneAt !== undefined) return [];
+        if (total === undefined) return [];
         const blocked = Math.max(0, Math.min(fresh<number>(entry, "blockedRam", requestedAt, expiry) ?? 0, total));
         const occupied = Math.min(total, blocked + heldGb(entry));
         return [{
@@ -2451,7 +2544,7 @@ export async function main(ns: NS): Promise<void> {
         generation: launch.generation,
         capturedAt: requestedAt,
         knowledge: recoveryKnowledge(launch.generation, hosts, mutationsSeen),
-        vault: [...vault.values()].map(cloneData),
+        vault: [...new Map([...pendingVault, ...vault]).values()].map(cloneData),
         codes: { ...codes },
         ...(spread ? { spread: cloneData(spread) } : {}),
         ...(farm ? { farm: cloneData(farm) } : {}),
@@ -2520,7 +2613,7 @@ export async function main(ns: NS): Promise<void> {
       if (inputs.fileInvalidations !== undefined) {
         for (const invalidation of inputs.fileInvalidations) {
           const entry = hosts.get(invalidation.host);
-          if (entry === undefined || entry.goneAt !== undefined) continue;
+          if (entry === undefined) continue;
           entry.dirty.files = true;
           needsInventory.add(invalidation.host);
         }
@@ -2544,9 +2637,12 @@ export async function main(ns: NS): Promise<void> {
     standDown() { standDown = true; signalDerive(); },
   };
 
-  // BOOTSTRAP: give the fold darkweb's identity, pre-create its entry.
-  foldReports(knowledge, [{ hostname: selfHost, at: bootAt, present: true }], bootAt, expiryOpts());
-  ensureEntry(selfHost);
+  // BOOTSTRAP: darkweb is the one seed whose existence is supplied by launch.
+  if (!hosts.has(selfHost)) {
+    hosts.set(selfHost, { hostname: selfHost, lastSeenAt: bootAt, seenAt: {}, dirty: {}, staged: [] });
+  } else {
+    hosts.get(selfHost)!.staged ??= [];
+  }
   // HAND OVER: the rendezvous IS the handover, and nothing has to be told.
   // Agents read `live()` fresh on every pass and never hold a controller across
   // an await, so a replacement is picked up on the next thing any of them does.
@@ -2611,7 +2707,7 @@ export async function main(ns: NS): Promise<void> {
             && !(await running(entry.prober.pid, entry.hostname));
         if (!dead) continue;
         // `retireVantage` settles an ACTIVE order with `died`, and `onReport`
-        // counts that loss itself — only a bare resident goes uncounted.
+        // counts that loss itself; a prober-only vantage is counted here.
         if (entry.agent === undefined) residentsLost++;
         retireVantage(entry.hostname, `${entry.hostname} process died during a mutation`);
         invalidateBackdoor(entry.hostname);

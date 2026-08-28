@@ -397,7 +397,7 @@ function detailCard(
     if (attempt.modelId !== undefined && host.modelId !== undefined && attempt.modelId !== host.modelId) {
       // The ledger was built against a different model, which means the host
       // was replaced under it. Every count above is about a password that no
-      // longer exists — see the `goneAt` branch in the fold.
+      // no longer exists because the host identity was replaced.
       attemptRows.push([
         "ledger model",
         `<span class="bad">${esc(attempt.modelId)} — stale, the host was replaced</span>`,
@@ -417,7 +417,7 @@ function detailCard(
     // raw(), because `card` escapes a plain string title and the hostname is
     // already escaped here.
     raw(esc(host.hostname)),
-    (lost === "" ? "" : note(`${lost} has left the digest — forgotten, or past the KNOWLEDGE_MAX_HOSTS cap`))
+    (lost === "" ? "" : note(`${lost} has left the live digest or fallen past the KNOWLEDGE_MAX_HOSTS cap`))
     + summary
     + (host.credentialKnown ? `<p class="good">credential held</p>` : "")
     + (host.agent
@@ -428,7 +428,6 @@ function detailCard(
           + ` · dnet RAM ${residentRam(host.agent)}</p>`
         : `<p class="bad">resident lost — last beat ${fmtTime(now - host.agent.lastBeatAt)} ago</p>`
       : "")
-    + (host.goneAt !== undefined ? `<p class="bad">gone — its identity facts were dropped with it</p>` : "")
     // A cache dies with its host, so an unopened one is a standing offer with an
     // expiry date on it. `.d.cache` is called out because it is the only kind
     // that can hand back a coding contract.
@@ -656,17 +655,11 @@ export const dnetTab: Tab = {
         // separate them. This tile counts the rows the page actually draws —
         // the map below it and the `all` filter badge are the same rows — so it
         // is named after them, and the census keeps the word "known".
-        label: hint("hosts on the map", "non-gone hosts in the published digest; the full census is in the Knowledge card"),
-        // Counted OVER THE ROWS WE HAVE, not `hosts.length - gone`: the digest
-        // caps `hosts` at KNOWLEDGE_MAX_HOSTS while `gone` is counted over every
-        // host the controller holds (`publish.ts`), so subtracting one from the
-        // other mixes two populations — it under-reports as soon as the cap
-        // bites and goes NEGATIVE once more hosts are gone than the cap carries.
-        value: String(knowledge.hosts.filter((entry) => entry.goneAt === undefined).length),
+        label: hint("hosts on the map", "hosts in the published digest; the full census is in the Knowledge card"),
+        value: String(knowledge.hosts.length),
         // The digest caps at KNOWLEDGE_MAX_HOSTS, and a capped count that says
         // nothing about the cap is a smaller net than the one we are flying.
-        // `totalHosts` counts gone hosts too — a third population — so the sub
-        // says "seen" rather than letting it read as a total of this tile.
+        // `totalHosts` is the uncapped live census.
         sub: knowledge.truncated && knowledge.totalHosts !== undefined
           ? `of ${knowledge.totalHosts} seen — digest capped`
           : undefined,
@@ -765,7 +758,6 @@ export const dnetTab: Tab = {
         case "locked": return host.authState === "auth-required";
         case "roomy": return (host.usableRam ?? 0) >= AGENT_RAM_GB;
         case "stale": return isStale(host, now, expiry);
-        case "gone": return host.goneAt !== undefined;
         default: return true;
       }
     });
@@ -858,7 +850,6 @@ export const dnetTab: Tab = {
                 + `${esc(AUTH_LABEL[h.authState])}</span>`;
             return [
               auth,
-              h.goneAt !== undefined ? `<span class="bad">gone</span>` : "",
               h.stasisLinked ? `<span class="good">pinned</span>` : "",
               h.isStationary ? `<span class="muted">fixed</span>` : "",
               isStale(h, now, expiry) ? `<span class="muted">stale</span>` : "",
@@ -1064,7 +1055,6 @@ export const dnetTab: Tab = {
         ["hosts known (census)", String(cover.known)],
         ["adjacency known", `${cover.adjacencyKnown} / ${cover.known}`],
         ["believed fresh", meter(cover.freshFraction, fmtPct(cover.freshFraction))],
-        ["gone", String(cover.gone)],
         ...(cover.cracked !== undefined ? [["cracked", String(cover.cracked)] as [Markup, Markup]] : []),
         ...(cover.plantable !== undefined
           ? [[hint("plantable", "cracked AND with believable room for an agent"), String(cover.plantable)] as [Markup, Markup]]
@@ -1611,7 +1601,6 @@ export const dnetTab: Tab = {
           { value: "locked", label: "auth required" },
           { value: "roomy", label: "has RAM", title: `free RAM >= one resident (${fmtRam(AGENT_RAM_GB)})` },
           { value: "stale", label: "stale" },
-          { value: "gone", label: "gone" },
         ], "all")
         + servers
         // The DIGEST's own cap, which is a different truncation from the

@@ -174,6 +174,93 @@ describe("ns proxy", () => {
     await proxy.free();
   });
 
+  test("guaranteeFit prepays an authority sequence and keeps it on one resident", async () => {
+    const world = realm({
+      members: {
+        a: { gb: 1.5 },
+        "dnet.connectToSession": { gb: 0.05, impl: () => ({ success: true, code: 200 }) },
+        exec: { gb: 1.3, impl: () => 77 },
+      },
+    });
+    const proxy = createNsProxy({ label: "nsp", budgetGb: 2, place: world.place });
+
+    await loose(proxy)("a");
+    const first = world.residents[0]!;
+    const pid = await proxy.call.guaranteeFit(
+      ["dnet.connectToSession", "exec"],
+      async (resident) => {
+        const connected = await (resident as LooseCall)("dnet.connectToSession", "dn-1", "pw");
+        expect(connected).toMatchObject({ success: true });
+        return await (resident as LooseCall)("exec", "dnet/agent.js", "dn-1", {});
+      },
+    );
+
+    expect(pid).toBe(77);
+    expect(world.residents).toHaveLength(2);
+    expect(first.alive).toBe(false);
+    expect(world.residents[1]!.calls).toEqual(["dnet.connectToSession", "exec"]);
+    // Leased exec is intentionally resident-bound; the nsMain exec list still
+    // contains only the resident launches themselves.
+    expect(world.execs).toHaveLength(2);
+    await proxy.free();
+  });
+
+  test("guaranteeFit rejects undeclared calls and free waits for the lease", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const world = realm({
+      members: {
+        slow: { gb: 1, impl: () => gate },
+        quick: { gb: 1 },
+      },
+    });
+    const proxy = createNsProxy({ label: "nsp", budgetGb: 8, place: world.place });
+
+    await expect(proxy.call.guaranteeFit(["slow"], (resident) =>
+      (resident as LooseCall)("quick"))).rejects.toThrow("undeclared ns.quick");
+
+    let leaseDone = false;
+    const lease = proxy.call.guaranteeFit(["slow"], async (resident) => {
+      await (resident as LooseCall)("slow");
+      leaseDone = true;
+    });
+    await Promise.resolve();
+    const freeing = proxy.free();
+    await Promise.resolve();
+    expect(world.placements[0]!.released).toBe(false);
+    expect(leaseDone).toBe(false);
+    release();
+    await Promise.all([lease, freeing]);
+    expect(world.placements[0]!.released).toBe(true);
+  });
+
+  test("a failed leased member invalidates its resident before the whole-pair retry", async () => {
+    let calls = 0;
+    const world = realm({
+      members: {
+        authority: {
+          gb: 1,
+          impl: () => {
+            calls++;
+            if (calls === 1) throw new Error("resident disappeared");
+            return "fresh";
+          },
+        },
+      },
+    });
+    const proxy = createNsProxy({ label: "nsp", budgetGb: 4, place: world.place });
+
+    await expect(proxy.call.guaranteeFit(["authority"], (resident) =>
+      (resident as LooseCall)("authority"))).rejects.toThrow("resident disappeared");
+    const retried = await proxy.call.guaranteeFit(["authority"], (resident) =>
+      (resident as LooseCall)("authority"));
+
+    expect(retried).toBe("fresh");
+    expect(world.residents).toHaveLength(2);
+    expect(world.residents[0]!.alive).toBe(false);
+    await proxy.free();
+  });
+
   test("calls on one resident are serialised, so a pending await never overlaps", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });

@@ -72,7 +72,6 @@ export interface FarmHost {
   reclaimOnly?: true;
   /** The labyrinth's own host. Its cache is the deferred one. */
   isLab?: boolean;
-  goneAt?: number;
   /** Farm work a live process is already doing to this host. */
   busy?: ReadonlySet<FarmKind>;
   /** Believable adjacency, for the remote-reclaim election: a helper must be
@@ -267,7 +266,7 @@ export function phishWindowOpen(inputs: Pick<FarmInputs, "now" | "lastPhishCache
  * cannot make, leaving nobody guaranteed to chase the cache.
  */
 export function electCacheHunter(hosts: readonly FarmHost[]): string | undefined {
-  const pool = hosts.filter((host) => host.goneAt === undefined && host.isLab !== true);
+  const pool = hosts.filter((host) => host.isLab !== true);
   if (pool.length === 0) return undefined;
   const best = [...pool].sort((a, b) => {
     const primary = compareDepthDesc(a.depth, b.depth) || b.freeGb - a.freeGb;
@@ -308,7 +307,7 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
   const windowOpen = phishWindowOpen(inputs);
   const maxPhishThreads = inputs.maxPhishThreads ?? DEFAULT_MAX_PHISH_THREADS;
   const eligibleHunters = hosts.filter((host) =>
-    host.goneAt === undefined && host.isLab !== true && host.reclaimOnly !== true
+    host.isLab !== true && host.reclaimOnly !== true
     && host.caches !== undefined && host.freeGb >= inputs.gbPerThread.phish);
   const preferredHunters = eligibleHunters.filter((host) => (host.difficulty ?? -Infinity) > 3);
   const hunterPool = preferredHunters.length > 0 ? preferredHunters : eligibleHunters;
@@ -361,7 +360,7 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
   let maximumFleetMoney = 0;
   let maximumFleetCharisma = 0;
   for (const host of hosts) {
-    if (host.goneAt !== undefined || host.isLab === true || host.reclaimOnly === true || host.caches === undefined) continue;
+    if (host.isLab === true || host.reclaimOnly === true || host.caches === undefined) continue;
     const rates = ratesByHost.get(host.host)!;
     maximumFleetMoney += Math.max(rates.phish.moneyPerSec, rates.promote.moneyPerSec);
     maximumFleetCharisma += Math.max(rates.phish.charismaExpPerSec, rates.promote.charismaExpPerSec);
@@ -389,10 +388,6 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
     };
     const busy = host.busy ?? new Set<FarmKind>();
 
-    if (host.goneAt !== undefined) {
-      refuse("gone", "the host is offline; darknet hosts go permanently");
-      continue;
-    }
 
     // --- 1. cache ---------------------------------------------------------
     //
@@ -457,7 +452,7 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
       if (selfThreads >= 1) grinders.push({ threads: selfThreads });
       if (host.hasCredential === true) {
         for (const other of hosts) {
-          if (other.host === host.host || other.goneAt !== undefined || other.isLab === true) continue;
+          if (other.host === host.host || other.isLab === true) continue;
           if (!(other.neighbours?.includes(host.host) ?? false)) continue;
           const threads = Math.min(Math.floor(other.freeGb / inputs.gbPerThread.reclaim), maxReclaim);
           if (threads >= 1) grinders.push({ from: other.host, threads });
@@ -507,7 +502,6 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
       ? [...hosts]
         .filter((other) =>
           other.host !== host.host
-          && other.goneAt === undefined
           && other.isLab !== true
           && (other.neighbours?.includes(host.host) ?? false)
           && Math.floor(other.freeGb / inputs.gbPerThread.reclaim) >= 1)

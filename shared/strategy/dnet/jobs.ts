@@ -113,17 +113,10 @@ export const TASK_KINDS = Object.keys(ROWS) as readonly TaskKind[];
  * drift from the table. `farm.ts` keys its price and busy maps on this. */
 export type FarmKind = { [K in TaskKind]: (typeof ROWS)[K] extends { farm: true } ? K : never }[TaskKind];
 
-/** Kinds that are not derived work at all — a price and a call surface, and
- * nothing else. Never planned, never queued, never handed to a body. They have
- * no row here, which is why `priorityOf` answers `+Infinity` for them. */
-export type ProcessMode = "idle" | "bootstrapReclaim";
-
 export const isTaskKind = (kind: string): kind is TaskKind => kind in ROWS;
 
-/** Queue rank. The two callers that ask about a process mode — or about work
- * read back from a snapshot, where the kind is only a string — get
- * `+Infinity`, which sorts them behind everything and keeps them out of every
- * comparison without each caller remembering to exclude them. */
+/** Queue rank. Unknown strings (including the unqueued bootstrap reclaimer)
+ * sort behind real work and cannot participate in preemption. */
 export function priorityOf(kind: string): number {
   return isTaskKind(kind) ? JOBS[kind].priority : Number.POSITIVE_INFINITY;
 }
@@ -132,6 +125,28 @@ export function priorityOf(kind: string): number {
  * records whose kind came off a snapshot. */
 export function isSameTurn(kind: string): boolean {
   return isTaskKind(kind) && JOBS[kind].sameTurn === true;
+}
+
+/** Revalidate one queued order against the room available at its FINAL launch
+ * boundary. A thread-scaled order may shrink; every other order is atomic and
+ * either still fits whole or must be re-derived elsewhere. Returning zero is
+ * the explicit refusal, never a request to launch zero threads. */
+export function fitOrderThreads(
+  kind: TaskKind,
+  requestedThreads: number,
+  ramOverrideGb: number,
+  roomGb: number,
+): number {
+  if (!Number.isFinite(requestedThreads) || !Number.isFinite(ramOverrideGb) || !Number.isFinite(roomGb)) return 0;
+  const requested = Math.max(0, Math.floor(requestedThreads));
+  if (requested < 1 || ramOverrideGb <= 0 || roomGb <= 0) return 0;
+  if (JOBS[kind].threadScaled === true) {
+    // RAM prices are decimal hundredths, but their binary quotient can land a
+    // hair below an integer (11.1 / 3.7 === 2.999999...). Admission elsewhere
+    // uses the same tiny tolerance; without it an exact fit loses a thread.
+    return Math.min(requested, Math.max(0, Math.floor((roomGb + 1e-9) / ramOverrideGb)));
+  }
+  return ramOverrideGb * requested <= roomGb + 1e-9 ? requested : 0;
 }
 
 /** Whether newly-ready work may displace active work on the same worker.
