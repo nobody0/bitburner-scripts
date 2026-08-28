@@ -1825,6 +1825,22 @@ The isolation evidence, for the darknet owner:
 Darknet internals are out of scope for the route layer; the route side stays
 estimation-pure and is unit-pinned up to the boundary.
 
+**BN15 walk-start blocker, diagnosed for the darknet owner (2026-08-28).**
+With the freeze fixed and installs flowing, bn15-full seed 1 still never
+launches a walker: at vt 5.5 h, charisma 380 vs the 300 gate, 40 hosts
+cracked, 5 augmentations installed — and `hold.refused` says `lab-walked:
+"we already hold this lab's password, so its maze has been finished"`. The
+inference at shared/strategy/dnet/hold.ts:318 (`lab.hasCredential` ⇒
+walked) is wrong for labyrinths: the lab's password is capturable passively
+like any darknet host's (sniffing, caches, dictionaries), and upstream
+makes a known password USELESS there — `handleLabyrinthPassword` answers
+the correct password with "the best way to beat a maze is to find the end"
+unless the walker is standing at the exit, where completion grants admin
+and the `the_great_work` cache. "Walked" is admin on the lab (set only on
+arrival) or the reward cache's existence, never the credential. Verified:
+no walker ever ran in any cycle of either 24 h run, no lab reward was ever
+produced, and the route correctly still says "complete labyrinth stage 1".
+
 **Losing A/B: the combat-gate weight split (85f567b2, reverted).** Some
 factions post their combat gate as four one-stat requirements, and the four
 needs at full weight quadruple-priced one gate (Mug outbid the measured
