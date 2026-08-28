@@ -77,17 +77,11 @@ export interface FarmScenario {
   /** Run `planArmour`, so the fleet wears the `spawn` chain that dodges
    * `restartServer` around a storm.
    *
-   * `"off"` is the shipped fleet today and the honest baseline. `"firing"` arms
-   * only once the storm is being fired or is already burning. `"ready"` also
-   * arms while every gate but the phish window is green, buying lead time — more
-   * of the fleet reaches an order boundary before the burst — at the cost of
-   * wearing armour while nothing is happening.
-   *
    * Only the storm rung can be exercised here: `planArmour`'s other rung is a
    * backdoor, and `#backdoored()` excludes stasis-linked hosts while a stasis
    * link is the only thing in either arena that sets `backdoorInstalled` — so
    * that pool is always empty. `tests/dnet-armour.test.ts` covers it. */
-  armour?: "off" | "firing" | "ready";
+  armour?: boolean;
 }
 
 export const SHIPPED_FARM: FarmScenario = { name: "shipped", stormEnabled: true, labPresent: true };
@@ -421,8 +415,6 @@ export function runFarmCase(
 
   let moneyStart = world.player.money;
 
-  let stormImminent = false;
-
   /** Move the fleet's armour toward what `planArmour` wants.
    *
    * Production can only resize a prober at an order boundary — the microtask
@@ -434,8 +426,8 @@ export function runFarmCase(
    * That partial coverage is not a defect of the policy, it is the policy: a
    * storm that finds half the fleet armoured still re-cascades from every
    * survivor, and each survivor's `exec` reaches its own neighbours. */
-  const applyArmourPolicy = (): void => {
-    if ((policy.armour ?? "off") === "off") return;
+  const applyArmourPolicy = (stormImminent: boolean): void => {
+    if (policy.armour !== true) return;
     const candidates: ArmourCandidate[] = [];
     for (const [name, agent] of agents) {
       if (agent.bootstrap || name === walkerHost || !truth(name)) continue;
@@ -614,6 +606,7 @@ export function runFarmCase(
 
     // The storm, through its own gates.
     const hold: Array<NonNullable<DeriveOptions["hold"]>[number]> = [];
+    let stormImminent = false;
     if (policy.stormEnabled) {
       const views: DnetHost[] = [];
       for (const host of knowledge.values()) {
@@ -644,10 +637,9 @@ export function runFarmCase(
       if (storm.fire) {
         hold.push({ kind: "storm", host: storm.fire.host, from: storm.fire.from, reason: storm.fire.reason });
       }
-      stormImminent = storm.imminent
-        || (policy.armour === "ready" && storm.awaitingPhishWindow === true);
+      stormImminent = storm.imminent;
     }
-    applyArmourPolicy();
+    applyArmourPolicy(stormImminent);
 
     const agentFreeGb = new Map<string, number>();
     for (const name of agents.keys()) agentFreeGb.set(name, jobFreeGb(name));

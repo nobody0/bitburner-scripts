@@ -1130,16 +1130,6 @@ export interface StormPlan {
    * opens seconds ahead of the engine's 5 s warning and well ahead of the phase
    * that actually restarts anything. */
   imminent: boolean;
-  /** Every gate but the phish window is green: a seed is in hand on a
-   * reachable host, the harvest is done, the links are spent and the walker is
-   * safe. The storm fires on the next `.d.cache`.
-   *
-   * This is the established net's RESTING state and it persists for long
-   * stretches, so it is reported separately from `imminent` rather than folded
-   * into it. Arming on it buys lead time — more of the fleet reaches an order
-   * boundary before the burst — at the cost of wearing armour while nothing is
-   * happening. `bench:sim:dnet-farm` prices both. */
-  awaitingPhishWindow?: boolean;
   refused: StormRefusal[];
 }
 
@@ -1251,11 +1241,11 @@ export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormP
         ? "no .d.cache ever sighted; waiting to fire just after one lands"
         : `last .d.cache landed ${Math.round((ctx.now - ctx.lastPhishCacheAt) / 1000)}s ago; firing only within ${Math.round(overlapMs / 1000)}s of one`,
     );
-    // NOT imminent — but READY. Every other gate is green, so the storm fires
-    // on the next `.d.cache`. That is the only lead time anyone gets, and
-    // whether it is worth arming on is a measured question, not a definition:
-    // see `awaitingPhishWindow`.
-    return { imminent: false, awaitingPhishWindow: true, refused };
+    // NOT imminent, even though every other gate is green. The storm fires on
+    // the next `.d.cache`, but that is the established net's RESTING state and
+    // it persists for long stretches — arming on it was measured and cost more
+    // than the extra lead time saved. See `spec/dnet.md`.
+    return { imminent: false, refused };
   }
 
   return {

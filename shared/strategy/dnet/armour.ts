@@ -53,7 +53,9 @@ export interface ArmourCandidate {
 }
 
 export interface ArmourContext {
-  /** The storm is one gate from firing, or already burning. */
+  /** A storm is being fired now, or is already burning — `StormPlan.imminent`.
+   *  NOT "a storm could fire soon": that is the established net's resting state
+   *  and arming on it was measured and rejected. */
   stormImminent: boolean;
   /** What `spawn` costs, passed in rather than imported so this layer stays
    *  free of `game/`. */

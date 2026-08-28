@@ -1272,22 +1272,22 @@ route — so the mean cost of a restart is a few seconds of one host's capacity,
 and there is nothing for a standing reserve to buy. It was **removed rather than
 left switched off**.
 
-**How much lead time to buy is the one tuned choice**, because a prober can only
-be resized at an order boundary and only hosts that reach one before the burst
-get armed. `bench:sim:dnet-farm` prices both arms over sixteen paired seeds
-against the shipped fleet's 72.17 stranded GB-h and 3.9 unrecovered hosts:
+Over sixteen paired seeds, against the shipped fleet's 72.17 stranded GB-h and
+3.9 unrecovered hosts, the armour costs **0.47 GB-h** and leaves 23.55 stranded
+and 0.8 unrecovered, dodging 28.6 restarts: total cost `-48.16` GB-h, 95% CI
+`-75.87..-20.45`, better on 12 seeds of 16. Against the 72.17 an unarmoured
+fleet strands, that is not far off free.
 
-| arm | armours when | armour GB-h | stranded GB-h | dodged | unrecovered | total cost vs shipped |
-| --- | --- | --- | --- | --- | --- | --- |
-| `firing` | the storm is being fired, or burning | 0.47 | 23.55 | 28.6 | 0.8 | `-48.16`, CI `-75.87..-20.45`, 12/16 |
-| `ready` | also while only the phish window is shut | 2.58 | 28.11 | 39.4 | 1.2 | `-41.48`, CI `-69.94..-13.02`, 13/16 |
-
-`ready` buys minutes of lead time and dodges a third more restarts, but it wears
-armour through the established net's resting state and the extra 2 GB-h costs
-more than the extra dodges save. **Production ships `firing`** —
-`StormPlan.imminent` — and `awaitingPhishWindow` is reported separately so the
-alternative stays measurable rather than becoming a fork. At 0.47 GB-h against
-the 72.17 the unarmoured fleet strands, the armour is not far off free.
+**A longer lead-in was tried and rejected.** A prober can only be resized at an
+order boundary, so only hosts that reach one before the burst get armed, and
+arming earlier catches more of them. Arming from the moment every gate but the
+phish window was green dodged a third more restarts (39.4) — but that state is
+the established net's RESTING state, not a warning, so it wore armour for
+2.58 GB-h and left MORE stranded (28.11) and more unrecovered (1.2). It lost on
+total cost (`-41.48` against `-48.16`) and was removed rather than kept as a
+switch. The lead-in that remains is free: the controller stamps
+`lastStormFiredAt` pessimistically at claim time, so `imminent` opens before the
+engine's own 5 s warning.
 
 **Taking it off matters as much as putting it on**, and there are two rules:
 
@@ -1310,7 +1310,7 @@ Together those two halved the armour bill — 1.04 GB-h to 0.47 — while slight
 instead of idling on hosts that have already taken their hit.
 
 What armour does NOT buy is throughput. Caches per hour are flat and money spans
-zero on both arms (`firing` `-$12m/h`, CI `-103.98..79.77`). **The capacity
+zero (`-$12m/h`, CI `-103.98..79.77`). **The capacity
 ledger is the proven result. There is no measured earnings effect, and none
 should be claimed.** That is not an argument against the armour: this lane's
 reconquest replants at zero virtual cost, so it prices the capacity a restart
@@ -1720,7 +1720,7 @@ then measures two hours without resetting the world, RNG, charisma, or planner
 state. Resetting only counters prevents the initial RAM-block backlog from
 masquerading as stable cache throughput. The lane reports both means and p10
 rates for caches and money across paired seeds. Its policy counterfactuals are
-withholding the storm and the two armour arms; the post-lab row is a lifecycle
+withholding the storm and the armour; the post-lab row is a lifecycle
 phase, not a tuning candidate. Production fixes the validated choices in code:
 depth-first cache hunting (capacity breaks depth ties), a ten-minute optional
 block-clear budget, and storm admission within thirty seconds of a phishing

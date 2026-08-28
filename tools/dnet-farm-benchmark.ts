@@ -27,12 +27,9 @@ const policies: FarmScenario[] = [
   SHIPPED_FARM,
   { ...SHIPPED_FARM, name: "no storm", stormEnabled: false },
   { ...SHIPPED_FARM, name: "post-lab (no walker)", labPresent: false },
-  // The armour arms. The webstorm restarts every movable survivor at once, so
-  // armour is the only policy with anything left standing afterwards; the
-  // question these two settle is how much LEAD TIME is worth buying, since a
-  // prober can only be resized at an order boundary.
-  { ...SHIPPED_FARM, name: "armour (firing)", armour: "firing" },
-  { ...SHIPPED_FARM, name: "armour (ready)", armour: "ready" },
+  // The webstorm restarts every movable survivor at once, so armour is the only
+  // policy with anything left standing afterwards.
+  { ...SHIPPED_FARM, name: "armour", armour: true },
 ];
 
 const seeds = Array.from({ length: seedCount }, (_, index) => index + 1);
@@ -101,8 +98,7 @@ const strandedOf = (held: readonly FarmRun[]): number[] =>
  *  the capacity armour holds. One number, so the trade cannot be read one-sided. */
 const totalCostOf = (held: readonly FarmRun[]): number[] =>
   held.map((run) => (run.restartLostGbMs + run.armourGbMs) / 3_600_000);
-const firing = runs.get("armour (firing)")!;
-const ready = runs.get("armour (ready)")!;
+const armour = runs.get("armour")!;
 const against = (
   metric: string,
   candidate: readonly FarmRun[],
@@ -123,12 +119,10 @@ const comparisons = [
   // The armour arms, paired on the same seeds as everything else. `stranded`
   // and `total cost` are the two that decide it: earnings move slowly against
   // seed noise, while the capacity ledger is what armour directly changes.
-  against("money/h ($m)", firing, "armour (firing)", moneyOf, false),
-  against("stranded GB-h", firing, "armour (firing)", strandedOf, true),
-  against("total cost GB-h", firing, "armour (firing)", totalCostOf, true),
-  against("money/h ($m)", ready, "armour (ready)", moneyOf, false),
-  against("stranded GB-h", ready, "armour (ready)", strandedOf, true),
-  against("total cost GB-h", ready, "armour (ready)", totalCostOf, true),
+  against("caches/h", armour, "armour", cachesOf, false),
+  against("money/h ($m)", armour, "armour", moneyOf, false),
+  against("stranded GB-h", armour, "armour", strandedOf, true),
+  against("total cost GB-h", armour, "armour", totalCostOf, true),
 ];
 console.table(comparisons.map(({ metric, result }) => {
   return {
