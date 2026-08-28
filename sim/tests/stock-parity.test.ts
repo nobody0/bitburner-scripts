@@ -4,18 +4,15 @@ import {
   COMMISSION,
   CYCLE_FLIP_CHANCE,
   FORECAST_CHANGE_PER_MOVEMENT,
-  FORECAST_GAP_CLAMP,
   FORECAST_INFLUENCE_LIMIT,
   FORECAST_NUDGE_PER_OP,
   FOUR_SIGMA_API_COST,
-  FOUR_SIGMA_DATA_COST,
+  expectedPriceFactor,
   MS_PER_TICK,
   MS_PER_TICK_MIN,
-  SHARE_TX_RECOVERY_PER_TICK,
   TICKS_PER_CYCLE,
   TIX_API_COST,
   unlockCosts,
-  WSE_ACCOUNT_COST,
 } from "../../shared/strategy/stock/market.ts";
 import { replaceCurrentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import { getBitNodeMultipliers } from "../vendor/bitburner/src/BitNode/BitNodeMults.ts";
@@ -28,10 +25,8 @@ import { forecastChangePerPriceMovement } from "../vendor/bitburner/src/StockMar
 import { forecastForecastChangeFromHack } from "../vendor/bitburner/src/StockMarket/PlayerInfluence.ts";
 import { STOCK_PROMOTION_CYCLE_DECAY } from "../features/dnet.ts";
 import {
-  getStockMarket4SDataCost,
   getStockMarket4STixApiCost,
   getStockMarketTixApiCost,
-  getStockMarketWseCost,
 } from "../vendor/bitburner/src/StockMarket/StockMarketCosts.ts";
 
 /** Parity between the SHIPPED transcription and the vendored game source.
@@ -98,10 +93,8 @@ describe("market constant parity", () => {
     expect(COMMISSION).toBe(StockMarketConstants.StockMarketCommission);
   });
 
-  test("the unlock prices, at their BN1 values", () => {
-    expect(WSE_ACCOUNT_COST).toBe(StockMarketConstants.WseAccountCost);
+  test("the automation unlock prices, at their BN1 values", () => {
     expect(TIX_API_COST).toBe(StockMarketConstants.TixApiCost);
-    expect(FOUR_SIGMA_DATA_COST).toBe(StockMarketConstants.MarketData4SCost);
     expect(FOUR_SIGMA_API_COST).toBe(StockMarketConstants.MarketDataTixApi4SCost);
   });
 
@@ -121,7 +114,10 @@ describe("market constant parity", () => {
     ).text();
     return engine.then((text) => {
       expect(text).toContain(`if (roll < ${CYCLE_FLIP_CHANCE})`);
-      expect(text).toContain(`stock.shareTxUntilMovement + ${SHARE_TX_RECOVERY_PER_TICK}`);
+      expect(text).toContain("stock.shareTxUntilMovement + 10");
+      expect(text).toContain("stock.changePrice(stock.price * (1 + av))");
+      expect(text).toContain("stock.changePrice(stock.price / (1 + av))");
+      expect(text).toContain("chc = 0.1");
       // The darknet decay is an inline literal too, and it is applied by the
       // ENGINE rather than by us — `sim/features/dnet.ts` only holds the charges.
       // So the source text is the only thing that can notice upstream changing
@@ -130,19 +126,25 @@ describe("market constant parity", () => {
     });
   });
 
-  test("the second-order forecast gap clamp", async () => {
-    const stock = await Bun.file(new URL("../vendor/bitburner/src/StockMarket/Stock.ts", import.meta.url)).text();
-    expect(stock).toContain(`Math.min(Math.max(diff, -${FORECAST_GAP_CLAMP}), ${FORECAST_GAP_CLAMP})`);
+  test("the fixed-signal price expectation integrates the source branches", () => {
+    const forecast = 0.63;
+    const volatility = 0.027;
+    const samples = 100_000;
+    let integrated = 0;
+    for (let i = 0; i < samples; i++) {
+      const move = 1 + ((i + 0.5) / samples) * volatility;
+      integrated += forecast * move + (1 - forecast) / move;
+    }
+    expect(expectedPriceFactor(forecast, volatility)).toBeCloseTo(integrated / samples, 10);
   });
+
 });
 
 describe("BitNode-multiplied unlock costs", () => {
   test("BN1 leaves every price alone", () => {
     replaceCurrentNodeMults(getBitNodeMultipliers(1, 1));
-    const ours = unlockCosts({ FourSigmaMarketDataCost: 1, FourSigmaMarketDataApiCost: 1 });
-    expect(ours.wseAccount).toBe(getStockMarketWseCost());
+    const ours = unlockCosts({ FourSigmaMarketDataApiCost: 1 });
     expect(ours.tixApi).toBe(getStockMarketTixApiCost());
-    expect(ours.fourSigmaData).toBe(getStockMarket4SDataCost());
     expect(ours.fourSigmaApi).toBe(getStockMarket4STixApiCost());
   });
 
@@ -153,14 +155,10 @@ describe("BitNode-multiplied unlock costs", () => {
     const mults = getBitNodeMultipliers(9, 1);
     replaceCurrentNodeMults(mults);
     const ours = unlockCosts({
-      FourSigmaMarketDataCost: mults.FourSigmaMarketDataCost,
       FourSigmaMarketDataApiCost: mults.FourSigmaMarketDataApiCost,
     });
-    expect(ours.fourSigmaData).toBe(getStockMarket4SDataCost());
     expect(ours.fourSigmaApi).toBe(getStockMarket4STixApiCost());
-    expect(ours.fourSigmaData).toBeGreaterThan(FOUR_SIGMA_DATA_COST);
     expect(ours.fourSigmaApi).toBeGreaterThan(FOUR_SIGMA_API_COST);
-    expect(ours.wseAccount).toBe(WSE_ACCOUNT_COST);
     expect(ours.tixApi).toBe(TIX_API_COST);
     replaceCurrentNodeMults(getBitNodeMultipliers(1, 1));
   });

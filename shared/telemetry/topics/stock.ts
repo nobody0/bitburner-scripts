@@ -78,7 +78,7 @@ export interface StockState {
    *  its stale snapshots count an open position's purchase as money gone and
    *  read deeply negative at exactly the passes that matter. */
   tradeCashFlow?: number;
-  /** Cumulative cash spent on WSE/TIX/4S unlocks since the install. Excluded
+  /** Cumulative cash spent on TIX/4S automation unlocks since the install. Excluded
    *  from `tradeCashFlow` (a purchase is not a trading loss) but still a real
    *  spend the game ledger records under the "stock" source, so cumulative
    *  earnings corrections must subtract it separately. */
@@ -157,7 +157,6 @@ export interface StockPlan {
    *  merely while `progression` is in its `ending` phase, which is an economic test
    *  that can hold for an entire run. */
   liquidate?: boolean;
-  /** Something outside our control: no WSE account, 4S disabled by the node's
-   *  options, shorts without SF8.2. Distinct from `hold`, which is a choice. */
+  /** Something outside our control, such as unavailable TIX access or shorts. */
   lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

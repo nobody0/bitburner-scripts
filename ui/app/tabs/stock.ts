@@ -116,7 +116,7 @@ export const stockTab: Tab = {
       // Not gated on truthiness: a measured $0 is a real reading, and hiding the
       // tile for it is the same error as printing an unmeasured 0. What it can
       // NOT do is carry the whole price of admission — `unlockSpend` is
-      // cumulative since the INSTALL while the WSE/TIX/4S flags survive every
+      // cumulative since the INSTALL while the TIX/4S flags survive every
       // install, so on any install after the one that bought a rung the ledger
       // honestly reads $0 and the earlier spend sits in another run artifact,
       // which this viewer never sees. The sub says which of the two a $0 is;
@@ -126,7 +126,7 @@ export const stockTab: Tab = {
             label: "unlocks paid",
             value: fmtMoney(s.unlockSpend),
             sub: s.unlockSpend > 0
-              ? "WSE · TIX · 4S, this install"
+              ? "TIX · 4S, this install"
               : hint("none this install", "the ladder survives an install and this ledger does not: a rung bought in an earlier install is not on the wire"),
           }]
         : []),
@@ -164,7 +164,7 @@ export const stockTab: Tab = {
         ) : "") +
         (hasEarnings ? banded(
           "stock-earnings",
-          "realised net against THIS INSTALL'S WSE/TIX/4S spend. The first curve clearing the second is the market paying for its own access — but only on the install that bought a rung: the unlocks survive an install and the ledger measuring them does not, so a later install plots a truthful $0 spend against access that was already paid for, and the crossing there says nothing.",
+          "realised net against THIS INSTALL'S TIX/4S spend. The first curve clearing the second is the market paying for its own access — but only on the install that bought a rung: the unlocks survive an install and the ledger measuring them does not, so a later install plots a truthful $0 spend against access that was already paid for, and the crossing there says nothing.",
           html`<span class="k1">${realised === undefined ? NONE : fmtSigned(realised)} realised</span>`,
           html`<span class="k5">${fmtMoney(s.unlockSpend)} unlocks, this install</span>`,
         ) : "") +
@@ -177,14 +177,14 @@ export const stockTab: Tab = {
       html`${dot(has ? "good" : "wait", why)}${label}`;
     const marketTiles = tiles([
       {
-        // The driver climbs WSE -> TIX -> 4S; the current rung determines the
-        // available market operations.
+        // WSE is informational. Automation starts with TIX, which initializes
+        // the market without requiring a WSE account.
         label: "access",
         value: raw(
           [
             access("WSE", s.hasWseAccount, "$200m — the exchange UI; a script reads nothing through it"),
             access("TIX", s.hasTixApiAccess, "$5b — prices, positions, buy and sell"),
-            access("4S", s.has4SDataApi, "$25b — getForecast and getVolatility; without it forecasts are estimated"),
+            access("4S", s.has4SDataApi, "$25b base — getForecast and getVolatility; node multipliers may raise the price"),
             // The $1b ticker, and deliberately NOT a rung of the ladder:
             // `getForecast` checks `has4SDataTixApi`, so owning this buys a
             // script nothing, and a fourth green dot would claim reach the

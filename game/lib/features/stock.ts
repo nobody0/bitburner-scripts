@@ -27,9 +27,8 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "
 
 /** The stock driver.
  *
- * Degrades honestly at three levels, because the game gates them separately and
- * the first two may also be granted by BN8/SF8: a WSE account ($200m) exposes
- * the exchange UI, the TIX API ($5b) allows scripted positions, and the
+ * Script automation has two levels: the TIX API ($5b) initializes the market
+ * and allows scripted positions without WSE, while the
  * 4S Market Data TIX API ($25b x the node's multiplier) supplies the exact
  * forecast. Nothing here is capability-gated, which is why `stock` is an
  * always-playable feature and the ladder is the driver's own job.
@@ -159,10 +158,9 @@ export function buildView(ctx: DriverContext): StockView | undefined {
   // For a position, unknown means "no install has been forecast", which is NOT
   // the same as "an install is imminent" — with nothing queued there is often no
   // install to forecast at all, and treating that as a zero horizon refuses every
-  // trade for the entire run. So it falls back to one regime cycle, which is not
-  // a guess about installs but a fact about the MARKET: the forecast a position is
-  // opened on is only known to hold until the next cycle boundary, and the solver
-  // already caps the hold there anyway. `liquidate` remains the real signal that
+  // trade for the entire run. So it falls back to one market cycle as a bounded
+  // risk horizon; forecasts can change inside it, so this is not a persistence
+  // guarantee. `liquidate` remains the real signal that
   // an install is coming, and it is read from progression's own phase.
   const nodeHorizonSec = usableForecastSec(ctx.horizons.node) ?? 0;
   const positionHorizonSec = usableForecastSec(ctx.horizons.install) ?? secondsForTicks(TICKS_PER_CYCLE);
@@ -206,13 +204,10 @@ export function buildView(ctx: DriverContext): StockView | undefined {
       bid: position.bid,
       maxShares: position.maxShares,
       shares: position.shares,
-      avgPx: position.avgPx,
       sharesShort: position.sharesShort,
-      avgPxShort: position.avgPxShort,
       ...(signals[position.sym]?.forecast !== undefined ? { forecast: signals[position.sym]!.forecast } : {}),
       ...(signals[position.sym]?.volatility !== undefined ? { volatility: signals[position.sym]!.volatility } : {}),
     })),
-    hasWseAccount: topic.hasWseAccount ?? false,
     hasTixApi: topic.hasTixApiAccess ?? false,
     has4SApi: topic.has4SDataApi ?? false,
     // Shorts require BN8 or SF8.2; emitting one without access throws inside
@@ -266,7 +261,7 @@ async function execute(ctx: DriverContext, actions: StockAction[]): Promise<void
   // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/data/Constants.ts#L3-L12
   const out: string[] = [];
   const touched = new Set<string>();
-  const access: Partial<Pick<StockState, "hasWseAccount" | "hasTixApiAccess" | "has4SDataApi">> = {};
+  const access: Partial<Pick<StockState, "hasTixApiAccess" | "has4SDataApi">> = {};
   const cashBefore = await ctx.nsp("getServerMoneyAvailable", "home");
   // Trade-only cash movement, measured around each buy/sell. Gating the whole
   // batch on "no unlock present" instead dropped the trade's cost from the
@@ -274,23 +269,20 @@ async function execute(ctx: DriverContext, actions: StockAction[]): Promise<void
   // PERMANENT +cost skew in earnedSinceInstall for every mixed unlock+trade
   // batch, not the "one lost sample" it looked like.
   let tradeDelta = 0;
+  let ok = true;
   for (const action of actions) {
     switch (action.type) {
-      case "buyWse": {
-        const bought = await ctx.nsp("stock.purchaseWseAccount");
-        if (bought) access.hasWseAccount = true;
-        out.push(bought ? "bought WSE account" : "WSE refused");
-        break;
-      }
       case "buyTix": {
         const bought = await ctx.nsp("stock.purchaseTixApi");
         if (bought) access.hasTixApiAccess = true;
+        else ok = false;
         out.push(bought ? "bought TIX API" : "TIX refused");
         break;
       }
       case "buy4SApi": {
         const bought = await ctx.nsp("stock.purchase4SMarketDataTixApi");
         if (bought) access.has4SDataApi = true;
+        else ok = false;
         out.push(bought ? "bought 4S API" : "4S API refused");
         break;
       }
@@ -298,8 +290,14 @@ async function execute(ctx: DriverContext, actions: StockAction[]): Promise<void
         touched.add(action.sym);
         const [long, , short] = await ctx.nsp("stock.getPosition", action.sym);
         const held = action.short ? short : long;
+        const opposite = action.short ? long : short;
         if (held > 0) {
           out.push(`already holding ${action.sym}`);
+          break;
+        }
+        if (opposite > 0) {
+          ok = false;
+          out.push(`opposite ${action.sym} position already held`);
           break;
         }
         const before = await ctx.nsp("getServerMoneyAvailable", "home");
@@ -307,6 +305,7 @@ async function execute(ctx: DriverContext, actions: StockAction[]): Promise<void
           ? await ctx.nsp("stock.buyShort", action.sym, action.shares)
           : await ctx.nsp("stock.buyStock", action.sym, action.shares);
         tradeDelta += await ctx.nsp("getServerMoneyAvailable", "home") - before;
+        if (!(price > 0)) ok = false;
         out.push(price > 0 ? `bought ${action.shares} ${action.sym}` : `buy ${action.sym} refused`);
         break;
       }
@@ -328,6 +327,7 @@ async function execute(ctx: DriverContext, actions: StockAction[]): Promise<void
           ? await ctx.nsp("stock.sellShort", action.sym, held)
           : await ctx.nsp("stock.sellStock", action.sym, held);
         tradeDelta += await ctx.nsp("getServerMoneyAvailable", "home") - before;
+        if (!(price > 0)) ok = false;
         out.push(price > 0 ? `sold ${held} ${action.sym}` : `sell ${action.sym} refused`);
         break;
       }
@@ -346,7 +346,7 @@ async function execute(ctx: DriverContext, actions: StockAction[]): Promise<void
   if (ctx.state.topics.player) {
     merge(ctx.state, "player", { money: cash });
   }
-  // Unlock purchases (WSE/TIX/4S) are spends, not trading cashflow. The
+  // Unlock purchases (TIX/4S) are spends, not trading cashflow. The
   // trade-only delta was measured around each buy/sell, so a mixed batch
   // (fundedActions concatenates the funded claims) records its trades exactly
   // and the remainder of the batch's cash movement is the unlock spend —
@@ -354,7 +354,7 @@ async function execute(ctx: DriverContext, actions: StockAction[]): Promise<void
   // debits unlocks under the "stock" source the correction strips out.
   const traded = actions.some((action) => action.type === "buy" || action.type === "sell");
   const unlocked = actions.some(
-    (action) => action.type === "buyWse" || action.type === "buyTix" || action.type === "buy4SApi",
+    (action) => action.type === "buyTix" || action.type === "buy4SApi",
   );
   const ledger = flows();
   if (traded) {
@@ -390,7 +390,7 @@ async function execute(ctx: DriverContext, actions: StockAction[]): Promise<void
       portfolioCost: positions.reduce((sum, position) => sum + position.costBasis, 0),
     } : {}),
   });
-  lastResult = { action: actions[0]!.type, ok: true, detail: out.join("; "), at };
+  lastResult = { action: actions[0]!.type, ok, detail: out.join("; "), at };
 }
 
 const driver: FeatureDriver = {
@@ -526,6 +526,7 @@ function claims(ctx: ClaimContext): Claim[] {
   }
 
   if (plan.entry) {
+    const holdSec = Math.max(1, secondsForTicks(plan.entry.holdTicks));
     out.push({
       by: "stock",
       id: POSITION_CLAIM_ID,
@@ -539,9 +540,9 @@ function claims(ctx: ClaimContext): Claim[] {
       // Divisible: a position is continuous, and fundedActions re-checks that
       // the reduced size still clears its round trip before buying it.
       shape: "continuous",
-      ratePerSec: plan.entry.expectedProfit / Math.max(1, plan.entry.holdTicks * 6),
+      ratePerSec: plan.entry.expectedProfit / holdSec,
       returnPerDollarSec:
-        plan.entry.expectedProfit / Math.max(1, plan.entry.cost * plan.entry.holdTicks * 6),
+        plan.entry.expectedProfit / (Math.max(1, plan.entry.cost) * holdSec),
     });
   }
   if (plan.reserve) {
@@ -634,8 +635,4 @@ export const stockModule: FeatureModule = {
   },
   claims,
   valueCurve,
-  // Outside BN8, the base reserve already fits account observation and either
-  // half of WSE/TIX acquisition. The 12.1 GB market/trade reserve has value
-  // only after TIX exists. BN8 keeps it from the first pass because TIX is a
-  // node starting condition that may not have reached the topic yet.
 };

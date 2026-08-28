@@ -10,15 +10,15 @@
  *    spent on augmentations BEFORE the install. A position is therefore capital
  *    that must be liquid again by the time `progression` wants to reset, and its
  *    horizon is the INSTALL, not the BitNode.
- *  - **The unlocks survive an install.** `hasWseAccount`, `hasTixApiAccess` and
+ *  - **The unlocks survive an install.** `hasTixApiAccess` and
  *    `has4SDataTixApi` are never cleared by `prestigeAugmentation`; only a
  *    BitNode reset clears them. They therefore amortize over the whole NODE,
  *    independently of the position's install horizon.
  *  - **There is no reason to trade on a short horizon.** Every round trip pays
  *    `2 x spreadPerc%` of notional plus $200k, and the expected drift needed to
  *    clear that takes a knowable number of ticks ({@link breakEvenTicks}). If
- *    the horizon is shorter than that number, the trade is a guaranteed loss and
- *    the answer is to hold cash.
+ *    the horizon is shorter than that number, the trade has negative expected
+ *    settlement and the answer is to hold cash.
  *
  * The signal model lives in ./market.ts (how prices move) and ./history.ts (how
  * to recover volatility and estimate forecast from prices, plus the cycle clock
@@ -45,7 +45,6 @@ import {
   manipulationValuePerOp,
   meanLogStep,
   secondsForTicks,
-  sideDriftPerTick,
   TICKS_PER_CYCLE,
   ticksInSeconds,
   unlockCosts,
@@ -75,7 +74,7 @@ export const ENTER_BAND = 0.09;
 /** Forecast distance required to KEEP one. Narrower than ENTER_BAND on purpose:
  *  the gap is the hysteresis that stops a symbol oscillating around 0.5 from
  *  churning two commissions and two spread crossings per tick. */
-export const EXIT_BAND = 0.005;
+const EXIT_BAND = 0.005;
 /** Ticks a fresh position is protected from reversal, however the forecast
  *  moves. Manipulation needs time to accumulate nudges, and a signal that
  *  flipped one tick after we bought is far more likely to be noise than a
@@ -83,12 +82,12 @@ export const EXIT_BAND = 0.005;
 export const MIN_HOLD_TICKS = 10;
 /** Safety margin on the achievable hold: a position must clear its round trip
  *  with this much room to spare, not exactly at the buzzer. */
-export const BREAK_EVEN_MARGIN = 1.5;
+const BREAK_EVEN_MARGIN = 1.5;
 /** Forecast deviation to assume when pricing an unlock that cannot be evaluated
  *  from live data yet (no TIX API means no `getSymbols`, so the market is
  *  entirely invisible). Deliberately meek — 0.55 is a quarter of what a good 4S
  *  symbol offers, so an unlock that clears this bar clears it comfortably. */
-export const BLIND_FORECAST = 0.55;
+const BLIND_FORECAST = 0.55;
 
 // --- view -------------------------------------------------------------------
 
@@ -98,9 +97,7 @@ export interface StockSymbolView {
   bid: number;
   maxShares: number;
   shares: number;
-  avgPx: number;
   sharesShort: number;
-  avgPxShort: number;
   /** 4S forecast, present only with `has4SApi`. */
   forecast?: number;
   /** 4S volatility, present only with `has4SApi`. */
@@ -110,7 +107,6 @@ export interface StockSymbolView {
 export interface StockView {
   symbols: StockSymbolView[];
 
-  hasWseAccount: boolean;
   hasTixApi: boolean;
   /** `has4SDataTixApi` — the ONLY 4S flag that matters to a script. */
   has4SApi: boolean;
@@ -141,7 +137,7 @@ export interface StockView {
    *  POSITION, because an install zeroes it. */
   positionHorizonSec: number;
   /** Seconds until the BitNode is expected to end — the life of an UNLOCK,
-   *  because WSE/TIX/4S survive installs. */
+   *  because TIX and 4S survive installs. */
   unlockHorizonSec: number;
   /** progression wants the book flat: reset imminent. Overrides everything. */
   liquidate: boolean;
@@ -184,21 +180,15 @@ export function initStockMemory(): StockMemory {
   return { history: initHistory(), intent: {} };
 }
 
-/** Full liquid cash offered to the shared investment arbiter. */
-export function positionBudget(view: Pick<StockView, "totalMoney">): number {
-  return Math.max(0, view.totalMoney);
-}
-
 // --- plan -------------------------------------------------------------------
 
 export type StockAction =
-  | { type: "buyWse"; cost: number }
   | { type: "buyTix"; cost: number }
   | { type: "buy4SApi"; cost: number }
   | { type: "buy"; sym: string; shares: number; short: boolean }
   | { type: "sell"; sym: string; shares: number; short: boolean };
 
-export interface RankedSymbol {
+interface RankedSymbol {
   sym: string;
   side: PositionSide;
   forecast: number;
@@ -211,8 +201,6 @@ export interface RankedSymbol {
   /** The estimator's shrink factor `n / (n + k)` (1 when exact). The known
    *  inverse fourSigmaGainPerSec uses to recover the un-shrunk forecast. */
   shrink: number;
-  /** Expected log return per tick on the favoured side. */
-  drift: number;
   /** The farm can drive at least one of this symbol's hosts, so a position in it
    *  can be pushed rather than merely waited on. */
   manipulable: boolean;
@@ -224,7 +212,7 @@ export interface RankedSymbol {
   notional: number;
 }
 
-export interface PositionTarget {
+interface PositionTarget {
   sym: string;
   side: PositionSide;
   /** Shares at full ambition — what unlimited money would buy. Divisible. */
@@ -235,10 +223,9 @@ export interface PositionTarget {
   /** EXPECTED hold, including the geometric tail of surviving cycle boundaries.
    *  What `expectedProfit` was integrated over. */
   holdTicks: number;
-  /** GUARANTEED hold — this regime's remaining ticks, or the horizon. What the
-   *  break-even gate must clear, and what a partially funded entry is re-checked
-   *  against. */
-  guaranteedTicks: number;
+  /** Entry window used by the break-even gate. With unknown cycle phase this is
+   *  the expected remaining phase, not a guaranteed signal duration. */
+  entryWindowTicks: number;
   breakEvenTicks: number;
   /** The quotes and signal the target was priced from, carried so a partially
    *  funded entry can be RE-priced at its smaller size rather than assumed to
@@ -250,7 +237,7 @@ export interface PositionTarget {
   volatility: number;
 }
 
-export interface UnlockPurchase {
+interface UnlockPurchase {
   action: StockAction;
   /** Cash this action spends now. */
   cost: number;
@@ -272,7 +259,7 @@ export interface UnlockPurchase {
  * driven by grows and a SHORT by hacks. Setting the flag on both sides of an
  * HWGW batch would cancel out — the hack takes what the grow puts back, so the
  * two nudges are equal and opposite. */
-export interface ManipulationIntent {
+interface ManipulationIntent {
   sym: string;
   hostname: string;
   side: PositionSide;
@@ -333,12 +320,11 @@ export interface StockPlan {
    *    "flat" while still intending to buy would let an install land on a
    *    position opened one pass later. */
   flat: boolean;
-  /** Set when something outside our control stops us: no WSE account, 4S
-   *  disabled by the node's options, shorts unavailable. */
+  /** Set when something outside our control stops us. */
   blocker?: string;
 }
 
-export interface StockDecision {
+interface StockDecision {
   plan: StockPlan;
   memory: StockMemory;
 }
@@ -348,11 +334,20 @@ export interface StockDecision {
 export function stepStock(view: StockView, memory: StockMemory): StockDecision {
   const costs = unlockCosts(view.nodeMults);
 
-  if (!view.hasWseAccount) {
-    return blocked(memory, unlockLadder(view, costs), "no WSE account — the market is invisible");
-  }
   if (!view.hasTixApi) {
-    return blocked(memory, unlockLadder(view, costs), "no TIX API — prices are visible but positions are not");
+    const unlock = unlockLadder(view, costs);
+    return {
+      memory,
+      plan: {
+        exits: [],
+        ...(unlock ? { unlock } : {}),
+        ranked: [],
+        manipulation: [],
+        observedTicks: memory.history.tick,
+        flat: true,
+        blocker: "no TIX API — automated market access is unavailable",
+      },
+    };
   }
 
   // Fold the sample into history first: the forecast estimator and measured
@@ -362,15 +357,11 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
   const cycleTicks = ticksUntilCycle(memory.history);
   const observedTicks = memory.history.tick;
 
-  // Two different hold lengths, because two different questions are being asked.
-  //
-  // GUARANTEED: how long the current regime is certain to last. Bounded by the
-  // install (which zeroes the position) and by the next cycle boundary, where
-  // this symbol has a 45% chance of having its forecast inverted. This is what
-  // the break-even gate is measured against — a position that only clears its
-  // round trip on the far side of a coin flip has not cleared it.
-  //
-  // EXPECTED: how long it will actually be held. A cycle boundary is not an exit;
+  // The entry window bounds the break-even gate by the install horizon and the
+  // next known cycle boundary. With unknown phase it uses the expected remaining
+  // phase, so it is a risk model rather than a guarantee about forecast changes.
+  // The expected hold adds the geometric tail of surviving cycle boundaries.
+  // A cycle boundary is not an exit;
   // it is a 45% chance of one. Surviving it buys another full cycle, and
   // surviving that another, so the expectation adds a geometric tail of
   // `survival / (1 - survival)` cycles. Truncating the profit estimate at the
@@ -379,29 +370,28 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
   const horizonTicks = ticksInSeconds(view.positionHorizonSec);
   // Cycle phase unknown (no boundary observed yet — without 4S the flip
   // detector never fires, so this is the no-4S steady state): the next
-  // boundary is uniformly distributed over the cycle, so claim only the
-  // EXPECTED distance to it, not the full cycle. Claiming all 75 ticks lets
+  // boundary is uniformly distributed over the cycle, so use the expected
+  // distance to it, not the full cycle. Claiming all 75 ticks lets
   // the break-even gate open positions one tick before a 45% coin flip — the
   // exact trade it exists to refuse.
   const regimeTicks = cycleTicks ?? (TICKS_PER_CYCLE + 1) / 2;
-  const guaranteedTicks = Math.max(0, Math.min(horizonTicks, regimeTicks));
+  const entryWindowTicks = Math.max(0, Math.min(horizonTicks, regimeTicks));
   const survival = 1 - CYCLE_FLIP_CHANCE;
   const tail = (survival / (1 - survival)) * TICKS_PER_CYCLE;
-  const holdTicks = Math.max(0, Math.min(horizonTicks, guaranteedTicks + tail));
+  const holdTicks = Math.max(0, Math.min(horizonTicks, entryWindowTicks + tail));
 
-  // Which symbols a farm could actually influence, inverted ONCE. Asking it per
-  // symbol — `Object.entries(symbolByHost).some(...)` inside rankSymbol — walked
-  // every server 33 times a pass, at controller cadence, for the whole run: it
-  // was the single largest allocation source in a BN8 profile. `farmableHosts`
-  // already drops any host with no symbol, so the inversion is total.
-  const manipulableSymbols = new Set<string>();
+  // Build the farmable symbol join once for ranking and manipulation intent.
+  const farmableHostsBySymbol = new Map<string, string[]>();
   for (const hostname of view.farmableHosts) {
     const sym = view.symbolByHost[hostname];
-    if (sym !== undefined) manipulableSymbols.add(sym);
+    if (sym === undefined) continue;
+    const hosts = farmableHostsBySymbol.get(sym);
+    if (hosts) hosts.push(hostname);
+    else farmableHostsBySymbol.set(sym, [hostname]);
   }
   const ranked: RankedSymbol[] = [];
   const perSymbol = new Map<string, { view: StockSymbolView; ranked: RankedSymbol }>();
-  const cashBudget = positionBudget(view);
+  const cashBudget = Math.max(0, view.totalMoney);
 
   for (const symbol of view.symbols) {
     const signal = estimateSignal(memory.history, symbol.sym, symbol.forecast);
@@ -412,7 +402,7 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
       side,
       holdTicks,
       cashBudget,
-      manipulable: manipulableSymbols.has(symbol.sym),
+      manipulable: farmableHostsBySymbol.has(symbol.sym),
     });
     ranked.push(entry);
     perSymbol.set(symbol.sym, { view: symbol, ranked: entry });
@@ -435,7 +425,8 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
       b.expectedProfit - a.expectedProfit ||
       (a.sym < b.sym ? -1 : 1),
   );
-  const exits = planExits(view, memory, perSymbol, guaranteedTicks);
+  reconcileIntent(view, memory);
+  const exits = planExits(view, memory, perSymbol, entryWindowTicks);
   const held = view.symbols.filter((s) => s.shares > 0 || s.sharesShort > 0);
   const exiting = new Set(exits.map((action) => (action as { sym: string }).sym));
 
@@ -443,19 +434,11 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
   // install: the shares are destroyed and the money is reset, so anything not
   // converted to augmentations first is simply lost.
   if (view.liquidate) {
-    // Liquidation converts the book to cash FOR THE INSTALL — it does not
-    // donate it. The reserve therefore STANDS during liquidation: progression's
-    // own install claims outrank it, so the conversion is never blocked, but a
-    // peer feature must still out-bid the working capital to take the
-    // proceeds. Without this, a liquidation ordered for a pocket-change
-    // install freed a $247m book, the no-reserve state held for the whole
-    // conversion window, and infrastructure claims ate the node's entire
-    // economy at zero opposition (bn8-full seed 1, t≈56 min: terminal wealth
-    // $38k, no install ever performed, no further trade possible for the
-    // remaining twenty-three hours).
+    // Keep the reserve while sales settle so peer claims cannot consume the
+    // proceeds before progression spends them.
     const liquidationReserve = planReserve(view, ranked, holdTicks, cashBudget);
     return {
-      memory: forgetIntent(memory, held.map((s) => s.sym)),
+      memory,
       plan: {
         exits,
         ...(liquidationReserve ? { reserve: liquidationReserve } : {}),
@@ -470,36 +453,23 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
 
   const entry = planEntry({
     view,
-    memory,
     ranked,
     perSymbol,
     holdTicks,
-    guaranteedTicks,
+    entryWindowTicks,
     exiting,
     cashBudget,
   });
-  if (entry) {
-    memory.intent[entry.sym] = { side: entry.side, sinceTick: memory.history.tick };
-  }
-
   const unlock = unlockLadder(view, costs, ranked, holdTicks);
-  const manipulation = planManipulation({ view, perSymbol, holdTicks, exiting });
-  // The reserve is ALWAYS posted, covering whatever the other claims do not —
-  // the entry claim defends its own cost, the unlock ladder vouches for its
-  // purchase — but never LESS than the viability floor. The floor overlap is
-  // the load-bearing part: an entry whose buy is RAM-starved for a few passes
-  // leaves its granted-but-unspent bankroll in the band, and with the reserve
-  // fully subtracted the band had NO continuous claim for exactly those
-  // passes — lambda read zero and a $318m rung took the money through the
-  // window (bn8-manipulation seed 3, surfaced when an upstream rebase
-  // reshuffled pass timings; the same one-pass-hole family as the
-  // sale-proceeds and liquidation gaps). Reserving the floor at all times
-  // costs the entry at most the last dollars blind trading could not deploy
-  // anyway, and guarantees the economy of a market-only node can never drop
-  // below the point where no trade clears its commissions. Covering MORE than
-  // the floor while an entry stands does not work: the reserve's own
-  // hyperbolic curve out-bids the flat-valued entry and freezes trading —
-  // measured, three seeds, $250m defended and zero trades ever placed.
+  const manipulation = planManipulation({
+    farmableHostsBySymbol,
+    perSymbol,
+    holdTicks,
+    exiting,
+    symbols: view.symbols,
+  });
+  // The reserve covers uncommitted cash and, when money is contested, preserves
+  // the smallest bankroll that can still clear fixed commissions.
   const uncommitted = Math.max(0, cashBudget - (unlock?.cost ?? 0) - (entry?.cost ?? 0));
   const bankrollForFloor = cashBudget + Math.max(0, view.portfolioValue) - (unlock?.cost ?? 0);
   const reserveAmount = entry === undefined
@@ -529,8 +499,6 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
   };
 }
 
-/** Expected profit per dollar deployed. Zero notional means nothing can be
- *  deployed, which is worth nothing however good the forecast. */
 function returnOnCapital(entry: RankedSymbol): number {
   return entry.notional > 0 ? entry.expectedProfit / entry.notional : -Infinity;
 }
@@ -545,24 +513,17 @@ function toSample(symbol: StockSymbolView): PriceSample {
   };
 }
 
-function blocked(memory: StockMemory, unlock: UnlockPurchase | undefined, blocker: string): StockDecision {
-  return {
-    memory,
-    plan: {
-      exits: [],
-      ...(unlock ? { unlock } : {}),
-      ranked: [],
-      manipulation: [],
-      observedTicks: memory.history.tick,
-      flat: true,
-      blocker,
-    },
-  };
-}
-
-function forgetIntent(memory: StockMemory, symbols: readonly string[]): StockMemory {
-  for (const sym of symbols) delete memory.intent[sym];
-  return memory;
+function reconcileIntent(view: StockView, memory: StockMemory): void {
+  const held = new Set<string>();
+  for (const symbol of view.symbols) {
+    const side = symbol.shares > 0 ? "long" : symbol.sharesShort > 0 ? "short" : undefined;
+    if (!side) continue;
+    held.add(symbol.sym);
+    memory.intent[symbol.sym] ??= { side, sinceTick: memory.history.tick };
+  }
+  for (const sym of Object.keys(memory.intent)) {
+    if (!held.has(sym)) delete memory.intent[sym];
+  }
 }
 
 // --- ranking ----------------------------------------------------------------
@@ -588,7 +549,6 @@ function rankSymbol(params: {
   // The forecast the position will actually experience: a large trade drags the
   // outlook back toward neutral, so the quoted forecast is not the one we get.
   const forecast = effectiveForecast(signal.forecast, shares, shareTx);
-  const drift = sideDriftPerTick(forecast, signal.volatility, side);
   const be = breakEvenTicks({
     shares,
     ask: symbol.ask,
@@ -614,7 +574,6 @@ function rankSymbol(params: {
     exact: signal.exact,
     confident: signal.confident,
     shrink: signal.shrink,
-    drift,
     manipulable,
     breakEvenTicks: be,
     expectedProfit: profit,
@@ -632,27 +591,13 @@ function rankSymbol(params: {
  * caller that supplies the same one gets a pointer compare.
  * This avoids rebuilding and rescanning the fixed mapping for each symbol at
  * controller cadence. */
-let hostsForSymbolsCache: { source: Readonly<Record<string, string>>; hosts: Map<string, string[]> } | undefined;
-
-function hostsForSymbols(symbolByHost: Readonly<Record<string, string>>): ReadonlyMap<string, string[]> {
-  if (hostsForSymbolsCache?.source === symbolByHost) return hostsForSymbolsCache.hosts;
-  const hosts = new Map<string, string[]>();
-  for (const [hostname, sym] of Object.entries(symbolByHost)) {
-    const bucket = hosts.get(sym);
-    if (bucket) bucket.push(hostname);
-    else hosts.set(sym, [hostname]);
-  }
-  hostsForSymbolsCache = { source: symbolByHost, hosts };
-  return hosts;
-}
-
 // --- exits ------------------------------------------------------------------
 
 function planExits(
   view: StockView,
   memory: StockMemory,
   perSymbol: Map<string, { view: StockSymbolView; ranked: RankedSymbol }>,
-  guaranteedTicks: number,
+  entryWindowTicks: number,
 ): StockAction[] {
   const exits: StockAction[] = [];
   for (const symbol of view.symbols) {
@@ -664,47 +609,42 @@ function planExits(
     const committed = memory.intent[symbol.sym];
     const heldTicks = committed ? memory.history.tick - committed.sinceTick : Infinity;
 
-    // Liquidation, or a guaranteed hold too short to clear the round trip:
+    // Liquidation, or an entry window too short to clear the round trip:
     // either way every further tick held is risk taken for a payoff that
     // cannot arrive.
-    if (view.liquidate || guaranteedTicks <= 0) {
-      if (long > 0) exits.push(sell(symbol.sym, long, false));
-      if (short > 0) exits.push(sell(symbol.sym, short, true));
+    if (view.liquidate || entryWindowTicks <= 0) {
+      if (long > 0) exits.push({ type: "sell", sym: symbol.sym, shares: long, short: false });
+      if (short > 0) exits.push({ type: "sell", sym: symbol.sym, shares: short, short: true });
       continue;
     }
 
     // Hysteresis: exit only once the forecast has crossed to the wrong side by
     // EXIT_BAND, and never inside MIN_HOLD_TICKS. Both guards exist to stop a
     // symbol sitting near 0.5 from churning a round trip every tick.
-    if (heldTicks < MIN_HOLD_TICKS) continue;
+    if (entry?.ranked.exact !== true && heldTicks < MIN_HOLD_TICKS) continue;
     if (long > 0 && forecast < 0.5 - EXIT_BAND) {
-      exits.push(sell(symbol.sym, long, false));
+      exits.push({ type: "sell", sym: symbol.sym, shares: long, short: false });
     }
     if (short > 0 && forecast > 0.5 + EXIT_BAND) {
-      exits.push(sell(symbol.sym, short, true));
+      exits.push({ type: "sell", sym: symbol.sym, shares: short, short: true });
     }
   }
   return exits;
-}
-
-function sell(sym: string, shares: number, short: boolean): StockAction {
-  return { type: "sell", sym, shares, short };
 }
 
 // --- entry ------------------------------------------------------------------
 
 function planEntry(params: {
   view: StockView;
-  memory: StockMemory;
   ranked: readonly RankedSymbol[];
   perSymbol: Map<string, { view: StockSymbolView; ranked: RankedSymbol }>;
   holdTicks: number;
-  guaranteedTicks: number;
+  entryWindowTicks: number;
   exiting: Set<string>;
   cashBudget: number;
 }): PositionTarget | undefined {
-  const { view, ranked, perSymbol, holdTicks, guaranteedTicks, exiting, cashBudget } = params;
-  if (guaranteedTicks <= 0 || cashBudget <= COMMISSION) return undefined;
+  const { view, ranked, perSymbol, holdTicks, entryWindowTicks, exiting, cashBudget } = params;
+  if (entryWindowTicks <= 0 || cashBudget <= COMMISSION) return undefined;
 
   // Walk the ranking rather than taking only the head: the top candidate may be
   // a short we cannot open, already held, or too small to clear its spread, and
@@ -751,10 +691,10 @@ function planEntry(params: {
     };
     // The margin is the point: a position that only breaks even at the very last
     // tick of the horizon is a coin flip on the timing, not an investment. And it
-    // is measured against the GUARANTEED hold — clearing the round trip only on
+    // is measured against the entry window — clearing the round trip only on
     // the far side of a 45% coin flip is not clearing it.
     const be = breakEvenTicks(priced);
-    if (!(be * BREAK_EVEN_MARGIN <= guaranteedTicks)) continue;
+    if (!(be * BREAK_EVEN_MARGIN <= entryWindowTicks)) continue;
     // Profit, though, is integrated over the EXPECTED hold: surviving a boundary
     // buys another cycle, so truncating there understates a good position.
     const profit = expectedProfit({ ...priced, ticks: holdTicks });
@@ -767,7 +707,7 @@ function planEntry(params: {
       cost: shares * price + COMMISSION,
       expectedProfit: profit,
       holdTicks,
-      guaranteedTicks,
+      entryWindowTicks,
       breakEvenTicks: be,
       ask: symbol.ask,
       bid: symbol.bid,
@@ -780,7 +720,7 @@ function planEntry(params: {
 
 // --- the unlock ladder ------------------------------------------------------
 
-/** WSE ($200m) -> TIX API ($5b) -> 4S Market Data TIX API ($25b x node mult).
+/** TIX API ($5b) -> 4S Market Data TIX API ($25b x node multiplier).
  *
  * **4S Market Data itself ($1b) is deliberately never bought.** It unlocks the
  * in-game ticker UI, not the script API: `getForecast` and `getVolatility` check
@@ -789,7 +729,7 @@ function planEntry(params: {
  * unlock therefore provides no script capability.
  *
  * Everything here amortizes against `unlockHorizonSec`, the NODE horizon, not the
- * install horizon — none of these three flags is cleared by
+ * install horizon — neither flag is cleared by
  * `prestigeAugmentation`; pricing them against the shorter install cadence would
  * undervalue persistent access.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/StockMarket.ts
@@ -802,21 +742,6 @@ function unlockLadder(
 ): UnlockPurchase | undefined {
   const horizon = view.unlockHorizonSec;
   if (horizon <= 0) return undefined;
-
-  if (!view.hasWseAccount) {
-    // WSE alone is worth nothing — `getSymbols` needs the TIX API — so it is
-    // only ever bought as the first half of a pair, and priced as the pair.
-    const pair = costs.wseAccount + costs.tixApi;
-    const gain = blindRatePerSec(view);
-    return propose(
-      { type: "buyWse", cost: costs.wseAccount },
-      costs.wseAccount,
-      gain,
-      horizon,
-      pair,
-      view,
-    );
-  }
 
   if (!view.hasTixApi) {
     const gain = blindRatePerSec(view);
@@ -942,11 +867,6 @@ export function blindBankrollRatePerSec(bankroll: number): number {
 let blindMarketShapeMemo: { cycleEdge: number } | undefined;
 function blindMarketShape(): { cycleEdge: number } {
   if (blindMarketShapeMemo) return blindMarketShapeMemo;
-  blindMarketShapeMemo = computeBlindMarketShape();
-  return blindMarketShapeMemo;
-}
-
-function computeBlindMarketShape(): { cycleEdge: number } {
   const volatilities = Object.keys(STOCK_METADATA)
     .map((sym) => midpoint(STOCK_METADATA[sym]!.mv) / 100)
     .sort((a, b) => a - b);
@@ -955,7 +875,8 @@ function computeBlindMarketShape(): { cycleEdge: number } {
   const spread = Object.keys(STOCK_METADATA)
     .map((sym) => worstSpreadFraction(sym))
     .sort((a, b) => a - b)[Math.floor(Object.keys(STOCK_METADATA).length / 2)] ?? 0;
-  return { cycleEdge: Math.expm1(Math.max(0, drift) * TICKS_PER_CYCLE) - spread };
+  blindMarketShapeMemo = { cycleEdge: Math.expm1(Math.max(0, drift) * TICKS_PER_CYCLE) - spread };
+  return blindMarketShapeMemo;
 }
 
 /** The smallest bankroll blind trading can grow at all: below this, the two
@@ -1021,23 +942,20 @@ function fourSigmaGainPerSec(view: StockView, ranked: readonly RankedSymbol[], h
  * shortest op time and the highest steal per thread, NOT the richest one. That
  * inversion is the whole reason this has to be priced rather than assumed. */
 function planManipulation(params: {
-  view: StockView;
+  farmableHostsBySymbol: ReadonlyMap<string, readonly string[]>;
   perSymbol: Map<string, { view: StockSymbolView; ranked: RankedSymbol }>;
   holdTicks: number;
   exiting: Set<string>;
+  symbols: readonly StockSymbolView[];
 }): ManipulationIntent[] {
-  const { view, perSymbol, holdTicks, exiting } = params;
+  const { farmableHostsBySymbol, perSymbol, holdTicks, exiting, symbols } = params;
   if (holdTicks <= 0) return [];
   const out: ManipulationIntent[] = [];
 
-  // Only hosts the farm can actually work: rooted, skill-reachable, present in
-  // THIS world. Do not publish manipulation intents for absent symbol hosts.
-  const farmable = new Set(view.farmableHosts);
-  const hostsBySymbol = hostsForSymbols(view.symbolByHost);
   const consider = (sym: string, side: PositionSide, notional: number): void => {
     const entryView = perSymbol.get(sym);
     if (!entryView || notional <= 0) return;
-    const hosts = hostsBySymbol.get(sym);
+    const hosts = farmableHostsBySymbol.get(sym);
     if (!hosts || hosts.length === 0) return;
     const forecast = entryView.ranked.forecast;
     const volatility = entryView.ranked.volatility;
@@ -1047,7 +965,6 @@ function planManipulation(params: {
     // delay the exit while being far too weak to overcome the new drift.
     if (side === "long" ? forecast <= 0.5 : forecast >= 0.5) return;
     for (const hostname of hosts) {
-      if (!farmable.has(hostname)) continue;
       // stealFraction 1 is the per-op UNIT: `hacking` scales by the steal
       // fraction its own solved batch achieves, which it knows and we do not.
       const valuePerOp = manipulationValuePerOp({
@@ -1069,7 +986,7 @@ function planManipulation(params: {
     }
   };
 
-  for (const symbol of view.symbols) {
+  for (const symbol of symbols) {
     if (exiting.has(symbol.sym)) continue;
     // Both sides at the LIVE price: the nudges act on the position's current
     // exposure, and an entry price from before a move misstates it by exactly
@@ -1130,7 +1047,7 @@ export function unlockClaimId(action: StockAction): string {
  * half a TIX API is nothing), then the entry, scaled down to fit and re-checked
  * against its round trip at the smaller size. That re-check matters: commission
  * is fixed, so a position cut to a quarter pays the same $200k against a quarter
- * of the drift and can flip from profitable to guaranteed loss.
+ * of the drift and can flip from profitable to negative expected value.
  *
  * The two budgets never cross-subsidise. Money the arbiter set aside for a
  * position is not available to the unlock, and vice versa — each was won on its
@@ -1156,7 +1073,7 @@ export function fundedActions(plan: StockPlan, grants: StockGrants): StockAction
         volatility: entry.volatility,
         side: entry.side,
       });
-      if (scaled * BREAK_EVEN_MARGIN <= entry.guaranteedTicks) {
+      if (scaled * BREAK_EVEN_MARGIN <= entry.entryWindowTicks) {
         actions.push({
           type: "buy",
           sym: entry.sym,

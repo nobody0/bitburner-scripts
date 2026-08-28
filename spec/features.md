@@ -50,16 +50,11 @@ Notes on the boundaries, since several are judgement calls:
   roster because their gameplay is DOM-driven and has no action API.
 - **BN1** is themed by `hacking` — it unlocks nothing else. **BN12** is themed
   by `progression`, being the node about the reset loop itself.
-- **`stock` is always playable**, and that is a correction rather than a
-  convenience. The market is MONEY-gated: a WSE account costs $200m and the TIX
-  API $5b, with no source file and no BitNode requirement — the same shape as
-  buying a hacknet node. Gating the feature on `hasWseAccount()` made the
-  purchase unreachable, because a driver never runs while its own feature reads
-  "no", so nothing could ever buy the thing that would unlock it. The account
-  flags now travel as ordinary state on the topic and the driver climbs the
-  ladder itself; `restrictions.disable4SData` still tells it when the forecast
-  cannot be bought at all. Its probes carry `when` guards so a locked market
-  costs one 0.2 GB flag read per minute and nothing else.
+- **`stock` is always playable.** The market is money-gated: the $5b TIX API
+  initializes the market and enables automation without requiring WSE. The
+  driver buys TIX and then the 4S TIX API; `restrictions.disable4SData` tells it
+  when the forecast cannot be bought. Its guarded probes reduce a locked market
+  to one 0.2 GB flag read per minute.
 
 ## Capabilities
 

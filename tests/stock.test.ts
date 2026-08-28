@@ -15,15 +15,13 @@ import {
 import {
   breakEvenTicks,
   COMMISSION,
-  driftPerTick,
   effectiveForecast,
+  expectedPriceFactor,
   expectedProfit,
-  manipulationLeverage,
   meanLogStep,
   nudgesPerOp,
   nudgeValue,
   roundTripCost,
-  roundTripCostFraction,
   selfInfluenceCost,
   TICKS_PER_CYCLE,
 } from "../shared/strategy/stock/market.ts";
@@ -68,9 +66,7 @@ function symbol(over: Partial<StockSymbolView> = {}): StockSymbolView {
     bid: 19_960,
     maxShares: 20_000_000,
     shares: 0,
-    avgPx: 0,
     sharesShort: 0,
-    avgPxShort: 0,
     ...over,
   };
 }
@@ -78,7 +74,6 @@ function symbol(over: Partial<StockSymbolView> = {}): StockSymbolView {
 function view(over: Partial<StockView> = {}): StockView {
   return {
     symbols: [symbol()],
-    hasWseAccount: true,
     hasTixApi: true,
     has4SApi: true,
     canShort: true,
@@ -134,17 +129,9 @@ describe("market mechanics", () => {
     expect(Math.abs(exact - 0.02) / 0.02).toBeGreaterThan(0.005);
   });
 
-  test("forecast 0.5 is exactly zero drift — no information means no trade", () => {
-    expect(driftPerTick(0.5, 0.01)).toBe(0);
-    expect(driftPerTick(0.6, 0.01)).toBeGreaterThan(0);
-    expect(driftPerTick(0.4, 0.01)).toBeCloseTo(-driftPerTick(0.6, 0.01), 12);
-  });
-
   test("a round trip pays BOTH commissions and crosses the spread twice", () => {
     // Buy at ask, sell at bid: the loss is shares * (ask - bid) plus $200k.
     expect(roundTripCost(1000, 100, 99)).toBeCloseTo(2 * COMMISSION + 1000, 6);
-    expect(roundTripCostFraction(100, 99)).toBeCloseTo(0.01, 9);
-    expect(roundTripCostFraction(0, 99)).toBe(Infinity);
   });
 
   test("break-even ticks fall as the position grows, but never below the spread's floor", () => {
@@ -157,12 +144,11 @@ describe("market mechanics", () => {
     // But the spread is proportional, so break-even converges on a positive
     // floor rather than to zero. A trader who thinks size is free stops here.
     expect(large).toBeGreaterThan(0.5);
-    const spreadOnly = roundTripCostFraction(20_000, 19_960) / driftPerTick(0.6, 0.0045);
-    expect(large).toBeCloseTo(spreadOnly, 0);
   });
 
-  test("no drift means no break-even, at any size", () => {
-    expect(breakEvenTicks({ shares: 1e9, ask: 100, bid: 99, forecast: 0.5, volatility: 0.01, side: "long" })).toBe(Infinity);
+  test("the arithmetic expectation includes multiplicative volatility drag", () => {
+    expect(expectedPriceFactor(0.5, 0.01)).toBeGreaterThan(1);
+    expect(breakEvenTicks({ shares: 1e9, ask: 100, bid: 99, forecast: 0.5, volatility: 0.01, side: "long" })).toBeFinite();
     expect(breakEvenTicks({ shares: 0, ask: 100, bid: 99, forecast: 0.9, volatility: 0.01, side: "long" })).toBe(Infinity);
   });
 
@@ -173,7 +159,7 @@ describe("market mechanics", () => {
     expect(expectedProfit({ ...common, ticks: Math.ceil(be * 2) })).toBeGreaterThan(0);
   });
 
-  test("a short's profit mirrors a long's on the same signal", () => {
+  test("long and short settlement use the correct side of the future spread", () => {
     const common = { shares: 100_000, ask: 100, bid: 99, volatility: 0.01, ticks: 50 };
     const long = expectedProfit({ ...common, forecast: 0.65, side: "long" });
     const short = expectedProfit({ ...common, forecast: 0.35, side: "short" });
@@ -181,8 +167,10 @@ describe("market mechanics", () => {
     // but the same order of magnitude and both profitable.
     expect(long).toBeGreaterThan(0);
     expect(short).toBeGreaterThan(0);
-    expect(Math.abs(long - short) / long).toBeLessThan
-      (0.05);
+    const longFactor = expectedPriceFactor(0.65, 0.01) ** 50;
+    const shortFactor = expectedPriceFactor(0.35, 0.01) ** 50;
+    expect(long).toBeCloseTo(100_000 * (99 * longFactor - 100) - 2 * COMMISSION, 6);
+    expect(short).toBeCloseTo(100_000 * (99 - 100 * shortFactor) - 2 * COMMISSION, 6);
   });
 
   test("a big trade degrades its own forecast, and cannot push it past the floor", () => {
@@ -230,18 +218,6 @@ describe("manipulation value", () => {
     expect(nudgeValue({ ...base, forecast: 1 })).toBe(0);
     // A short pushes the other way, so its headroom is measured downward.
     expect(nudgeValue({ ...base, forecast: 0, side: "short" })).toBe(0);
-  });
-});
-
-// --- BitNode multipliers ----------------------------------------------------
-
-describe("BitNode effect on the market", () => {
-  test("manipulation leverage is infinite exactly when hacked money is worthless", () => {
-    // BN8: ScriptHackMoneyGain 0. Hacking earns literally nothing while still
-    // draining the server, so the market is not one income source among several.
-    expect(manipulationLeverage({ ScriptHackMoneyGain: 0 })).toBe(Infinity);
-    expect(manipulationLeverage({ ScriptHackMoneyGain: 0.5 })).toBe(2);
-    expect(manipulationLeverage(undefined)).toBe(1);
   });
 });
 
@@ -371,6 +347,18 @@ describe("price history", () => {
     }
     expect(history.cyclesSeen).toBe(0);
   });
+
+  test("a darknet-promoted outlier does not invalidate the shared-roll estimate", () => {
+    const prices = new Map(STOCK_SYMBOLS.map((sym) => [sym, midpoint(STOCK_METADATA[sym]!.initPrice)]));
+    const actual = new Map(STOCK_SYMBOLS.map((sym) => [sym, volatilityEstimate(sym)] as const));
+    actual.set("JGN", actual.get("JGN")! * 4);
+    const history = initHistory();
+    observeMarket(history, tick(prices, 0, () => true, (sym) => actual.get(sym)!));
+    observeMarket(history, tick(prices, 0.731, () => true, (sym) => actual.get(sym)!));
+
+    expect(history.lastV).toBeCloseTo(0.731, 10);
+    expect(history.symbols.JGN!.volatility).toBeCloseTo(actual.get("JGN")!, 10);
+  });
 });
 
 // --- the solver -------------------------------------------------------------
@@ -410,7 +398,7 @@ describe("stepStock", () => {
   test("it sells everything and buys nothing when an install is imminent", () => {
     // An install calls initStockMarket, which zeroes every holding and credits
     // no money. There is no reason to hold an asset past it.
-    const held = symbol({ shares: 1_000_000, avgPx: 19_000, forecast: 0.9, volatility: 0.0045 });
+    const held = symbol({ shares: 1_000_000, forecast: 0.9, volatility: 0.0045 });
     const { decision } = run(view({ liquidate: true, symbols: [held] }), MIN_HOLD_TICKS + 2, () => true);
     expect(decision.plan.exits).toHaveLength(1);
     expect(decision.plan.exits[0]).toMatchObject({ type: "sell", sym: "ECP", short: false });
@@ -424,7 +412,7 @@ describe("stepStock", () => {
     // cannot answer it: an exit decided but not yet executed, and an entry wanted
     // on the next pass, are both invisible in one and both mean the book is not
     // flat. So this is published by the feature that knows.
-    const held = symbol({ shares: 1_000_000, avgPx: 19_000, forecast: 0.9, volatility: 0.0045 });
+    const held = symbol({ shares: 1_000_000, forecast: 0.9, volatility: 0.0045 });
 
     // Holding: not flat.
     const holding = run(view({ symbols: [held] }), MIN_HOLD_TICKS + 2, () => true);
@@ -454,14 +442,13 @@ describe("stepStock", () => {
   });
 
   test("a market that cannot be traded at all reports flat, not unknown", () => {
-    // No WSE or no TIX means there is no book for an install to destroy, so
+    // No TIX means there is no book for an install to destroy, so
     // blocking the reset on it would stall the run forever.
-    expect(run(view({ hasWseAccount: false }), 1, () => true).decision.plan.flat).toBe(true);
     expect(run(view({ hasTixApi: false }), 1, () => true).decision.plan.flat).toBe(true);
   });
 
   test("a short position is liquidated too", () => {
-    const held = symbol({ sharesShort: 500_000, avgPxShort: 20_000, forecast: 0.1, volatility: 0.0045 });
+    const held = symbol({ sharesShort: 500_000, forecast: 0.1, volatility: 0.0045 });
     const { decision } = run(view({ liquidate: true, symbols: [held] }), 2, () => false);
     expect(decision.plan.exits).toEqual([
       expect.objectContaining({ type: "sell", sym: "ECP", short: true }),
@@ -488,22 +475,32 @@ describe("stepStock", () => {
     expect(decision.plan.entry?.side).toBe("short");
   });
 
-  test("hysteresis: a fresh position is not reversed on one bad tick", () => {
-    const held = symbol({ shares: 1_000_000, avgPx: 19_000, forecast: 0.3, volatility: 0.0045 });
+  test("hysteresis protects estimated signals, while exact 4S reverses immediately", () => {
+    const held = symbol({ shares: 1_000_000, volatility: 0.0045 });
     const memory = initStockMemory();
-    // Commit the intent this tick, then immediately turn the forecast against it.
     memory.intent["ECP"] = { side: "long", sinceTick: 0 };
+    memory.history.symbols.ECP = {
+      price: (held.ask + held.bid) / 2,
+      ask: held.ask,
+      bid: held.bid,
+      samples: 25,
+      upRate: 0,
+      volatility: 0.0045,
+      lastMove: -1,
+    };
     const first = stepStock(view({ symbols: [held] }), memory);
     expect(first.plan.exits).toHaveLength(0);
-    // Only after MIN_HOLD_TICKS does the exit fire.
     memory.history.tick = MIN_HOLD_TICKS + 1;
     const later = stepStock(view({ symbols: [held] }), memory);
     expect(later.plan.exits).toHaveLength(1);
     expect(later.plan.exits[0]).toMatchObject({ type: "sell", sym: "ECP", short: false });
+
+    const exact = stepStock(view({ symbols: [{ ...held, forecast: 0.3 }] }), initStockMemory());
+    expect(exact.plan.exits).toHaveLength(1);
   });
 
   test("it publishes manipulation intent for a held symbol, on the right op — FARMABLE hosts only", () => {
-    const held = symbol({ shares: 1_000_000, avgPx: 19_000, forecast: 0.7, volatility: 0.0045 });
+    const held = symbol({ shares: 1_000_000, forecast: 0.7, volatility: 0.0045 });
     const memory = initStockMemory();
     memory.intent["ECP"] = { side: "long", sinceTick: 0 };
     memory.history.tick = 5;
@@ -529,7 +526,7 @@ describe("stepStock", () => {
     const flat = stepStock(view({ symbols: [open], farmableHosts: ["ecorp"] }), initStockMemory());
     expect(flat.plan.manipulation).toHaveLength(0);
 
-    const held = symbol({ shares: 1_000_000, avgPx: 19_000, forecast: 0.3, volatility: 0.0045 });
+    const held = symbol({ shares: 1_000_000, forecast: 0.3, volatility: 0.0045 });
     const memory = initStockMemory();
     memory.intent["ECP"] = { side: "long", sinceTick: 0 };
     memory.history.tick = 5;
@@ -575,7 +572,7 @@ describe("stepStock", () => {
   });
 
   test("a symbol with no server is never given manipulation intent", () => {
-    const held = symbol({ sym: "WDS", ask: 6000, bid: 5950, shares: 1_000_000, avgPx: 5500, forecast: 0.7, volatility: 0.025 });
+    const held = symbol({ sym: "WDS", ask: 6000, bid: 5950, shares: 1_000_000, forecast: 0.7, volatility: 0.025 });
     const memory = initStockMemory();
     memory.intent["WDS"] = { side: "long", sinceTick: 0 };
     memory.history.tick = 5;
@@ -598,12 +595,11 @@ describe("stepStock", () => {
 // --- the unlock ladder ------------------------------------------------------
 
 describe("the unlock ladder", () => {
-  test("no WSE account is reported as a blocker, and priced as a PAIR with TIX", () => {
-    // A WSE account alone buys nothing scriptable: getSymbols needs the TIX API.
-    const { decision } = run(view({ hasWseAccount: false, totalMoney: 1e12 }), 1, () => true);
-    expect(decision.plan.blocker).toContain("WSE");
-    expect(decision.plan.unlock?.action.type).toBe("buyWse");
-    expect(decision.plan.unlock?.investmentCost).toBe(5.2e9);
+  test("TIX is the first automation unlock and does not require WSE", () => {
+    const { decision } = run(view({ hasTixApi: false, totalMoney: 1e12 }), 1, () => true);
+    expect(decision.plan.blocker).toContain("TIX");
+    expect(decision.plan.unlock?.action.type).toBe("buyTix");
+    expect(decision.plan.unlock?.investmentCost).toBe(5e9);
     expect(decision.plan.unlock?.paybackSec).toBe(
       decision.plan.unlock!.investmentCost / decision.plan.unlock!.gainPerSec,
     );
@@ -614,7 +610,7 @@ describe("the unlock ladder", () => {
 
   test("the ladder stops when the money would leave nothing to trade with", () => {
     // Spending the bankroll on the unlock makes it worthless the moment it lands.
-    const { decision } = run(view({ hasWseAccount: false, totalMoney: 3e9 }), 1, () => true);
+    const { decision } = run(view({ hasTixApi: false, totalMoney: 3e9 }), 1, () => true);
     expect(decision.plan.unlock).toBeUndefined();
   });
 
@@ -646,7 +642,7 @@ describe("the unlock ladder", () => {
   });
 
   test("an unlock is amortized over the NODE horizon, not the install horizon", () => {
-    // WSE, TIX and 4S all survive prestigeAugmentation and die only with the
+    // TIX and 4S survive prestigeAugmentation and die only with the
     // BitNode. Pricing them against the install cadence (as the shared horizon
     // did) made the highest-leverage purchase in the feature unaffordable at any
     // bankroll below ~$100b — which in BN8 is unreachable without it.
@@ -663,7 +659,7 @@ describe("the unlock ladder", () => {
 describe("fundedActions", () => {
   test("a partially funded entry is RE-PRICED, not assumed to scale", () => {
     // Commission is fixed, so a position cut to a fraction pays the same $200k
-    // against a fraction of the drift and can flip to a guaranteed loss.
+    // against a fraction of the drift and can flip to negative expected value.
     const { decision } = run(
       view({ totalMoney: 1e11, symbols: [symbol({ forecast: 0.62, volatility: 0.0045, maxShares: 1e9 })] }),
       MIN_HOLD_TICKS + 2,
@@ -679,7 +675,7 @@ describe("fundedActions", () => {
   });
 
   test("exits come first and are never gated on the grant", () => {
-    const held = symbol({ shares: 1_000_000, avgPx: 19_000, forecast: 0.9, volatility: 0.0045 });
+    const held = symbol({ shares: 1_000_000, forecast: 0.9, volatility: 0.0045 });
     const { decision } = run(view({ liquidate: true, symbols: [held] }), 2, () => true);
     const actions = fundedActions(decision.plan, granted(0));
     expect(actions).toHaveLength(1);
@@ -724,7 +720,6 @@ describe("when to liquidate — the signal, not the solver", () => {
   function ctxWith(plan: unknown) {
     const state = initState();
     state.topics.stock = {
-      hasWseAccount: true,
       hasTixApiAccess: true,
       has4SDataApi: false,
       positions: [],

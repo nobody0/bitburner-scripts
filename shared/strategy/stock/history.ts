@@ -46,8 +46,8 @@ import { TICKS_PER_CYCLE } from "./market.ts";
 export const FORECAST_ALPHA = 0.08;
 /** EWMA weight for volatility once the shared tick roll makes a live
  * measurement available. The upstream midpoint is only the bootstrap. */
-export const VOLATILITY_ALPHA = 0.05;
-/** Strength of the Beta(k,k) prior at 0.5. A forecast estimate is shrunk toward
+const VOLATILITY_ALPHA = 0.05;
+/** Strength of the symmetric shrinkage toward 0.5. The estimate is pulled toward
  *  the coin flip by `n / (n + k)`, so it takes real evidence to claim an edge —
  *  the alternative is paying the spread on noise. */
 export const FORECAST_PRIOR_STRENGTH = 25;
@@ -57,7 +57,7 @@ export const FORECAST_PRIOR_STRENGTH = 25;
  *  produce (`otlkMag` moves ~0.04/tick). */
 export const CYCLE_QUORUM = 6;
 
-export interface SymbolHistory {
+interface SymbolHistory {
   /** Price at the last OBSERVED tick. */
   price: number;
   /** Ask/bid at the last observed tick, so the solver always prices a trade off
@@ -109,7 +109,7 @@ export interface PriceSample {
 
 /** Mid price. The market moves `Stock.price`; ask and bid are that price with
  *  the spread applied symmetrically, so their mean recovers it exactly. */
-export function midPrice(sample: { ask: number; bid: number }): number {
+function midPrice(sample: { ask: number; bid: number }): number {
   return (sample.ask + sample.bid) / 2;
 }
 
@@ -247,11 +247,10 @@ function recoverCommonRoll(
  *
  * For every moved symbol, public prices reveal `amplitude = v * volatility`.
  * The hidden `v` is common to the whole basket, while each volatility must be
- * one of the integer-grid values in the pinned upstream range. Enumerating the
- * narrowest symbol's grid and intersecting all 33 constraints usually leaves
- * exactly one `v`, which in turn reveals every symbol's volatility after one
- * tick. Ambiguous or inconsistent baskets return undefined and use the live
- * midpoint/EWMA estimator above. */
+ * one of the integer-grid values in the pinned upstream range unless darknet
+ * promotion has multiplied it. The unique majority consensus recovers `v`
+ * while tolerating promoted outliers. Ambiguous baskets use the median/EWMA
+ * fallback above. */
 function recoverCorpusRoll(moved: readonly { sample: PriceSample; step: number }[]): number | undefined {
   const constrained = moved.flatMap(({ sample, step }) => {
     const range = volatilityRange(sample.sym);
@@ -262,33 +261,30 @@ function recoverCorpusRoll(moved: readonly { sample: PriceSample; step: number }
 
   const count = (range: readonly [number, number]): number =>
     Math.max(0, Math.round((range[1] - range[0]) / STOCK_VOLATILITY_STEP));
-  const reference = constrained.reduce((best, candidate) =>
-    count(candidate.range) < count(best.range) ? candidate : best);
-  const solutions: number[] = [];
   const tolerance = 1e-8;
-
-  for (let i = 0; i <= count(reference.range); i++) {
-    const referenceVolatility = reference.range[0] + i * STOCK_VOLATILITY_STEP;
-    const v = reference.amplitude / referenceVolatility;
-    if (!(v > 0) || v > 1 + tolerance) continue;
-
-    let fits = true;
-    for (const candidate of constrained) {
-      const implied = candidate.amplitude / v;
-      const index = Math.round((implied - candidate.range[0]) / STOCK_VOLATILITY_STEP);
-      if (index < 0 || index > count(candidate.range)) {
-        fits = false;
-        break;
+  const candidates = new Map<string, { v: number; fits: number }>();
+  for (const reference of constrained) {
+    for (let i = 0; i <= count(reference.range); i++) {
+      const referenceVolatility = reference.range[0] + i * STOCK_VOLATILITY_STEP;
+      const v = reference.amplitude / referenceVolatility;
+      if (!(v > 0) || v > 1 + tolerance) continue;
+      const key = v.toPrecision(12);
+      if (candidates.has(key)) continue;
+      let fits = 0;
+      for (const candidate of constrained) {
+        const implied = candidate.amplitude / v;
+        const index = Math.round((implied - candidate.range[0]) / STOCK_VOLATILITY_STEP);
+        if (index < 0 || index > count(candidate.range)) continue;
+        const gridValue = candidate.range[0] + index * STOCK_VOLATILITY_STEP;
+        if (Math.abs(implied - gridValue) <= tolerance * Math.max(STOCK_VOLATILITY_STEP, gridValue)) fits++;
       }
-      const gridValue = candidate.range[0] + index * STOCK_VOLATILITY_STEP;
-      if (Math.abs(implied - gridValue) > tolerance * Math.max(STOCK_VOLATILITY_STEP, gridValue)) {
-        fits = false;
-        break;
-      }
+      candidates.set(key, { v: Math.min(1, v), fits });
     }
-    if (fits) solutions.push(Math.min(1, v));
   }
-  return solutions.length === 1 ? solutions[0] : undefined;
+  const ordered = [...candidates.values()].sort((a, b) => b.fits - a.fits);
+  const best = ordered[0];
+  if (!best || best.fits < Math.ceil(constrained.length / 2)) return undefined;
+  return ordered[1]?.fits === best.fits ? undefined : best.v;
 }
 
 function metadataVolatility(sym: string): number {
@@ -302,14 +298,14 @@ function metadataVolatility(sym: string): number {
  * value. The `confident` flag is what the solver gates on — an unshrunk
  * estimate off four samples would happily claim a 0.75 forecast, and paying the
  * spread on that is how an automated trader loses money while looking busy. */
-export interface ForecastEstimate {
+interface ForecastEstimate {
   forecast: number;
   volatility: number;
   /** True when 4S supplied the value outright. */
   exact: boolean;
   /** Enough evidence to open a position on. */
   confident: boolean;
-  /** The Beta-prior shrink factor `n / (n + k)` this estimate was multiplied by
+  /** The shrink factor `n / (n + k)` this estimate was multiplied by
    *  (1 for exact values, 0 with no samples). The KNOWN inverse for anything
    *  that needs the un-shrunk forecast back — pricing the 4S purchase — rather
    *  than a guessed one. */
@@ -339,27 +335,11 @@ export function estimateSignal(history: MarketHistory, sym: string, exactForecas
   };
 }
 
-/** Ticks until the next regime change, or undefined until one has been seen.
- *
- * This is the position size limiter that matters: a long opened 3 ticks before a
- * cycle has a 45% chance of having its forecast inverted before it can clear the
- * spread, and no amount of edge fixes that. */
+/** Ticks until the next periodic market-cycle boundary, once observed. A symbol
+ * has a 45% chance of inversion there, but can also change trend between cycles. */
 export function ticksUntilCycle(history: MarketHistory): number | undefined {
   if (history.lastCycleTick === undefined) return undefined;
   const elapsed = history.tick - history.lastCycleTick;
   const into = elapsed % TICKS_PER_CYCLE;
   return TICKS_PER_CYCLE - into;
-}
-
-/** Drop everything derived from a market that no longer exists. An augmentation
- *  install re-rolls every symbol (`prestigeAugmentation` -> `initStockMarket`),
- *  so a history that survived it describes prices, spreads and volatilities that
- *  were all thrown away. */
-export function resetHistory(history: MarketHistory): void {
-  history.tick = 0;
-  delete history.lastCycleTick;
-  history.cyclesSeen = 0;
-  history.lastFlipCount = 0;
-  delete history.lastV;
-  history.symbols = {};
 }

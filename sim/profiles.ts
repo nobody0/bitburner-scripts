@@ -168,8 +168,8 @@ const CYBERSEC_CADENCE_WORLD: NonNullable<SimProfile["world"]> = {
 };
 
 /** Cross-node stock fixture. This is a reachable mid-run BN5 state rather than
- * free market access: the controller must decide whether WSE + TIX are worth
- * their real $5.2b cost. Every omega-net field is a vendored upstream value
+ * free market access: the controller must decide whether TIX is worth
+ * its real $5b cost. Every omega-net field is a vendored upstream value
  * (the midpoint where upstream declares a range), and the paired profiles
  * differ only by whether the stock feature is enabled. */
 const BN5_STOCK_WORLD: NonNullable<SimProfile["world"]> = {
@@ -359,11 +359,11 @@ const BN8_MANIPULATION_WORLD: NonNullable<SimProfile["world"]> = {
 /** The stock capability ladder: three profiles over ONE world, differing only
  * in capability, each a strict superset of the one below it. BitNode 5, not 8:
  * BN8 grants shorts unconditionally, so the lower rungs could not exist there.
- * Hacking is off, which leaves BN5's other multipliers inert; WSE+TIX are
+ * Hacking is off, which leaves BN5's other multipliers inert; TIX is
  * pre-granted because the unlock LADDER purchases are already exercised by
  * `stock-only` and `bn5-hacking-stock` — the experiment here is signal quality
  * (inferred vs read) and the trading surface (longs vs both sides). */
-const STOCK_LADDER_GATES = { hasWseAccount: true, hasTixApiAccess: true } as const;
+const STOCK_LADDER_GATES = { hasTixApiAccess: true } as const;
 const STOCK_LADDER = {
   bitnode: 5,
   features: only("stock", "progression"),

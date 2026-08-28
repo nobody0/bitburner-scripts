@@ -76,9 +76,7 @@ function symbolViews(market: StockMarketSystem, has4S: boolean): StockSymbolView
       bid: stock.getBidPrice(),
       maxShares: stock.maxShares,
       shares: stock.playerShares,
-      avgPx: stock.playerAvgPx,
       sharesShort: stock.playerShortShares,
-      avgPxShort: stock.playerAvgShortPx,
       // Exactly the gate the game applies: getForecast/getVolatility read
       // has4SDataTixApi and nothing else.
       ...(has4S ? { forecast: stock.getAbsoluteForecast() / 100, volatility: stock.mv / 100 } : {}),
@@ -96,9 +94,6 @@ function apply(market: StockMarketSystem, actions: readonly StockAction[]): void
       case "sell":
         if (action.short) market.sellShort(action.sym, action.shares);
         else market.sellStock(action.sym, action.shares);
-        break;
-      case "buyWse":
-        market.purchaseWseAccount();
         break;
       case "buyTix":
         market.purchaseTixApi();
@@ -138,7 +133,6 @@ function tradeRun(options: RunOptions): RunResult {
   const has4S = options.has4S ?? true;
   const world = new SimWorld({ seed, network: [] });
   const market = new StockMarketSystem(world, world.player, mulberry32(seed + 7), {
-    hasWseAccount: true,
     hasTixApiAccess: true,
     has4SDataTixApi: has4S,
   });
@@ -157,7 +151,6 @@ function tradeRun(options: RunOptions): RunResult {
       const remainingTicks = Math.max(0, (options.liquidateAt ?? ticks) - tick);
       const view: StockView = {
         symbols: symbolViews(market, has4S),
-        hasWseAccount: true,
         hasTixApi: true,
         has4SApi: has4S,
         canShort: false,
@@ -333,7 +326,6 @@ describe("the install barrier", () => {
   function barrier(options: RunOptions): { flat: boolean; blockers: string[]; portfolio: number } {
     const world = new SimWorld({ seed: options.seed, network: [] });
     const market = new StockMarketSystem(world, world.player, mulberry32(options.seed + 7), {
-      hasWseAccount: true,
       hasTixApiAccess: true,
       has4SDataTixApi: true,
     });
@@ -388,7 +380,6 @@ describe("the install barrier", () => {
     const remaining = Math.max(0, (options.liquidateAt ?? options.ticks) - tick);
     return {
       symbols: symbolViews(market, true),
-      hasWseAccount: true,
       hasTixApi: true,
       has4SApi: true,
       canShort: false,

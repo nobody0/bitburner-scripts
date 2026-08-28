@@ -1,7 +1,7 @@
 # `stock` — the World Stock Exchange
 
 33 symbols random-walk on a 6-second tick, biased by a hidden per-symbol forecast that
-re-rolls on a 75-tick cycle. Each position pays a spread and a commission, so profit exists
+evolves continuously and may invert at a 75-tick market-cycle boundary. Each position pays a spread and a commission, so profit exists
 only where the drift over the hold clears both. Hack and grow with `{stock: true}` move the
 forecast of the symbol owned by the target's organization.
 
@@ -23,15 +23,16 @@ Money-gated, not capability-gated. Costs `StockMarket/data/Constants.ts:4-11`, g
 | 4S Market Data | $1b × `FourSigmaMarketDataCost` | nothing — it is the exchange UI's forecast column |
 | 4S Market Data TIX API | $25b × `FourSigmaMarketDataApiCost` | `getForecast`, `getVolatility` (`:228-247`) |
 
+- `purchaseTixApi` does **not** require WSE and initializes the market itself. Automation
+  therefore starts at TIX; buying WSE first wastes $200m.
 - `purchase4SMarketDataTixApi` needs TIX access and **not** `has4SData` (`:275-297`), so the $1b
-  buys an automated player nothing: `decide.ts`'s ladder has three rungs and no `buy4SData`.
+  buys an automated player nothing: `decide.ts` has no WSE or 4S-data purchase action.
 - Shorts need BN8 or SF8 ≥ 2, `placeOrder` / `getOrders` BN8 or SF8 ≥ 3 (`:151, 163, 178, 192, 204`);
   we probe open orders and never place one. `disable4SData` blocks both 4S purchases (`:250, 276`).
 - BN8 starts with $250m, WSE and TIX; SF8 ≥ 1 re-grants both at every prestige (`Prestige.ts:161-168, 302-312`).
   SF8's only multiplier is `hacking_grow` ×1.12 / 1.18 / 1.21 (`SourceFile/applySourceFile.ts:124-133`).
-- **`stock` is unconditionally "yes"** (`shared/features/unlock.ts:122, 157-166`). Gating it
-  on `hasWseAccount()` deadlocked: a driver never runs while its own feature reads "no", so
-  nothing could buy the account that unlocks it.
+- **`stock` is unconditionally "yes"** (`shared/features/unlock.ts:122, 157-166`) so its
+  driver can buy TIX when automated access is absent.
 
 ## Rules
 
@@ -55,11 +56,16 @@ Consequences, in `shared/strategy/stock/market.ts`, pinned by `sim/tests/stock-p
 |---|---|---|
 | `v` is one shared draw ~U(0,1) | `StockMarket.ts:260` | `getVolatility()` is the CEILING; the mean move is half it (`meanLogStep`) |
 | ask = `price·(1+spread/100)`, bid = `price·(1−spread/100)` | `Stock.ts:225-232` | a round trip costs `2·spreadPerc%` of notional — 10x–200x the $100k commission, charged on both legs (`StockMarketHelpers.ts:28, 53`) |
-| `otlkMag` drifts by `otlkMag · av` | `StockMarket.ts:311` | the forecast is near-constant inside a cycle; what ends it is the scheduled boundary |
+| `otlkMag` drifts each tick and `cycleForecast` may flip the trend | `StockMarket.ts` | cycle phase bounds risk but never guarantees the signal persists |
 | `getForecastIncreaseChance` pulls the forecast toward `otlkMagForecast`, clamped ±45 | `Stock.ts:235-240` | the second-order forecast leads, and it is the only quantity hack/grow can move |
-| every `shareTxForMovement` shares transacted drags `otlkMag` toward a floor of 5 and `otlkMagForecast` toward 50, recovering +10/tick | `StockMarketHelpers.ts:64-109`, `Stock.ts:5` | size degrades your own signal (`selfInfluenceCost`) |
+| each rolled `shareTxUntilMovement` threshold drags `otlkMag` toward a floor of 5 and `otlkMagForecast` toward 50, recovering +10/tick | `StockMarketHelpers.ts:64-109`, `Stock.ts:5` | size degrades the signal; `selfInfluenceCost` estimates it from metadata because the live threshold is hidden |
 | `mv`, `spreadPerc`, `initPrice`, `shareTxForMovement` are rolled once per world from declared `{min,max}` bands; `maxShares` is 20% of `marketCap / initPrice` | `Stock.ts:40, 139-150` | `mv` sits on a discrete 1/100 grid inside a PUBLIC band (`data/InitStockMetadata.ts` → `shared/features/stocks.ts`); `maxShares` silently caps every transaction |
-| the shared `v` calibrates all symbols at once, and the tick sign is a Bernoulli draw on the forecast | `shared/strategy/stock/history.ts` | **no 4S is needed to trade**: intersecting the discrete grids usually recovers volatility exactly, and up-tick frequency estimates the forecast (EWMA α 0.08, shrunk toward 0.5 at prior strength 25). Only the cycle boundary needs 4S — ≥ 6 simultaneous 0.5 crossings, exact thereafter |
+| the shared `v` calibrates all symbols at once, and the tick sign is a Bernoulli draw on the forecast | `shared/strategy/stock/history.ts` | **no 4S is needed to trade**: majority consensus over the discrete grids recovers volatility while tolerating darknet-promoted outliers, and up-tick frequency estimates the forecast (EWMA α 0.08, symmetrically shrunk toward 0.5). 4S makes the signal exact and exposes cycle boundaries |
+
+`expectedProfit` exactly matches long and short entry/exit settlement for a fixed
+forecast and volatility. It does not claim the forecast stays fixed, and it excludes
+the engine's soft price cap (which forces only a 10% up chance above the cap). The
+entry-window and simulator gates bound that model; they do not guarantee a realized gain.
 
 **Manipulation.** Both flagged ops roll `random() < moneyMoved / server.moneyMax` and on success
 move `otlkMagForecast` by ∓0.1 (`StockMarket/PlayerInfluencing.ts:12, 34-35, 57-58`), joined to a
@@ -111,7 +117,7 @@ Cash, in BN8 the only cash — no rep, no experience, no permanent multiplier. P
 ## Measured
 
 Paired `bn5-hacking` / `bn5-hacking-stock`: same seeds, same vendored omega-net midpoint,
-$12b → $20b, treatment paying the real $5.2b for WSE + TIX, only the stock flag differing.
+$12b → $20b, treatment paying the real $5b for TIX, only the stock flag differing.
 
 | Seed | Hacking only | Hacking + stock | Improvement |
 |---:|---:|---:|---:|
@@ -133,7 +139,7 @@ the finding and differencing either curve destroys it:
 - **book at market against book at cost** — the gap is unrealised P/L, and the
   crossing is the moment the open book goes underwater.
 - **realised net against cumulative unlock spend** — the crossing is the moment
-  the market has earned back the $200m/$5b/$25b of access it was given, which is
+  the market has earned back the $5b/$25b-base automation access it bought, which is
   the quantity the whole unlock ladder argues about. Realised net is taken at
   COST BASIS, matching `earnedSinceInstall`, so it is unmoved by opening a
   position and by price wobble.
@@ -180,8 +186,5 @@ volatility, spread, commission or `maxShares`. [BN8](../bitnodes/bn08.md) is the
   record stream, so a stored run served compacted (over `COMPACT_OVER_BYTES`,
   `ui/server.ts`) has no history to fold and the charts fill from connect time.
   A hub-side series sidecar in `RunStore.append` would fix it; not yet warranted.
-- Does the discrete-grid volatility recovery in `history.ts` still resolve after a darknet
-  `promoteStock` charge, which multiplies `mv` off that grid?
-- `NUDGE_CONVERGENCE` is asserted at 0.5 as the convergence ramp's midpoint; what does the
-  engine measure? And is the $200m WSE rung worth buying, given `purchaseTixApi` (`:317-334`)
-  has no WSE prerequisite and nothing scripted reads the flag?
+- `NUDGE_CONVERGENCE = 0.5` is a calibrated manipulation heuristic, not an upstream constant.
+  Keep it covered by the bounded BN8 manipulation control/treatment lanes when changing it.

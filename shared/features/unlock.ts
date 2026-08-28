@@ -124,16 +124,8 @@ export function deriveCapabilities(r: GateReadings): Capabilities {
   set("career", "yes", "");
   set("hacknet", "yes", "");
   set("side", "yes", "");
-  // The market is MONEY-gated, not capability-gated, which is why it belongs
-  // here rather than behind `hasWseAccount`. A WSE account costs $200m and the
-  // TIX API $5b; BN8/SF8 also grants both on prestige, but neither flag is a
-  // prerequisite for the driver to begin climbing the ladder. Gating the
-  // feature on the account instead made the
-  // purchase unreachable: a driver never runs while its own feature reads "no",
-  // so nothing could ever buy the thing that would unlock it. The account flags
-  // travel as ordinary state on the topic and the driver climbs the ladder
-  // itself; `restrictions.disable4SData` still tells it when the forecast cannot
-  // be bought at all.
+  // Stock is money-gated. TIX initializes the market without requiring WSE, so
+  // the always-running driver can buy TIX and then the 4S TIX API.
   // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/data/Constants.ts#L3-L12
   // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Prestige.ts#L163-L168
   set("stock", "yes", "");

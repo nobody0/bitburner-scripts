@@ -37,20 +37,20 @@
  * 2. **Spread dominates commission.** A round trip pays `2 * spreadPerc%` of
  *    notional (up to 4% for NTLK) on top of $200k. On any position big enough
  *    to matter, the fixed fee is noise and the spread is the real hurdle. See
- *    {@link roundTripCostFraction}.
- * 3. **The forecast is persistent, and the regime change is SCHEDULED.**
- *    `otlkMag` drifts by `otlkMag * av` — a few points over a whole 75-tick
- *    cycle — so a forecast is nearly constant within a cycle. What ends it is
- *    the cycle boundary, which arrives every 75 ticks EXACTLY once the first
- *    random offset has passed. That makes it observable and plannable
- *    (shared/strategy/stock/history.ts).
+ *    {@link expectedProfit}.
+ * 3. **The market cycle is periodic, not a guaranteed signal window.** The
+ *    boundary repeats every 75 ticks after the initial random offset, but
+ *    `cycleForecast` may also flip a symbol between boundaries. The observed
+ *    phase is useful for risk bounds, not certainty.
  * 4. **`otlkMagForecast` leads `forecast`.** `getForecastIncreaseChance` pulls
  *    the forecast toward the second-order forecast at up to 95%/tick, so the
  *    forecast converges on `otlkMagForecast / 100`. That is also the ONLY
  *    quantity hack/grow can move, which is what makes manipulation work.
  * 5. **Trading degrades your own signal.** Every `shareTxForMovement` shares
  *    transacted drags `otlkMag` toward a floor of 5 and `otlkMagForecast` toward
- *    50. Size is not free. See {@link selfInfluenceCost}.
+ *    50. Size is not free. See {@link selfInfluenceCost}. The price engine also
+ *    forces only a 10% up chance above its soft cap, so fixed-signal profit is
+ *    an entry model rather than a promise about an arbitrary future price.
  */
 
 // --- constants (v3.0.1) -----------------------------------------------------
@@ -70,10 +70,8 @@ export const TICKS_PER_CYCLE = 75;
 export const CYCLE_FLIP_CHANCE = 0.45;
 /** `StockMarketCommission`, charged on BOTH the buy and the sell. */
 export const COMMISSION = 100_000;
-/** `WseAccountCost` / `TixApiCost` / `MarketData4SCost` / `MarketDataTixApi4SCost`. */
-export const WSE_ACCOUNT_COST = 200e6;
+/** Script automation unlock costs used by the strategy. */
 export const TIX_API_COST = 5e9;
-export const FOUR_SIGMA_DATA_COST = 1e9;
 export const FOUR_SIGMA_API_COST = 25e9;
 /** `Stock.StockForecastInfluenceLimit` — trading cannot push `otlkMag` below 5. */
 export const FORECAST_INFLUENCE_LIMIT = 5;
@@ -82,12 +80,6 @@ export const FORECAST_CHANGE_PER_MOVEMENT = 0.006;
 /** `forecastForecastChangeFromHack` — the nudge one influencing hack or grow
  *  lands, on `otlkMagForecast`'s 0..100 scale. */
 export const FORECAST_NUDGE_PER_OP = 0.1;
-/** Shares of headroom `shareTxUntilMovement` recovers per tick. */
-export const SHARE_TX_RECOVERY_PER_TICK = 10;
-/** `getForecastIncreaseChance` clamps the second-order gap to +/-45, so the
- *  forecast converges on `otlkMagForecast` at up to 95% of ticks. */
-export const FORECAST_GAP_CLAMP = 45;
-
 // --- price movement ---------------------------------------------------------
 
 /** Expected per-tick log price step magnitude, `E[ln(1 + v * volatility)]` over
@@ -105,21 +97,6 @@ export function meanLogStep(volatility: number): number {
   return ((1 + volatility) * Math.log1p(volatility) - volatility) / volatility;
 }
 
-/** Expected log return per tick of a LONG position: `(2f - 1) * meanLogStep`.
- *
- * At forecast 0.5 this is exactly zero, which is the point — no information
- * means no edge, and a trader who bought anyway would pay the spread for a coin
- * flip. Negative values are the short's edge, with the sign flipped. */
-export function driftPerTick(forecast: number, volatility: number): number {
-  return (2 * forecast - 1) * meanLogStep(volatility);
-}
-
-/** Expected log return per tick of a position on the given side. */
-export function sideDriftPerTick(forecast: number, volatility: number, side: PositionSide): number {
-  const drift = driftPerTick(forecast, volatility);
-  return side === "short" ? -drift : drift;
-}
-
 export type PositionSide = "long" | "short";
 
 /** Which side the forecast favours, and by how much. */
@@ -129,26 +106,25 @@ export function favouredSide(forecast: number): PositionSide {
 
 // --- transaction costs ------------------------------------------------------
 
-/** Round-trip cost as a FRACTION of notional, from the live ask/bid.
- *
- * Both legs cross the spread: you buy at ask and sell at bid, so the loss is
- * `(ask - bid) / ask` of the position before any price movement. Position
- * sizing must include this cost as well as commissions. */
-export function roundTripCostFraction(ask: number, bid: number): number {
-  if (!(ask > 0) || !(bid > 0)) return Infinity;
-  return Math.max(0, (ask - bid) / ask);
-}
-
 /** Total round-trip cost in dollars: both commissions plus the spread crossing. */
 export function roundTripCost(shares: number, ask: number, bid: number): number {
   return 2 * COMMISSION + shares * Math.max(0, ask - bid);
 }
 
-/** Ticks a position must be held before the expected drift clears its round
- * trip. Infinite when the drift is the wrong sign or zero.
- *
- * Derive the required hold length from the position instead of assuming one;
- * refuse the trade when the available horizon is shorter. */
+/** Expected underlying-price multiplier for one tick while forecast and
+ * volatility remain fixed. Upstream multiplies by `1 + v * volatility` on an
+ * up move and divides by it on a down move, with `v` uniform on [0, 1]. This
+ * excludes forecast evolution and the soft price cap. */
+export function expectedPriceFactor(forecast: number, volatility: number): number {
+  if (!(volatility > 0)) return 1;
+  const chanceUp = Math.min(1, Math.max(0, forecast));
+  const up = 1 + volatility / 2;
+  const down = Math.log1p(volatility) / volatility;
+  return chanceUp * up + (1 - chanceUp) * down;
+}
+
+/** Ticks until fixed-signal expected settlement clears spread and commission.
+ * Infinite when the selected side cannot break even. */
 export function breakEvenTicks(params: {
   shares: number;
   ask: number;
@@ -158,16 +134,22 @@ export function breakEvenTicks(params: {
   side: PositionSide;
 }): number {
   const { shares, ask, bid, forecast, volatility, side } = params;
-  const drift = sideDriftPerTick(forecast, volatility, side);
-  if (!(drift > 0) || !(shares > 0)) return Infinity;
-  const notional = shares * (side === "short" ? bid : ask);
-  if (!(notional > 0)) return Infinity;
-  return roundTripCost(shares, ask, bid) / (notional * drift);
+  if (!(shares > 0) || !(ask > 0) || !(bid > 0)) return Infinity;
+  const factor = expectedPriceFactor(forecast, volatility);
+  if (side === "long") {
+    if (!(factor > 1)) return Infinity;
+    const target = (ask + (2 * COMMISSION) / shares) / bid;
+    return target > 1 ? Math.log(target) / Math.log(factor) : 0;
+  }
+  if (!(factor < 1)) return Infinity;
+  const proceedsAfterFees = bid - (2 * COMMISSION) / shares;
+  if (!(proceedsAfterFees > 0)) return Infinity;
+  const target = proceedsAfterFees / ask;
+  return target < 1 ? Math.log(target) / Math.log(factor) : 0;
 }
 
-/** Expected profit in dollars from holding `shares` for `ticks`, net of the
- * round trip. Uses the log drift compounded over the hold, which is the correct
- * shape — the game multiplies and divides the price, it does not add. */
+/** Fixed-signal expected settlement. Longs enter at ask and leave at future
+ * bid; shorts enter at bid and cover at future ask. */
 export function expectedProfit(params: {
   shares: number;
   ask: number;
@@ -178,14 +160,15 @@ export function expectedProfit(params: {
   ticks: number;
 }): number {
   const { shares, ask, bid, forecast, volatility, side, ticks } = params;
-  if (!(shares > 0) || !(ticks > 0)) return 0;
-  const drift = sideDriftPerTick(forecast, volatility, side);
-  const notional = shares * (side === "short" ? bid : ask);
-  const gross = notional * Math.expm1(drift * ticks);
-  return gross - roundTripCost(shares, ask, bid);
+  if (!(shares > 0) || !(ask > 0) || !(bid > 0)) return 0;
+  const priceFactor = expectedPriceFactor(forecast, volatility) ** Math.max(0, ticks);
+  const gross = side === "long"
+    ? shares * (bid * priceFactor - ask)
+    : shares * (bid - ask * priceFactor);
+  return gross - 2 * COMMISSION;
 }
 
-/** The forecast damage a trade of this size does to itself.
+/** Estimate of the forecast damage caused by a trade.
  *
  * Every `shareTxForMovement` shares transacted calls `influenceForecast`, which
  * moves `otlkMag` `FORECAST_CHANGE_PER_MOVEMENT` toward the floor of 5. So a
@@ -193,6 +176,8 @@ export function expectedProfit(params: {
  * outlook magnitude — for ECP's full 21.8M-share allocation, ~2.2 points off a
  * 19-point outlook.
  *
+ * The live movement threshold and its accumulated headroom are hidden, so the
+ * metadata midpoint estimates rather than reproduces the exact transaction.
  * Returned in FORECAST units (0..1) so it can be subtracted from a forecast
  * directly, and clamped by the influence floor: a symbol already at or below
  * `otlkMag = 5` (forecast 0.55 / 0.45) cannot be damaged further. */
@@ -234,13 +219,12 @@ export function nudgesPerOp(stealFraction: number): number {
   return Math.min(1, Math.max(0, stealFraction)) * FORECAST_NUDGE_PER_OP;
 }
 
-/** Fraction of a nudge's theoretical value that is actually realized.
+/** Calibrated fraction of a nudge's theoretical value realized during a hold.
  *
  * A nudge moves `otlkMagForecast` immediately, but `forecast` only walks toward
  * it at `otlkMag * av` per tick — so the price impact arrives gradually over the
- * hold rather than at once. Half credit is the conservative midpoint of that
- * ramp, and it is a named parameter precisely so the simulator can measure the
- * right value instead of us asserting one. */
+ * hold rather than at once. The bounded manipulation lanes calibrate this
+ * heuristic; it is not an upstream constant. */
 export const NUDGE_CONVERGENCE = 0.5;
 
 /** Dollars one `otlkMagForecast` nudge is worth, given the position it will be
@@ -287,59 +271,23 @@ export function manipulationValuePerOp(params: {
 
 // --- BitNode-adjusted costs -------------------------------------------------
 
-/** The BitNode multipliers that change what the market is worth.
- *
- * The market's own mechanics are NOT multiplied by anything — no BitNode scales
- * a stock's price, forecast or volatility. Only two things move:
- *
- *  - **the unlock prices**, via `FourSigmaMarketDataCost` /
- *    `FourSigmaMarketDataApiCost` (BN9 charges 5x/4x, and the option to disable
- *    4S entirely exists), which is what decides whether the forecast is
- *    affordable at all; and
- *  - **the manipulation trade-off**, via `ScriptHackMoney` (scales the drained
- *    fraction, so it scales nudges per op) and `ScriptHackMoneyGain` (scales
- *    only the player's cut, so it scales what hacking gives up to manipulate).
- *
- * That asymmetry is the whole of BN8: `ScriptHackMoneyGain: 0` makes hacked
- * money worth zero while `ScriptHackMoney: 0.3` leaves manipulation at 30%
- * strength, so the market stops being one income source among several and
- * becomes the only one. */
+/** BitNode multiplier that affects the automation unlock bought here. */
 export interface StockNodeMults {
-  FourSigmaMarketDataCost?: number;
   FourSigmaMarketDataApiCost?: number;
-  ScriptHackMoney?: number;
-  ScriptHackMoneyGain?: number;
 }
 
 export interface UnlockCosts {
-  wseAccount: number;
   tixApi: number;
-  fourSigmaData: number;
   fourSigmaApi: number;
 }
 
-/** `getStockMarket4SDataCost` and friends: the base cost times the node's
- *  multiplier. WSE and TIX are NOT multiplied by anything upstream.
+/** TIX is fixed; the 4S TIX API uses the node multiplier.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/StockMarket.ts */
 export function unlockCosts(mults: StockNodeMults | undefined): UnlockCosts {
   return {
-    wseAccount: WSE_ACCOUNT_COST,
     tixApi: TIX_API_COST,
-    fourSigmaData: FOUR_SIGMA_DATA_COST * (mults?.FourSigmaMarketDataCost ?? 1),
     fourSigmaApi: FOUR_SIGMA_API_COST * (mults?.FourSigmaMarketDataApiCost ?? 1),
   };
-}
-
-/** How much the market matters relative to hacking, in this node.
- *
- * `1` means hacked money arrives at full value and the market competes with it
- * on the merits. `Infinity` means hacking earns nothing and every dollar has to
- * come from somewhere else — BN8. This decides how hard `stock` bids for money
- * and how much of the farm it may commandeer for manipulation. */
-export function manipulationLeverage(mults: StockNodeMults | undefined): number {
-  const gain = mults?.ScriptHackMoneyGain ?? 1;
-  if (gain <= 0) return Infinity;
-  return 1 / gain;
 }
 
 // --- ticks and horizons -----------------------------------------------------
