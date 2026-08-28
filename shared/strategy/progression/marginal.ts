@@ -208,6 +208,19 @@ function perturbedRates(rates: RouteRates, resource: MarginalResource, relativeD
     if (rates.hackingExpPerSec !== undefined && rates.hackingExpPerSec > 0) {
       next.hackingExpPerSec = rates.hackingExpPerSec * scale;
     }
+    // Faction-work reputation is EARNED BY hacking skill (near-linearly, per
+    // the transcribed work-rep formulas), so a hacking perturbation moves the
+    // reputation legs too, at the driver-measured elasticity. Without this
+    // the route's dominant channel was invisible to the multipliers that
+    // accelerate it.
+    const elasticity = rates.repRateHackingElasticity;
+    if (elasticity !== undefined && elasticity > 0) {
+      const repScale = 1 + (scale - 1) * elasticity;
+      if (rates.daedalusRepPerSec > 0) next.daedalusRepPerSec = rates.daedalusRepPerSec * repScale;
+      if (rates.daedalusRepPerSecProjected !== undefined && rates.daedalusRepPerSecProjected > 0) {
+        next.daedalusRepPerSecProjected = rates.daedalusRepPerSecProjected * repScale;
+      }
+    }
   } else if (resource === "charisma") {
     next.charismaSkillPerSec = (
       rates.charismaSkillPerSec > 0 ? rates.charismaSkillPerSec : 1 / FALLBACK_SEC_PER_CHARISMA_LEVEL

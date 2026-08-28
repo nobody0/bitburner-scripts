@@ -2694,7 +2694,7 @@ function projectedDaedalusEconomics(
   ctx: NeedContext,
   view: EndgameView,
   factionWorkRepGain: number,
-): Pick<RouteRates, "daedalusRepPerSecProjected" | "daedalusDonateUnlockRepGap" | "daedalusDonationDollarsPerRep" | "daedalusDonationUnlocked"> {
+): Pick<RouteRates, "daedalusRepPerSecProjected" | "repRateHackingElasticity" | "daedalusDonateUnlockRepGap" | "daedalusDonationDollarsPerRep" | "daedalusDonationUnlocked"> {
   const playerTopic = ctx.state.topics.player;
   const repFactionMult = (playerTopic?.mults as Record<string, number> | undefined)?.["faction_rep"] ?? 1;
   const standing = ctx.state.topics.factions?.standings?.find((s) => s.name === "Daedalus");
@@ -2723,9 +2723,42 @@ function projectedDaedalusEconomics(
     },
     true,
   );
+  // d ln(rep rate) / d ln(hacking), by finite difference of the SAME
+  // transcribed formula at the player's CURRENT skills — the coupling that
+  // lets a hacking perturbation move the reputation legs it actually earns.
+  const livePerson = {
+    skills: {
+      hacking: Math.max(1, view.hackingSkill),
+      strength: view.lowestCombatSkill,
+      defense: view.lowestCombatSkill,
+      dexterity: view.lowestCombatSkill,
+      agility: view.lowestCombatSkill,
+      charisma: playerTopic?.skills?.charisma ?? 1,
+      intelligence: playerTopic?.skills?.intelligence ?? 0,
+    },
+    mults: { faction_rep: repFactionMult },
+  };
+  const repCtx = {
+    factionWorkRepGain,
+    shareBonus: ctx.state.topics.fleet?.sharePower ?? 1,
+    sf15Level: sfLevel(ctx.caps.sourceFiles, 15),
+    hasFocusAug: false,
+  };
+  const delta = 0.01;
+  const baseRep = workRepPerSec("hacking", livePerson, favor, repCtx, true);
+  const bumpedPerson = {
+    ...livePerson,
+    skills: { ...livePerson.skills, hacking: livePerson.skills.hacking * (1 + delta) },
+  };
+  const bumpedRep = workRepPerSec("hacking", bumpedPerson, favor, repCtx, true);
+  const repRateHackingElasticity = baseRep > 0 ? (bumpedRep / baseRep - 1) / delta : undefined;
+
   const favorToDonate = ctx.state.topics.factions?.favorToDonate ?? favorNeededToDonate(1);
   return {
     ...(projected > 0 ? { daedalusRepPerSecProjected: projected } : {}),
+    ...(repRateHackingElasticity !== undefined && repRateHackingElasticity > 0
+      ? { repRateHackingElasticity }
+      : {}),
     daedalusDonateUnlockRepGap: repUntilFavor(favor, standing?.rep ?? 0, favorToDonate),
     daedalusDonationDollarsPerRep: donationForRep(1, repFactionMult, factionWorkRepGain),
     daedalusDonationUnlocked: favor >= favorToDonate,

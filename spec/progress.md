@@ -1860,6 +1860,34 @@ stall with telemetry). Any early-game perturbation can presumably trip this
 basin; pricing one gate four times stays a known, now-documented distortion
 until the basin is fixed.
 
+## The 4-hour BN1 hunt (2026-08-28)
+
+Where seed 3's 21.4-hours-to-pill actually went (definitive bench, model
+10): 10.1 h to the 30-augmentation count gate, 6.5 h more at the invite
+gates, 4.8 h on the favor-unlock/donation reputation leg, 2.4 h regrow.
+Every phase but the regrow is REPUTATION-bound: the intent stream shows
+5-30 rep/s grinds, and rep rate is skill x mults x share physics.
+
+- **Losing A/B: foreclosure-aware portfolio (225d3051, reverted).** The
+  set solver is rate-greedy and side-blind at the city enemy graph, so a
+  second solve with unjoined foreclosers banned looked principled — and
+  won its unit test. In vivo it collapsed seed 3 from 31 augs/$51e12 at
+  12 h to 2 augs/$4.3e6: committing to the travel-and-money-gated eastern
+  side before the economy could fund it starved the count tranche, and
+  static total-value comparison ignores that EARLY slots compound. The
+  current HEAD's trajectory also already joins the eastern side once it
+  is affordable, so the defect the fix targeted was stale.
+- **Landed: hacking inherits the reputation legs it earns.** Perturbing
+  the hacking rate moved no reputation leg (rep rates are constants in
+  RouteRates), so worth(hacking) read 3-7k BN-seconds while
+  worth(reputation) read 107-189k — on a run whose reputation is earned
+  BY hacking skill, near-linearly per the transcribed work-rep formulas.
+  The driver now measures d ln(repRate)/d ln(hacking) by finite
+  difference of that same formula and the marginal scales the Daedalus
+  rep rates by it under hacking perturbations, so the multipliers that
+  accelerate the route's dominant channel are finally priced at what
+  they buy.
+
 ## Known gaps in the current implementation
 
 Stated plainly rather than buried, because several features are implemented to
