@@ -124,12 +124,30 @@ export class Clock {
 
   /** As `run`, but drains the microtask queue between events so async script
    * code actually makes progress. `until` is re-checked after each drain, so a
-   * goal reached inside a promise continuation stops the pump immediately. */
+   * goal reached inside a promise continuation stops the pump immediately.
+   *
+   * `SIM_TRACE_STALL=<path>` synchronously overwrites that file with the
+   * source of each event callback before running it — diagnosis-only, for the
+   * stall class the tripwire cannot see: a promise chain that never awaits a
+   * real timer starves the drain's setImmediate, so the pump never pops
+   * another event and the LAST traced callback is the loop's entry point. */
   async runAsync(
     until: () => boolean = () => false,
     horizonMs = Infinity,
     drain: () => Promise<void> = drainMicrotasks,
   ): Promise<"goal" | "empty" | "horizon"> {
+    const tracePath = globalThis.process?.env?.["SIM_TRACE_STALL"];
+    const trace = tracePath
+      ? await (async () => {
+          const fs = await import("node:fs");
+          return (event: Scheduled): void => {
+            fs.writeFileSync(
+              tracePath,
+              `t=${event.time} seq=${event.seq}\n${String(event.fn).slice(0, 4_000)}\n`,
+            );
+          };
+        })()
+      : undefined;
     // Virtual hours pass in wall-seconds, so the allocation churn of a busy
     // late-game fleet outruns the collector's own pacing: RSS ratcheted to
     // 50+ GB with a ~0.5 GB live heap and the OS killed whole seed processes
@@ -151,6 +169,7 @@ export class Clock {
         nextGcWallMs = realNowMs() + 2_000;
         gc(true);
       }
+      trace?.(next);
       next.fn();
     }
   }
