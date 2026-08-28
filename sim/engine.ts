@@ -125,26 +125,43 @@ export class Engine {
     this.cyclesProcessed += numCycles;
     this.updates++;
     const s = this.#subsystems;
+    // Diagnosis-only: with SIM_TRACE_STALL set, name each subsystem before it
+    // runs so a tick that never returns leaves the culprit on disk (the clock
+    // traces the event level; this traces one level deeper).
+    const mark = this.#traceMark;
 
     s.addPlaytime?.(numCycles * MILLI_PER_CYCLE);
-    s.terminalProcess?.(numCycles);
-    s.processWork?.(numCycles);
-    s.processStockPrices?.(numCycles);
-    s.gangProcess?.(numCycles);
-    s.staneksGiftProcess?.(numCycles);
+    mark?.("terminalProcess"); s.terminalProcess?.(numCycles);
+    mark?.("processWork"); s.processWork?.(numCycles);
+    mark?.("processStockPrices"); s.processStockPrices?.(numCycles);
+    mark?.("gangProcess"); s.gangProcess?.(numCycles);
+    mark?.("staneksGiftProcess"); s.staneksGiftProcess?.(numCycles);
     if (s.corporationStoreCycles) {
-      s.corporationStoreCycles(numCycles);
+      mark?.("corporation"); s.corporationStoreCycles(numCycles);
       s.corporationProcess?.();
     }
-    s.bladeburnerStoreCycles?.(numCycles);
-    s.sleeveProcess?.(numCycles);
-    s.darknetProcess?.(numCycles);
-    s.updateOnlineScriptTimes?.(numCycles);
-    s.processHacknetEarnings?.(numCycles);
+    mark?.("bladeburnerStoreCycles"); s.bladeburnerStoreCycles?.(numCycles);
+    mark?.("sleeveProcess"); s.sleeveProcess?.(numCycles);
+    mark?.("darknetProcess"); s.darknetProcess?.(numCycles);
+    mark?.("updateOnlineScriptTimes"); s.updateOnlineScriptTimes?.(numCycles);
+    mark?.("processHacknetEarnings"); s.processHacknetEarnings?.(numCycles);
 
     this.decrementAllCounters(numCycles);
-    this.checkCounters();
+    mark?.("checkCounters"); this.checkCounters();
+    mark?.("tick-complete");
   }
+
+  /** Lazily built subsystem tracer; undefined unless SIM_TRACE_STALL is set. */
+  #traceMark: ((name: string) => void) | undefined = (() => {
+    const path = globalThis.process?.env?.["SIM_TRACE_STALL"];
+    if (!path) return undefined;
+    // Deferred import kept synchronous: node:fs is always resolvable here.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require("node:fs") as typeof import("node:fs");
+    return (name: string): void => {
+      fs.writeFileSync(`${path}.subsystem`, name);
+    };
+  })();
 
   decrementAllCounters(numCycles = 1): void {
     for (const name of Object.keys(this.counters)) this.counters[name]! -= numCycles;
