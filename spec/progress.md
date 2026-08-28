@@ -1778,14 +1778,25 @@ The isolation evidence, for the darknet owner:
   as host-absent.
 - Harness note: the forced-GC pacing keys on VIRTUAL time, so a frozen
   clock starves the GC and turns a hang into an OOM spiral.
-- SHARPENED (2026-08-28, rev 45fc4fda — the hang survives the armour-leak
-  fixes and now fires at vt 7 MINUTES): in every captured instance the
-  freeze lands on the tick right after the first SUCCESSFUL darknet
-  backdoor ("dnet-N-xNNN backdoored, 2 hops out",
-  game/lib/features/dnet.ts:1232) — the next planning pass never returns.
-  Combined with the profile, the suspect is candidate/vantage enumeration
-  over a map whose first backdoored host unlocks a shape it cannot
-  terminate on.
+- ROOT CAUSE CONFIRMED (2026-08-28, instrumented): the dnet controller's
+  `signalDerive` (game/dnet/controller.ts, "derive wake") self-perpetuates.
+  `deriveQueued` clears BEFORE `fileWork` runs, so any write-through inside
+  a derive pass queues the next pass — a bare `Promise.resolve().then`
+  chain with NO timer anywhere. When a pass reliably produces one new fact
+  (first observed right after darknet backdoor/restart activity), the
+  chain never ends: a temporary counter measured 200,000+ chained passes
+  at one frozen virtual instant, still climbing. The chain starves the
+  clock pump's `setImmediate` (microtasks outrank macrotasks), so virtual
+  time freezes, the virtual-keyed forced GC never fires, and RSS spirals
+  until the OS kills the seed. The REAL game survives the identical loop
+  because its engine ticks in wall time — which is why overnight live runs
+  are clean and only sim runs die. Diagnosis chain: clock-event tripwire
+  silent at a 50k bound (so no timer events at all), engine-subsystem
+  trace reads "tick-complete" (the freeze is in the post-tick microtasks),
+  then the counter. The fix shape already exists in this codebase: the
+  32-wake-race bound in game/lib/controller.ts:569 — after N chained
+  same-instant derive passes, defer the next re-derive to a realmSleep
+  timer so time can advance. Left to the darknet owner.
 
 Darknet internals are out of scope for the route layer; the route side stays
 estimation-pure and is unit-pinned up to the boundary.
