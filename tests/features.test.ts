@@ -13,7 +13,8 @@ import {
   selectDue,
 } from "../game/lib/features/index.ts";
 import { PROBE_EVERY_TICKS, TICK_MS } from "../game/lib/controller.ts";
-import { purchasableAugmentation, sleeveView } from "../game/lib/features/remaining.ts";
+import { purchasableAugmentation } from "../game/lib/features/remaining.ts";
+import { sleeveView } from "../game/lib/features/sleeves.ts";
 import { NEUROFLUX } from "../shared/strategy/factions/augs.ts";
 import {
   ALL_PROBES,
@@ -478,10 +479,9 @@ describe("v3.0.1 feature observation contracts", () => {
     }] } as never;
     const crime = sleeveView(state)!.tasks.find((task) => task.type === "crime")!;
     const outcome = crime.outcomes[0]!;
-    // These are pre-shock. stepSleeves applies the 50% shock factor once.
-    expect(outcome.moneyPerSec).toBe(400);
+    // Experience is pre-shock; crime money, karma, and kills bypass shock.
     expect(outcome.rates.combatSkills).toBe(30);
-    expect(outcome.shockExemptRates).toEqual({ karma: 1, kills: 1 });
+    expect(outcome.shockExemptRates).toEqual({ money: 400, karma: 1, kills: 1 });
   });
 });
 

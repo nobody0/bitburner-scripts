@@ -9,7 +9,6 @@ import { sfLevel } from "../../../shared/features/unlock.ts";
 import { disabledByProfile } from "../../../shared/features/profile.ts";
 import { PRIORITY, type Claim, type ClaimValueCurve } from "../../../shared/strategy/arbiter.ts";
 import { stepBladeburner } from "../../../shared/strategy/bladeburner/decide.ts";
-import { successChance, type CrimeStats } from "../../../shared/strategy/career/crimes.ts";
 import { stepCorp } from "../../../shared/strategy/corp/stages.ts";
 import {
   DARKSCAPE_EARLY_BN1_ROUTE_SECONDS,
@@ -24,7 +23,7 @@ import {
   scoreAugMults,
   weightsFromMarginals,
 } from "../../../shared/strategy/factions/augs.ts";
-import { donationForRep, favorNeededToDonate, repUntilFavor, workRepPerSec, type WorkType } from "../../../shared/strategy/factions/rep.ts";
+import { donationForRep, favorNeededToDonate, repUntilFavor, workRepPerSec } from "../../../shared/strategy/factions/rep.ts";
 import { goDemands } from "../../../shared/strategy/go/demand.ts";
 import {
   goNeuralPositionIdentity,
@@ -109,7 +108,6 @@ import {
   type AugmentationCycle,
   type CyclePoint,
 } from "../../../shared/strategy/progression/regrowth.ts";
-import { stepSleeves, type SleevesView, type SleeveTask } from "../../../shared/strategy/sleeves/decide.ts";
 import { packFragments } from "../../../shared/strategy/stanek/pack.ts";
 import type {
   GoActionDigest,
@@ -127,10 +125,8 @@ import { priceCall } from "../ns-proxy.ts";
 import { RESIDENT_BASE_GB } from "../../../shared/ram/broker.ts";
 import { resetGateSignal, signalGateRecheck } from "../gate-signal.ts";
 import { resetInstallSignal, takeInstallSignal } from "../install-signal.ts";
-import { armSleeveCompletion, consumeSleeveCompletion, pendingSleeveCompletions, resetSleeveCompletions } from "../sleeve-completion.ts";
 import { merge, set, type GameState } from "../state.ts";
 import { bladeburnerApiActionType } from "../bladeburner.ts";
-import type { WorkTaskLike } from "../work-completion.ts";
 import { dnetLabCacheDeferral } from "./dnet.ts";
 import { liquidatableValue } from "./factions.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
@@ -359,263 +355,6 @@ const bladeburner: FeatureDriver = {
         ? { type: bladeburnerApiActionType(action.actionType), name: action.name, elapsedMs: 0 }
         : undefined,
     });
-  },
-};
-
-// --- sleeves ----------------------------------------------------------------
-
-export function sleeveView(state: GameState): SleevesView | undefined {
-  const topic = state.topics.sleeves;
-  if (!topic) return undefined;
-  const completed = pendingSleeveCompletions();
-  const sleeves = (topic.sleeves ?? []).map((sleeve) => ({
-    index: sleeve.index,
-    shock: sleeve.shock,
-    sync: sleeve.sync,
-    city: sleeve.city,
-    skills: sleeve.skills as unknown as Record<string, number>,
-    ...(sleeve.task
-      ? {
-          task: {
-            type: sleeve.task.type,
-            detail: sleeve.task.detail,
-            ...(sleeve.task.workType !== undefined ? { workType: sleeve.task.workType } : {}),
-          },
-        }
-      : {}),
-    ...(completed.has(sleeve.index) ? { allowCrimeSwitch: true } : {}),
-  }));
-  const progression = state.topics.progression;
-  const node = effectiveBitNodeMultipliers(
-    progression?.bitNode,
-    sfLevel(progression?.sourceFiles, 12),
-    progression?.multipliers,
-  ) ?? {};
-  const playerMults = (state.topics.player?.mults ?? {}) as unknown as Record<string, number>;
-  // This per-run option zeros every sleeve experience field in
-  // calculateCrimeWorkStats/calculateFactionExp, but leaves money, reputation,
-  // karma, and kills intact.
-  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Work/Formulas.ts#L24-L35
-  const sleeveExpEnabled = state.topics.capabilities?.restrictions.disableSleeveExpAndAugmentation !== true;
-  const crimes = state.topics.career?.crimes ?? [];
-  const tasks: SleeveTask[] = [
-    { type: "recovery", outcomes: [{ rates: {}, moneyPerSec: 0 }] },
-    { type: "synchro", outcomes: [{ rates: {}, moneyPerSec: 0 }] },
-  ];
-  for (const crime of crimes) {
-    // getCrimeStats replaces the base money/experience with gains calculated
-    // for the current PLAYER. Undo those factors before applying each sleeve's
-    // own multipliers; otherwise player augmentations are counted once and
-    // sleeve augmentations a second time.
-    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L1068-L1090
-    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Work/Formulas.ts#L58-L79
-    const baseGain = (value: number, factor: number): number =>
-      crime.gainsAreEffective ? (factor > 0 ? value / factor : 0) : value;
-    const baseMoney = baseGain(
-      crime.money,
-      (playerMults["crime_money"] ?? 1) * (node["CrimeMoney"] ?? 1),
-    );
-    const baseExp = Object.fromEntries(Object.entries(crime.exp ?? {}).map(([skill, value]) => [
-      skill,
-      baseGain(
-        value,
-        (skill === "intelligence" ? 1 : (playerMults[`${skill}_exp`] ?? 1)) * (node["CrimeExpGain"] ?? 1),
-      ),
-    ]));
-    const outcomes = (topic.sleeves ?? []).map((sleeve) => {
-      const mults = sleeve.mults ?? {};
-      const stats: CrimeStats = {
-        type: crime.name,
-        timeMs: crime.timeMs,
-        money: baseMoney,
-        difficulty: crime.difficulty ?? 1,
-        karma: Math.abs(crime.karma),
-        kills: crime.kills ?? 0,
-        weights: crime.weights ?? {},
-        exp: baseExp,
-      };
-      const chance = successChance(
-        stats,
-        { skills: sleeve.skills as unknown as Record<string, number>, mults: { crime_success: mults["crime_success"] ?? 1, crime_money: mults["crime_money"] ?? 1 } },
-        { crimeSuccessRate: node["CrimeSuccessRate"] ?? 1, crimeMoney: node["CrimeMoney"] ?? 1 },
-      );
-      const seconds = crime.timeMs / 1_000;
-      const sync = sleeve.sync / 100;
-      const expectedExp = 0.25 + 0.75 * chance;
-      const exp = baseExp;
-      const expRate = (skill: string): number =>
-        sleeveExpEnabled
-          ? expectedExp * sync * (exp[skill] ?? 0) * (mults[`${skill}_exp`] ?? 1) * (node["CrimeExpGain"] ?? 1) / seconds
-          : 0;
-      const rates = {
-        combatSkills: Math.min(expRate("strength"), expRate("defense"), expRate("dexterity"), expRate("agility")),
-        charisma: expRate("charisma"),
-      };
-      const contributions = Object.keys(exp)
-        .map((skill) => ({ kind: "skill" as const, subject: skill, perSec: expRate(skill) }))
-        .filter((entry) => entry.perSec > 0);
-      // SleeveCrimeWork changes karma/kills directly. Neither is multiplied by
-      // shock; karma is multiplied by sync, while kills are not.
-      // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Sleeve/Work/SleeveCrimeWork.ts#L37-L50
-      const shockExemptRates = {
-        karma: chance * Math.abs(crime.karma) * sync / seconds,
-        kills: chance * (crime.kills ?? 0) / seconds,
-      };
-      // Outcomes are deliberately pre-shock: stepSleeves applies shock once
-      // while comparing every task. SleeveCrimeWork shocks these WorkStats
-      // before paying them, while only karma/kills bypass that scaling.
-      // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Sleeve/Work/SleeveCrimeWork.ts#L31-L50
-      const moneyPerSec = chance * baseMoney * (mults["crime_money"] ?? 1) * (node["CrimeMoney"] ?? 1) / seconds;
-      return { sleeve: sleeve.index, rates, contributions, shockExemptRates, moneyPerSec };
-    });
-    tasks.push({
-      type: "crime",
-      detail: crime.name,
-      outcomes,
-    });
-  }
-
-  // The current faction reputation breakpoint is an outcome sleeves can
-  // advance in parallel with Player.currentWork. Each faction is capacity-one
-  // in the game, while crime remains freely repeatable across sleeves.
-  const factionTopic = state.topics.factions;
-  const repTarget = factionTopic?.plan?.until;
-  if (repTarget?.kind === "rep" && repTarget.faction && factionTopic?.joined.includes(repTarget.faction)) {
-    const standing = factionTopic.standings?.find((entry) => entry.name === repTarget.faction);
-    const offered = factionTopic.workTypes?.[repTarget.faction] ?? [];
-    const sourceFiles = state.topics.progression?.sourceFiles ?? {};
-    for (const workType of ["hacking", "field", "security"] as const) {
-      if (!offered.includes(workType)) continue;
-      const outcomes = (topic.sleeves ?? []).map((sleeve) => {
-        const mults = sleeve.mults ?? {};
-        const contributions = [{
-          kind: "factionRep" as const,
-          subject: repTarget.faction,
-          // Outcomes are pre-shock; stepSleeves applies the exact shock factor
-          // once. Sleeve faction reputation is not scaled by sync.
-          // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Sleeve/Work/SleeveFactionWork.ts#L30-L38
-          perSec: workRepPerSec(
-            workType as WorkType,
-            {
-              skills: {
-                hacking: sleeve.skills.hacking,
-                strength: sleeve.skills.strength,
-                defense: sleeve.skills.defense,
-                dexterity: sleeve.skills.dexterity,
-                agility: sleeve.skills.agility,
-                charisma: sleeve.skills.charisma,
-                intelligence: sleeve.skills.intelligence ?? 0,
-              },
-              mults: { faction_rep: mults["faction_rep"] ?? 1 },
-            },
-            standing?.favor ?? 0,
-            {
-              factionWorkRepGain: node["FactionWorkRepGain"] ?? 1,
-              shareBonus: state.topics.fleet?.sharePower ?? 1,
-              sf15Level: sfLevel(sourceFiles, 15),
-              hasFocusAug: true,
-            },
-            true,
-          ),
-        }];
-        return { sleeve: sleeve.index, rates: {}, contributions, moneyPerSec: 0 };
-      });
-      tasks.push({
-        type: "faction",
-        detail: repTarget.faction,
-        workType,
-        exclusiveKey: `faction:${repTarget.faction}`,
-        outcomes,
-      });
-    }
-  }
-  return { sleeves, tasks, shockCeiling: 50, syncFloor: 50 };
-}
-
-const sleeves: FeatureDriver = {
-  id: "sleeves",
-  everyMs: 30_000,
-  wake: () => pendingSleeveCompletions().size > 0,
-  requires: "sleeves",
-  async tick(ctx: DriverContext) {
-    const topic = ctx.state.topics.sleeves;
-    const view = sleeveView(ctx.state);
-    if (!topic || !view) return;
-    const decision = stepSleeves(view, ctx.board);
-
-    merge(ctx.state, "sleeves", {
-      plan: {
-        assignments: decision.assignments.map((entry) => ({
-          index: entry.index,
-          task: `${entry.task.type}${entry.task.detail ? `:${entry.task.detail}` : ""}${entry.task.workType ? `:${entry.task.workType}` : ""}`,
-        })),
-        selection: decision.assignment.choices.map((entry) => ({
-          index: entry.agent.index,
-          task: `${entry.task.type}${entry.task.detail ? `:${entry.task.detail}` : ""}${entry.task.workType ? `:${entry.task.workType}` : ""}`,
-          score: entry.score,
-        })),
-        totalScore: decision.assignment.total,
-        ...(results["sleeves"] ? { lastResult: results["sleeves"] } : {}),
-      },
-    });
-
-    const completed = [...pendingSleeveCompletions()];
-    if (decision.assignments.length === 0 && completed.length === 0) return;
-
-    // Keep setters sequential. The resident prices each call independently and
-    // recycles when needed, so grouping by task would only reorder assignments.
-    //
-    // The setters are independent writes on distinct sleeve indices; the
-    // getTask pass is a read-back that arms completions — sleeves.core performs
-    // the identical read every 30 s — not an atomicity requirement.
-    const changed: number[] = [];
-    for (const next of decision.assignments) {
-      let ok = false;
-      if (next.task.type === "recovery") ok = await ctx.nsp("sleeve.setToShockRecovery", next.index);
-      else if (next.task.type === "synchro") ok = await ctx.nsp("sleeve.setToSynchronize", next.index);
-      else if (next.task.type === "crime") ok = await ctx.nsp("sleeve.setToCommitCrime", next.index, next.task.detail as never);
-      else if (next.task.type === "gym") {
-        ok = await ctx.nsp("sleeve.setToGymWorkout", next.index, "Powerhouse Gym" as never, next.task.detail as never);
-      } else if (next.task.type === "class") {
-        ok = await ctx.nsp("sleeve.setToUniversityCourse", next.index, "Rothman University" as never, next.task.detail as never);
-      } else if (next.task.type === "faction") {
-        ok = Boolean(await ctx.nsp("sleeve.setToFactionWork", next.index, next.task.detail as never, next.task.workType as never));
-      }
-      if (ok) changed.push(next.index);
-    }
-    // A sleeve the game refused stays on its previous task and is retried next
-    // pass; the ones that did land are still worth reading back.
-    const refused = decision.assignments.length - changed.length;
-
-    const observed = new Map<number, { type: string; detail?: string; workType?: string } | undefined>();
-    for (const sleeve of topic.sleeves ?? []) {
-      const task = await ctx.nsp("sleeve.getTask", sleeve.index) as (WorkTaskLike & Record<string, unknown>) | null;
-      armSleeveCompletion(sleeve.index, task);
-      if (!task) observed.set(sleeve.index, undefined);
-      else {
-        const detail = task.factionName ?? task.companyName ?? task.crimeType ?? task.classType;
-        observed.set(sleeve.index, {
-          type: String(task.type),
-          ...(detail !== undefined ? { detail: String(detail) } : {}),
-          ...(task.factionWorkType !== undefined ? { workType: String(task.factionWorkType) } : {}),
-        });
-      }
-    }
-    for (const index of completed) consumeSleeveCompletion(index);
-    merge(ctx.state, "sleeves", {
-      sleeves: (topic.sleeves ?? []).map((sleeve) => {
-        const task = observed.get(sleeve.index);
-        return task === undefined ? { ...sleeve, task: undefined } : { ...sleeve, task };
-      }),
-    });
-    results["sleeves"] = {
-      action: "batch",
-      ok: refused === 0,
-      detail: refused === 0
-        ? `updated ${changed.length} sleeves`
-        : `updated ${changed.length} sleeves; the game refused ${refused} assignments`,
-      at: Date.now(),
-    };
   },
 };
 
@@ -3603,14 +3342,6 @@ export const bladeburnerModule: FeatureModule = {
         urgency: "blocking",
       },
     ];
-  },
-};
-
-export const sleevesModule: FeatureModule = {
-  driver: sleeves,
-  reset: (state) => {
-    resetSleeveCompletions();
-    delete state.topics.sleeves;
   },
 };
 

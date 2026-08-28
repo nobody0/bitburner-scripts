@@ -94,6 +94,12 @@ const TRANSCRIPTION_SOURCE_PATHS = [
   "src/Bladeburner/Bladeburner.ts",
   "src/Corporation/Corporation.ts",
   "src/PersonObjects/Sleeve/Sleeve.ts",
+  "src/PersonObjects/Sleeve/Work/Work.ts",
+  "src/PersonObjects/Sleeve/Work/SleeveCrimeWork.ts",
+  "src/PersonObjects/Sleeve/Work/SleeveFactionWork.ts",
+  "src/PersonObjects/Sleeve/Work/SleeveRecoveryWork.ts",
+  "src/PersonObjects/Sleeve/Work/SleeveSynchroWork.ts",
+  "src/NetscriptFunctions/Sleeve.ts",
 ] as const;
 
 interface Patch {

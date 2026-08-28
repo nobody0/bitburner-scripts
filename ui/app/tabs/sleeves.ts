@@ -44,7 +44,9 @@ export const sleevesTab: Tab = {
         id: "task",
         label: "task",
         left: true,
-        cell: (x) => esc(x.task ? `${x.task.type}${x.task.detail ? `: ${x.task.detail}` : ""}` : "idle"),
+        cell: (x) => esc(x.task
+          ? `${x.task.type}${x.task.detail ? `: ${x.task.detail}` : ""}${x.task.workType ? ` (${x.task.workType})` : ""}`
+          : "idle"),
         sort: (x) => (x.task ? x.task.type : "idle"),
       },
       {

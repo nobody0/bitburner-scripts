@@ -36,9 +36,8 @@ const CYCLES_PER_SEC = 1_000 / ENGINE_CYCLE_MS;
  * worth closing, and the direction of the error is worth knowing:
  *
  *  - `sleeves` earn real money in parallel, and in BN10 a great deal of it. The
- *    digest prices a task MENU (`taskOptions[].moneyPerSec`) rather than what the
- *    assigned sleeves are currently earning, so summing it would report what they
- *    COULD earn on their best assignment, not what they do. Closing this wants a
+ *    topic records each current task but no observed or persisted current payout,
+ *    so a replay cannot produce an honest realized rate. Closing this wants a
  *    per-sleeve current rate in the topic.
  *  - `bladeburner` contracts pay money, but the digest ranks actions by `rankPerSec`
  *    and never records their payout.
@@ -127,7 +126,7 @@ export function announcedIncome(state: GameState): IncomeAnnouncement[] {
   // These features genuinely cannot turn their current topics into an income
   // rate. Announce that explicitly so absence can never be read as zero.
   out.push(
-    { by: "sleeves", state: "unknown", reason: "task options do not report assigned-sleeve earnings" },
+    { by: "sleeves", state: "unknown", reason: "current sleeve tasks do not publish realized earnings" },
     { by: "bladeburner", state: "unknown", reason: "action ranking does not publish contract payouts" },
     { by: "side", state: "unknown", reason: "one-off contract rewards have no measured solve cadence" },
   );

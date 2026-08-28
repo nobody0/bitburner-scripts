@@ -16,6 +16,7 @@ export interface WorkTaskLike {
   companyName?: unknown;
   crimeType?: unknown;
   classType?: unknown;
+  actionName?: unknown;
   programName?: unknown;
   augmentation?: unknown;
 }
@@ -40,7 +41,8 @@ function globals(): CompletionGlobalThis {
 }
 
 export function workDetail(task: WorkTaskLike): string | undefined {
-  const detail = task.factionName ?? task.companyName ?? task.crimeType ?? task.classType ?? task.programName ?? task.augmentation;
+  const detail = task.factionName ?? task.companyName ?? task.crimeType ?? task.classType
+    ?? task.actionName ?? task.programName ?? task.augmentation;
   return detail === undefined ? undefined : String(detail);
 }
 

@@ -278,7 +278,7 @@ describe("tab rendering", () => {
         index: 0, shock: 10, sync: 90, memory: 1, storedCycles: 0, city: "Sector-12",
         hp: { current: 10, max: 10 },
         skills: { hacking: 1, strength: 1, defense: 1, dexterity: 1, agility: 1, charisma: 1 },
-        task: { type: "CRIME", detail: "Mug" }, purchasableAugs: [],
+        task: { type: "CRIME", detail: "Mug" },
       }],
     } as StateMap["sleeves"];
     state.caps = deriveCapabilities({

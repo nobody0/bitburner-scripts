@@ -64,7 +64,13 @@
     "src/PersonObjects/Player/PlayerObjectGangMethods.ts": "40db29034575808671f0432d9dd8f8f3d79d3d54212f7226c017f2e820243851",
     "src/Bladeburner/Bladeburner.ts": "1543543ccd643598c7bb323e0bcc6fa7471cff31aeacf01ce5ce45715053202d",
     "src/Corporation/Corporation.ts": "8d66f56db09aaeebfe2c1af094ff3672d86610ec89d579d47a756874d4a68a9d",
-    "src/PersonObjects/Sleeve/Sleeve.ts": "21f3b3c71f8ec39c326bcae9bb49a252db52689b9aa32e9f22b3119e6c10c011"
+    "src/PersonObjects/Sleeve/Sleeve.ts": "21f3b3c71f8ec39c326bcae9bb49a252db52689b9aa32e9f22b3119e6c10c011",
+    "src/PersonObjects/Sleeve/Work/Work.ts": "c65d89cf57c2f6c6a4af2a00c1d20be30cbb7e6522a2e33116b0050b496e450f",
+    "src/PersonObjects/Sleeve/Work/SleeveCrimeWork.ts": "d69a6fb75da934cf247471a99e8f19f5f195e3b7684a169136eeaeac0d91188e",
+    "src/PersonObjects/Sleeve/Work/SleeveFactionWork.ts": "0f764526a553d212133206174203ceedbc15d5fe6e880341b2091618b67f67b7",
+    "src/PersonObjects/Sleeve/Work/SleeveRecoveryWork.ts": "18a86904c4993611cdc266d1543c0c14e5b9ba7eee04cfeda35ed74a60bc8c3c",
+    "src/PersonObjects/Sleeve/Work/SleeveSynchroWork.ts": "ad583e506fb130a1fc08c722762c6dfae7e69df9fdb02e8adf543ff7ae2e9b8d",
+    "src/NetscriptFunctions/Sleeve.ts": "7522eef6037178d353d4d4e10dd88e49507a08cec13144ff3b2ae0bb3a784f11"
   },
   "files": [
     {

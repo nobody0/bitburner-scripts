@@ -415,10 +415,10 @@ describe("bladeburner", () => {
 describe("sleeves", () => {
   const sleeve = (index: number, shock = 0, sync = 100) => ({ index, shock, sync, city: "Sector-12", skills: {} });
   const tasks = [
-    { type: "recovery" as const, outcomes: [{ rates: {}, moneyPerSec: 0 }] },
-    { type: "synchro" as const, outcomes: [{ rates: {}, moneyPerSec: 0 }] },
-    { type: "crime" as const, detail: "Homicide", outcomes: [{ rates: { karma: 1 }, moneyPerSec: 100 }] },
-    { type: "crime" as const, detail: "Heist", outcomes: [{ rates: { karma: 0.01 }, moneyPerSec: 10_000 }] },
+    { type: "recovery" as const, outcomes: [{ rates: {} }] },
+    { type: "synchro" as const, outcomes: [{ rates: {} }] },
+    { type: "crime" as const, detail: "Homicide", outcomes: [{ rates: { karma: 1 }, shockExemptRates: { money: 100 } }] },
+    { type: "crime" as const, detail: "Heist", outcomes: [{ rates: { karma: 0.01 }, shockExemptRates: { money: 10_000 } }] },
   ];
 
   test("shock scales output DOWN, so recovery dominates when it is high", () => {
@@ -454,7 +454,7 @@ describe("sleeves", () => {
     const special = [{
       type: "crime" as const,
       detail: "Test",
-      outcomes: [{ rates: { combatSkills: 100 }, shockExemptRates: { karma: 1 }, moneyPerSec: 0 }],
+      outcomes: [{ rates: { combatSkills: 100 }, shockExemptRates: { karma: 1 } }],
     }];
     const shocked = sleeve(0, 100);
     const karma = stepSleeves(
@@ -476,7 +476,6 @@ describe("sleeves", () => {
       outcomes: [{
         rates: {},
         contributions: [{ kind: "skill" as const, subject: "hacking", perSec: 3 }],
-        moneyPerSec: 0,
       }],
     }];
     const decision = stepSleeves(
@@ -497,10 +496,9 @@ describe("sleeves", () => {
         outcomes: [{
           rates: {},
           contributions: [{ kind: "factionRep" as const, subject: "CyberSec", perSec: 1 }],
-          moneyPerSec: 0,
         }],
       },
-      { type: "crime" as const, detail: "Heist", outcomes: [{ rates: {}, moneyPerSec: 100 }] },
+      { type: "crime" as const, detail: "Heist", outcomes: [{ rates: {}, shockExemptRates: { money: 100 } }] },
     ];
     const decision = stepSleeves(
       { sleeves: [sleeve(0), sleeve(1)], tasks: capacityTasks, shockCeiling: 50, syncFloor: 50 },

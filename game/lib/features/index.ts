@@ -15,13 +15,13 @@ import { careerModule } from "./career.ts";
 import { dnetModule } from "./dnet.ts";
 import { factionsModule } from "./factions.ts";
 import { hacknetModule } from "./hacknet.ts";
+import { sleevesModule } from "./sleeves.ts";
 import { gangModule } from "./gang.ts";
 import {
   bladeburnerModule,
   corpModule,
   goModule,
   progressionModule,
-  sleevesModule,
   stanekModule,
 } from "./remaining.ts";
 import { sideModule } from "./side.ts";

@@ -138,7 +138,7 @@ export const FEATURES: readonly Feature[] = [
     bitnodes: [10],
     topics: ["sleeves"],
     problem:
-      "Assign N sleeves across crime, faction work, company work, training and synchronisation, accounting for shock suppression and sync scaling.",
+      "Assign N sleeves across recovery, synchronisation, crime and faction work, accounting for source-accurate shock, sync and target exclusivity.",
     moneySources: ["sleeves"],
     api: true,
   },

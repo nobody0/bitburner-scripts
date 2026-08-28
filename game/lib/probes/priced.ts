@@ -1,5 +1,5 @@
 import { armWorkCompletion, workDetail, type WorkTaskLike } from "../work-completion.ts";
-import { armSleeveCompletion } from "../sleeve-completion.ts";
+import { armSleeveCompletion, sleeveTaskDigest } from "../sleeve-completion.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { marginalCostPerGb } from "../../../shared/strategy/ram-supply.ts";
@@ -1164,13 +1164,7 @@ const sleevesCore: PricedProbe = {
           intelligence: s.skills.intelligence,
         },
         mults: { ...s.mults },
-        task: task
-          ? {
-              type: task.type,
-              detail: String(task.factionName ?? task.companyName ?? task.crimeType ?? task.classType ?? ""),
-              ...(task.factionWorkType !== undefined ? { workType: String(task.factionWorkType) } : {}),
-            }
-          : undefined,
+        task: sleeveTaskDigest(task),
       });
     }
     return [emit("sleeves", { count, sleeves })];

@@ -1,20 +1,22 @@
 # `sleeves` — parallelism
 
 Sleeves are cloned bodies that run tasks concurrently with the player. Each is its own `Person`
-with its own skills, augmentations and multipliers, plus two stats: shock throttles what it
-produces, sync sets how much reaches the player. They are the one feature that *supplies* the
-resource all the others fight over.
+with its own skills, augmentations and multipliers, plus two stats. Shock throttles experience
+and faction reputation but not money; sync scales experience shared to the player and other
+sleeves, plus sleeve-crime karma, but not money, reputation or kills. They are the one feature
+that *supplies* the resource all the others fight over.
 
-> "Assign N sleeves across crime, faction work, company work, training and
-> synchronisation, accounting for shock suppression and sync scaling."
+> "Assign N sleeves across recovery, synchronisation, crime and faction work,
+> accounting for source-accurate shock, sync and target exclusivity."
 > (`shared/features/registry.ts:141`)
 
 **Theme** BN10 Digital Carbon (`shared/features/registry.ts:138`) · **Status** done, no
 simulator model (`spec/progress.md:36`, `sim/fidelity.ts:43`)
 
 **Sourcing.** Bare `src/…` paths are the pinned `v3.0.1` tag — source 3 in
-[`README`](../README.md) — because the vendor extract carries no sleeve source at all
-(`tools/vendor.ts` hash-pins `Sleeve.ts` without emitting it, `sim/transcription-sources.ts:48`).
+[`README`](../README.md) — because the vendor extract carries no sleeve source at all.
+`tools/vendor.ts` hash-pins the Sleeve API and work implementations used by this model without
+emitting them; `sim/transcription-sources.ts` records the accepted v3.0.1 hashes.
 
 ## Unlock
 
@@ -85,29 +87,26 @@ the sleeve the moment that job goes away (`:43`). `Player.jobs` is a record, so 
 **the player collects jobs, the sleeves grind their reputations** — one sleeve per employer; it
 also moves the stock price (`SleeveCompanyWork.ts:47`).
 
-**Augmentations.** A sleeve aug must not be `isSpecial`, must come from a joined faction
+**Augmentations.** A standard sleeve aug must not be `isSpecial`, must come from a joined faction
 (Bladeburners and Netburners excluded; a gang faction offers all its own), must clear
 `getAugCost(aug).repCost`, and must move one of 17 multipliers — six skills, six exps,
 `company_rep`, `faction_rep`, `crime_money`, `crime_success`, `work_money` (`Sleeve.ts:100-171`).
+The explicit exception is **Z.O.Ë.**: membership in the Church of the Machine God adds it after
+the ordinary special/multiplier filter (`Sleeve.ts:165-168`).
 Purchase requires **shock exactly 0** (`:356-361`) and costs `aug.baseCost` (`:372,397`), the raw
 table price: it escapes both `AugmentationMoneyCost` and the queued-aug escalation
 `MultipleAugMultiplier` 1.9, SF11-discounted, that player augs pay
 (`AugmentationHelpers.ts:29-36,156-158`; `sim/vendor/…/Constants.ts:42`). Installing one **zeroes
 that sleeve's exp** (`:215-225`). Grafting needs SF10 too but belongs to [`factions`](factions.md).
 
-## Needs · Gives · Contends
+## Implemented controller surface
 
 | Edge | Detail |
 |---|---|
-| **Needs** money | covenant sleeves; memory upgrades (`1e12 × Σ 1.02^m`, cap 100, `Sleeve.ts:198-213`); augs at `baseCost` |
-| **Needs** time | Recovery and Synchronize return no `WorkStats` (`SleeveRecoveryWork.ts:12-18`, `SleeveSynchroWork.ts:13-19`) |
-| **Gives** the work slot, N more times | one of nine task types per sleeve (`types/NetscriptDefinitions.d.ts:1165-1174`), parallel to `Player.currentWork`; plus exp to the player and every other sleeve (`Work/Work.ts:22-24`) |
-| **Contends** RAM only | the driver files one `actionRamClaim`, no `time` or `money` claim (`game/lib/features/remaining.ts:3693-3702`) |
-
-The arbiter has exactly two contended resources, `"money" | "time"`, and `time` *is* the single
-`Player.currentWork` slot (`shared/strategy/arbiter.ts:24-28,42`). Sleeves alone supply it rather
-than consume it ([`graph.md`](../graph.md)), and nothing in the arbiter represents that: enabling
-sleeves should change its model of `time` from one slot to N+1, not add a driver.
+| **Consumes** | no arbiter money or player-work claim; the current driver does not buy sleeves, memory or augmentations |
+| **Assigns** | recovery, synchronization, crime and faction work through the Netscript proxy |
+| **Gives** | crime money/karma/kills/experience and faction reputation/experience in parallel with `Player.currentWork` |
+| **Defers** | covenant purchases, memory, sleeve augmentations, company/class/Bladeburner/infiltration/support task planning |
 
 ## Challenges
 
@@ -117,8 +116,8 @@ sleeves should change its model of `time` from one slot to N+1, not add a driver
   an assignment problem, not N argmaxes; `assignSleeves` solves it in
   `O(sleeves × tasks × 2^exclusiveKeys)` (`shared/strategy/sleeves/decide.ts:80-121`).
 - **Our task menu is four wide.** `sleeveView` builds only recovery, synchro, crime and faction
-  tasks; company work, gym, class, Bladeburner and travel are never assigned, and nothing fills
-  or acts on `nextSleeveCost` / `purchasableAugs` (`shared/telemetry/topics/sleeves.ts:20,27`).
+  tasks. Company, class, Bladeburner, infiltration and support tasks are observed but never assigned;
+  travel is an action that stops work, not a sleeve task.
 
 ## Rewards
 
@@ -148,13 +147,7 @@ Values from `sim/vendor/bitburner/src/BitNode/BitNodeMults.ts`:
 | Concern | File |
 |---|---|
 | strategy | `shared/strategy/sleeves/decide.ts`, `shared/strategy/assignment.ts` |
-| driver, task menu, claims | `game/lib/features/remaining.ts` (`sleeveView`, `sleevesModule`) |
+| driver, task menu | `game/lib/features/sleeves.ts` (`sleeveView`, `sleevesModule`) |
 | probe, completion arming | `game/lib/probes/priced.ts` (`sleeves.core`), `game/lib/sleeve-completion.ts` |
 | telemetry topic, tab | `shared/telemetry/topics/sleeves.ts`, `ui/app/tabs/sleeves.ts` |
 | sim | none — `sim/fidelity.ts:43` says `unmodeled`; `sim/engine.ts:243` drains stored cycles (min 5, max 15) |
-
-## Open
-
-- Is 18.5 h of shock recovery ever repaid inside a node, given money is shock-exempt?
-- Is a `1e12` memory point worth the sync floor it buys at the next node change?
-- How many augmentations pass the 17-multiplier sleeve filter? Not counted here.

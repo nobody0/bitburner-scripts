@@ -1,7 +1,7 @@
-/** Sleeves feature — BN10's theme. Problem: assign N sleeves across crime,
- * faction work, company work, training and synchronisation, accounting for
- * shock (which suppresses gains until recovered) and sync (which scales what
- * the host receives). N independent agents sharing one objective. */
+/** Sleeves feature — BN10's theme. Assign sleeves across recovery,
+ * synchronisation, crime, and faction work. Shock suppresses experience and
+ * faction reputation but not crime money, karma, or kills; sync scales shared
+ * experience and crime karma. Faction targets make allocation capacity-coupled. */
 
 export interface SleeveDigest {
   index: number;
@@ -15,23 +15,11 @@ export interface SleeveDigest {
   mults?: Partial<Record<string, number>>;
   /** SleeveTask digest — the union's `type` plus whichever detail applies. */
   task?: { type: string; detail?: string; workType?: string };
-  augCount?: number;
-  /** Cheapest augmentations still purchasable for this sleeve. */
-  purchasableAugs?: { name: string; price: number }[];
 }
 
 export interface SleevesState {
   count: number;
   sleeves: SleeveDigest[];
-  /** Cost of the next sleeve from The Covenant, if offered. */
-  nextSleeveCost?: number;
-  /** Task menu, priced per sleeve by the probe. */
-  taskOptions?: {
-    type: "recovery" | "synchro" | "crime" | "class" | "gym" | "faction" | "company" | "bladeburner";
-    detail?: string;
-    rates: Record<string, number>;
-    moneyPerSec: number;
-  }[];
   plan?: SleevesPlan;
 }
 

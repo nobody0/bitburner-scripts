@@ -1,4 +1,5 @@
-import type { WorkTaskLike } from "./work-completion.ts";
+import type { SleeveDigest } from "../../shared/telemetry/topics/sleeves.ts";
+import { workDetail, type WorkTaskLike } from "./work-completion.ts";
 
 /** Sleeve tasks inherit the same cached nextCompletion promise as player work;
  * getTask returns the current work's API copy containing that live promise.
@@ -42,6 +43,28 @@ export function armSleeveCompletion(index: number, task: WorkTaskLike | null): v
       if (state().tokens.get(index) === token) s.promises.delete(index);
     },
   );
+}
+
+/** Invalidate a listener before deliberately replacing a sleeve task. The
+ * old task's finish() resolves nextCompletion, which is cancellation rather
+ * than evidence that a repeatable unit completed naturally. */
+export function disarmSleeveCompletion(index: number): void {
+  const s = state();
+  s.tokens.set(index, (s.tokens.get(index) ?? 0) + 1);
+  s.promises.delete(index);
+}
+
+/** Normalize the public SleeveTask union once for both probe and driver
+ * readback. Fields that do not exist stay absent; an empty-string detail makes
+ * RECOVERY and SYNCHRO look different from their planned task every pass. */
+export function sleeveTaskDigest(task: WorkTaskLike | null): SleeveDigest["task"] | undefined {
+  if (!task) return undefined;
+  const detail = workDetail(task);
+  return {
+    type: String(task.type),
+    ...(detail !== undefined ? { detail } : {}),
+    ...(task.factionWorkType !== undefined ? { workType: String(task.factionWorkType) } : {}),
+  };
 }
 
 export function pendingSleeveCompletions(): ReadonlySet<number> {
