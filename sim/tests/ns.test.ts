@@ -302,8 +302,10 @@ lane({ feature: "world", bn: 1 }).describe("running game/ in the synthetic world
     expect(result.scenario).toBe("synthetic-early-game");
   });
 
-  test("an installed Red Pill acquires the final opener and completes the real daemon transition", async () => {
+  test("an installed Red Pill acquires the final opener, roots the daemon, and respects the operator hold", async () => {
     const events: { name?: string; data?: Record<string, unknown> }[] = [];
+    let daemonRooted = false;
+    let completion: { ready?: boolean; automatic?: boolean; stalled?: boolean; execute?: boolean } | undefined;
     const result = await runGame({
       goal: parseGoals(["bn:1"]),
       seed: 1,
@@ -327,12 +329,24 @@ lane({ feature: "world", bn: 1 }).describe("running game/ in the synthetic world
         sourceFiles: { "4": 3 },
       },
       homeFiles: ["BruteSSH.exe", "FTPCrack.exe", "relaySMTP.exe", "HTTPWorm.exe"],
-      telemetry: false,
-      recordFilter: (record) => record.kind === "event",
-      onRecord: (line) => events.push(JSON.parse(line)),
+      onRecord: (line) => {
+        const record = JSON.parse(line) as {
+          kind: string;
+          key?: string;
+          name?: string;
+          data?: Record<string, unknown> & {
+            plan?: { completion?: typeof completion };
+            w0r1d_d43m0n?: { hasAdminRights?: boolean };
+          };
+        };
+        if (record.kind === "event") events.push(record);
+        if (record.key === "servers") daemonRooted = record.data?.w0r1d_d43m0n?.hasAdminRights === true;
+        if (record.key === "progression") completion = record.data?.plan?.completion;
+      },
     });
 
-    expect(result.reached).toBe(true);
+    expect(result.reached).toBe(false);
+    expect(result.stoppedBecause).toBe("horizon");
     expect(result.validity).toBe("valid");
     expect(result.unmodeled).toEqual({});
     expect(result.crashes).toEqual([]);
@@ -340,10 +354,9 @@ lane({ feature: "world", bn: 1 }).describe("running game/ in the synthetic world
       name: "program.bought",
       data: { program: "SQLInject.exe", cost: 250_000_000 },
     }));
-    expect(events).toContainEqual(expect.objectContaining({
-      name: "bitnode.reset",
-      data: expect.objectContaining({ from: 1, to: 1, callback: "start.js" }),
-    }));
+    expect(daemonRooted).toBe(true);
+    expect(completion).toEqual(expect.objectContaining({ ready: true, automatic: true, stalled: true, execute: false }));
+    expect(events.some((event) => event.name === "bitnode.reset")).toBe(false);
   });
 
   test("...but fleet placement funds it anyway, so features actually unlock", async () => {

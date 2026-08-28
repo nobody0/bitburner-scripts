@@ -22,6 +22,7 @@ export const TRANSCRIPTION_SOURCE_HASHES = {
   "src/DarkWeb/DarkWebItems.ts": "e423bf39194c71f2a118b51c9cecc79fbf83491040e1960d8957afe1cf0f161e",
   "src/Faction/FactionHelpers.tsx": "ea2ee2cf4e28d59dbc55dd904e75e8f5560d7eaed760fff4509da811bad1d106",
   "src/Faction/FactionJoinCondition.ts": "8b72ce8bf780b02e070610b262f049297f318e28bd3abbceaeaa334240aa3bb6",
+  "src/Company/utils.ts": "cb54e5d12a36ffb0f6f3a2489da578243a4ab61ca82ad9c39726a39345f554e2",
   "src/Work/FactionWork.tsx": "cdef5958472502c85d81d70bf81f882a2950cc0ad0dccd49f04b9fab5cba65a5",
   "src/PersonObjects/Grafting/GraftingHelpers.ts": "0f8d3f0c706bcd42704244acdc3bb898e502bde796b05c0f5d4597ee71a36977",
   "src/CotMG/StaneksGift.ts": "280839c40532b8c0f702416a06f10b04fe89c1446e618eac1cc8b7de13b71a1d",

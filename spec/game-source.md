@@ -20,6 +20,11 @@ to that exact commit before reading any source. The generated manifest records
 both values, preventing a moved tag or a checkout on `dev` from silently
 changing the simulator's evidence base.
 
+`sim/tests/drift-pins.test.ts` also scans handwritten simulator code for
+`Source:` citations. Every cited upstream TypeScript file must be either in the
+generated vendor manifest or hash-pinned as a transcription source. This keeps
+source-backed behavior auditable without maintaining a second coverage list.
+
 For type safety, prefer the definition file returned by the running game's
 Remote File API. The source checkout remains the authoritative place to inspect
 implementation details and version-specific behavior.

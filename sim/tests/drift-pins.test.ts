@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import manifest from "../vendor/manifest.json";
 import { TRANSCRIPTION_SOURCE_HASHES } from "../transcription-sources.ts";
 import { RAM_COST_CONSTANTS } from "../../shared/strategy/ram-supply.ts";
@@ -24,6 +26,38 @@ import { ServerConstants } from "../vendor/bitburner/src/Server/data/Constants.t
 describe("handwritten simulator source drift", () => {
   test("every accepted transcription source matches the generated upstream manifest", () => {
     expect(manifest.transcriptionSources).toEqual(TRANSCRIPTION_SOURCE_HASHES);
+  });
+
+  test("every cited upstream implementation file is vendored or drift-pinned", () => {
+    const authoritative = new Set<string>(Object.keys(manifest.transcriptionSources));
+    for (const file of manifest.files) {
+      for (const source of file.path.split("#", 1)[0]!.split("+")) authoritative.add(source);
+    }
+
+    const implementationFiles: string[] = [];
+    const visit = (directory: string): void => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        if (entry.name === "tests" || entry.name === "vendor") continue;
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) visit(path);
+        else if (entry.isFile() && entry.name.endsWith(".ts")) implementationFiles.push(path);
+      }
+    };
+    visit(join(import.meta.dir, ".."));
+
+    const cited = new Set<string>();
+    const citations = [
+      /https:\/\/github\.com\/bitburner-official\/bitburner-src\/blob\/[0-9a-f]+\/(src\/[A-Za-z0-9_./-]+\.tsx?)\b/g,
+      /Source:\s+(src\/[A-Za-z0-9_./-]+\.tsx?)\b/g,
+    ];
+    for (const file of implementationFiles) {
+      const source = readFileSync(file, "utf8");
+      for (const citation of citations) {
+        for (const match of source.matchAll(citation)) cited.add(match[1]!);
+      }
+    }
+
+    expect([...cited].filter((source) => !authoritative.has(source)).sort()).toEqual([]);
   });
 });
 

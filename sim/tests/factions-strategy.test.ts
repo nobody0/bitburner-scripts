@@ -71,7 +71,7 @@ describe("faction and hacking strategy simulation", () => {
     expect(resetSamples[0]?.lastAugReset).toBe(DEFAULT_EPOCH_MS);
     expect(prestigeAt).toBeDefined();
     expect(resetSamples.some((sample) => sample.lastAugReset === DEFAULT_EPOCH_MS + prestigeAt!)).toBe(true);
-    expect(result.output.filter((line) => line.includes("start.js online"))).toHaveLength(2);
+    expect(result.output.filter((line) => line.includes("main.js online"))).toHaveLength(2);
     expect(Object.keys(result.unmodeled)).not.toContain("ns getMoneySources");
   }, 10_000);
 

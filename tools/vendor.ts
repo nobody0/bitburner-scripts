@@ -39,6 +39,7 @@ const TRANSCRIPTION_SOURCE_PATHS = [
   "src/DarkWeb/DarkWebItems.ts",
   "src/Faction/FactionHelpers.tsx",
   "src/Faction/FactionJoinCondition.ts",
+  "src/Company/utils.ts",
   "src/Work/FactionWork.tsx",
   "src/PersonObjects/Grafting/GraftingHelpers.ts",
   "src/CotMG/StaneksGift.ts",

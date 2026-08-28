@@ -1753,7 +1753,14 @@ describe("worker pooling", () => {
     const idle = [...h.memory.dispatch.pool.workers.values()].find((worker) => !worker.busy && worker.role)!;
     expect(idle).toBeDefined();
     const takenBy = (role: PoolRole) =>
-      planTake(h.memory.dispatch.pool, idle.kind, idle.threads, new Set(), role).take
+      planTake(
+        h.memory.dispatch.pool,
+        idle.kind,
+        idle.threads,
+        new Set(),
+        role,
+        { target: idle.target!, generation: idle.generation! },
+      ).take
         .map((entry) => entry.worker);
     expect(takenBy(idle.role!)).toContain(idle);
     const otherRole = idle.role === "w1" ? "w2" : "w1";
