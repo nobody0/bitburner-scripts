@@ -321,6 +321,10 @@ export interface HostEntry extends DnetHost {
    *  only proves the process was admitted, so without this a replacement that
    *  died before lending would be re-launched on every dispatch, for ever. */
   proberResizeAt?: number;
+  /** When this host last had an armour respawn ADMITTED. Rate-limits the hook
+   *  so a missed kill-mark degrades to a slow leak rather than a 1 ms respawn
+   *  loop that freezes the game. */
+  proberRespawnAt?: number;
   /** One exact prober launch is expected to publish a first report. Kept on
    * the host rather than as a launch callback so every caller observes the
    * same readiness barrier and an old prober cannot satisfy it. */

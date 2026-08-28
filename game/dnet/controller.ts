@@ -453,6 +453,13 @@ export async function main(ns: NS): Promise<void> {
       // A prober outlives the agent beside it (a finished `pin` leaves one
       // standing alone). Kill it rather than forgetting its pid, so the
       // re-plant starts from an empty host instead of around a stranded 1.8 GB.
+      //
+      // MARK FIRST. This is a deliberate kill on one of the most-travelled
+      // paths there is — every agent death reaches it — and an armoured prober
+      // whose death is unmarked reads it as a host restart and spawns a
+      // successor a millisecond later, onto the very host we are clearing. That
+      // is a 1 ms respawn loop, and it froze the game.
+      if (entry.prober !== undefined && entry.prober.pid > 0) entry.proberKillMark = entry.prober.pid;
       killPid(entry.prober?.pid);
       entry.prober = undefined;
       entry.bootstrap = undefined;
@@ -712,6 +719,10 @@ export async function main(ns: NS): Promise<void> {
    * because closing the window early costs a duplicate prober while closing it
    * late costs one repair cycle. */
   const PROBER_RESPAWN_GRACE_MS = 2_000;
+
+  /** The shortest interval between two armour respawns on ONE host. See the
+   *  backstop in `announceProberRespawn`. */
+  const PROBER_RESPAWN_FLOOR_MS = 5_000;
 
   /** Is an armoured successor still legitimately on its way?
    *
@@ -2380,6 +2391,17 @@ export async function main(ns: NS): Promise<void> {
     announceProberRespawn(host, pid, launchId, withdraw) {
       const entry = hosts.get(host);
       if (entry === undefined) return false;
+      // BACKSTOP. Marking every deliberate kill is the actual contract, but the
+      // cost of missing one is not a stray process — it is a 1 ms respawn loop
+      // that starves the event loop and freezes the game, which is exactly what
+      // an unmarked `retireVantage` did. A legitimate respawn answers a host
+      // RESTART, and one host is restarted at most once per storm and otherwise
+      // minutes apart, so refusing a second respawn inside this window cannot
+      // block a real recovery and caps any future miss at a slow leak.
+      const at = Date.now();
+      if (entry.proberRespawnAt !== undefined && at - entry.proberRespawnAt < PROBER_RESPAWN_FLOOR_MS) {
+        return false;
+      }
       // A kill WE ordered. The mark is consumed here rather than left standing,
       // so it can never suppress a later, genuine restart recovery.
       if (entry.proberKillMark === pid) {
@@ -2389,7 +2411,8 @@ export async function main(ns: NS): Promise<void> {
       // Standing down for the run: a respawn now would outlive the controller
       // that is trying to retire the net.
       if (standDown) return false;
-      entry.proberRespawn = { at: Date.now(), launchId, withdraw };
+      entry.proberRespawnAt = at;
+      entry.proberRespawn = { at, launchId, withdraw };
       return true;
     },
     markProberKill(host, pid) {
@@ -2792,7 +2815,13 @@ export async function main(ns: NS): Promise<void> {
     entry.probeRefresh?.settle(undefined);
     entry.probeRefresh = undefined;
     const probe = entry.prober;
-    if (probe !== undefined && probe.pid > 0 && probe.pid !== ns.pid) killPid(probe.pid);
+    // Marked for the same reason, and not left to the fact that the rendezvous
+    // was deleted above: an armour hook that outlived this loop must have one
+    // reason to stand down that does not depend on statement order.
+    if (probe !== undefined && probe.pid > 0 && probe.pid !== ns.pid) {
+      entry.proberKillMark = probe.pid;
+      killPid(probe.pid);
+    }
   }
   TELEMETRY: if (__TELEMETRY__ && tel) tel.flush();
 }

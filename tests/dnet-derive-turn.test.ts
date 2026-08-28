@@ -638,6 +638,25 @@ describe("armour is resized at the order boundary", () => {
     expect(handle.hosts.get(VANTAGE)?.inbound?.pid).toBe(700);
   });
 
+  test("a missed kill-mark degrades to a leak, never to a respawn storm", async () => {
+    // Defence in depth for a mechanism whose failure mode is freezing the game.
+    // An unmarked kill in `retireVantage` — the path every agent death takes —
+    // let an armoured prober read a deliberate retirement as a host restart and
+    // spawn a successor a millisecond later, onto the host being cleared. The
+    // mark is the fix; this is the floor under it.
+    //
+    // A legitimate respawn answers a host RESTART, and one host is restarted at
+    // most once per storm and otherwise minutes apart — so a second respawn
+    // moments later is never real work, whatever forgot to mark the kill.
+    const handle = await bootController();
+    standHands();
+    standProber(handle, TARGET, 900);
+
+    expect(handle.announceProberRespawn(TARGET, 900, 1, () => {})).toBe(true);
+    expect(handle.announceProberRespawn(TARGET, 901, 2, () => {})).toBe(false);
+    expect(handle.announceProberRespawn(TARGET, 902, 3, () => {})).toBe(false);
+  });
+
   test("a mark is consumed, so it cannot suppress a later genuine restart", async () => {
     const handle = await bootController();
     standHands();
