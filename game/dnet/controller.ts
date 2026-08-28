@@ -130,6 +130,18 @@ import { emptyDnetProfit, mergeDnetProfit } from "./profit.ts";
 
 const BEAT_INTERVAL_MS = 15_000;
 const STAND_DOWN_POLL_MS = 250;
+/** Consecutive same-instant derive passes before the next one is deferred to
+ * a real timer. `deriveQueued` clears before the pass runs, so a
+ * write-through INSIDE a pass legitimately queues the next — but a pass that
+ * always produces a fact then chains forever on bare microtasks with no
+ * timer anywhere. Under the simulator's virtual clock that freezes time
+ * itself (measured: 200,000+ chained passes at one instant, the GC starved
+ * with the clock, 66 GB RSS, seed killed by the OS); in the live game the
+ * same loop is a silent CPU spin. Thirty-two mirrors the controller sleep's
+ * wake-race bound — the proven cutoff for this storm class — and a fact
+ * filed during the rest still derives, one rest later. */
+const DERIVE_CHAIN_BOUND = 32;
+const DERIVE_CHAIN_REST_MS = 200;
 /** Fallback duration used only to compare loaded vantages. */
 const TYPICAL_ORDER_MS = 6_000;
 const MAX_GRAMMAR_SHAPES = 20;
@@ -322,13 +334,28 @@ export async function main(ns: NS): Promise<void> {
    * and beat sweeps, watchdog cancellation, telemetry) plus a bounded re-derive
    * in case a fact was ever missed. */
   let deriveQueued = false;
+  /** Chain accounting for DERIVE_CHAIN_BOUND: how many passes have been
+   * queued at the current instant. Any advance of the clock resets it, so
+   * the bound only ever bites a genuine same-instant feedback loop. */
+  let deriveChainAt = 0;
+  let deriveChain = 0;
   const signalDerive = (): void => {
     if (deriveQueued) return;
     deriveQueued = true;
-    void Promise.resolve().then(async () => {
+    const now = Date.now();
+    if (now !== deriveChainAt) {
+      deriveChainAt = now;
+      deriveChain = 0;
+    }
+    deriveChain++;
+    const pass = async (): Promise<void> => {
       deriveQueued = false;
       try { if (!standDown) await fileWork(Date.now()); } catch {}
-    });
+    };
+    // Past the bound, the pass rests on a real timer so time can advance;
+    // signals arriving during the rest coalesce into it (deriveQueued holds).
+    if (deriveChain > DERIVE_CHAIN_BOUND) void realmSleep(DERIVE_CHAIN_REST_MS).then(pass);
+    else void Promise.resolve().then(pass);
   };
 
   // --- helpers --------------------------------------------------------------

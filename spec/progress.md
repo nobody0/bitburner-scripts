@@ -1793,10 +1793,13 @@ The isolation evidence, for the darknet owner:
   are clean and only sim runs die. Diagnosis chain: clock-event tripwire
   silent at a 50k bound (so no timer events at all), engine-subsystem
   trace reads "tick-complete" (the freeze is in the post-tick microtasks),
-  then the counter. The fix shape already exists in this codebase: the
-  32-wake-race bound in game/lib/controller.ts:569 — after N chained
-  same-instant derive passes, defer the next re-derive to a realmSleep
-  timer so time can advance. Left to the darknet owner.
+  then the counter. FIXED with the codebase's own proven shape (the
+  32-wake-race bound in game/lib/controller.ts): past 32 same-instant
+  chained passes, the next derive rests on a 200 ms realm timer so time can
+  advance; a clock advance resets the chain, so the bound only ever bites a
+  genuine feedback loop. Verified on the repro: bn15-full seed 1 now
+  completes the 2 h horizon that every previous darknet-enabled run froze
+  inside.
 
 Darknet internals are out of scope for the route layer; the route side stays
 estimation-pure and is unit-pinned up to the boundary.
