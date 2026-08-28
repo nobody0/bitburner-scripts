@@ -64,14 +64,11 @@ export const bladeburnerTab: Tab = {
       },
       { id: "time", label: "time", cell: (a) => fmtTime(a.timeMs), sort: (a) => a.timeMs },
       {
-        // `getActionCountRemaining` returns Infinity for the five general
+        // `getActionCountRemaining` returns Infinity for the six general
         // actions, and game/lib/telemetry.ts serialises records with a bare
-        // JSON.stringify, so what reaches the viewer is null. The old
-        // `>= 1e9` test never matched that — contract and operation counts are
-        // small and a black op is 0 or 1 — so the infinity branch was dead and
-        // Training / Diplomacy / Field Analysis / Recruitment / Hyperbolic
-        // Regeneration read as "not measured" in the one column that should say
-        // they never run out. Tested through Number.isFinite because the topic
+        // JSON.stringify, so what reaches the viewer is null. Contract and
+        // operation counts are finite, while black operations are 0 or 1.
+        // Test through Number.isFinite because the topic
         // still types this `number`; widening it to `number | null` the way
         // hacknet's `maxNumNodes` already is belongs to that file's own change.
         // The probe's finish() gate only publishes `actions` once every row was
@@ -86,21 +83,17 @@ export const bladeburnerTab: Tab = {
         sort: (a) => (Number.isFinite(a.countRemaining) ? a.countRemaining : Infinity),
       },
       { id: "level", label: "level", cell: (a) => (a.maxLevel ? `${a.level ?? 0}/${a.maxLevel}` : NONE) },
-      // The two measured inputs to the ranking, raw. Both are optional on the
-      // digest (an older or partial record arrives without them), so an absent
-      // one is NONE and never `?? 0` — a 0 would present a rank-losing action
-      // as free.
       {
         id: "rankgain",
         label: "rank gain",
-        cell: (a) => (a.rankGain === undefined ? NONE : fmtNum(a.rankGain, 1)),
-        sort: (a) => a.rankGain ?? -Infinity,
+        cell: (a) => fmtNum(a.rankGain, 1),
+        sort: (a) => a.rankGain,
       },
       {
         id: "rankloss",
         label: "rank loss",
-        cell: (a) => (a.rankLoss === undefined ? NONE : fmtNum(a.rankLoss, 1)),
-        sort: (a) => a.rankLoss ?? -Infinity,
+        cell: (a) => fmtNum(a.rankLoss, 1),
+        sort: (a) => a.rankLoss,
       },
       {
         id: "rankpersec",
@@ -173,18 +166,21 @@ export const bladeburnerTab: Tab = {
       : note("city intel needs the cities probe");
 
     const plan = b.plan;
+    const selectedAction = plan?.action.type === "act" || plan?.action.type === "continue"
+      ? plan.action
+      : undefined;
     const decision = plan
       ? tiles([
           {
             label: "selected",
             value: plan.action.type,
-            sub: plan.action.name
-              ? `${plan.action.actionType ?? "action"}: ${plan.action.name}`
-              : plan.action.skill ?? undefined,
+            sub: selectedAction
+              ? `${selectedAction.actionType}: ${selectedAction.name}`
+              : plan.action.type === "upgrade" ? plan.action.skill : undefined,
           },
           // `ranked` is `decision.ranked.slice(0, 8)`
-          // (game/lib/features/remaining.ts) while the decider scores every
-          // action with charges left, around forty of them — so printing the
+          // (game/lib/features/remaining.ts) while the decider scores up to 15
+          // ordinary actions plus the next available Black Op — so printing the
           // length under "candidates" read a permanent "8" however large the
           // real candidate set was. No uncapped total is on the wire, so the
           // tile says which rows these ARE instead of claiming a total;
@@ -192,18 +188,8 @@ export const bladeburnerTab: Tab = {
           // rankedTable's shown/total note say how many were dropped.
           { label: "candidates", value: `top ${plan.ranked.length}`, sub: "the digest carries only the top slice" },
         ]) +
-        // `stop` has two causes — stamina under the floor, and no non-black-op
-        // candidate at all — and the plan publishes neither, so the panel says
-        // so rather than guessing: the stamina beside it comes off the 30s core
-        // probe while the decision is up to 5s old, and the chaos branch reads a
-        // `cities` array the slow detail probe may not have filled yet, so a
-        // viewer-side derivation would state a gate that did not fire. A
-        // `reason` string on BladeburnerPlan is the real fix.
         (plan.action.type === "stop"
-          ? note(
-              "stopped, and the plan carries no reason: either stamina fell under the floor or nothing outside " +
-                "black ops had charges left, and this panel cannot tell the two apart",
-            )
+          ? note(plan.action.reason === "stamina" ? "stopped to recover stamina" : "stopped: no viable action")
           : "") +
         rankedTable(
           ["type", "action", "rank/sec", "min success"],
@@ -216,20 +202,7 @@ export const bladeburnerTab: Tab = {
           {
             selected: (i) => {
               const entry = plan.ranked[i]!;
-              // `continue` means the running action IS the selection, but the
-              // producer writes name/actionType onto `plan.action` only for
-              // `act` — so every continue tick rendered a full ranking with
-              // nothing marked. Matched on name alone, which is what decide.ts
-              // itself compares (`view.current?.name === best.name`):
-              // `b.current.type` is the game's capitalised string ("Black
-              // Operation") against the probe's lowercase vocabulary
-              // ("blackop"), so an actionType comparison would silently never
-              // match and the marker would still never appear. Gated on the
-              // decision type because the plan is republished every 5s while
-              // `current` comes off the 30s core probe — an unconditional
-              // fallback would mark a stale row on an act/upgrade/stop tick.
-              if (plan.action.type === "continue") return entry.name === b.current?.name;
-              return entry.name === plan.action.name && entry.actionType === plan.action.actionType;
+              return entry.name === selectedAction?.name && entry.actionType === selectedAction.actionType;
             },
             empty: "no viable rank actions",
             left: [0, 1],

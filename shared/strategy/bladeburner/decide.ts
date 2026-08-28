@@ -6,8 +6,8 @@
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Bladeburner/Bladeburner.ts#L1014-L1080
  *
  * Three constraints shape every choice:
- *  - **stamina**, which multiplies success chance below a threshold, so acting
- *    while exhausted is worse than resting;
+ *  - **stamina**, which multiplies success chance below a threshold; this
+ *    policy idles rather than making penalised attempts;
  *  - **chaos**, which rises with activity and lowers success chance, and is
  *    actively managed here with Diplomacy;
  *  - **the success-chance INTERVAL**. The game reports `[min, max]` because
@@ -28,7 +28,6 @@ export interface BladeburnerAction {
   timeMs: number;
   /** Remaining count; Infinity for general actions. */
   countRemaining: number;
-  level: number;
   /** Level-adjusted base rank gained on success, before completion variance. */
   rankGain: number;
   /** Level-adjusted base rank lost on failure, before completion variance. */
@@ -42,30 +41,31 @@ export interface BladeburnerView {
   skillPoints: number;
   /** `[current, max]`. */
   stamina: [number, number];
-  city: string;
   chaos: number;
   actions: BladeburnerAction[];
-  /** Skill name -> {level, upgradeCost}. */
-  skills: Record<string, { level: number; upgradeCost: number }>;
-  current?: { type: string; name: string };
+  /** Skill name -> next-level cost. */
+  skills: Record<string, { upgradeCost: number }>;
+  current?: { name: string };
 }
 
-export type BladeburnerDecision =
-  | { action: { type: "stop" }; ranked: ScoredBladeburner[] }
-  | { action: { type: "continue" }; ranked: ScoredBladeburner[] }
-  | { action: { type: "act"; actionType: string; name: string }; ranked: ScoredBladeburner[] }
-  | { action: { type: "upgrade"; skill: string }; ranked: ScoredBladeburner[] };
+export type BladeburnerDecision = {
+  action:
+    | { type: "stop"; reason: "stamina" | "no-action" }
+    | { type: "continue"; actionType: BladeburnerAction["type"]; name: string }
+    | { type: "act"; actionType: BladeburnerAction["type"]; name: string }
+    | { type: "upgrade"; skill: string };
+  ranked: ScoredBladeburner[];
+};
 
 export interface ScoredBladeburner {
   name: string;
-  actionType: string;
+  actionType: BladeburnerAction["type"];
   /** Pessimistic expected net rank per second, including failure loss. */
   rankPerSec: number;
   chanceLow: number;
 }
 
-/** Below this fraction of max stamina, the game penalises success chance —
- * so acting is worse than resting. */
+/** Below this fraction of max stamina, the game penalises success chance. */
 export const STAMINA_FLOOR = 0.5;
 /** Chaos above this materially degrades every action in the city. */
 export const CHAOS_CEILING = 50;
@@ -73,9 +73,30 @@ export const CHAOS_CEILING = 50;
  * deal damage, while success permanently advances the ordered operation list. */
 export const BLACKOP_CONFIDENCE = 0.95;
 
+function selectAction(
+  view: BladeburnerView,
+  ranked: ScoredBladeburner[],
+  actionType: BladeburnerAction["type"],
+  name: string,
+): BladeburnerDecision {
+  return view.current?.name === name
+    ? { action: { type: "continue", actionType, name }, ranked }
+    : { action: { type: "act", actionType, name }, ranked };
+}
+
 export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
+  // getBlackOpNames is explicitly ordered upstream. Completed ops report 0;
+  // the first remaining row is the only Black Op whose predecessor gate can
+  // be satisfied, regardless of how much rank later rows require.
+  const nextBlackOp = view.actions.find((action) => action.type === "blackop" && action.countRemaining >= 1);
   const ranked: ScoredBladeburner[] = view.actions
-    .filter((action) => action.countRemaining > 0)
+    // Levelable counts regrow fractionally, but upstream availability requires
+    // a full count (`count >= 1`) before startAction will accept the action.
+    .filter((action) =>
+      action.countRemaining >= 1
+      && (action.type !== "blackop"
+        || (action === nextBlackOp && action.rankNeeded !== undefined && action.rankNeeded <= view.rank)),
+    )
     .map((action) => {
       const chanceLow = action.chance[0];
       const seconds = action.timeMs / 1000;
@@ -88,13 +109,14 @@ export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
         chanceLow,
       };
     })
-    .sort((a, b) => b.rankPerSec - a.rankPerSec || (a.name < b.name ? -1 : 1));
+    .sort((a, b) => b.rankPerSec - a.rankPerSec || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
-  // Stamina first: acting below the floor reduces success chance, so resting
-  // is strictly faster than pushing through.
+  // Stamina first: this conservative policy avoids attempts while the game is
+  // applying its below-half success penalty. Stamina regenerates either way,
+  // so this is a risk policy, not a claim that idling is always throughput-optimal.
   const [current, max] = view.stamina;
   if (max > 0 && current / max < STAMINA_FLOOR) {
-    return { action: { type: "stop" }, ranked };
+    return { action: { type: "stop", reason: "stamina" }, ranked };
   }
 
   // Chaos suppresses success chance across the city; this policy switches to
@@ -103,18 +125,20 @@ export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
   if (view.chaos > CHAOS_CEILING) {
     const diplomacy = view.actions.find((action) => action.name === "Diplomacy");
     if (diplomacy) {
-      return {
-        action: { type: "act", actionType: "general", name: "Diplomacy" },
-        ranked,
-      };
+      return selectAction(view, ranked, diplomacy.type, diplomacy.name);
     }
   }
 
-  // Skill upgrades improve Bladeburner performance. Spending the cheapest
-  // available level first is a strategy policy, not an upstream optimum.
+  // Buy only skills that improve rank throughput or this policy's chance
+  // information. Cheapest-first is a strategy policy, not an upstream optimum.
   const affordable = Object.entries(view.skills)
-    .filter(([, skill]) => skill.upgradeCost <= view.skillPoints)
-    .sort((a, b) => a[1].upgradeCost - b[1].upgradeCost || (a[0] < b[0] ? -1 : 1));
+    .filter(([name, skill]) =>
+      name !== "Hands of Midas"
+      && name !== "Hyperdrive"
+      && Number.isFinite(skill.upgradeCost)
+      && skill.upgradeCost <= view.skillPoints,
+    )
+    .sort((a, b) => a[1].upgradeCost - b[1].upgradeCost || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   if (affordable.length > 0) {
     const [name] = affordable[0]!;
     return {
@@ -124,15 +148,12 @@ export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
   }
 
   // Black Ops only above the policy confidence bar, using the pessimistic end.
-  const blackOp = view.actions.find(
-    (action) => action.type === "blackop" && action.countRemaining > 0 && (action.rankNeeded ?? 0) <= view.rank,
-  );
+  const blackOp = nextBlackOp?.rankNeeded !== undefined && nextBlackOp.rankNeeded <= view.rank
+    ? nextBlackOp
+    : undefined;
   if (blackOp) {
     if (blackOp.chance[0] >= BLACKOP_CONFIDENCE) {
-      return {
-        action: { type: "act", actionType: "blackop", name: blackOp.name },
-        ranked,
-      };
+      return selectAction(view, ranked, blackOp.type, blackOp.name);
     }
     // Not confident enough — fall through to ordinary actions rather than
     // gambling. This is the "without dying" constraint doing its job.
@@ -140,13 +161,7 @@ export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
 
   const best = ranked.find((entry) => entry.actionType !== "blackop");
   if (!best) {
-    return { action: { type: "stop" }, ranked };
+    return { action: { type: "stop", reason: "no-action" }, ranked };
   }
-  if (view.current?.name === best.name) {
-    return { action: { type: "continue" }, ranked };
-  }
-  return {
-    action: { type: "act", actionType: best.actionType, name: best.name },
-    ranked,
-  };
+  return selectAction(view, ranked, best.actionType, best.name);
 }

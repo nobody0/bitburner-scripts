@@ -10,6 +10,7 @@ import {
 } from "../../../shared/strategy/side/contracts.ts";
 import { rotate } from "../../../shared/strategy/stanek/pack.ts";
 import type { AugmentationMeta } from "../../../shared/telemetry/topics/factions.ts";
+import type { BladeActionDigest } from "../../../shared/telemetry/topics/bladeburner.ts";
 import {
   contractKey,
   contractOrigin,
@@ -20,6 +21,7 @@ import {
 } from "../contracts.ts";
 import { emit, emitPartial, type PricedProbe, type Emission, type ProbeContext } from "./index.ts";
 import { fleetFrom } from "./local.ts";
+import { bladeburnerApiActionType } from "../bladeburner.ts";
 
 /** The priced probe table — one entry per (feature, cost tier).
  *
@@ -1040,6 +1042,7 @@ const bladeCore: PricedProbe = {
     const skillPoints = await ctx.nsp("bladeburner.getSkillPoints");
     const stamina = await ctx.nsp("bladeburner.getStamina");
     const city = String(await ctx.nsp("bladeburner.getCity"));
+    const chaos = await ctx.nsp("bladeburner.getCityChaos", city as never);
 
     // getCurrentAction and getActionCurrentTime are read back to back: the
     // elapsed time is reported for whatever action is current when it is asked,
@@ -1073,6 +1076,7 @@ const bladeCore: PricedProbe = {
         skillPoints,
         stamina,
         city,
+        chaos,
         current,
         ...(next ? { nextBlackOp: { name: String(next.name), rank: next.rank } } : {}),
         ...(nextIndex >= 0 ? { blackOpsComplete: nextIndex } : {}),
@@ -1083,25 +1087,11 @@ const bladeCore: PricedProbe = {
 
 /** One row per Bladeburner action.
  *
- * Every per-action getter here is BladeburnerApiBase (4 GB) and there are eight
- * of them: 39.6 GB in a single stub, which is why this was four stubs sharing a
- * row table. The four name lists and getSkillNames are 0 GB, so addressing the
- * actions costs nothing either way; what changed is that the 4 GB getters can
- * now be paid one at a time, and the table is filled in a single pass per row
- * instead of one pass per getter. */
-interface BladeAction {
-  type: "contract" | "operation" | "blackop" | "general";
-  name: string;
-  chance: [number, number];
-  timeMs: number;
-  countRemaining: number;
-  level: number;
-  maxLevel: number;
-  rankGain: number;
-  rankLoss: number;
-  rankNeeded?: number;
-}
-
+ * The per-action getters here are BladeburnerApiBase (4 GB), with seven calls
+ * for a levelable row. The four name lists and getSkillNames are 0 GB, so
+ * addressing the actions costs nothing either way. Contracts and operations
+ * alone have level getters; calling those APIs for a general action or Black
+ * Op is rejected by the game. */
 const bladeActionsProbe: PricedProbe = {
   id: "bladeburner.actions",
   kind: "priced",
@@ -1110,23 +1100,22 @@ const bladeActionsProbe: PricedProbe = {
   everyMs: MIN_2,
   merge: true,
   async run(ctx: ProbeContext) {
-    const groups: { type: BladeAction["type"]; names: string[] }[] = [
+    const groups: { type: BladeActionDigest["type"]; names: string[] }[] = [
       { type: "contract", names: (await ctx.nsp("bladeburner.getContractNames")).map(String) },
       { type: "operation", names: (await ctx.nsp("bladeburner.getOperationNames")).map(String) },
       { type: "blackop", names: (await ctx.nsp("bladeburner.getBlackOpNames")).map(String) },
       { type: "general", names: (await ctx.nsp("bladeburner.getGeneralActionNames")).map(String) },
     ];
-    const actions: BladeAction[] = [];
+    const actions: BladeActionDigest[] = [];
     for (const { type, names } of groups) {
       for (const name of names) {
-        const action: BladeAction = {
+        const apiType = bladeburnerApiActionType(type);
+        const action: BladeActionDigest = {
           type,
           name,
-          chance: await ctx.nsp("bladeburner.getActionEstimatedSuccessChance", type as never, name as never),
-          timeMs: await ctx.nsp("bladeburner.getActionTime", type as never, name as never),
-          countRemaining: await ctx.nsp("bladeburner.getActionCountRemaining", type as never, name as never),
-          level: await ctx.nsp("bladeburner.getActionCurrentLevel", type as never, name as never),
-          maxLevel: await ctx.nsp("bladeburner.getActionMaxLevel", type as never, name as never),
+          chance: await ctx.nsp("bladeburner.getActionEstimatedSuccessChance", apiType, name as never),
+          timeMs: await ctx.nsp("bladeburner.getActionTime", apiType, name as never),
+          countRemaining: await ctx.nsp("bladeburner.getActionCountRemaining", apiType, name as never),
           // Both rank values are public in v3.0.1. Reading them prevents a
           // made-up rank reward and enforces each Black Op's hard rank gate;
           // failure rank loss is independently level-adjusted, so
@@ -1134,9 +1123,15 @@ const bladeActionsProbe: PricedProbe = {
           // outcome.
           // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Bladeburner.ts#L165-L171
           // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Bladeburner.ts#L164-L181
-          rankGain: await ctx.nsp("bladeburner.getActionRankGain", type as never, name as never),
-          rankLoss: await ctx.nsp("bladeburner.getActionRankLoss", type as never, name as never),
+          rankGain: await ctx.nsp("bladeburner.getActionRankGain", apiType, name as never),
+          rankLoss: await ctx.nsp("bladeburner.getActionRankLoss", apiType, name as never),
         };
+        // The game rejects getActionCurrentLevel/getActionMaxLevel for general
+        // actions and Black Ops; only contracts and operations are levelable.
+        if (type === "contract" || type === "operation") {
+          action.level = await ctx.nsp("bladeburner.getActionCurrentLevel", apiType, name as never);
+          action.maxLevel = await ctx.nsp("bladeburner.getActionMaxLevel", apiType, name as never);
+        }
         if (type === "blackop") {
           action.rankNeeded = await ctx.nsp("bladeburner.getBlackOpRank", name as never);
         }

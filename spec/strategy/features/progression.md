@@ -156,5 +156,5 @@ reset, which returns the only reward that carries between nodes — a Source-Fil
 
 - Does the hacking route really not require The Red Pill? `.d.ts:2886-2888` says the augment must be installed; `Singularity.ts:1170-1174` **[src]** checks only hacking level and `hasAdminRights`, and `nuke` checks only NUKE.exe and open ports (`NetscriptFunctions.ts:531-547` **[src]**). Untested, and the two sources disagree.
 - Is `$1,000` the right install floor? `sim/world.ts:393` uses it; `PlayerObjectGeneralMethods.ts:102` **[src]** uses `1000 + CONSTANTS.Donations`, which is 262 (`sim/vendor/bitburner/src/Constants.ts:108`).
-- Is `BLACK_OP_COUNT = 20` (`shared/strategy/progression/endgame.ts:40`) right? The enum it mirrors has 21 members **[src]**.
+- Keep `BLACK_OP_COUNT = 21` in sync with the 21-member Bladeburner enum **[src]**.
 - What the BN2 gang Red Pill requires beyond a gang and 2 500 000 rep ([bn02](../bitnodes/bn02.md)), and whether the `w0r1d_d43m0n` finish is reachable normally in BN15, where Daedalus does not sell the pill ([bn15](../bitnodes/bn15.md)).

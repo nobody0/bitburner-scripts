@@ -130,6 +130,7 @@ import { resetGateSignal, signalGateRecheck } from "../gate-signal.ts";
 import { resetInstallSignal, takeInstallSignal } from "../install-signal.ts";
 import { armSleeveCompletion, consumeSleeveCompletion, pendingSleeveCompletions, resetSleeveCompletions } from "../sleeve-completion.ts";
 import { merge, set, type GameState } from "../state.ts";
+import { bladeburnerApiActionType } from "../bladeburner.ts";
 import type { WorkTaskLike } from "../work-completion.ts";
 import { dnetLabCacheDeferral } from "./dnet.ts";
 import { liquidatableValue } from "./factions.ts";
@@ -380,72 +381,83 @@ const bladeburner: FeatureDriver = {
       rank: topic.rank,
       skillPoints: topic.skillPoints,
       stamina: topic.stamina,
-      city: topic.city,
-      chaos: topic.cities?.find((city) => city.name === topic.city)?.chaos ?? 0,
-      actions: (topic.actions ?? []).map((action) => ({
-        type: action.type as "general" | "contract" | "operation" | "blackop",
-        name: action.name,
-        chance: action.chance,
-        timeMs: action.timeMs,
-        countRemaining: action.countRemaining ?? Infinity,
-        level: action.level ?? 1,
-        // v3.0.1 exposes the level-adjusted base rank gain directly; action
-        // completion applies its random offset around that base.
-        // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Bladeburner.ts#L165-L171
-        rankGain: action.rankGain ?? 0,
-        rankLoss: action.rankLoss ?? 0,
-        ...(action.rankNeeded !== undefined ? { rankNeeded: action.rankNeeded } : {}),
-      })),
+      chaos: topic.chaos,
+      actions: topic.actions ?? [],
       skills: topic.skills ?? {},
-      ...(topic.current ? { current: { type: topic.current.type, name: topic.current.name } } : {}),
+      ...(topic.current ? { current: { name: topic.current.name } } : {}),
     });
 
     merge(ctx.state, "bladeburner", {
       plan: {
-        action: {
-          type: decision.action.type,
-          ...(decision.action.type === "act" ? { actionType: decision.action.actionType, name: decision.action.name } : {}),
-          ...(decision.action.type === "upgrade" ? { skill: decision.action.skill } : {}),
-        },
-        ranked: decision.ranked.slice(0, 8).map((entry) => ({
-          name: entry.name,
-          actionType: entry.actionType,
-          rankPerSec: entry.rankPerSec,
-          chanceLow: entry.chanceLow,
-        })),
+        action: decision.action,
+        ranked: decision.ranked.slice(0, 8),
         ...(results["bladeburner"] ? { lastResult: results["bladeburner"] } : {}),
       },
     });
 
-    if (decision.action.type === "continue") return;
+    const action = decision.action;
+    if (action.type === "continue") return;
+    if (action.type === "stop" && !topic.current) return;
     const hasSimulacrum = (ctx.state.topics.progression?.ownedAugs?.[BLADES_SIMULACRUM] ?? 0) > 0;
-    if (decision.action.type === "act" && !hasSimulacrum && !ctx.grants.slot) {
+    if (action.type === "act" && !hasSimulacrum && !ctx.grants.slot) {
       // Starting a Bladeburner action cancels Player.currentWork unless the
       // installed Blade's Simulacrum exempts it. Wait for the arbiter's slot.
       // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Bladeburner/Bladeburner.ts#L173-L182
       record("bladeburner", "act", false, "waiting for Player.currentWork slot");
       return;
     }
-    await act(
+    const successDetail = action.type === "stop"
+      ? "stopped"
+      : action.type === "upgrade"
+        ? "upgraded"
+        : "started";
+    const succeeded = await act(
       "bladeburner",
-      decision.action.type,
+      action.type,
       async () => {
-        const action = decision.action;
-        if (action.type === "stop") {
-          // Stopping is a separate API call; merely declining to start a new
-          // action leaves the current Bladeburner action running.
-          // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Bladeburner.ts#L108-L124
-          await ctx.nsp("bladeburner.stopBladeburnerAction");
-          return true;
+        switch (action.type) {
+          case "stop":
+            // Merely declining to start a new action leaves the current action
+            // running, so stopping needs its own API call.
+            await ctx.nsp("bladeburner.stopBladeburnerAction");
+            return true;
+          case "upgrade":
+            return await ctx.nsp("bladeburner.upgradeSkill", action.skill as never, 1);
+          case "act":
+            return await ctx.nsp(
+              "bladeburner.startAction",
+              bladeburnerApiActionType(action.actionType),
+              action.name as never,
+            );
         }
-        if (action.type === "upgrade") return await ctx.nsp("bladeburner.upgradeSkill", action.skill as never, 1);
-        if (action.type === "act") {
-          return await ctx.nsp("bladeburner.startAction", action.actionType as never, action.name as never);
-        }
-        return false;
       },
-      (value) => ({ ok: Boolean(value), detail: Boolean(value) ? "started" : "refused" }),
+      (value) => ({
+        ok: Boolean(value),
+        detail: Boolean(value) ? successDetail : "refused",
+      }),
     );
+    if (succeeded === undefined || succeeded === false) return;
+
+    const latest = ctx.state.topics.bladeburner;
+    if (!latest) return;
+    if (action.type === "upgrade") {
+      const { [action.skill]: upgraded, ...skills } = latest.skills ?? {};
+      if (!upgraded) return;
+      // The following cost is unknown. Remove this skill until the detail
+      // probe refreshes it instead of buying repeatedly against a stale quote.
+      set(ctx.state, "bladeburner", {
+        ...latest,
+        skillPoints: Math.max(0, latest.skillPoints - upgraded.upgradeCost),
+        skills,
+      });
+      return;
+    }
+    set(ctx.state, "bladeburner", {
+      ...latest,
+      current: action.type === "act"
+        ? { type: bladeburnerApiActionType(action.actionType), name: action.name, elapsedMs: 0 }
+        : undefined,
+    });
   },
 };
 
@@ -3739,17 +3751,22 @@ export const bladeburnerModule: FeatureModule = {
   driver: bladeburner,
   reset: resetWithTopic("bladeburner"),
   claims: (ctx) => {
-    const action = ctx.state.topics.bladeburner?.plan?.action.type;
+    const topic = ctx.state.topics.bladeburner;
+    const action = topic?.plan?.action;
     const claims: Claim[] = [];
     const hasSimulacrum = (ctx.state.topics.progression?.ownedAugs?.[BLADES_SIMULACRUM] ?? 0) > 0;
-    if (action === "act" && !hasSimulacrum) {
+    const occupiesSlot = action?.type === "act" || topic?.current !== undefined;
+    if (occupiesSlot && !hasSimulacrum) {
       // ANNOUNCE THE RATE. A time claim with no `produces` is a HARD claim, and
       // hard claims outrank every priced one outright — so leaving this silent
       // would hand Bladeburner the exclusive work slot ahead of faction
       // reputation on nothing but the absence of a number. Rank is a priced
       // channel (`bladeburnerRank`), and the planner already publishes the rate
       // it would earn.
-      const rankPerSec = ctx.state.topics.bladeburner?.plan?.ranked?.[0]?.rankPerSec;
+      const selectedName = action?.type === "act" || action?.type === "continue"
+        ? action.name
+        : topic?.current?.name;
+      const rankPerSec = topic?.plan?.ranked?.find((entry) => entry.name === selectedName)?.rankPerSec;
       claims.push({
         by: "bladeburner",
         id: "work",

@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
-import { FEATURE_MODULES, type ClaimContext, type NeedContext } from "../game/lib/features/index.ts";
+import {
+  FEATURE_MODULES,
+  noGrants,
+  type ClaimContext,
+  type DriverContext,
+  type NeedContext,
+} from "../game/lib/features/index.ts";
 import { PRICED_PROBES } from "../game/lib/probes/index.ts";
 import { probeCtx } from "./support/probe-fixture.ts";
 import { initState } from "../game/lib/state.ts";
@@ -171,7 +177,6 @@ describe("bladeburner", () => {
     chance: [0.9, 0.95] as [number, number],
     timeMs: 30_000,
     countRemaining: 100,
-    level: 1,
     rankGain: 5,
     rankLoss: 1,
     ...over,
@@ -180,14 +185,13 @@ describe("bladeburner", () => {
     rank: 100,
     skillPoints: 0,
     stamina: [100, 100] as [number, number],
-    city: "Sector-12",
     chaos: 0,
     actions: [action()],
     skills: {},
     ...over,
   });
 
-  test("resting below the stamina floor beats pushing through", () => {
+  test("the conservative stamina policy stops below the penalty threshold", () => {
     expect(stepBladeburner(view({ stamina: [40, 100] })).action.type).toBe("stop");
     expect(stepBladeburner(view({ stamina: [STAMINA_FLOOR * 100 + 1, 100] })).action.type).toBe("act");
   });
@@ -204,34 +208,71 @@ describe("bladeburner", () => {
     expect(decision.ranked[0]!.rankPerSec).toBe(1);
   });
 
-  test("the live probe reads base rank loss instead of assuming failure is free", async () => {
+  test("the live probe uses exact API action types and levels only levelable actions", async () => {
     const probe = PRICED_PROBES.find((entry) => entry.id === "bladeburner.actions")!;
+    const apiTypes: string[] = [];
     const [emission] = await probe.run(probeCtx({
       "bladeburner.getContractNames": () => ["Tracking"],
       "bladeburner.getOperationNames": () => [],
-      "bladeburner.getBlackOpNames": () => [],
-      "bladeburner.getGeneralActionNames": () => [],
-      "bladeburner.getActionEstimatedSuccessChance": () => [1, 1],
+      "bladeburner.getBlackOpNames": () => ["Operation Typhoon"],
+      "bladeburner.getGeneralActionNames": () => ["Diplomacy"],
+      "bladeburner.getActionEstimatedSuccessChance": (type: string) => {
+        apiTypes.push(type);
+        return [1, 1];
+      },
       "bladeburner.getActionTime": () => 1_000,
       "bladeburner.getActionCountRemaining": () => 1,
-      "bladeburner.getActionCurrentLevel": () => 1,
-      "bladeburner.getActionMaxLevel": () => 1,
+      "bladeburner.getActionCurrentLevel": (type: string) => {
+        expect(type).toBe("Contracts");
+        return 1;
+      },
+      "bladeburner.getActionMaxLevel": (type: string) => {
+        expect(type).toBe("Contracts");
+        return 1;
+      },
       "bladeburner.getActionRankGain": () => 50,
       "bladeburner.getActionRankLoss": () => 7,
+      "bladeburner.getBlackOpRank": () => 100,
       "bladeburner.getSkillNames": () => [],
     }));
-    expect((emission!.data as { actions: { rankGain: number; rankLoss: number }[] }).actions[0]).toMatchObject({ rankGain: 50, rankLoss: 7 });
+    const actions = (emission!.data as { actions: { rankGain: number; rankLoss: number; level?: number }[] }).actions;
+    expect(actions[0]).toMatchObject({ rankGain: 50, rankLoss: 7, level: 1 });
+    expect(actions[1]!.level).toBeUndefined();
+    expect(actions[2]!.level).toBeUndefined();
+    expect(apiTypes).toEqual(["Contracts", "Black Operations", "General"]);
+  });
+
+  test("the core probe observes current-city chaos instead of defaulting it", async () => {
+    const probe = PRICED_PROBES.find((entry) => entry.id === "bladeburner.core")!;
+    const [emission] = await probe.run(probeCtx({
+      "bladeburner.getRank": () => 25,
+      "bladeburner.getSkillPoints": () => 3,
+      "bladeburner.getStamina": () => [50, 100],
+      "bladeburner.getCity": () => "Sector-12",
+      "bladeburner.getCityChaos": (city: string) => city === "Sector-12" ? 77 : 0,
+      "bladeburner.getCurrentAction": () => null,
+      "bladeburner.getNextBlackOp": () => ({ name: "Operation Typhoon", rank: 2.5 }),
+      "bladeburner.getBlackOpNames": () => ["Operation Typhoon", "Operation Zero"],
+    }));
+    expect(emission!.data).toMatchObject({ city: "Sector-12", chaos: 77, blackOpsComplete: 0 });
   });
 
   test("continuing and stopping are distinct decisions", () => {
-    expect(stepBladeburner(view({ current: { type: "Contract", name: "Tracking" } })).action.type).toBe("continue");
-    expect(stepBladeburner(view({ stamina: [40, 100], current: { type: "Contract", name: "Tracking" } })).action.type).toBe("stop");
+    expect(stepBladeburner(view({ current: { name: "Tracking" } })).action.type).toBe("continue");
+    expect(stepBladeburner(view({ stamina: [40, 100], current: { name: "Tracking" } })).action.type).toBe("stop");
   });
 
   test("a Bladeburner action claims Player.currentWork only without the installed Simulacrum", () => {
     const module = FEATURE_MODULES.bladeburner;
     const state = initState();
-    state.topics.bladeburner = { plan: { action: { type: "act" }, ranked: [] } } as never;
+    state.topics.bladeburner = {
+      rank: 0,
+      skillPoints: 0,
+      stamina: [1, 1],
+      city: "Sector-12",
+      chaos: 0,
+      plan: { action: { type: "act", actionType: "contract", name: "Tracking" }, ranked: [] },
+    };
     const progression = { ownedAugs: {} as Record<string, number> };
     state.topics.progression = progression as never;
     const context = {
@@ -242,6 +283,9 @@ describe("bladeburner", () => {
       horizons: {},
       board: postNeeds([]),
     } as unknown as ClaimContext;
+    expect(module.claims?.(context).some((claim) => claim.resource === "time")).toBe(true);
+    state.topics.bladeburner!.current = { type: "Contracts", name: "Tracking", elapsedMs: 0 };
+    state.topics.bladeburner!.plan!.action = { type: "upgrade", skill: "Overclock" };
     expect(module.claims?.(context).some((claim) => claim.resource === "time")).toBe(true);
     progression.ownedAugs["The Blade's Simulacrum"] = 1;
     expect(module.claims?.(context).some((claim) => claim.resource === "time")).toBe(false);
@@ -260,9 +304,48 @@ describe("bladeburner", () => {
     expect(decision.action.type === "act" && decision.action.name).toBe("Operation Typhoon");
   });
 
+  test("later Black Ops stay unavailable until the ordered predecessor completes", () => {
+    const next = action({ type: "blackop", name: "Operation Typhoon", rankNeeded: 1_000 });
+    const later = action({ type: "blackop", name: "Operation Zero", rankNeeded: 0, rankGain: 10_000 });
+    const decision = stepBladeburner(view({ rank: 100, actions: [next, later, action()] }));
+    expect(decision.action.type === "act" && decision.action.name).toBe("Tracking");
+    expect(decision.ranked.some((entry) => entry.actionType === "blackop")).toBe(false);
+  });
+
+  test("fractional action counts are not yet startable", () => {
+    expect(stepBladeburner(view({ actions: [action({ countRemaining: 0.99 })] })).action.type).toBe("stop");
+  });
+
+  test("Diplomacy and Black Ops continue instead of resetting their progress", () => {
+    const diplomacy = action({ type: "general", name: "Diplomacy", countRemaining: Infinity });
+    expect(stepBladeburner(view({ chaos: 100, actions: [diplomacy], current: { name: "Diplomacy" } })).action.type).toBe("continue");
+
+    const blackOp = action({ type: "blackop", name: "Operation Typhoon", chance: [1, 1], rankNeeded: 0 });
+    expect(stepBladeburner(view({ actions: [blackOp], current: { name: blackOp.name } })).action.type).toBe("continue");
+  });
+
   test("skill points are spent rather than hoarded", () => {
-    const decision = stepBladeburner(view({ skillPoints: 10, skills: { "Blade's Intuition": { level: 1, upgradeCost: 3 } } }));
+    const decision = stepBladeburner(view({ skillPoints: 10, skills: { "Blade's Intuition": { upgradeCost: 3 } } }));
     expect(decision.action.type).toBe("upgrade");
+  });
+
+  test("rank strategy does not buy money-only or experience-only skills", () => {
+    const decision = stepBladeburner(view({
+      skillPoints: 10,
+      skills: {
+        "Hands of Midas": { upgradeCost: 1 },
+        Hyperdrive: { upgradeCost: 1 },
+      },
+    }));
+    expect(decision.action.type).toBe("act");
+  });
+
+  test("a non-finite stale skill quote is never treated as affordable", () => {
+    const decision = stepBladeburner(view({
+      skillPoints: 10,
+      skills: { Overclock: { upgradeCost: Infinity } },
+    }));
+    expect(decision.action.type).toBe("act");
   });
 
   test("high chaos is reduced by Diplomacy before anything else", () => {
@@ -270,6 +353,72 @@ describe("bladeburner", () => {
       view({ chaos: 100, actions: [action(), action({ type: "general", name: "Diplomacy", countRemaining: Infinity })] }),
     );
     expect(decision.action.type === "act" && decision.action.name).toBe("Diplomacy");
+  });
+
+  test("the driver records a successful start immediately and does not restart before the next probe", async () => {
+    const state = initState();
+    state.topics = {
+      bladeburner: {
+        rank: 100,
+        skillPoints: 0,
+        stamina: [100, 100],
+        city: "Sector-12",
+        chaos: 0,
+        actions: [{ ...action(), level: 1 }],
+        skills: {},
+      },
+      progression: { ownedAugs: {} },
+    } as never;
+    const calls: { path: string; args: unknown[] }[] = [];
+    const ctx = {
+      ns: {} as NS,
+      nsp: async (path: string, ...args: unknown[]) => {
+        calls.push({ path, args });
+        return true;
+      },
+      state,
+      caps: deriveCapabilities({ bitNode: 6, inBladeburner: true }),
+      grants: { ...noGrants(), slot: true },
+    } as unknown as DriverContext;
+
+    await FEATURE_MODULES.bladeburner.driver.tick(ctx);
+    await FEATURE_MODULES.bladeburner.driver.tick(ctx);
+
+    expect(calls).toEqual([{ path: "bladeburner.startAction", args: ["Contracts", "Tracking"] }]);
+    expect(state.topics.bladeburner?.current).toMatchObject({ type: "Contracts", name: "Tracking" });
+  });
+
+  test("the driver does not repeat a skill purchase against a stale cost", async () => {
+    const state = initState();
+    state.topics = {
+      bladeburner: {
+        rank: 100,
+        skillPoints: 10,
+        stamina: [100, 100],
+        city: "Sector-12",
+        chaos: 0,
+        actions: [{ ...action(), level: 1 }],
+        skills: { Overclock: { level: 1, upgradeCost: 3 } },
+      },
+      progression: { ownedAugs: {} },
+    } as never;
+    const calls: string[] = [];
+    const ctx = {
+      ns: {} as NS,
+      nsp: async (path: string) => {
+        calls.push(path);
+        return true;
+      },
+      state,
+      caps: deriveCapabilities({ bitNode: 6, inBladeburner: true }),
+      grants: { ...noGrants(), slot: true },
+    } as unknown as DriverContext;
+
+    await FEATURE_MODULES.bladeburner.driver.tick(ctx);
+    await FEATURE_MODULES.bladeburner.driver.tick(ctx);
+
+    expect(calls).toEqual(["bladeburner.upgradeSkill", "bladeburner.startAction"]);
+    expect(state.topics.bladeburner?.skillPoints).toBe(7);
   });
 });
 

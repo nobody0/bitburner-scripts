@@ -1,28 +1,17 @@
+import type {
+  BladeburnerAction,
+  BladeburnerDecision,
+  ScoredBladeburner,
+} from "../../strategy/bladeburner/decide.ts";
+
 /** Bladeburner feature — BN6/BN7's theme. Problem: pick the action sequence
  * (contracts / operations / black ops / general) that climbs rank fastest
  * without dying, spending skill points and managing stamina and city chaos.
- * A stochastic scheduling problem over ~30 actions. */
+ * A stochastic scheduling problem over 36 actions. */
 
-export interface BladeActionDigest {
-  type: "contract" | "operation" | "blackop" | "general";
-  name: string;
-  /** Estimated success chance range [min, max]. */
-  chance: [number, number];
-  timeMs: number;
-  countRemaining: number;
+export interface BladeActionDigest extends BladeburnerAction {
   level?: number;
   maxLevel?: number;
-  autolevel?: boolean;
-  successes?: number;
-  repGain?: number;
-  /** Level-adjusted base rank gain before completion variance. */
-  rankGain?: number;
-  /** Level-adjusted base rank loss before completion variance. */
-  rankLoss?: number;
-  /** Rank required to attempt — Black Ops only. */
-  rankNeeded?: number;
-  /** Black ops only: rank required to attempt. */
-  rankReq?: number;
 }
 
 export interface BladeCityDigest {
@@ -37,6 +26,8 @@ export interface BladeburnerState {
   skillPoints: number;
   stamina: [number, number];
   city: string;
+  /** Current city's chaos from the core probe. */
+  chaos: number;
   current?: { type: string; name: string; elapsedMs: number };
   nextBlackOp?: { name: string; rank: number };
   /** Completed black operations, derived on the CORE probe from the next
@@ -56,7 +47,7 @@ export interface BladeburnerState {
 }
 
 export interface BladeburnerPlan {
-  action: { type: string; actionType?: string; name?: string; skill?: string };
-  ranked: { name: string; actionType: string; rankPerSec: number; chanceLow: number }[];
+  action: BladeburnerDecision["action"];
+  ranked: ScoredBladeburner[];
   lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

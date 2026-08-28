@@ -142,7 +142,7 @@ function hashGoals(ctx: HacknetViewContext): HashGoalCandidate[] {
     if (state.bladeburner.nextBlackOp && state.bladeburner.rank < state.bladeburner.nextBlackOp.rank) {
       goals.push({ name: HASH_UPGRADE.bladeRank, priority: 58 });
     }
-    if (state.bladeburner.plan?.action.type === "upgradeSkill") {
+    if (state.bladeburner.plan?.action.type === "upgrade") {
       goals.push({ name: HASH_UPGRADE.bladeSp, priority: 60 });
     }
   }

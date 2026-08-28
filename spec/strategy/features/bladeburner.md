@@ -18,15 +18,15 @@ darknet. An unqualified `:line` continues the previous file.
 
 ## Unlock
 
-**BN6 or SF6 alone is sufficient for scripting; SF7 only adds multipliers.** Older notes claiming SF7 is
-required for the API are wrong.
+**BN6/BN7 or SF6/SF7 is sufficient for scripting.** SF7 additionally grants
+Bladeburner multipliers, and level 3 grants The Blade's Simulacrum on joining.
 
 | Fact | Source |
 |---|---|
 | `bladeburner.inBladeburner()` costs **0 GB**, "Does not require API access" | `types/NetscriptDefinitions.d.ts:4017-4023` |
 | API remark "be in BitNode 6/7 or have Source-File 6/7"; in code, `canAccessBitNodeFeature(7)` or `(6)` | `:3433-3434`; `NetscriptFunctions/Bladeburner.ts:35`, `PersonObjects/Player/PlayerObjectBladeburnerMethods.ts:6-8` **[src]** |
 | Faction invite: `(BN6 or SF6) or (BN7 or SF7)`, plus `bladeburnerRank` 25 | `sim/vendor/bitburner/src/Faction/FactionTable.ts:1418-1459` |
-| `joinBladeburnerDivision()` refuses without SF6/SF7, on the `disableBladeburner` option, at `BladeburnerRank === 0` (BN8), or with any of strength/defense/dexterity/agility below **100** | `NetscriptFunctions/Bladeburner.ts:332-361` **[src]**; `NetscriptDefinitions.d.ts:1901`; `sim/vendor/bitburner/src/BitNode/BitNodeMults.ts:228` |
+| `joinBladeburnerDivision()` refuses without BN6/BN7 or SF6/SF7 access, on the `disableBladeburner` option, at `BladeburnerRank === 0` (BN8), or with any of strength/defense/dexterity/agility below **100** | `NetscriptFunctions/Bladeburner.ts:332-361` **[src]**; `NetscriptDefinitions.d.ts:1901`; `sim/vendor/bitburner/src/BitNode/BitNodeMults.ts:228` |
 | Our veto and enable path | `shared/features/unlock.ts:133,167` |
 | Starting an action calls `Player.finishWork(true)`, and `process` cancels a running action whenever `Player.currentWork` exists — both unless **The Blade's Simulacrum** is installed | `Bladeburner/Bladeburner.ts:178-179,1356` **[src]** |
 | Simulacrum is one of the 18 augmentations the Bladeburners sell — `isSpecial`, rep 1 250, $150b — and SF7.3 grants it free on joining | `sim/vendor/bitburner/src/Augmentation/AugmentationTable.ts:337-347`; `PlayerObjectBladeburnerMethods.ts:13-18` **[src]** |
@@ -46,19 +46,19 @@ chance = min(1, competence / (difficulty * chaosFactor))
 |---|---|---|
 | `populationFactor` | `(pop / 1e9) ^ 0.7`; `PopulationThreshold` 1e9, `PopulationExponent` 0.7 | `Action.ts:88-92`; `Constants.ts:30-31` |
 | `chaosFactor` | `sqrt(1 + chaos - 50)` above `ChaosThreshold` 50, else 1 | `:94-102`; `Constants.ts:32` |
-| `teamBonus` | `(teamCount + 1) ^ 0.05`, operations and black ops only; one per supporting sleeve | `Operation.ts:96-98`; `Bladeburner.ts:747` |
+| `teamBonus` | `(teamCount + 1) ^ 0.05`, operations and black ops only; `teamCount` is assigned per action from recruited members plus supporting sleeves | `Operation.ts:96-98`; `Bladeburner.ts:86-101,747-752`; `NetscriptFunctions/Bladeburner.ts:273-293` **[src]** |
 | action time | `difficulty / DifficultyToTimeFactor`, reduced by Overclock and a dexterity/agility factor, floored at 1 s | `Action.ts:105-121`; `Constants.ts:9,23-26` |
 | reported chance | an **interval**: "value[0] - MIN Chance, value[1] - MAX Chance", because `popEst` differs from `pop` | `NetscriptDefinitions.d.ts:3576,3583-3587`; `Action.ts:144-167` |
 | levelling | 3 contracts, 6 operations, 6 general actions, 21 black ops; contracts and operations run `difficulty *= 1.01^(level-1)`, `reward *= 1.02^(level-1)` over a finite `count` regrowing on the 480 s `ActionCountGrowthPeriod` | `LevelableAction.ts:19-20,58-64`; `Constants.ts:40` |
 | stamina penalty | `min(1, stamina / (0.5 * maxStamina))` — below **half** max stamina every success chance scales down linearly | `Bladeburner.ts:167-169` |
 | max stamina | `(agility^0.8 + staminaBonus)` × the Stamina skill mult × `bladeburner_max_stamina` | `:1329-1345` |
 | regen | `(0.0085 + maxStamina/70000) * agility^0.17`, × those same multipliers | `:1319-1327`; `Constants.ts:5-7` |
-| cost per action | `BaseStaminaLoss 0.285 * difficultyMultiplier` stamina, `hpLoss * difficultyMultiplier` HP, which can hospitalise | `:1021-1023,1061-1069` |
+| cost per contract/operation/black op | `BaseStaminaLoss 0.285 * difficultyMultiplier` stamina; failure can deal `hpLoss * difficultyMultiplier` HP and hospitalise | `:917-925,975-987,1015-1023,1060-1069` |
 | city state | `pop`, `popEst`, `comms` (5–150 at init), `chaos`, per city, six cities | `Bladeburner/City.ts:18-27` |
 | population loop | retiring Synthoids lowers `pop`, lowering `populationFactor` — the feature erodes its own success chance | `Bladeburner.ts:824-888` |
 | Raid | decrements `comms`; returns chance **0** at `comms <= 0` | `Operation.ts:63-68` |
-| chaos | contracts, operations and random riots raise it; Diplomacy and Stealth Retirement lower it; Incite Violence adds **+10 to every city** for action counts | `Bladeburner.ts:680-683,824-888,1220-1236` |
-| rank gain | `rankGain * rewardFac^(level-1) * BladeburnerRank`, offset ±10% | `Bladeburner/Formulas.ts:9-28`; `Bladeburner.ts:1033`; `utils/helpers/addOffset.ts` **[src]** |
+| chaos | Bounty Hunter/Retirement contracts, several operations and random riots can raise it; Diplomacy and Stealth Retirement lower it. Incite Violence replenishes action counts, then adds 10 and a further `chaos/log10(chaos)` to every city | `Bladeburner.ts:680-683,804-888,1218-1236` |
+| rank gain | Contracts/operations use `rankGain * rewardFac^(level-1) * BladeburnerRank`; black ops omit the level reward; Field Analysis gives `0.1 * BladeburnerRank`. Completed contracts/operations/black ops apply a ±10% offset | `Bladeburner/Formulas.ts:9-28`; `Bladeburner.ts:950-953,1031-1034,1135-1141`; `utils/helpers/addOffset.ts` **[src]** |
 | skill points | off **maxRank**, one per `RanksPerSkillPoint` 3 | `Bladeburner.ts:1284-1293`; `Constants.ts:48` |
 | skills | twelve, `baseCost` 1–3, `costInc` 1–3; a level applies `1 + baseMult * level / 100`, so Overclock — the only capped skill, `maxLvl` 90 with `ActionTime` −1 — reaches 0.10× action time at level 90 | `Bladeburner/data/Skills.ts:44-53`; `Bladeburner.ts:776-786` |
 
@@ -73,8 +73,8 @@ cost = round(count * BladeburnerSkillCost
 
 There are **21**, not 20: `numberOfBlackOperations = Object.keys(BladeburnerBlackOpName).length`
 (`Bladeburner/data/BlackOperations.ts:735` **[src]**) over a 21-member enum (`Bladeburner/Enums.ts:38-60`).
-`shared/strategy/progression/endgame.ts:40` hardcodes `BLACK_OP_COUNT = 20`, so our route model calls the node
-finished one operation early.
+`shared/strategy/progression/endgame.ts` uses the matching `BLACK_OP_COUNT = 21`, so the route does not call
+the node complete before Operation Daedalus finishes.
 
 | Rule | Source |
 |---|---|
@@ -103,7 +103,7 @@ augmentation other than NeuroFlux Governor (`CotMG/Helper.tsx:59-74`, `Locations
 | Needs | `bladeburnerRank` 400 000 when this is the endgame route (`needs.ts:38`) |
 | Needs | The work slot, unless Simulacrum is installed |
 | Gives | The Bladeburners faction at rank 25 and its 18 augmentations (`FactionTable.ts:1418-1459`; `AugmentationTable.ts`); rep at `RankToFactionRepFactor 2 × Δrank × faction_rep × (1 + favor/100)` (`Formulas.ts:43-46`; `Constants.ts:42`) |
-| Gives | Combat and intelligence exp on the action's `weights` table (`Bladeburner.ts:706-733`); the node-destroy route |
+| Gives | Contracts, operations and black ops award combat/intelligence exp from their `weights`; Training and Field Analysis have separate fixed stat rewards (`Bladeburner.ts:706-733,1088-1155`); the node-destroy route |
 | Gives | Money from **contracts only** — `ContractBaseMoneyGain 250e3 × rewardFac^(level-1) × MoneySkillMult`; operations, black ops and general actions pay none (`Bladeburner.ts:936-943`; `Constants.ts:50`) |
 | Contends | The work slot, against `career`, `factions`, grafting and class/gym (`shared/strategy/arbiter.ts`) |
 
@@ -111,11 +111,16 @@ augmentation other than NeuroFlux Governor (`CotMG/Helper.tsx:59-74`, `Locations
 
 - **The chance is an interval and the optimistic end is a trap.** An op reading 60–100% may really be 60%.
   `shared/strategy/bladeburner/decide.ts` uses `chance[0]` and refuses black ops below `BLACKOP_CONFIDENCE` 0.95.
-- **Stamina is a multiplier, not a bar.** Below 0.5 × max, acting is slower than resting, because the penalty
-  scales every attempt.
+- **The API action types are exact enum strings.** The store normalises them to `contract`, `operation`,
+  `blackop`, and `general`; the game adapter maps those back to `Contracts`, `Operations`, `Black Operations`,
+  and `General`. Only contracts and operations may be passed to the current/max-level getters.
+- **Stamina is a multiplier, not a bar.** Below 0.5 × max the penalty scales every attempt. The strategy's
+  decision to idle there is a conservative policy; stamina regenerates while acting too, so idling is not
+  proven throughput-optimal at every value below the threshold.
 - **The population loop is self-defeating**, and city selection and population estimation are unmodelled.
 - **Skill allocation is a knapsack whose prices the node changes.** The driver buys the cheapest affordable
-  level first (`decide.ts:113-124`) — a policy, not an optimum. At `BladeburnerSkillCost` 2 (BN7, BN13, BN14)
+  rank-relevant level first and excludes the money-only Hands of Midas and experience-only Hyperdrive — a
+  policy, not an optimum. At `BladeburnerSkillCost` 2 (BN7, BN13, BN14)
   or 3 (BN15) that order misallocates: `costInc` differs per skill (Cyber's Edge 1/+3 versus Hyperdrive
   1/+2.5) and the multiplier scales the whole curve.
 - **No dedicated driver module or sim model** — the driver lives in `game/lib/features/remaining.ts:374-454`,
@@ -150,8 +155,8 @@ exp gains*, SF7 raises `bladeburner_max_stamina`, `_stamina_gain`, `_analysis` a
 | Concern | File |
 |---|---|
 | strategy | `shared/strategy/bladeburner/decide.ts` |
-| driver | `game/lib/features/remaining.ts:374` |
-| probe | `game/lib/probes/priced.ts:1327` |
+| driver | `game/lib/features/remaining.ts` |
+| probe | `game/lib/probes/priced.ts` |
 | telemetry topic | `shared/telemetry/topics/bladeburner.ts` |
 | tab | `ui/app/tabs/bladeburner.ts` |
 | tests | `tests/features-remaining.test.ts` |

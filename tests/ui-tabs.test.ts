@@ -250,9 +250,12 @@ describe("tab rendering", () => {
       }],
     } as StateMap["gang"];
     state.topics.bladeburner = {
-      rank: 100, skillPoints: 5, stamina: [50, 100], city: "Sector-12",
+      rank: 100, skillPoints: 5, stamina: [50, 100], city: "Sector-12", chaos: 0,
       current: { type: "Contract", name: "Tracking", elapsedMs: 1000 }, skills: {},
-      actions: [{ type: "contract", name: "Tracking", chance: [0.5, 0.7], timeMs: 30000, countRemaining: 100, level: 1, maxLevel: 5 }],
+      actions: [{
+        type: "contract", name: "Tracking", chance: [0.5, 0.7], timeMs: 30000,
+        countRemaining: 100, rankGain: 1, rankLoss: 0, level: 1, maxLevel: 5,
+      }],
       cities: [],
     } as StateMap["bladeburner"];
     state.topics.sleeves = {
