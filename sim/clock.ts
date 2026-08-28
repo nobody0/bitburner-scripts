@@ -43,6 +43,19 @@ export function drainMicrotasks(): Promise<void> {
   return new Promise<void>((resolve) => void realSetImmediate(resolve));
 }
 
+/** Consecutive same-instant events before the clock declares a stall.
+ *
+ * A discrete-event clock only moves when the queue's head does, so a callback
+ * that reschedules itself at delay 0 freezes virtual time FOREVER while
+ * burning host CPU — and starves the forced GC, whose trigger is virtual, so
+ * the freeze compounds into an OOM spiral. The real game survives the same
+ * code because its engine ticks in wall time regardless. A legitimate burst
+ * (a 200 ms wake pump over a 24k-worker fleet, a prestige kill sweep) is tens
+ * of thousands of same-instant events; a million is nothing but a loop.
+ * Measured: darknet-enabled runs froze at one virtual instant for 30+ wall
+ * minutes at 100% CPU and 20-66 GB RSS with no diagnostic at all. */
+export const SAME_INSTANT_EVENT_BOUND = 1_000_000;
+
 export class Clock {
   #heap: Scheduled[] = [];
   #now = 0;
@@ -55,6 +68,8 @@ export class Clock {
    * number: virtual ms per event says how much time a run buys per unit of
    * host work. */
   #events = 0;
+  /** Same-instant stall tripwire (see SAME_INSTANT_EVENT_BOUND). */
+  #sameInstant = 0;
 
   now(): number {
     return this.#now;
@@ -150,6 +165,20 @@ export class Clock {
         return "horizon";
       }
       this.#pop();
+      if (next.time === this.#now) {
+        this.#sameInstant++;
+        if (this.#sameInstant > SAME_INSTANT_EVENT_BOUND) {
+          // A stalled clock previously burned the host silently until the OS
+          // killed the process. Naming the callback's source is usually
+          // enough to find the zero-delay loop that scheduled it.
+          throw new Error(
+            `virtual clock stalled: ${this.#sameInstant} consecutive events at t=${this.#now}ms; `
+            + `next callback: ${String(next.fn).slice(0, 300)}`,
+          );
+        }
+      } else {
+        this.#sameInstant = 0;
+      }
       this.#now = next.time;
       this.#events++;
       return next;
