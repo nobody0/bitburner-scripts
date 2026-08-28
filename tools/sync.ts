@@ -47,7 +47,7 @@ export function syncOptionsFrom(body: unknown): SyncOptions {
 }
 
 const TYPES_FILE = fileURLToPath(new URL("../types/NetscriptDefinitions.d.ts", import.meta.url));
-const READY_TIMEOUT_MS = 15_000;
+const READY_TIMEOUT_MS = 30_000;
 const READY_POLL_MS = 100;
 
 async function refreshTypes(session: RfaSession, config: BitburnerConfig, log: SyncLog): Promise<void> {
