@@ -581,11 +581,19 @@ class Resident {
           ? SLOW_REEMIT_MS[slowEmits - 1]
           : nextSlowAt + SLOW_PERIOD_MS;
       }
-      if (waitMs >= WARN_AFTER_MS && incident !== "" && !warnedIncidents.has(incident)) {
-        warnedIncidents.add(incident);
+      // The loudest case used to be the quietest. `incident` is assigned only in
+      // the branch where a placement WAS obtained, so a placer that can never
+      // grant the floor — the one situation that stalls for ever — left it "" and
+      // warned never. Name that case instead of skipping it.
+      const label = incident !== "" ? incident : `${this.#label}:unplaced:${minGb}`;
+      if (waitMs >= WARN_AFTER_MS && !warnedIncidents.has(label)) {
+        warnedIncidents.add(label);
         nsMain().tprint(
-          `WARNING: ns resident ${this.#label} cannot exec (needs ${minGb}GB) — retrying; ` +
-            `is ${nsResidentScript()} synced, and is the RAM free?`,
+          incident !== ""
+            ? `WARNING: ns resident ${this.#label} cannot exec (needs ${minGb}GB) — retrying; `
+              + `is ${nsResidentScript()} synced, and is the RAM free?`
+            : `WARNING: ns resident ${this.#label} cannot be PLACED at all (needs ${minGb}GB) — `
+              + "retrying; no host in the fleet has that much free.",
         );
       }
       // Yield to the game's scheduler so a pending reap can free the RAM;

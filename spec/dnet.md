@@ -1467,6 +1467,49 @@ for, and its cost is the generation stamp: a stale agent can keep reporting from
 a run that no longer exists, which is why the generation is checked at every
 rendezvous.
 
+### A launch window, and when it expires
+
+Dispatch claims the host before it launches, so a second pass does not launch
+onto a host that already has a process coming. That claim needs an end.
+
+**A pid answers for itself.** Once `exec` has returned a pid, `isRunning` decides
+and no clock is consulted: a process that is running has not failed to launch
+however long it has been there, and reaping its window would start a second
+launch onto RAM the first one holds — which the engine then refuses, while
+`durableRoomGb` still reports the host as roomy.
+
+**A window with no pid is on a clock**, because nothing else can answer it. The
+launcher has claimed the host and not exec'd yet, and if it dies in between there
+is no process to ask about. This used to answer a bare `true` for ever —
+`refreshLiveness` only asks about windows that HAVE a pid, so a pid-less one was
+never examined at all — and that single value gates `reapGhostLaunches`,
+`releaseStranded`, `reconcilePending` and dispatch itself. One launcher lost in
+that gap wedged its host for the rest of the run, holding its order so the
+planner would not re-route the work either. `LAUNCH_WINDOW_MS` is deliberately
+generous: it is not a race budget, only the answer to "will this ever arrive".
+
+The managed (stasis) dispatch is the path that made this reachable. It claims the
+window and *then* awaits an atomic `connectToSession + exec` lease on the shared
+ns resident — and `NsProxy#respawn` retries placement in an unbounded loop with
+no failure exit, so a resident the fleet cannot afford leaves that await
+unsettled. It is time-bounded now, and the proxy's own "cannot place at all"
+warning no longer skips itself (it was gated on a label assigned only where a
+placement had already been obtained).
+
+**A refused launch is loud.** `exec` returning 0 is the engine's answer to a
+missing script, a host that cannot fit the launch and a refused darknet check
+alike, and it writes its reason only to the launching script's own log. Both
+dispatch paths now record it as a `launch-refused` refusal, so the panel shows a
+fault rather than a quiet host, and log it to the browser console. Neither may
+`tprint`: the controller parks on `dnet.nextMutation`, which holds the Netscript
+lock, so a second `ns` call throws CONCURRENCY ERROR and kills it.
+
+**Only an adopted agent is a resident.** The snapshot used to report a launch
+window's `pendingOrder` as the active job with its full declared RAM, stamped
+`lastBeatAt` at the current instant on every read — so a launch that never
+arrived rendered as a live resident holding its whole allocation and could never
+go stale, because asking refreshed its own beat.
+
 ### The derive scheduler
 
 Derivation is fact-driven: `signalDerive()` queues one `fileWork` pass, and the

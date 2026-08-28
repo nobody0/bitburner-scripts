@@ -149,6 +149,16 @@ const DERIVE_CHAIN_REST_MS = 200;
  * the planner a question again. Long enough to cost nothing, short enough that
  * a missed fact is an inconvenience rather than a stall. */
 const DERIVE_FALLBACK_MS = 20_000;
+/** How long a launch window with NO PID may stay open.
+ *
+ * Only the pid-less case — the launcher has claimed the host and not exec'd yet.
+ * Once there is a pid, `isRunning` answers and no clock is consulted.
+ *
+ * Deliberately generous, because this is not a race budget: a plant legitimately
+ * holds its window across an `scp`, a `connectToSession`, two `exec`s and the
+ * new prober's first report. It exists only to answer "will this ever arrive",
+ * and past this point the honest answer is no. */
+const LAUNCH_WINDOW_MS = 10_000;
 /** Fallback duration used only to compare loaded vantages. */
 const TYPICAL_ORDER_MS = 6_000;
 const MAX_GRAMMAR_SHAPES = 20;
@@ -320,6 +330,25 @@ export async function main(ns: NS): Promise<void> {
   /** Hosts `planArmour` wants carrying the `spawn` chain. An INTENT, acted on
    *  only at an order boundary — see `resizeProber`. */
   const armourWanted = new Set<string>();
+  /** Hosts whose last dispatch the ENGINE refused, so the panel can name a fault
+   *  instead of showing a quiet host. Cleared by a launch that works.
+   *
+   * `exec` returning 0 is the engine's answer to a missing script, a host that
+   * cannot fit the launch and a refused darknet check alike, and it writes its
+   * reason only to the launching script's own log. Retrying it silently every
+   * pass is indistinguishable from having nothing to do. */
+  const launchRefusals = new Map<string, { kind: string; threads: number; wantedGb: number; at: number }>();
+  const noteLaunchRefused = (entry: HostEntry, order: Order, why: string): void => {
+    const wantedGb = order.ramOverrideGb * order.threads;
+    launchRefusals.set(entry.hostname, { kind: order.kind, threads: order.threads, wantedGb, at: Date.now() });
+    // `console.log`, never `ns.tprint`: this controller parks on
+    // `dnet.nextMutation`, which holds the Netscript lock, so a second ns call
+    // throws CONCURRENCY ERROR and kills it.
+    console.log(
+      `[dnet] launch refused on ${entry.hostname}: ${order.kind} x${order.threads}`
+      + ` wanted ${wantedGb.toFixed(2)}GB, room ${(durableRoomGb(entry.hostname) ?? 0).toFixed(2)}GB (${why})`,
+    );
+  };
 
   // --- derive wake ----------------------------------------------------------
   /** Derivation is FACT-driven, not tick-driven.
@@ -1144,8 +1173,10 @@ export async function main(ns: NS): Promise<void> {
       // Nothing started. Put the order back where the next pass will find it
       // rather than leaving it in a handoff slot nobody is coming for.
       restoreRefusedLaunch(entry, next, offer);
+      noteLaunchRefused(entry, next, "exec returned 0");
       return;
     }
+    launchRefusals.delete(entry.hostname);
     entry.inbound = { ...entry.inbound, pid };
   };
 
@@ -1155,6 +1186,10 @@ export async function main(ns: NS): Promise<void> {
    * locks that pair; retries cover an externally killed resident and the
    * engine's transient zero while a prior allocation is being reaped. */
   const MANAGED_DISPATCH_ATTEMPTS = 3;
+  /** How long one `connectToSession + exec` lease may take before the dispatch
+   *  gives the host back. The proxy's own placement retry is unbounded, so
+   *  without this the launch window is held for the rest of the run. */
+  const MANAGED_DISPATCH_TIMEOUT_MS = 5_000;
   const dispatchManaged = async (entry: HostEntry): Promise<void> => {
     if (!stasisLinked.has(entry.hostname)) return;
     if (entry.agent !== undefined || processInbound(entry) || standDown) return;
@@ -1175,7 +1210,13 @@ export async function main(ns: NS): Promise<void> {
     let failureCode = 0;
     for (let attempt = 0; attempt < MANAGED_DISPATCH_ATTEMPTS && pid === 0; attempt++) {
       try {
-        const outcome = await nsp.guaranteeFit(
+        // TIME-BOUNDED. The window above is already claimed, and the lease can
+        // wait for ever: `NsProxy#respawn` retries placement in an unbounded
+        // loop with no failure exit, so a resident the fleet cannot afford
+        // leaves this await unsettled and the host wedged behind it. Losing the
+        // race costs one refused dispatch; not having it cost the host.
+        const outcome = await Promise.race([
+          nsp.guaranteeFit(
           ["dnet.connectToSession", "exec"],
           async (resident) => {
             const connected = await resident("dnet.connectToSession", entry.hostname, credential.password);
@@ -1189,7 +1230,9 @@ export async function main(ns: NS): Promise<void> {
             );
             return { pid: launched, code: launched === 0 ? 0 : 200 };
           },
-        );
+          ),
+          realmSleep(MANAGED_DISPATCH_TIMEOUT_MS).then(() => ({ pid: 0, code: 0 })),
+        ]);
         pid = outcome.pid;
         failureCode = outcome.code;
         if (failureCode === 401 || failureCode === 503) break;
@@ -1200,11 +1243,13 @@ export async function main(ns: NS): Promise<void> {
     }
 
     if (pid > 0) {
+      launchRefusals.delete(entry.hostname);
       if (entry.agent === undefined) entry.inbound = { ...(entry.inbound ?? { at: Date.now(), via: "plant-exec" }), pid };
       return;
     }
 
     restoreRefusedLaunch(entry, next, offer);
+    noteLaunchRefused(entry, next, `managed lease, code ${failureCode}`);
     if (failureCode === 503) {
       retireLifetime(entry.hostname, "stasis target was unavailable during managed dispatch");
     } else if (failureCode === 401) {
@@ -1460,8 +1505,20 @@ export async function main(ns: NS): Promise<void> {
     // An announced pid we have not asked about yet is still ON ITS WAY. That is
     // the conservative answer: it keeps a second launch off a host that already
     // has one coming, which is the only thing this guard exists to prevent.
+    //
+    // A pid ANSWERS the question and no clock may overrule it: a process that is
+    // running has not failed to launch however long it has been there, and
+    // reaping its window starts a second launch onto RAM the first one holds.
     if (inbound.pid !== undefined) return livePids.get(livenessKey(inbound.pid, entry.hostname)) ?? true;
-    return true;
+    // No pid: the LAUNCHER still owns this window and has not exec'd yet. This
+    // is the one case a clock has to decide, because nothing else can — and it
+    // used to answer a bare `true` for ever. `refreshLiveness` only asks about
+    // windows that HAVE a pid, so a pid-less one was never even examined, and
+    // this single value gates `reapGhostLaunches`, `releaseStranded`,
+    // `reconcilePending` and dispatch itself. A launcher that died between
+    // claiming the host and exec'ing wedged it for the rest of the run, holding
+    // its order so the planner would not re-route the work either.
+    return Date.now() - inbound.at <= LAUNCH_WINDOW_MS;
   };
 
   const fileTask = (task: Task): boolean => {
@@ -2033,7 +2090,17 @@ export async function main(ns: NS): Promise<void> {
             : "no vantage's adjacency still names it, and no fresh backdoor or stasis fact to reach it without one",
         };
       });
-    const refusals = [...plan.refused, ...routeless];
+    // A launch the ENGINE refused is a fault, not a routing gap.
+    const refusedLaunches: Refusal[] = [...launchRefusals.entries()]
+      .filter(([host]) => hosts.get(host)?.agent === undefined)
+      .map(([host, refused]): Refusal => ({
+        host,
+        why: "launch-refused",
+        detail: `the engine refused ${refused.kind} x${refused.threads}`
+          + ` (${refused.wantedGb.toFixed(2)}GB wanted) ${Math.round((at - refused.at) / 1000)}s ago`
+          + " — the reason is in the launcher's own script log",
+      }));
+    const refusals = [...plan.refused, ...routeless, ...refusedLaunches];
     const why: Record<string, string> = {};
     for (const refusal of refusals) why[refusal.host] = refusal.detail;
     spread = {
@@ -2675,12 +2742,16 @@ export async function main(ns: NS): Promise<void> {
       };
       return {
         recovery,
-        residents: liveEntries().map((entry) => {
-          // An exec'd child may be holding its full allocation for the short
-          // window before it adopts. The controller already owns its order and
-          // pid, so reporting it is observation, not a new probe.
-          const active = entry.agent?.order
-            ?? (entry.inbound?.pid !== undefined ? entry.pendingOrder : undefined);
+        // ONLY ADOPTED AGENTS. A launch window is an intention, not a resident:
+        // this used to report `pendingOrder` as the active job with its full
+        // declared RAM and stamp `lastBeatAt` at the current instant on every
+        // read — so a launch that never arrived rendered as a live resident
+        // holding its whole allocation and could never go stale, because asking
+        // refreshed its own beat. Under-reporting one tick of a real launch
+        // window is the honest trade; `processInbound` still gates dispatch, so
+        // nothing double-launches for want of counting it.
+        residents: liveEntries().filter((entry) => entry.agent !== undefined).map((entry) => {
+          const active = entry.agent?.order;
           const jobGb = active === undefined ? 0 : active.ramOverrideGb * active.threads;
           const proberGb = entry.prober !== undefined && entry.prober.pid > 0
             ? proberReserveGb(entry.hostname)

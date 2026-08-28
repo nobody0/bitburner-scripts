@@ -638,6 +638,27 @@ describe("armour is resized at the order boundary", () => {
     expect(handle.hosts.get(VANTAGE)?.inbound?.pid).toBe(700);
   });
 
+  test("a launch window with no pid is reaped, not held for ever", async () => {
+    // The wedge. A window with no pid answered `processInbound` with a bare
+    // `true`, and `refreshLiveness` only asks about windows that HAVE a pid, so
+    // it was never examined at all. That one value gates `reapGhostLaunches`,
+    // `releaseStranded`, `reconcilePending` and dispatch itself, so a launcher
+    // that died between claiming a host and exec'ing wedged it for the rest of
+    // the run — a prober standing, no agent, and nothing saying why.
+    //
+    // A pid still answers for itself: only the pid-less case is on a clock.
+    const handle = await bootController();
+    standHands();
+    standProber(handle, TARGET, 900, true, () => 0);
+    const entry = handle.hosts.get(TARGET)!;
+
+    entry.inbound = { at: Date.now() - 7_200_000, via: "plant-exec" };
+    handle.wake("test");
+    await settleMicrotasks();
+
+    expect(handle.hosts.get(TARGET)?.inbound).toBeUndefined();
+  });
+
   test("a missed kill-mark degrades to a leak, never to a respawn storm", async () => {
     // Defence in depth for a mechanism whose failure mode is freezing the game.
     // An unmarked kill in `retireVantage` — the path every agent death takes —

@@ -794,6 +794,12 @@ export type RefusalReason =
    *  refusal of its own. That is the commonest reason a cracked host sits
    *  empty, and it was the one reason the panel could not name. */
   | "no-route"
+  /** Also emitted by the CALLER: the engine REFUSED the launch — `exec`
+   *  returned 0, or the managed lease could not place its resident. That is a
+   *  fault, not a routing gap, and it is the one thing a host with a prober and
+   *  no agent can be suffering from. It was silent, so a wedged host was
+   *  indistinguishable from an idle one. */
+  | "launch-refused"
   /** Also emitted by the CALLER: the host is not a candidate because a process
    *  has already been launched at it and has not adopted yet. Distinct from
    *  `no-route`, which says the opposite — that nothing is coming. Reading one
