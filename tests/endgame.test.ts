@@ -80,6 +80,18 @@ describe("endgame routes", () => {
     });
   });
 
+  test("BN2 gang creation does not require negative karma", () => {
+    const gang = stepEndgame(view({
+      bitNode: 2,
+      gangAvailable: true,
+      inGang: false,
+      karma: 0,
+      gangCreateFaction: "Slum Snakes",
+    })).routes.find((route) => route.id === "gang")!;
+    expect(gang).toMatchObject({ stage: "gang-create", blocker: "create a gang with Slum Snakes" });
+    expect(gang.needs.some((need) => need.kind === "karma")).toBe(false);
+  });
+
   test("the install resets the skill, so the regrow is a distinct phase", () => {
     // Exactly the trap: pill owned AND installed, but hacking is back at 1.
     const d = stepEndgame(

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
 import { shouldReportCrash } from "../game/main.ts";
 import { planKillOrder } from "../game/start.ts";
 import { parseSyncControl, syncControl } from "../shared/deployment.ts";
@@ -52,5 +53,19 @@ describe("clean sync control", () => {
     expect(parseSyncControl(syncControl(prepare))).toEqual({ ...prepare, hosts: ["home"] });
     expect(parseSyncControl('{"id":"","phase":"ready"}')).toBeUndefined();
     expect(parseSyncControl("not json")).toBeUndefined();
+  });
+});
+
+describe("controller startup", () => {
+  test("main has one initialization path and start never forwards a sync mode", async () => {
+    const [start, main] = await Promise.all([
+      readFile("game/start.ts", "utf8"),
+      readFile("game/main.ts", "utf8"),
+    ]);
+    expect(start).not.toContain("launchMain(ns, true)");
+    expect(main).not.toContain("afterSync");
+    expect(main).not.toContain("clearControllerGlobals");
+    expect(await readFile("game/lib/controller.ts", "utf8")).toContain("clearControllerGlobals();");
+    expect(main).toContain("main.js accepts no arguments");
   });
 });

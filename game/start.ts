@@ -4,20 +4,21 @@ import {
   syncControl,
   SYNC_CONTROL_FILE,
 } from "../shared/deployment.ts";
-import { MAIN_SCRIPT_GB, START_SCRIPT_GB } from "./lib/ram.ts";
+import { MAIN_SCRIPT_GB } from "./lib/ram.ts";
+import { realmSleep } from "./lib/wake.ts";
 
 export const MAIN_SCRIPT = "main.js";
 const SYNC_ARG = "--sync";
 const CONTROL_POLL_MS = 100;
 
-function launchMain(ns: NS, afterSync = false): void {
+function launchMain(ns: NS): void {
   ns.spawn(MAIN_SCRIPT, {
     threads: 1,
     ramOverride: MAIN_SCRIPT_GB,
     spawnDelay: 0,
     temporary: true,
     preventDuplicates: true,
-  }, ...(afterSync ? [SYNC_ARG] : []));
+  });
 }
 
 export function planKillOrder(hosts: readonly string[], home: string): string[] {
@@ -48,9 +49,9 @@ export async function main(ns: NS): Promise<void> {
         phase: "ready",
       }), "w");
     } else if (control?.phase === "commit" && control.id === activeId) {
-      launchMain(ns, true);
+      launchMain(ns);
       return;
     }
-    await ns.sleep(CONTROL_POLL_MS);
+    await realmSleep(CONTROL_POLL_MS);
   }
 }

@@ -739,12 +739,12 @@ const dnet: FeatureDriver = {
     // there. home cannot play this feature itself — `probe()` is host-local, so
     // from here the darknet is one host wide — and it cannot hold a session
     // either, because a session belongs to the PID that won it and home's
-    // `start.js` is pinned at 3.6 GB static.
+    // `main.js` is launched with a 3.2 GB allocation.
     //
     // `exec` evaluates its direct-connection requirement BEFORE the darkweb
     // early-out, so only the host holding the TOR edge can place a process on
     // `darkweb`; a launcher anywhere else scps happily and then gets a silent
-    // 0. The seed runs in the driver, which IS home's `start.js`, so the exec
+    // 0. The seed runs in the driver, which IS home's `main.js`, so the exec
     // is issued from the one `ns` that can issue it. (`scp` is distance-free
     // and never needed the pin.)
     const buildId = gameBuildId();

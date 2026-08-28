@@ -11,14 +11,14 @@ import { PRICED_PROBES } from "../game/lib/probes/index.ts";
 import { probeCtx } from "./support/probe-fixture.ts";
 import { initState } from "../game/lib/state.ts";
 import { deriveCapabilities } from "../shared/features/unlock.ts";
-import { assignCoupled, assignIndependent } from "../shared/strategy/assignment.ts";
+import { assignIndependent } from "../shared/strategy/assignment.ts";
 import { BLACKOP_CONFIDENCE, STAMINA_FLOOR, stepBladeburner } from "../shared/strategy/bladeburner/decide.ts";
 import { stepCorp, type CorpView } from "../shared/strategy/corp/stages.ts";
 import { reachableFrom, stepDarknet, unlockValue } from "../shared/strategy/dnet/decide.ts";
 import { darknetRoute } from "../game/lib/features/dnet.ts";
 import { emptyKnowledge, foldKnowledgeReports } from "../shared/strategy/dnet/host.ts";
 import { msPerHostEvent } from "../shared/strategy/dnet/rates.ts";
-import { ASCEND_THRESHOLD, CLASH_CONFIDENCE, stepGang } from "../shared/strategy/gang/decide.ts";
+import { ASCEND_THRESHOLD, stepGang } from "../shared/strategy/gang/decide.ts";
 import {
   decideGoNeural,
   finalizeNeuralGoDecision,
@@ -68,99 +68,91 @@ describe("assignment", () => {
     expect(result.approximated).toBe(false);
   });
 
-  test("coupled assignment beats independent when the payoff interacts", () => {
-    // Two agents, two tasks; taking the SAME task halves both payoffs. The
-    // per-agent argmax picks the same task twice and loses.
-    const agents = ["a", "b"];
-    const tasks = ["x", "y"];
-    const base = (_agent: string, task: string): number => (task === "x" ? 10 : 9);
-    const objective = (assignment: { agent: string; task: string }[]): number => {
-      const total = assignment.reduce((sum, entry) => sum + base(entry.agent, entry.task), 0);
-      const collided = assignment[0]!.task === assignment[1]!.task;
-      return collided ? total / 2 : total;
-    };
-    const independent = assignIndependent(agents, tasks, base, String);
-    const coupled = assignCoupled(agents, tasks, objective, base, String);
-    expect(objective(independent.choices.map((c) => ({ agent: c.agent, task: c.task })))).toBe(10);
-    expect(coupled.total).toBe(19);
-  });
-
-  test("above the search budget it falls back to greedy AND SAYS SO", () => {
-    // A silently-approximate answer presented as exact is worse than a slower
-    // one, so the flag is the contract.
-    const agents = Array.from({ length: 12 }, (_, i) => i);
-    const tasks = Array.from({ length: 12 }, (_, i) => i);
-    const result = assignCoupled(agents, tasks, () => 1, () => 1, String, 1_000);
-    expect(result.approximated).toBe(true);
-  });
 });
 
 describe("gang", () => {
-  const member = (name: string, task = "Unassigned") => ({
-    name,
-    task,
-    skills: { hack: 1, str: 10, def: 10, dex: 10, agi: 10, cha: 1 },
-    ascMults: { hack: 1, str: 1, def: 1, dex: 1, agi: 1, cha: 1 },
-    earnedRespect: 0,
-    upgrades: 0,
+  const task = (name: string, over: Record<string, unknown> = {}) => ({
+    name, baseRespect: 0, baseWanted: 0,
+    difficulty: 1, hackWeight: 0, strWeight: 25, defWeight: 25, dexWeight: 25, agiWeight: 0, chaWeight: 25,
+    territory: { respect: 1, wanted: 1 }, ...over,
   });
-
-  const view = (over: Partial<Parameters<typeof stepGang>[0]> = {}) => ({
-    faction: "Slum Snakes",
-    isHacking: false,
-    respect: 100,
-    wantedLevel: 1,
-    wantedPenalty: 0.9,
-    territory: 0.2,
-    territoryClashChance: 0.1,
-    territoryWarfareEngaged: false,
+  const member = (name: string, memberTask = "Unassigned", skill = 100) => ({
+    name, task: memberTask,
+    skills: { hack: skill, str: skill, def: skill, dex: skill, agi: skill, cha: skill },
+    ascensionGain: 0,
+  });
+  const view = (over: Partial<Parameters<typeof stepGang>[0]> = {}): Parameters<typeof stepGang>[0] => ({
+    isHacking: false, respect: 100, wantedLevel: 1, territory: 0.2,
+    territoryWarfareEngaged: false, gangSoftcap: 1, recruitsAvailable: 0,
     members: [member("a")],
-    taskOptions: () => [
-      { name: "Mug People", respectGain: 1, moneyGain: 100, wantedGain: 0.5, training: false },
-      { name: "Train Combat", respectGain: 0, moneyGain: 0, wantedGain: 0, training: true },
+    tasks: [
+      task("Mug People", { baseRespect: 0.001, baseWanted: 0.1 }),
+      task("Vigilante Justice", { baseWanted: -0.001 }),
+      task("Train Combat"), task("Train Hacking"), task("Territory Warfare"),
     ],
-    ascensionGain: () => 1,
-    respectForNextRecruit: 200,
-    canRecruit: false,
-    clashChances: {},
-    weights: { respect: 1, money: 1e-6 },
     ...over,
   });
 
-  test("the wanted penalty makes assignment COUPLED, not per-member", () => {
-    // Wanted level is gang-wide, so one member's task multiplies down
-    // everyone's output. Two members are few enough for the exact pair search.
-    const decision = stepGang(view({ members: [member("a"), member("b")] }));
-    expect(decision.assignment.approximated).toBe(false);
+  test("fresh gangs recruit every available member with deterministic names and training", () => {
+    expect(stepGang(view({ members: [], recruitsAvailable: 3 })).actions).toEqual([
+      { type: "recruit", name: "member-1", task: "Train Combat" },
+      { type: "recruit", name: "member-2", task: "Train Combat" },
+      { type: "recruit", name: "member-3", task: "Train Combat" },
+    ]);
   });
 
-  test("sparse live task rates are never borrowed across members", () => {
-    const a = member("a", "Mug People");
-    const b = member("b", "Train Combat");
-    const decision = stepGang(view({
-      members: [a, b],
-      taskOptions: (candidate) => candidate.name === "a"
-        ? [{ name: "Mug People", respectGain: 1, moneyGain: 100, wantedGain: 0.5, training: false }]
-        : [{ name: "Train Combat", respectGain: 0, moneyGain: 0, wantedGain: 0, training: true }],
-    }));
-    expect(decision.assignment.choices).toEqual([]);
-    expect(decision.actions.some((action) => action.type === "assign")).toBe(false);
+  test("recruitment precedes ascension and hacking gangs train hacking", () => {
+    expect(stepGang(view({ isHacking: true, recruitsAvailable: 1, members: [member("member-1")] })).actions)
+      .toEqual([{ type: "recruit", name: "member-2", task: "Train Hacking" }]);
   });
 
-  test("ascension fires only above the explicit policy threshold", () => {
-    expect(stepGang(view({ ascensionGain: () => ASCEND_THRESHOLD - 0.01 })).actions.some((a) => a.type === "ascend")).toBe(false);
-    expect(stepGang(view({ ascensionGain: () => ASCEND_THRESHOLD + 0.01 })).actions.some((a) => a.type === "ascend")).toBe(true);
+  test("ascends one best member at the threshold with a deterministic tie", () => {
+    const members = [member("b"), member("a")];
+    members[0]!.ascensionGain = ASCEND_THRESHOLD;
+    members[1]!.ascensionGain = ASCEND_THRESHOLD;
+    expect(stepGang(view({ members })).actions).toContainEqual({ type: "ascend", member: "a", task: "Train Combat" });
   });
 
-  test("warfare engages only above the confidence bar — a dead member costs more than territory", () => {
-    const timid = stepGang(view({ clashChances: { Tetrads: CLASH_CONFIDENCE - 0.01 } }));
-    expect(timid.actions.find((a) => a.type === "warfare")).toBeUndefined();
-    const bold = stepGang(view({ clashChances: { Tetrads: CLASH_CONFIDENCE + 0.01 } }));
-    expect(bold.actions.find((a) => a.type === "warfare" && a.engage)).toBeDefined();
+  test("balances wanted while retaining one respect producer", () => {
+    const decision = stepGang(view({ members: [member("a"), member("b"), member("c")] }));
+    expect(decision.assignments.filter((entry) => entry.respect > 0)).toHaveLength(1);
+    expect(decision.assignments.some((entry) => entry.task === "Vigilante Justice")).toBe(true);
   });
 
-  test("a crushing wanted penalty is surfaced, not silently absorbed", () => {
-    expect(stepGang(view({ wantedPenalty: 0.3 })).wantedWarning).toContain("over half");
+  test("trains weak members and always disables warfare", () => {
+    const weak = stepGang(view({ members: [member("a", "Unassigned", 1)] }));
+    expect(weak.actions).toContainEqual({ type: "assign", member: "a", task: "Train Combat" });
+    expect(stepGang(view({ territoryWarfareEngaged: true })).actions[0]).toEqual({ type: "warfare" });
+  });
+
+  test("the driver recruits and trains the whole fresh batch in one pass", async () => {
+    const state = initState();
+    state.topics.gang = {
+      faction: "Slum Snakes", isHacking: false,
+      respect: 1, respectGainRate: 0, wantedLevel: 1, wantedLevelGainRate: 0,
+      wantedPenalty: 0.5, moneyGainRate: 0, territory: 0.1,
+      territoryWarfareEngaged: false,
+      respectForNextRecruit: 0, recruitsAvailable: 3,
+      members: [], tasks: view().tasks, gangSoftcap: 1,
+    };
+    const calls: { path: string; args: unknown[] }[] = [];
+    const ctx = {
+      ns: {} as NS,
+      nsp: async (path: string, ...args: unknown[]) => {
+        calls.push({ path, args });
+        return true;
+      },
+      state,
+      caps: deriveCapabilities({ bitNode: 2, inGang: true }),
+      grants: noGrants(),
+    } as unknown as DriverContext;
+    await FEATURE_MODULES.gang.driver.tick(ctx);
+    expect(calls.map((call) => call.path)).toEqual([
+      "gang.recruitMember", "gang.setMemberTask",
+      "gang.recruitMember", "gang.setMemberTask",
+      "gang.recruitMember", "gang.setMemberTask",
+    ]);
+    expect(state.topics.gang.plan?.lastResults).toHaveLength(3);
   });
 });
 

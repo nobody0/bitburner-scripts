@@ -1,158 +1,139 @@
-import { assignCoupled, type AssignmentResult } from "../assignment.ts";
-
-/** Gang management.
- *
- * Objective: grow respect, money and territory WITHOUT the wanted-level
- * penalty eating the gains. That penalty is the whole reason this is a coupled
- * assignment rather than "every member does the most profitable thing": wanted
- * level is a single gang-wide number, every member's task contributes to it,
- * and the resulting penalty multiplies EVERYONE's output. A member-by-member
- * argmax therefore optimises the wrong function. */
+import { gangRespectGain, gangWantedGain, type GangTaskStats } from "./formulas.ts";
 
 export interface GangMemberState {
   name: string;
   task: string;
   skills: { hack: number; str: number; def: number; dex: number; agi: number; cha: number };
-  ascMults: { hack: number; str: number; def: number; dex: number; agi: number; cha: number };
-  earnedRespect: number;
-  upgrades: number;
-}
-
-export interface GangTaskOption {
-  name: string;
-  /** Per-member rates, as the game reports them for this member. */
-  respectGain: number;
-  moneyGain: number;
-  wantedGain: number;
-  /** True for training tasks, which produce nothing but raise stats. */
-  training: boolean;
+  ascensionGain: number;
 }
 
 export interface GangView {
-  faction: string;
   isHacking: boolean;
   respect: number;
   wantedLevel: number;
-  /** `1 / (1 + wanted/respect)`-ish, as the game reports it. Multiplies output. */
-  wantedPenalty: number;
   territory: number;
-  territoryClashChance: number;
   territoryWarfareEngaged: boolean;
+  gangSoftcap: number;
+  recruitsAvailable: number;
   members: GangMemberState[];
-  /** Task options, already priced per member by the caller. */
-  taskOptions: (member: GangMemberState) => GangTaskOption[];
-  /** Members whose ascension multiplier gain clears the threshold. */
-  ascensionGain: (member: GangMemberState) => number;
-  respectForNextRecruit: number;
-  canRecruit: boolean;
-  /** Chance of winning a clash, per rival gang. */
-  clashChances: Record<string, number>;
-  /** How much the run values money against respect. Respect buys members and
-   *  territory; money buys equipment. */
-  weights: { respect: number; money: number };
+  tasks: GangTaskStats[];
 }
 
+export type GangPhase = "recruit" | "ascend" | "train" | "wanted" | "respect";
 export type GangAction =
-  | { type: "recruit" }
+  | { type: "recruit"; name: string; task: string }
   | { type: "assign"; member: string; task: string }
-  | { type: "ascend"; member: string }
-  | { type: "warfare"; engage: boolean }
-  | { type: "idle" };
+  | { type: "ascend"; member: string; task: string }
+  | { type: "warfare" };
+
+export interface GangAssignment {
+  member: string;
+  task: string;
+  respect: number;
+  wanted: number;
+}
 
 export interface GangDecision {
+  phase: GangPhase;
+  reason: string;
   actions: GangAction[];
-  assignment: AssignmentResult<GangMemberState, GangTaskOption>;
-  /** Whether the wanted penalty is currently costing more than the tasks earn. */
-  wantedWarning?: string;
+  assignments: GangAssignment[];
 }
 
 /** A deliberate policy threshold, not an upstream formula or crossover. */
 export const ASCEND_THRESHOLD = 1.15;
 
-/** Engage territory warfare only above this win chance. Any clash can kill a
- * warfare-assigned member, even on a win, and a dead member is a far larger
- * loss than the territory is worth.
- * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Gang/Gang.ts#L281-L302 */
-export const CLASH_CONFIDENCE = 0.6;
+function trainingTask(isHacking: boolean): string {
+  return isHacking ? "Train Hacking" : "Train Combat";
+}
+
+function nextMemberNames(existing: readonly GangMemberState[], count: number): string[] {
+  const used = new Set(existing.map((member) => member.name));
+  const names: string[] = [];
+  for (let index = 1; names.length < count; index++) {
+    const name = `member-${index}`;
+    if (!used.has(name)) names.push(name);
+  }
+  return names;
+}
 
 export function stepGang(view: GangView): GangDecision {
-  const actions: GangAction[] = [];
+  const warfare: GangAction[] = view.territoryWarfareEngaged ? [{ type: "warfare" }] : [];
+  const train = trainingTask(view.isHacking);
 
-  // Recruiting is free respect-wise and strictly additive — always take it.
-  if (view.canRecruit) {
-    actions.push({ type: "recruit" });
+  if (view.recruitsAvailable > 0) {
+    const recruits = nextMemberNames(view.members, view.recruitsAvailable)
+      .map((name): GangAction => ({ type: "recruit", name, task: train }));
+    return { phase: "recruit", reason: `recruit ${recruits.length} available member(s)`, actions: [...warfare, ...recruits], assignments: [] };
   }
 
-  // Ascension policy threshold, checked per member.
-  for (const member of view.members) {
-    const gain = view.ascensionGain(member);
-    if (gain >= ASCEND_THRESHOLD) {
-      actions.push({ type: "ascend", member: member.name });
+  const ascender = [...view.members]
+    .filter((member) => member.ascensionGain >= ASCEND_THRESHOLD)
+    .sort((a, b) => b.ascensionGain - a.ascensionGain || a.name.localeCompare(b.name))[0];
+  if (ascender) {
+    return {
+      phase: "ascend",
+      reason: `${ascender.name} has a ${ascender.ascensionGain.toFixed(2)}x policy gain`,
+      actions: [...warfare, { type: "ascend", member: ascender.name, task: train }],
+      assignments: [],
+    };
+  }
+
+  const gang = { respect: view.respect, wantedLevel: view.wantedLevel, territory: view.territory };
+  const productiveTasks = view.tasks.filter((task) =>
+    task.name !== "Unassigned"
+    && task.name !== "Vigilante Justice"
+    && task.name !== "Territory Warfare"
+    && !task.name.startsWith("Train"));
+  const justice = view.tasks.find((task) => task.name === "Vigilante Justice");
+  const assignments: GangAssignment[] = view.members.map((member) => {
+    const options = productiveTasks
+      .map((task) => ({
+        member: member.name,
+        task: task.name,
+        respect: gangRespectGain(gang, member, task, view.gangSoftcap),
+        wanted: gangWantedGain(gang, member, task),
+      }))
+      .filter((option) => option.respect > 0)
+      .sort((a, b) => b.respect - a.respect || a.task.localeCompare(b.task));
+    return options[0] ?? { member: member.name, task: train, respect: 0, wanted: 0 };
+  });
+
+  let totalWanted = assignments.reduce((sum, assignment) => sum + assignment.wanted, 0);
+  if (justice && totalWanted > 0) {
+    const candidates = assignments
+      .filter((assignment) => assignment.respect > 0)
+      .map((assignment) => {
+        const member = view.members.find((entry) => entry.name === assignment.member)!;
+        const wanted = gangWantedGain(gang, member, justice);
+        const reduction = assignment.wanted - wanted;
+        return { assignment, wanted, reduction, cost: reduction > 0 ? assignment.respect / reduction : Infinity };
+      })
+      .filter((candidate) => candidate.reduction > 0)
+      .sort((a, b) => a.cost - b.cost || a.assignment.member.localeCompare(b.assignment.member));
+    let producers = assignments.filter((assignment) => assignment.respect > 0).length;
+    for (const candidate of candidates) {
+      if (totalWanted <= 0 || producers <= 1) break;
+      totalWanted -= candidate.reduction;
+      candidate.assignment.task = justice.name;
+      candidate.assignment.respect = 0;
+      candidate.assignment.wanted = candidate.wanted;
+      producers--;
     }
   }
 
-  // Only compare task names priced for EVERY member. getMemberInformation
-  // exposes the current task's exact rates, not a hypothetical task matrix;
-  // borrowing member A's measured rate for member B would fabricate data.
-  // A full Formulas-backed caller may still supply a complete matrix.
-  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Gang.ts#L151-L164
-  const tasksFor = view.members.length > 0
-    ? view.taskOptions(view.members[0]!).filter((task) =>
-        view.members.every((member) => view.taskOptions(member).some((option) => option.name === task.name)))
-    : [];
-  const assignment = assignCoupled(
-    view.members,
-    tasksFor,
-    (choices) => {
-      let respect = 0;
-      let money = 0;
-      let wanted = 0;
-      for (const { agent, task } of choices) {
-        const options = view.taskOptions(agent);
-        const priced = options.find((option) => option.name === task.name)!;
-        respect += priced.respectGain;
-        money += priced.moneyGain;
-        wanted += priced.wantedGain;
-      }
-      // The gang-wide penalty. More wanted level divides everyone's output, so
-      // the objective is the PENALISED total, not the raw sum.
-      const penalty = 1 / (1 + Math.max(0, wanted) / Math.max(1, view.respect + respect));
-      return (respect * view.weights.respect + money * view.weights.money) * penalty;
-    },
-    (member, task) => {
-      const priced = view.taskOptions(member).find((option) => option.name === task.name)!;
-      return priced.respectGain * view.weights.respect + priced.moneyGain * view.weights.money;
-    },
-    (task) => task.name,
-  );
-
-  for (const choice of assignment.choices) {
-    if (choice.agent.task === choice.task.name) continue;
-    actions.push({
-      type: "assign",
-      member: choice.agent.name,
-      task: choice.task.name,
-    });
-  }
-
-  // Territory warfare: engage only when confident, because losing costs
-  // members and a dead member outweighs the territory.
-  const worst = Math.min(...Object.values(view.clashChances), 1);
-  const shouldEngage = Number.isFinite(worst) && worst >= CLASH_CONFIDENCE;
-  if (shouldEngage !== view.territoryWarfareEngaged) {
-    actions.push({ type: "warfare", engage: shouldEngage });
-  }
-
-  const wantedWarning =
-    view.wantedPenalty < 0.5
-      ? `wanted penalty is ${view.wantedPenalty.toFixed(2)} — over half of all output is being lost`
-      : undefined;
-
-  if (actions.length === 0) actions.push({ type: "idle" });
-
-  return {
-    actions,
-    assignment,
-    ...(wantedWarning ? { wantedWarning } : {}),
-  };
+  const actions = assignments
+    .filter((assignment) => view.members.find((member) => member.name === assignment.member)?.task !== assignment.task)
+    .map((assignment): GangAction => ({ type: "assign", member: assignment.member, task: assignment.task }));
+  const productive = assignments.some((assignment) => assignment.respect > 0);
+  const balancing = assignments.some((assignment) => assignment.task === "Vigilante Justice");
+  const phase: GangPhase = !productive ? "train" : balancing || totalWanted > 0 ? "wanted" : "respect";
+  const reason = !productive
+    ? "members need training before any task produces respect"
+    : totalWanted > 0
+      ? "best effort: retain one respect producer while wanted still rises"
+      : balancing
+        ? "reduce raw wanted gain while preserving respect production"
+        : "maximize source-calculated respect gain";
+  return { phase, reason, actions: [...warfare, ...actions], assignments };
 }

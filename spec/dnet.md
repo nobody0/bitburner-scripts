@@ -1401,7 +1401,7 @@ Read from the game's own source, because guessing at it cost a day.
 ## The shape that follows: a controller, probers, and one-order agents
 
 Two processes share the word "controller", so this document names them: the
-**home driver** is `start.js`'s dnet feature driver, pinned inside home's 3.6 GB
+**home driver** is `main.js`'s dnet feature driver, pinned inside home's 3.2 GB
 static budget (`tests/ram-budget.test.ts`); the **controller**
 (`game/dnet/controller.ts`) is the darknet's own small controller, living on
 `darkweb`.
@@ -1409,7 +1409,7 @@ static budget (`tests/ram-budget.test.ts`); the **controller**
 **Home cannot play the feature.** `probe()` is host-local, so from `home` the
 darknet is one host wide; a session belongs to the PID that won it, so no
 borrowed `ns` can win one on anyone's behalf; and putting `ns.dnet.*` or
-`ns.scp` into `start.js`'s billable surface would break the static pin that is
+`ns.scp` into `main.js`'s billable surface would break the static pin that is
 the whole reason the ns proxy exists. So the home driver only seeds the
 beachhead (`scp` through the proxy, `exec` from home's own `ns` — see the check
 order above), reads an

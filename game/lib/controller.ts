@@ -24,7 +24,7 @@ import { driverEnabled, featureModule, grantsFor, resetAllFeatures, selectDueMod
 import type { ClaimContext, NeedContext } from "./features/index.ts";
 import { sweepFleet } from "./fleet.ts";
 import { takeGateSignal } from "./gate-signal.ts";
-import { gameGlobal } from "./globals.ts";
+import { clearControllerGlobals, gameGlobal } from "./globals.ts";
 import { initProbeRunner, runGateProbe, runProbes } from "./probe-runner.ts";
 import { ALL_PROBES, probeCadenceMs } from "./probes/index.ts";
 import { caps, initState, merge, set, type GameState } from "./state.ts";
@@ -195,6 +195,7 @@ export async function runController(
           setProxyEventSink(undefined);
         }
         await disposeProxies();
+        clearControllerGlobals();
         return;
       }
       if (reportedSyncFailure !== sync.id) {

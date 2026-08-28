@@ -367,9 +367,8 @@ class GoNeuralWorkerClient implements GoNeuralRuntime {
   }
 }
 
-/** Reuse the worker within one controller lifetime. main.js disposes
- * controller-owned globals on every launch, so no worker state crosses a
- * manual, reset, or post-sync restart. */
+/** Reuse the worker while its build remains valid. Sync shutdown and feature
+ * reset hooks explicitly dispose controller-owned runtime state. */
 export function goNeuralWorkerRuntime(): GoNeuralRuntime {
   const current = gameGlobal.goNeuralWorker;
   if (current?.buildId === __BUILD_ID__) return current.runtime;

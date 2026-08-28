@@ -480,7 +480,7 @@ at scale that would be ~3 events per 16 ms.
 
 ## Static RAM (`tests/ram-budget.test.ts`)
 
-`start.js` = base 1.6 + `exec` 1.3 = **2.90 GB**, and that is the whole list.
+`main.js` has a 2.90 GB static surface (base 1.6 + `exec` 1.3) inside its 3.2 GB launch allocation.
 `exec` is the one member the bundle owns on purpose: every ns resident is
 launched through it and every proxied `exec` routes back to it, so the bundle
 pays for it once (see `spec/ns-proxy.md`). Everything else — the scan, `scp`,
@@ -524,5 +524,5 @@ money bands held during farming.
   servers are quoted as a bankroll-filtered size ladder (8 GB → max, ×4
   steps), so fleet growth compounds once income allows instead of buying
   8 GB forever.
-- The game driver quotes purchases as unavailable (start.js owns them); the
+- The game driver quotes purchases as unavailable (main.js owns them); the
   sim dispatcher buys servers and upgrades home so the A/B includes economy.

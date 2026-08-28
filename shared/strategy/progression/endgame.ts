@@ -461,12 +461,12 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
         needs.push(...tail.needs);
         mandatoryInstall = tail.mandatoryInstall;
       } else if (!view.inGang) {
-        blocker = view.karma !== undefined && view.karma > GANG_KARMA
+        blocker = view.bitNode !== 2 && view.karma !== undefined && view.karma > GANG_KARMA
           ? `karma ${view.karma} of ${GANG_KARMA}`
           : view.gangCreateFaction
             ? `create a gang with ${view.gangCreateFaction}`
             : "join an eligible gang faction";
-        if (view.karma !== undefined && view.karma > GANG_KARMA) {
+        if (view.bitNode !== 2 && view.karma !== undefined && view.karma > GANG_KARMA) {
           needs.push({ kind: "karma", target: GANG_KARMA, have: view.karma });
         }
       } else if (rep < RED_PILL_REP) {

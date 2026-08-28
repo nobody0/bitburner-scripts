@@ -25,7 +25,6 @@ import {
   weightsFromMarginals,
 } from "../../../shared/strategy/factions/augs.ts";
 import { donationForRep, favorNeededToDonate, repUntilFavor, workRepPerSec, type WorkType } from "../../../shared/strategy/factions/rep.ts";
-import { stepGang } from "../../../shared/strategy/gang/decide.ts";
 import { goDemands } from "../../../shared/strategy/go/demand.ts";
 import {
   goNeuralPositionIdentity,
@@ -214,104 +213,6 @@ async function act<T>(
     record(id, action, false, String(error));
   }
 }
-
-// --- gang -------------------------------------------------------------------
-
-const gang: FeatureDriver = {
-  id: "gang",
-  everyMs: 10_000,
-  requires: "gang",
-  async tick(ctx: DriverContext) {
-    const topic = ctx.state.topics.gang;
-    if (!topic) return;
-
-    const members = (topic.members ?? []).map((member) => ({
-      name: member.name,
-      task: member.task,
-      skills: member.skills,
-      ascMults: member.ascMults,
-      earnedRespect: member.earnedRespect,
-      upgrades: member.upgrades,
-    }));
-    // Task rates come from the game per member; without them the strategy
-    // would be scoring invented numbers.
-    const taskOptions = (member: (typeof members)[number]) =>
-      (topic.taskRates?.[member.name] ?? []).map((rate) => ({
-        name: rate.name,
-        respectGain: rate.respect,
-        moneyGain: rate.money,
-        wantedGain: rate.wanted,
-        training: rate.name.startsWith("Train"),
-      }));
-
-    const decision = stepGang({
-      faction: topic.faction,
-      isHacking: topic.isHacking,
-      respect: topic.respect,
-      wantedLevel: topic.wantedLevel,
-      wantedPenalty: topic.wantedPenalty,
-      territory: topic.territory,
-      territoryClashChance: topic.territoryClashChance,
-      territoryWarfareEngaged: topic.territoryWarfareEngaged,
-      members,
-      taskOptions,
-      ascensionGain: (member) => topic.ascensionGain?.[member.name] ?? 0,
-      respectForNextRecruit: topic.respectForNextRecruit,
-      canRecruit: topic.canRecruit,
-      clashChances: topic.clashChances ?? {},
-      // Gang respect is the direct input to gang-faction reputation. When BN2
-      // selected this route, make that terminal objective dominate equipment
-      // money; on other routes retain the balanced standing policy.
-      weights: ctx.route === "gang"
-        ? { respect: 10, money: 1e-8 }
-        : { respect: 1, money: 1e-6 },
-    });
-
-    merge(ctx.state, "gang", {
-      plan: {
-        actions: decision.actions.map((action) => ({
-          type: action.type,
-          ...("member" in action ? { member: action.member } : {}),
-          ...("task" in action ? { task: action.task } : {}),
-          ...("engage" in action ? { engage: action.engage } : {}),
-        })),
-        assignment: {
-          total: decision.assignment.total,
-          approximated: decision.assignment.approximated,
-          choices: decision.assignment.choices.map((choice) => ({
-            member: choice.agent.name,
-            task: choice.task.name,
-            score: choice.score,
-          })),
-        },
-        ...(results["gang"] ? { lastResult: results["gang"] } : {}),
-      },
-    });
-
-    const next = decision.actions.find((action) => action.type !== "idle");
-    if (!next) return;
-    await act(
-      "gang",
-      next.type,
-      async () => {
-        switch (next.type) {
-          case "recruit":
-            return await ctx.nsp("gang.recruitMember", `m-${Date.now() % 100000}`);
-          case "assign":
-            return await ctx.nsp("gang.setMemberTask", next.member, next.task);
-          case "ascend":
-            return await ctx.nsp("gang.ascendMember", next.member) !== undefined;
-          case "warfare":
-            await ctx.nsp("gang.setTerritoryWarfare", next.engage);
-            return true;
-          default:
-            return false;
-        }
-      },
-      (value) => ({ ok: Boolean(value), detail: Boolean(value) ? `${next.type} ok` : `${next.type} refused` }),
-    );
-  },
-};
 
 // --- corp -------------------------------------------------------------------
 
@@ -3395,7 +3296,7 @@ function progressionRefresh(ctx: NeedContext): void {
       ? { type: "joinBladeburner" as const }
       : choice?.route === "gang"
         && selectedStatus?.stage === "gang-create"
-        && (view.karma ?? 0) <= GANG_KARMA
+        && (view.bitNode === 2 || (view.karma ?? 0) <= GANG_KARMA)
         && view.gangCreateFaction
         ? {
             type: "createGang" as const,
@@ -3594,7 +3495,8 @@ const progression: FeatureDriver = {
     }
     if (plan?.routeAction?.type === "createGang") {
       const faction = plan.routeAction.faction;
-      await ctx.nsp("gang.createGang", faction as never);
+      const created = await ctx.nsp("gang.createGang", faction as never);
+      if (created) signalGateRecheck();
       return;
     }
     if (!plan?.installReady) {
@@ -3637,11 +3539,6 @@ const resetWithTopic =
     reset();
     delete state.topics[topic];
   };
-
-export const gangModule: FeatureModule = {
-  driver: gang,
-  reset: resetWithTopic("gang"),
-};
 
 export const corpModule: FeatureModule = {
   driver: corp,

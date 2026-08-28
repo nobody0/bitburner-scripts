@@ -46,6 +46,7 @@ allowed to read both sides:
 | `shared/strategy/side/contracts.ts` | handcrafted solvers ship inside the game bundle | `sim/tests/contracts-parity.test.ts` |
 | `shared/strategy/stanek/pack.ts` | ships inside the game bundle | `sim/tests/stanek-parity.test.ts` |
 | `shared/strategy/ram-supply.ts` | ships inside the game bundle | `sim/tests/drift-pins.test.ts` |
+| `shared/strategy/gang/formulas.ts` | ships inside the game bundle; Gang imports the live player singleton | `tests/gang.test.ts` plus `sim/tests/drift-pins.test.ts` source hashes |
 | `sim/features/dnet.ts` timing | `DarkNet/` cannot be vendored — see below | **required before `"full"`; needs the checkout** |
 
 The stock pair is worth a note, because three of its constants are inline

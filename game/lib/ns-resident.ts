@@ -9,7 +9,7 @@ import { captureLaunch } from "./launch-shared.ts";
  * (game/dnet/prober.ts), generalised to the whole home-side automation. This
  * process publishes its own `ns` and then does nothing at all, so every call
  * the proxy makes through that object is billed to THIS allocation instead of
- * to start.js. A function's cost is charged once per running script, so a
+ * to main.js. A function's cost is charged once per running script, so a
  * resident that has already paid for `singularity.getOwnedAugmentations` runs
  * it free for the rest of its life.
  *

@@ -3,7 +3,7 @@ import type { NS } from "@ns";
 /** Restore a saved snapshot into the running game.
  *
  * DESTRUCTIVE, and deliberately its own entrypoint rather than anything
- * start.js can reach: it overwrites the live save with a file pushed from the
+ * controller can reach: it overwrites the live save with a file pushed from the
  * repository, and there is no undo. Keeping it separate means the controller
  * never carries a code path that can clobber real progress, and never pays RAM
  * for one.

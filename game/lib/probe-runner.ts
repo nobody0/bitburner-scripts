@@ -96,7 +96,7 @@ export async function runProbes(
 
   const now = Date.now();
   // `enums` is the one ns PROPERTY a probe needs and the only thing the proxy
-  // cannot serve — it calls functions. It is 0 GB, so start.js reads it off its
+  // cannot serve — it calls functions. It is 0 GB, so main.js reads it off its
   // own ns here and hands it down rather than paying a resident round trip.
   const ctx: ProbeContext = { player, servers, caps: caps(state), state, nsp, enums: ns["enums"] };
   const applicable = (probe: PricedProbe | DirectProbe | (typeof LOCAL_PROBES)[number]): boolean => {
@@ -124,7 +124,7 @@ export async function runProbes(
 
   // Verified-free synchronous reads. If an API update gives any declared
   // method a RAM price, refuse the direct call and report the drift instead of
-  // overrunning start.js's allocation.
+  // overrunning main.js's allocation.
   for (const probe of DIRECT_PROBES) {
     if (!due(runner, probe.id, probe.everyMs, now) || !applicable(probe)) continue;
     runner.lastRunAt.set(probe.id, now);

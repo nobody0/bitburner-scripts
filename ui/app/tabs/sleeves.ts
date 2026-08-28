@@ -124,14 +124,7 @@ export const sleevesTab: Tab = {
 
     const plan = s.plan;
     const decision = plan?.selection
-      ? // No "solver" tile: this one read `"exact"` as a literal. It happened to
-        // be true — `assignSleeves` is an exclusive-key DP with no combination
-        // budget, unlike `assignCoupled` — but the plan record carries no
-        // `approximated` flag the way `StanekPlan` does,
-        // so the claim was the panel's, not the run's, and a replay of an older
-        // record would keep making it for a solver that had since grown a cap.
-        // Publishing `approximated` on `SleevesPlan` is the repair.
-        tiles([
+      ? tiles([
           { label: "total score", value: fmtNum(plan.totalScore, 4) },
           { label: "task changes", value: String(plan.assignments.length) },
         ]) +

@@ -35,8 +35,8 @@ const threadsForJob = threadsFor;
 import { WORKER_RAM } from "../shared/world.ts";
 import type { NS } from "@ns";
 
-/** Declared RAM is the fresh-game constraint: start.js plus a transient dodge
- * stub must fit an 8 GB home. Every assertion here runs against the artifacts
+/** Declared RAM is the fresh-game constraint: the wrapper and controller
+ * launch allocations must fit the 8 GB home boundary. Every assertion here runs against the artifacts
  * the sync actually pushes — minified deployment builds — through a faithful
  * port of the game's own static analyzer (tools/ram-analysis.ts), so the
  * numbers below are the numbers `ls -l` shows in game. */
@@ -68,9 +68,7 @@ const RAM_COSTS: Record<string, number> = {
   "ns.share": 2.4,
 };
 const BASE_GB = 1.6;
-/** start.js + dodge stub (1.6 + 2.5) must stay under an 8 GB home. */
-/** Single-sourced with the bootstrap arithmetic, so the two cannot drift:
- * home's 5.1 GB bootstrap window is 8 GB minus exactly this. */
+/** The wrapper's honest static price: base + killall + spawn. */
 const START_BUDGET_GB = START_SCRIPT_GB;
 const MAIN_BUDGET_GB = MAIN_SCRIPT_GB;
 
@@ -143,7 +141,7 @@ describe("in-game static RAM budget", () => {
   test("the game bills the shipped start.js at exactly its declared budget", async () => {
     // This is the autostart contract: start.js is launched by the game
     // (autoexec, destroyW0r1dD43m0n) with no way to pass an override, so the
-    // static analyzer itself must resolve to the declared 2.9 GB.
+    // static analyzer itself must resolve to the declared 4.1 GB.
     const [start] = await buildScripts(config, { telemetry: true });
     const analysis = analyzeScriptRam(start!.content);
     expect(analysis.overridden).toBe(false);
@@ -151,9 +149,7 @@ describe("in-game static RAM budget", () => {
   });
 
   test("the wrapper does not use an override decoy", async () => {
-    // Strip the appended decoy declaration and the pessimistic walk must
-    // reappear; if this ever reads 2.9 without the decoy, the analyzer port
-    // is broken and the previous test proves nothing.
+    // No RAM-override decoy may hide the wrapper's actual surface.
     const [start] = await buildScripts(config, { telemetry: true });
     const withoutDecoy = start!.content.replace(/async function main\(ns\)\{ns\.ramOverride\([\d.]+\)\}\s*$/, "");
     expect(withoutDecoy).toBe(start!.content);
@@ -208,23 +204,7 @@ describe("in-game static RAM budget", () => {
     const [start] = await buildScripts(config, { telemetry: true, minifyNames: false });
     const { total, members } = staticRam(start!.content);
     expect(total).toBeLessThanOrEqual(START_BUDGET_GB + 1e-9);
-    // start.js's whole billable surface, exhaustively, because the ns proxy's
-    // entire value is that this list does not grow. Each entry is deliberate:
-    //
-    //  - `exec` is the ONE member the bundle owns on purpose. Every resident is
-    //    launched through it and every proxied `exec` routes back to it, so the
-    //    bundle pays 1.3 GB once and residents never pay it at all.
-    //  - `disableLog` is free.
-    //
-    // Nothing else. The hot-target live reads and the cadenced `getPlayer`
-    // were the last holdouts, kept out of the proxy by a rule inherited from
-    // the DODGER — "never dodge inside a timing-critical window" — which
-    // priced a throwaway stub process per call. A warm resident is a
-    // microtask, so they went through the proxy too and took 0.7 GB with
-    // them.
-    //
-    // Anything else appearing here is a leak — see the next test for why that
-    // is so easy to do by accident.
+    // The wrapper owns only shutdown and replacement-process operations.
     expect(new Set(members)).toEqual(new Set(["ns.disableLog", "ns.killall", "ns.spawn"]));
   });
 

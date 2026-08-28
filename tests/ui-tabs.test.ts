@@ -26,6 +26,21 @@ describe("tab rendering", () => {
     renderAll(emptyState());
   });
 
+  test("Gang converts upstream per-cycle rates to per-second display", () => {
+    const state = emptyState();
+    state.topics.gang = {
+      faction: "Slum Snakes", isHacking: false,
+      respect: 100, respectGainRate: 2, wantedLevel: 1, wantedLevelGainRate: 0.5,
+      wantedPenalty: 0.99, moneyGainRate: 3, territory: 0.1,
+      territoryWarfareEngaged: false,
+      respectForNextRecruit: 125, recruitsAvailable: 0,
+      members: [], tasks: [], gangSoftcap: 1,
+    };
+    const html = TABS.gang.render(state);
+    expect(html).toContain("10.00/s");
+    expect(html).toContain("$15/s");
+  });
+
   test("Hacking server table shows and explains host CPU cores", () => {
     const state = emptyState();
     state.servers.set("iron-gym", {
@@ -239,14 +254,13 @@ describe("tab rendering", () => {
     state.topics.gang = {
       faction: "Slum Snakes", isHacking: false, respect: 100, respectGainRate: 1,
       wantedLevel: 2, wantedLevelGainRate: 0.1, wantedPenalty: 0.9, moneyGainRate: 500,
-      power: 10, territory: 0.2, territoryClashChance: 0.1, territoryWarfareEngaged: false,
-      respectForNextRecruit: 200, recruitsAvailable: 1, canRecruit: true, clashChances: {},
+      territory: 0.2, territoryWarfareEngaged: false,
+      respectForNextRecruit: 200, recruitsAvailable: 1,
+      tasks: [], gangSoftcap: 1,
       members: [{
-        name: "a", task: "Mug People", earnedRespect: 10, respectGain: 0.5,
+        name: "a", task: "Mug People", respectGain: 0.5,
         wantedLevelGain: 0.01, moneyGain: 100,
         skills: { hack: 1, str: 10, def: 10, dex: 10, agi: 10, cha: 1 },
-        ascMults: { hack: 1, str: 1, def: 1, dex: 1, agi: 1, cha: 1 },
-        upgrades: 2, augmentations: 1,
       }],
     } as StateMap["gang"];
     state.topics.bladeburner = {

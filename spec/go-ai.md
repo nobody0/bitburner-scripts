@@ -98,10 +98,9 @@ top-8 agreement must remain at least 99%. Creation, device loss, or a runtime
 evaluation failure aborts the Go turn; production never imports or runs neural
 inference on the CPU.
 
-Production embeds one classic-worker bundle into `start.js` and opens it from a
-Blob URL. The page-realm global retains the worker across same-build controller
-restarts and replaces it on a new build, whose V9 artifact or protocol may have
-changed. Adapter/device creation, weight upload, and prepared positions are not
+Production embeds one classic-worker bundle into `main.js` and opens it from a
+Blob URL. The page-realm global retains the worker while its build remains valid;
+sync shutdown and feature resets dispose it. Adapter/device creation, weight upload, and prepared positions are not
 paid per turn. A position is transferred once. Steady-state messages contain
 compact turn and position ids, our selected move, White's observed response,
 and playtime reduced modulo WHRNG's 30,000-second period. No

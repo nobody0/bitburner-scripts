@@ -44,7 +44,7 @@ Notes on the boundaries, since several are judgement calls:
   augmentations, not a separate objective. It is gated by BN10/SF10 rather
   than SF4, so its probe section carries its own try/catch.
 - **Karma** lives inside `career` because it is a *precondition* other
-  features wait on — BN2's gang needs -54,000 of it.
+  features wait on. Gang access outside BN2 needs -54,000; BN2 explicitly waives it.
 - **Coding contracts** live in `side`: universal income with no BitNode of its
   own. Infiltration and the casino are intentionally outside the automation
   roster because their gameplay is DOM-driven and has no action API.
@@ -82,7 +82,7 @@ Four tiers, by what a body is allowed to touch:
    (`ns.getPlayer`, the servers map). No ns call at all, so it always runs.
    Karma, skills, joined factions and fleet totals live here, so those panels
    are never empty.
-2. **Direct** (`probes/direct.ts`) — synchronous reads on `start.js`'s own
+2. **Direct** (`probes/direct.ts`) — synchronous reads on `main.js`'s own
    `ns`. The runner re-prices every declared method against the live API each
    pass and refuses the call if anything stopped being 0 GB, so an API change
    is reported as drift rather than paid for out of the controller's
@@ -95,7 +95,7 @@ Four tiers, by what a body is allowed to touch:
 4. **Priced** (`probes/priced.ts`) — everything with a price, split into
    `core` and detail tiers per feature. The body awaits `ctx.nsp(path, ...)`,
    which runs the member on the ns resident (`spec/ns-proxy.md`); nothing here
-   is billed to `start.js`.
+   is billed to `main.js`.
 
 There is no `methods` table and no budget arithmetic anywhere in this
 subsystem any more. The resident prices each member the first time a body
@@ -110,7 +110,7 @@ Rules for probe bodies:
 
 - **Name the member as a string path**, never as a property. Bitburner charges
   by member NAME across the whole bundle regardless of the receiver, so
-  `ns["gang"]["inGang"]` billed `start.js` exactly as `ns.gang.inGang`
+  `ns["gang"]["inGang"]` billed `main.js` exactly as `ns.gang.inGang`
   would; only the string escapes the static parser. The path is typed, so a
   wrong one is a compile error rather than a probe that silently never runs.
 - **Guard every call that can throw.** `ns.gang.*`, `ns.bladeburner.*`,
@@ -254,7 +254,7 @@ issues its own on live hosts through the controller/prober/agent pipeline, while
 `stepDarknet` stays a pure ranking with no action for a driver to carry out
 (`spec/progress.md`, and for dnet's reasons `spec/dnet.md`). Seven have their own
 file (`hacking`, `factions`, `career`, `hacknet`, `stock`, `dnet`, `side`) because
-they needed more than the common shape; the other seven (`progression`, `gang`,
+they needed more than the common shape; gang is also separate because it executes fresh action batches. The other six (`progression`,
 `corp`, `bladeburner`, `sleeves`, `go`, `stanek`) share
 `features/remaining.ts`, which is a statement about their SHAPE — build a view,
 call one pure `step*`, execute at most one action per tick — not

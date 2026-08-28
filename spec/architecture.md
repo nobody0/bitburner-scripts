@@ -14,8 +14,10 @@ Startup has two root artifacts:
   RAM override, zero delay, and duplicate prevention.
 
 Every build embeds one `__BUILD_ID__` in all artifacts, but no build-stamp file
-or runtime adoption protocol exists. A controller launch always clears the
-page-realm operational caches and rebuilds from game state.
+or runtime adoption protocol exists. A clean sync clears page-realm operational
+caches before the replacement launch. Game prestige retains the prior identity
+long enough for `shared/reset.ts` to classify the reset, then clears world state
+through the registered feature reset hooks.
 
 ## Clean sync transaction
 

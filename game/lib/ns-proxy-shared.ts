@@ -61,7 +61,7 @@ export const proxyRealm = (): ProxyGlobalThis => globalThis as ProxyGlobalThis;
 
 export function proxyHandle(slot: keyof ProxyGlobals): NsProxyHandle {
   const held = proxyRealm()[slot];
-  if (!held) throw new Error(`${slot} is not initialised; game/start.ts must call initProxies()`);
+  if (!held) throw new Error(`${slot} is not initialised; game/main.ts must call initProxies()`);
   return held;
 }
 

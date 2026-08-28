@@ -236,7 +236,7 @@ export interface NsProxyHandle {
 
 const nsMain = (): NS => {
   const held = nsMainGlobal().nsMain;
-  if (!held) throw new Error("nsMain is not published; game/start.ts must set it before any proxy call");
+  if (!held) throw new Error("nsMain is not published; game/main.ts must set it before any proxy call");
   return held;
 };
 

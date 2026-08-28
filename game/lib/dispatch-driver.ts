@@ -161,7 +161,7 @@ export async function buildView(
       },
     },
     servers: views,
-    // Purchases are start.js's business; quoting them as unavailable keeps the
+    // Purchases are main.js's business; quoting them as unavailable keeps the
     // dispatcher from emitting buy actions the game driver would ignore.
     prices: { upgradeHomeRam: Infinity, cloudServer: {}, cloudServerLimit: 0 },
     ...(nodeMults ? { nodeMults: nodeMults as HackNodeMults } : {}),
@@ -517,7 +517,7 @@ async function startOp(ns: NS, state: DriverState, action: HgwAction, opId: numb
  * workerExit) so the heap frees synchronously, and returns the hostname.
  *
  * The obfuscated member access is deliberate: naming the kill API statically
- * would bill start.js for it in every build, for a call made once per run. */
+ * would bill main.js for it in every build, for a call made once per run. */
 export function killWorkersForCritical(ns: NS, state: DriverState, neededGb: number): string | undefined {
   const dispatch = state.memory.dispatch;
   const info = state.globals.worker_info;

@@ -793,60 +793,42 @@ const gangCore: PricedProbe = {
   kind: "priced",
   feature: "gang",
   requires: "gang",
-  everyMs: SEC_30,
+  everyMs: 10_000,
   merge: true,
   async run(ctx: ProbeContext) {
     const info = await ctx.nsp("gang.getGangInformation");
     const members = [];
+    const ascensionGain: Record<string, number> = {};
     for (const name of await ctx.nsp("gang.getMemberNames")) {
       const m = await ctx.nsp("gang.getMemberInformation", name);
       // Undefined until the member has enough exp to gain anything.
       // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Gang.ts#L283-L302
       const ascension = await ctx.nsp("gang.getAscensionResult", name);
+      ascensionGain[name] = ascension
+        ? info.isHacking
+          ? ascension.hack
+          : Math.min(ascension.str, ascension.def, ascension.dex, ascension.agi)
+        : 0;
       members.push({
-        ascensionResult: ascension
-          ? {
-              respect: ascension.respect,
-              hack: ascension.hack,
-              str: ascension.str,
-              def: ascension.def,
-              dex: ascension.dex,
-              agi: ascension.agi,
-              cha: ascension.cha,
-            }
-          : undefined,
         name: m.name,
         task: m.task,
-        earnedRespect: m.earnedRespect,
         respectGain: m.respectGain,
         wantedLevelGain: m.wantedLevelGain,
         moneyGain: m.moneyGain,
         skills: { hack: m.hack, str: m.str, def: m.def, dex: m.dex, agi: m.agi, cha: m.cha },
-        ascMults: {
-          hack: m.hack_asc_mult, str: m.str_asc_mult, def: m.def_asc_mult,
-          dex: m.dex_asc_mult, agi: m.agi_asc_mult, cha: m.cha_asc_mult,
-        },
-        upgrades: m.upgrades.length,
-        augmentations: m.augmentations.length,
       });
     }
-    const taskRates = Object.fromEntries(members.map((member) => [member.name, [{
-      name: member.task,
-      respect: member.respectGain,
-      money: member.moneyGain,
-      wanted: member.wantedLevelGain,
-    }]]));
-    // The API exposes exact rates only for each member's CURRENT task. We do
-    // not pretend these are rates for unobserved tasks; without Formulas.exe
-    // there is no side-effect-free API that prices every member/task pair.
-    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Gang.ts#L151-L164
-    const ascensionGain = Object.fromEntries(members.map((member) => {
-      const result = member.ascensionResult;
-      if (!result) return [member.name, 0];
-      return [member.name, info.isHacking
-        ? result.hack
-        : Math.min(result.str, result.def, result.dex, result.agi)];
-    }));
+    const tasks = [];
+    for (const name of await ctx.nsp("gang.getTaskNames")) {
+      const task = await ctx.nsp("gang.getTaskStats", name);
+      tasks.push({
+        name: String(task.name), baseRespect: task.baseRespect, baseWanted: task.baseWanted,
+        difficulty: task.difficulty,
+        hackWeight: task.hackWeight, strWeight: task.strWeight, defWeight: task.defWeight,
+        dexWeight: task.dexWeight, agiWeight: task.agiWeight, chaWeight: task.chaWeight,
+        territory: { respect: task.territory.respect, wanted: task.territory.wanted },
+      });
+    }
     return [
       emit("gang", {
         faction: String(info.faction),
@@ -857,37 +839,20 @@ const gangCore: PricedProbe = {
         wantedLevelGainRate: info.wantedLevelGainRate,
         wantedPenalty: info.wantedPenalty,
         moneyGainRate: info.moneyGainRate,
-        power: info.power,
         territory: info.territory,
-        territoryClashChance: info.territoryClashChance,
         territoryWarfareEngaged: info.territoryWarfareEngaged,
         respectForNextRecruit: info.respectForNextRecruit,
         recruitsAvailable: await ctx.nsp("gang.getRecruitsAvailable"),
-        canRecruit: await ctx.nsp("gang.canRecruitMember"),
         members,
-        taskRates,
+        tasks,
+        gangSoftcap: effectiveBitNodeMultipliers(
+          ctx.caps.bitNode,
+          sfLevel(ctx.caps.sourceFiles, 12),
+          ctx.state.topics.progression?.multipliers,
+        )?.GangSoftcap ?? 1,
         ascensionGain,
       }),
     ];
-  },
-};
-
-const gangDetail: PricedProbe = {
-  id: "gang.detail",
-  kind: "priced",
-  feature: "gang",
-  requires: "gang",
-  everyMs: MIN_2,
-  merge: true,
-  // Ascension results live on the member digest, so they are collected by
-  // gang.core (which owns `members`) rather than here — this probe cannot
-  // write into that array without clobbering it on every merge.
-  async run(ctx: ProbeContext) {
-    const clashChances: Record<string, number> = {};
-    for (const other of Object.keys(await ctx.nsp("gang.getAllGangInformation"))) {
-      clashChances[other] = await ctx.nsp("gang.getChanceToWinClash", other as never);
-    }
-    return [emitPartial("gang", { clashChances, bonusTime: await ctx.nsp("gang.getBonusTime") })];
   },
 };
 
@@ -1391,7 +1356,6 @@ export const PRICED_PROBES: readonly PricedProbe[] = [
   stockForecast,
   stockOrders,
   gangCore,
-  gangDetail,
   corpCore,
   corpDivisions,
   bladeCore,

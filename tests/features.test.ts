@@ -411,7 +411,7 @@ describe("v3.0.1 feature observation contracts", () => {
       .toMatchObject({ rankGain: 50, rankLoss: 7, rankNeeded: 2_500 });
   });
 
-  test("gang publishes only observed current-task rates and usable ascension gain", async () => {
+  test("gang publishes the source task catalog and usable ascension gain", async () => {
     const probe = pricedProbe("gang.core");
     const gang = {
       "gang.getGangInformation": () => ({
@@ -428,11 +428,17 @@ describe("v3.0.1 feature observation contracts", () => {
       }),
       "gang.getAscensionResult": () => ({ respect: 0, hack: 2, str: 1.4, def: 1.3, dex: 1.2, agi: 1.1, cha: 1.5 }),
       "gang.getRecruitsAvailable": () => 0,
-      "gang.canRecruitMember": () => false,
+      "gang.getTaskNames": () => ["Mug People"],
+      "gang.getTaskStats": () => ({
+        name: "Mug People", isHacking: false, isCombat: true,
+        baseMoney: 1, baseRespect: 2, baseWanted: 3, difficulty: 4,
+        hackWeight: 0, strWeight: 25, defWeight: 25, dexWeight: 25, agiWeight: 25, chaWeight: 0,
+        territory: { money: 1, respect: 1, wanted: 1 },
+      }),
     };
     const [emission] = await probe.run(probeCtx(gang));
-    const data = emission.data as { taskRates: Record<string, unknown[]>; ascensionGain: Record<string, number> };
-    expect(data.taskRates.m).toEqual([{ name: "Mug People", respect: 2, money: 3, wanted: 0.5 }]);
+    const data = emission.data as { tasks: { name: string }[]; ascensionGain: Record<string, number> };
+    expect(data.tasks.map((task) => task.name)).toEqual(["Mug People"]);
     expect(data.ascensionGain.m).toBe(1.1);
   });
 
@@ -792,7 +798,7 @@ describe("capability deltas", () => {
 
 describe("feature dodges are centralised and priced", () => {
   test("no feature driver reaches the game except through the ns proxy", () => {
-    // start.js is ONE bundle. Bitburner's static analyser charges home for
+    // main.js is ONE bundle. Bitburner's static analyser charges home for
     // every ns member NAMED anywhere in it, regardless of the receiver — so a
     // dotted `ns.singularity.*` in any driver would bill the whole automation
     // for it whether or not the call ever runs. The proxy's path is a string
@@ -809,7 +815,7 @@ describe("feature dodges are centralised and priced", () => {
     ];
     for (const file of files) {
       const source = readFileSync(resolve(root, file), "utf8");
-      // `ctx.ns.exec` is the one exception, and it is deliberate: start.js has
+      // `ctx.ns.exec` is the one exception, and it is deliberate: main.js has
       // already paid for `exec` statically, and it is the only ns in the realm
       // that can reach `darkweb` (see tests/dnet-seed-unpinned.test.ts).
       const reaches = source.replace(/ctx\.ns\.exec\b/g, "");

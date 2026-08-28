@@ -15,7 +15,7 @@ property called `exec`, `RegExp.prototype.exec` — each bills the full price of
 the ns member of that name (`game/dnet/attempt.ts` records this at length; it
 is how a `.exec` on a regex costs 1.3 GB).
 
-And `start.js` is not one file. The controller, every feature driver, every
+And `main.js` is not one source file. The controller, every feature driver, every
 probe and the fleet sweep compile into a single bundle, so **one dotted ns
 member anywhere under `game/lib/**` is charged to home**, whatever module it
 was written in.
@@ -49,7 +49,7 @@ A **resident** (`game/lib/ns-resident.ts`, synced as `lib/ns-resident.js`) is
 one process exec'd with a flat `ramOverride` that publishes its own `ns`
 through the launch rendezvous (`game/lib/launch-shared.ts`) and then parks. The
 proxy (`game/lib/ns-proxy.ts`) holds that object and calls through it, so every
-call is billed to the resident's allocation instead of to `start.js`.
+call is billed to the resident's allocation instead of to `main.js`.
 
 Nothing is serialized through ports or files. Every script is an ES module in one browser realm, so the
 `ns` crosses as a live reference and a proxied call is an ordinary in-realm
@@ -97,7 +97,7 @@ which is strictly worse than waiting.
 
 ### `nsMain`, and why `exec` is special
 
-`game/start.ts` publishes its own `ns` as `globalThis.nsMain` before anything
+`game/main.ts` publishes its own `ns` as `globalThis.nsMain` before anything
 else. That process never returns, so it is the one long-lived `ns` in the realm
 — and the one that has statically paid for `exec`'s 1.3 GB.
 
@@ -155,15 +155,17 @@ Both are **lazy** — no process is exec'd until the first call.
 
 ## The bootstrap
 
-`start.js` owns `ns.exec` and nothing else. That is the point of the whole
+`main.js` owns `ns.exec` and nothing else. That is the point of the whole
 design, and it means the entry script cannot scan, cannot root and cannot copy
 — each of those is a billable member. So the fleet the residents want to stand
 on has to be brought up *through a resident*, and the first one has to be
 placed knowing nothing.
 
 It is placed **blind, by arithmetic**. A fresh game has 8 GB of home RAM and
-`start.js` costs exactly 2.9 GB (1.6 base + `exec`), so 5.1 GB is free without
-measuring — and measuring it would itself need a resident. That temporary home
+`start.js` costs 4.1 GB while it replaces itself with the 3.2 GB `main.js`, so the
+controller begins within the fresh 8 GB home budget. Once running, `main.js`
+owns `exec`; the wrapper is gone. The initial resident is placed
+without measuring — measuring would itself need a resident. That temporary home
 resident gets a 3.5 GB budget and one job:
 
 1. `nuke` and `scp` the payload to **`foodnstuff`**, else **`n00dles`**. Both
@@ -239,7 +241,7 @@ the resident stops wanting the room.
 ## Rules for writing calls
 
 - **Never write a dotted ns member name** in anything that compiles into
-  `start.js` or another game script. Not `ns.getServer(...)`, and not a local
+  `main.js` or another game script. Not `ns.getServer(...)`, and not a local
   or property named `exec`, `scan`, `read` or `run` either. `String.match`, not
   `RegExp.exec`. `tests/ram-budget.test.ts` is the backstop.
 - **Batching is no longer a discipline.** The dodger demanded loops be hoisted

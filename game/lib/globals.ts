@@ -21,7 +21,7 @@ export interface GameGlobals {
 
 export const gameGlobal = globalThis as typeof globalThis & GameGlobals;
 
-/** Drop controller-owned realm state before the post-sync main.js launch. */
+/** Drop controller-owned realm state during a clean sync shutdown. */
 export function clearControllerGlobals(): void {
   gameGlobal.goNeuralWorker?.runtime.dispose();
   delete gameGlobal.state;
