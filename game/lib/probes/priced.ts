@@ -865,16 +865,12 @@ const corpCore: PricedProbe = {
   requires: "corp",
   everyMs: MIN_1,
   merge: true,
+  when: (caps) => caps.corporation.exists === "yes",
   async run(ctx: ProbeContext) {
     const c = await ctx.nsp("corporation.getCorporation");
-    const offer = await ctx.nsp("corporation.getInvestmentOffer");
-    // Public/exhausted corporations receive a zero-valued offer rather than an
-    // exception, so the optional topic field is kept for an ACTIONABLE offer
-    // and left undefined otherwise.
-    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Corporation/Corporation.ts#L333-L354
-    const investmentOffer = offer.funds > 0 && offer.shares > 0
-      ? { round: offer.round, funds: offer.funds, shares: offer.shares }
-      : undefined;
+    const officeApi = await ctx.nsp("corporation.hasUnlock", "Office API");
+    const warehouseApi = await ctx.nsp("corporation.hasUnlock", "Warehouse API");
+    const smartSupply = await ctx.nsp("corporation.hasUnlock", "Smart Supply");
     return [
       // emitPartial, not a cast: this probe declares `merge: true`, and the
       // partial helper is what keeps every field name checked against CorpState
@@ -894,7 +890,7 @@ const corpCore: PricedProbe = {
         dividendRate: c.dividendRate,
         dividendEarnings: c.dividendEarnings,
         state: String(c.nextState),
-        investmentOffer,
+        unlocks: { officeApi, warehouseApi, smartSupply },
       }),
     ];
   },
@@ -930,6 +926,11 @@ interface CorpDivision {
     size: number;
     sizeUsed: number;
     smartSupplyEnabled: boolean;
+    materials: {
+      name: string;
+      desiredSellAmount: string | number;
+      desiredSellPrice: string | number;
+    }[];
   }[];
 }
 
@@ -940,6 +941,10 @@ const corpDivisions: PricedProbe = {
   requires: "corp",
   everyMs: MIN_2,
   merge: true,
+  when: (caps, topics) =>
+    caps.corporation.exists === "yes" &&
+    topics.corp?.unlocks.officeApi === true &&
+    topics.corp?.unlocks.warehouseApi === true,
   async run(ctx: ProbeContext) {
     const names = (await ctx.nsp("corporation.getCorporation")).divisions.map(String);
     const divisions: CorpDivision[] = [];
@@ -975,12 +980,22 @@ const corpDivisions: PricedProbe = {
         // asked first rather than inferred from a caught exception.
         if (!await ctx.nsp("corporation.hasWarehouse", division.name, city as never)) continue;
         const w = await ctx.nsp("corporation.getWarehouse", division.name, city as never);
+        const materials = [];
+        for (const materialName of ["Plants", "Food"] as const) {
+          const material = await ctx.nsp("corporation.getMaterial", division.name, city as never, materialName);
+          materials.push({
+            name: materialName,
+            desiredSellAmount: material.desiredSellAmount,
+            desiredSellPrice: material.desiredSellPrice,
+          });
+        }
         division.warehouses.push({
           city,
           level: w.level,
           size: w.size,
           sizeUsed: w.sizeUsed,
           smartSupplyEnabled: w.smartSupplyEnabled,
+          materials,
         });
       }
       divisions.push(division);

@@ -31,7 +31,7 @@ The acceptance bar for a feature is the full vertical slice:
 | 3 | hacknet | **done** |
 | 4 | stock | **done** — rebuilt in phase 15; the first version could not place a trade |
 | 5 | gang | **done** |
-| 6 | corp | **strategy only †** — the stage machine is complete; the calls are not issued |
+| 6 | corp | **done (bounded foundation)** — found, build six-city Agriculture, configure supply/sales, stop at observed profit |
 | 7 | bladeburner | **done** |
 | 8 | sleeves | **done** |
 | 9 | go | **done** |
@@ -398,7 +398,7 @@ Every feature now has a real driver module; `inert()` is gone from
 | 3 | hacknet | Cumulative production minus spend over the horizon | **0/1-knapsack DP** oracle; greedy matches the DP optimum. Beats the "level to 80 then RAM" baseline. |
 | 4 | stock | Money at the end of the RUN, net of spread, commission and the regime cycle | Model of the real price engine (shared volatility roll, 75-tick cycle, second-order forecast), **pinned against the vendored source**; break-even derived rather than assumed; beats both buy-and-hold and the predecessor's forecast>0.6 rule at matched exposure; trades profitably **without 4S** off recovered signal; liquidates before every install. |
 | 5 | gang | BN2 respect growth with controlled wanted | Pinned respect/wanted formulas, deterministic recruitment and a documented 1.15x ascension policy. Equipment and territory warfare are deferred. |
-| 6 | corp | Sequence divisions, cities, products, investment | Staged script with per-stage precondition and expected effect. **Optimality boundary stated openly** — near-optimal *within the modelled stage graph*, not globally. |
+| 6 | corp | Establish a working corporation | Source-pinned reconciliation builds one six-city Agriculture baseline and stops at observed profit. Investment, products, research and public-company policy are explicitly deferred; no optimality claim is made. |
 | 7 | bladeburner | Climb rank fastest **without dying** | Every decision uses the **pessimistic** end of the `[min,max]` chance interval; Black Ops refused below 95%. Stamina floor and chaos ceiling. |
 | 8 | sleeves | Allocate N sleeves across the task menu | Exact exclusive-key DP: crimes repeat, while faction targets have capacity one. The explicit 50/50 policy forces recovery or synchronisation before productive work. |
 | 9 | go | Wins, territory, streaks | Upstream-oracle arena; trained value network over legal candidates and their seeded faction replies, executed as a WebGPU compute shader. See `spec/go-ai.md`. |
@@ -1898,9 +1898,9 @@ Every phase but the regrow is REPUTATION-bound: the intent stream shows
 Stated plainly rather than buried, because several features are implemented to
 the *strategy* level without full end-to-end execution:
 
-- **Corporation actions are not executed.** The stage machine, its
-  preconditions and its digest are complete and tested; issuing the calls
-  against an unmodelled world is the one thing this project refuses to do.
+- **Corporation actions execute only in the live game.** The controller builds
+  the source-pinned Agriculture foundation; the simulator has no corporation
+  model, so the same calls report `unmodeled()` there instead of fabricating.
 - **Sim models exist for factions, crime, hacknet, stock, Go and dnet.** The
   darknet model covers all 23 APIs, mutation/restart, sessions, labyrinth and
   storms, cache/clue rewards, live stock grants and coding contracts for fresh

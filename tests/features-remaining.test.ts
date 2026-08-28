@@ -13,7 +13,6 @@ import { initState } from "../game/lib/state.ts";
 import { deriveCapabilities } from "../shared/features/unlock.ts";
 import { assignIndependent } from "../shared/strategy/assignment.ts";
 import { BLACKOP_CONFIDENCE, STAMINA_FLOOR, stepBladeburner } from "../shared/strategy/bladeburner/decide.ts";
-import { stepCorp, type CorpView } from "../shared/strategy/corp/stages.ts";
 import { reachableFrom, stepDarknet, unlockValue } from "../shared/strategy/dnet/decide.ts";
 import { darknetRoute } from "../game/lib/features/dnet.ts";
 import { emptyKnowledge, foldKnowledgeReports } from "../shared/strategy/dnet/host.ts";
@@ -738,59 +737,6 @@ describe("coding contracts — known answers and exact release coverage", () => 
 
 });
 
-
-// --- corp ---------------------------------------------------------------------
-
-describe("corp staged script", () => {
-  const view = (over: Partial<CorpView> = {}): CorpView => ({
-    hasCorporation: true,
-    funds: 0,
-    revenue: 0,
-    expenses: 0,
-    public: false,
-    divisions: [],
-    moneyGranted: 0,
-    ...over,
-  });
-
-  test("founding comes first, then Agriculture", () => {
-    expect(stepCorp(view({ hasCorporation: false })).action.type).toBe("createCorporation");
-    expect(stepCorp(view()).action.type).toBe("expandIndustry");
-  });
-
-  test("a stall is attributable to a named stage", () => {
-    const decision = stepCorp(
-      view({ divisions: [{ name: "Ag", industry: "Agriculture", cities: ["Sector-12"], researchPoints: 0, products: [], maxProducts: 0, offices: [], warehouses: [] }] }),
-    );
-    expect(decision.stage).toBeTruthy();
-  });
-
-  test("a finished ladder reports its completed stages", () => {
-    const done = stepCorp(
-      view({
-        divisions: [
-          { name: "Ag", industry: "Agriculture", cities: ["Sector-12", "Aevum", "Chongqing", "New Tokyo", "Ishima", "Volhaven"], researchPoints: 0, products: [], maxProducts: 0, offices: [], warehouses: Array.from({ length: 6 }, (_, i) => ({ city: `c${i}`, level: 1, size: 1, sizeUsed: 0, smartSupplyEnabled: true })) },
-          { name: "Tob", industry: "Tobacco", cities: [], researchPoints: 0, products: ["p"], maxProducts: 1, offices: [], warehouses: [] },
-        ],
-      }),
-    );
-    expect(done.stage).toBe("done");
-    expect(done.completed.length).toBeGreaterThan(0);
-  });
-
-  test("a zero-valued upstream investment offer is unavailable", async () => {
-    const probe = PRICED_PROBES.find((entry) => entry.id === "corp.core")!;
-    const [emission] = await probe.run(probeCtx({
-      "corporation.getCorporation": () => ({
-        name: "Acme", funds: 1, revenue: 0, expenses: 0, public: true,
-        valuation: 1, sharePrice: 1, totalShares: 1, numShares: 1,
-        issuedShares: 0, dividendRate: 0, dividendEarnings: 0, nextState: "START",
-      }),
-      "corporation.getInvestmentOffer": () => ({ round: 5, funds: 0, shares: 0 }),
-    }));
-    expect((emission!.data as { investmentOffer?: unknown }).investmentOffer).toBeUndefined();
-  });
-});
 
 // --- dnet ----------------------------------------------------------------------
 

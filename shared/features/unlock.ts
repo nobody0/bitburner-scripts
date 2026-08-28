@@ -11,6 +11,14 @@ import { FEATURE_IDS, type FeatureId } from "./ids.ts";
 
 export type UnlockState = "yes" | "no" | "unknown";
 
+/** Exact result returned by the free corporation creation pre-flight. */
+export type CorporationCreateCheck =
+  | "Success"
+  | "NoSf3OrDisabled"
+  | "CorporationExists"
+  | "UseSeedMoneyOutsideBN3"
+  | "DisabledBySoftCap";
+
 /** The subset of ResetInfo.bitNodeOptions that changes what we may play.
  *
  * These are per-run toggles chosen when entering the node, so holding a source
@@ -40,6 +48,8 @@ export interface GateReadings {
   inGang?: boolean;
   inBladeburner?: boolean;
   hasCorporation?: boolean;
+  canSelfFundCorporation?: CorporationCreateCheck;
+  canSeedFundCorporation?: CorporationCreateCheck;
   hasWseAccount?: boolean;
   hasTixApiAccess?: boolean;
   /** ns.go.getGameState() succeeded — IPvGO is reachable. */
@@ -60,6 +70,13 @@ export interface Capabilities {
    *  its ambition instead of discovering the restriction by failing. Distinct
    *  from `unlocked`, which is about whether we may play it at all. */
   restrictions: BitNodeDisables;
+  /** Access and ownership are separate: the driver must run before ownership
+   * to create the corporation, while priced reads must wait for one to exist. */
+  corporation: {
+    exists: UnlockState;
+    selfFundCheck?: CorporationCreateCheck;
+    seedFundCheck?: CorporationCreateCheck;
+  };
   /** Upstream has TWO darknet gates and they are not the same test:
    *
    *    hasDarknetAccess()     = BN15 || SF15 || DarkscapeNavigator.exe
@@ -127,7 +144,13 @@ export function deriveCapabilities(r: GateReadings): Capabilities {
   set("factions", hasNode(r, 4), "requires BN4 or SF4 (Singularity) for the faction/augmentation API");
 
   set("gang", fromFlag(r.inGang), "requires a gang — BN2, or SF2 plus karma <= -54,000");
-  set("corp", fromFlag(r.hasCorporation), "requires a corporation — BN3, or SF3 plus the seed money");
+  const corporationExists = fromFlag(r.hasCorporation);
+  const creationObserved = r.canSelfFundCorporation !== undefined || r.canSeedFundCorporation !== undefined;
+  const canCreateCorporation = r.canSelfFundCorporation === "Success" || r.canSeedFundCorporation === "Success";
+  const corporationAccess: UnlockState = corporationExists === "yes" || canCreateCorporation
+    ? "yes"
+    : creationObserved ? "no" : "unknown";
+  set("corp", corporationAccess, "requires BN3 or active SF3, and a BitNode where corporations can be created");
   // Both the division and its ns API are gated on BN6/SF6 OR BN7/SF7.
   // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Bladeburner.ts#L43-L57
   set("bladeburner", fromFlag(r.inBladeburner), "requires the Bladeburner division — BN6/BN7, or SF6/SF7");
@@ -178,6 +201,11 @@ export function deriveCapabilities(r: GateReadings): Capabilities {
     unlocked,
     reason,
     restrictions: { ...options },
+    corporation: {
+      exists: corporationExists,
+      ...(r.canSelfFundCorporation !== undefined ? { selfFundCheck: r.canSelfFundCorporation } : {}),
+      ...(r.canSeedFundCorporation !== undefined ? { seedFundCheck: r.canSeedFundCorporation } : {}),
+    },
     darknetFullAccess: dnetNode,
   };
 }

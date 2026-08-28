@@ -102,6 +102,16 @@ export async function runGates(nsp: NsProxy): Promise<GateResult> {
   readings.hasCorporation = await attempt(failures, "corporation.hasCorporation", () =>
     nsp("corporation.hasCorporation"),
   );
+  readings.canSelfFundCorporation = await attempt(
+    failures,
+    "corporation.canCreateCorporation:selfFund",
+    () => nsp("corporation.canCreateCorporation", true),
+  );
+  readings.canSeedFundCorporation = await attempt(
+    failures,
+    "corporation.canCreateCorporation:seedFund",
+    () => nsp("corporation.canCreateCorporation", false),
+  );
   // No boolean form exists: reaching a game state at all means IPvGO is there.
   // v3.0.1 exposes this getter without a BN/SF access check.
   // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Go.ts#L69-L77

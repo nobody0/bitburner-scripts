@@ -30,7 +30,7 @@ enforces that the five stay in sync.
 | `hacknet` | Hacknet | BN9 Hacktocracy | always |
 | `stock` | Stocks | BN8 Ghost of Wall Street | always |
 | `gang` | Gang | BN2 Rise of the Underworld | `gang.inGang()` — **0 GB** |
-| `corp` | Corp | BN3 Corporatocracy | `corporation.hasCorporation()` — **0 GB** |
+| `corp` | Corp | BN3 Corporatocracy | existing corporation, or `canCreateCorporation()` succeeds — **0 GB** |
 | `bladeburner` | Bladeburner | BN6, BN7 Bladeburners | `bladeburner.inBladeburner()` — **0 GB** |
 | `sleeves` | Sleeves | BN10 Digital Carbon | BN10 or SF10 |
 | `go` | Go | BN14 IPvGO Subnet Takeover | `go.getGameState()` — **0 GB** |
@@ -248,14 +248,13 @@ Everything else is slower by orders of magnitude, which is the reason the
 frame schedules by cadence at all rather
 than running every driver every pass.
 
-All fourteen are implemented; there is no `inert()` helper any more. `corp` is
-implemented to the *strategy* level only and refuses to issue its calls; `dnet`
+All fourteen are implemented; there is no `inert()` helper any more. `corp`
+executes its bounded Agriculture foundation; `dnet`
 issues its own on live hosts through the controller/prober/agent pipeline, while
 `stepDarknet` stays a pure ranking with no action for a driver to carry out
-(`spec/progress.md`, and for dnet's reasons `spec/dnet.md`). Seven have their own
-file (`hacking`, `factions`, `career`, `hacknet`, `stock`, `dnet`, `side`) because
-they needed more than the common shape; gang is also separate because it executes fresh action batches. The other six (`progression`,
-`corp`, `bladeburner`, `sleeves`, `go`, `stanek`) share
+(`spec/progress.md`, and for dnet's reasons `spec/dnet.md`). Ten have their own
+file (`hacking`, `factions`, `career`, `hacknet`, `stock`, `gang`, `corp`,
+`sleeves`, `dnet`, `side`). The other four (`progression`, `bladeburner`, `go`, `stanek`) share
 `features/remaining.ts`, which is a statement about their SHAPE — build a view,
 call one pure `step*`, execute at most one action per tick — not
 about their size. Any of them moves to its own file the moment it needs more.

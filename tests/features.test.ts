@@ -115,6 +115,8 @@ describe("capability derivation", () => {
       inGang: false,
       inBladeburner: false,
       hasCorporation: false,
+      canSelfFundCorporation: "NoSf3OrDisabled",
+      canSeedFundCorporation: "NoSf3OrDisabled",
       hasWseAccount: false,
       hasTixApiAccess: false,
       goPlayable: true,
@@ -140,6 +142,28 @@ describe("capability derivation", () => {
     // SF2 plus karma grants a gang outside BN2, which is why gang uses the
     // live inGang() flag rather than a node check.
     expect(deriveCapabilities({ bitNode: 1, sourceFiles: { "2": 1 }, inGang: true }).unlocked.gang).toBe("yes");
+  });
+
+  test("corporation creation access is distinct from corporation ownership", () => {
+    const seed = deriveCapabilities({
+      bitNode: 3,
+      sourceFiles: {},
+      hasCorporation: false,
+      canSelfFundCorporation: "Success",
+      canSeedFundCorporation: "Success",
+    });
+    expect(seed.unlocked.corp).toBe("yes");
+    expect(seed.corporation.exists).toBe("no");
+    expect(seed.corporation.seedFundCheck).toBe("Success");
+
+    const disabled = deriveCapabilities({
+      bitNode: 3,
+      sourceFiles: {},
+      hasCorporation: false,
+      canSelfFundCorporation: "NoSf3OrDisabled",
+      canSeedFundCorporation: "NoSf3OrDisabled",
+    });
+    expect(disabled.unlocked.corp).toBe("no");
   });
 });
 

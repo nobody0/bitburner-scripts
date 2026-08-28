@@ -118,7 +118,7 @@ export const FEATURES: readonly Feature[] = [
     bitnodes: [3],
     topics: ["corp"],
     problem:
-      "Sequence divisions, offices, warehouses, research and investment rounds to maximise valuation, then dividends, per real-time cycle.",
+      "Establish and observe a profitable six-city Agriculture foundation; advanced corporation strategy is deferred.",
     moneySources: ["corporation"],
     api: true,
   },

@@ -9,7 +9,6 @@ import { sfLevel } from "../../../shared/features/unlock.ts";
 import { disabledByProfile } from "../../../shared/features/profile.ts";
 import { PRIORITY, type Claim, type ClaimValueCurve } from "../../../shared/strategy/arbiter.ts";
 import { stepBladeburner } from "../../../shared/strategy/bladeburner/decide.ts";
-import { stepCorp } from "../../../shared/strategy/corp/stages.ts";
 import {
   DARKSCAPE_EARLY_BN1_ROUTE_SECONDS,
   DARKSCAPE_TOTAL_COST,
@@ -209,61 +208,6 @@ async function act<T>(
     record(id, action, false, String(error));
   }
 }
-
-// --- corp -------------------------------------------------------------------
-
-const corp: FeatureDriver = {
-  id: "corp",
-  everyMs: 30_000,
-  requires: "corp",
-  async tick(ctx: DriverContext) {
-    const topic = ctx.state.topics.corp;
-    if (!topic) return;
-    const decision = stepCorp({
-      hasCorporation: true,
-      funds: topic.funds,
-      revenue: topic.revenue,
-      expenses: topic.expenses,
-      public: topic.public,
-      divisions: (topic.divisions ?? []).map((entry) => ({
-        name: entry.name,
-        industry: entry.industry,
-        cities: entry.cities,
-        researchPoints: entry.researchPoints,
-        products: entry.products,
-        maxProducts: entry.maxProducts,
-        offices: entry.offices ?? [],
-        warehouses: entry.warehouses ?? [],
-      })),
-      ...(topic.investmentOffer ? { investmentOffer: topic.investmentOffer } : {}),
-      moneyGranted: ctx.grants.money,
-    });
-
-    merge(ctx.state, "corp", {
-      plan: {
-        action: {
-          type: decision.action.type,
-          ...(decision.action.type === "expandIndustry" ? { industry: decision.action.industry, division: decision.action.division } : {}),
-          ...("division" in decision.action ? { division: decision.action.division } : {}),
-          ...("city" in decision.action ? { city: decision.action.city } : {}),
-          ...("size" in decision.action ? { size: decision.action.size } : {}),
-          ...("job" in decision.action ? { job: decision.action.job } : {}),
-          ...("material" in decision.action ? { material: decision.action.material } : {}),
-          ...("round" in decision.action ? { round: decision.action.round } : {}),
-          ...("name" in decision.action ? { name: decision.action.name } : {}),
-        },
-        stage: decision.stage,
-        completed: decision.completed,
-        ...(results["corp"] ? { lastResult: results["corp"] } : {}),
-      },
-    });
-    // Execution of the corporation API is deliberately not wired yet: every
-    // stage's action is a distinct multi-argument call, and issuing them
-    // against an unmodelled world would be the one thing this project refuses
-    // to do. The stage machine and its digest are testable without it.
-    record("corp", decision.action.type, false, "corporation actions are not executed yet (see spec/progress.md)");
-  },
-};
 
 // --- bladeburner ------------------------------------------------------------
 
@@ -3278,15 +3222,6 @@ const resetWithTopic =
     reset();
     delete state.topics[topic];
   };
-
-export const corpModule: FeatureModule = {
-  driver: corp,
-  reset: resetWithTopic("corp"),
-  // Corporation actions are not implemented, and the feature only unlocks
-  // after a corporation exists. Publish no money claim until execute() can
-  // spend a grant on a concrete action.
-  claims: () => [],
-};
 
 export const bladeburnerModule: FeatureModule = {
   driver: bladeburner,

@@ -338,8 +338,7 @@ export const PRIORITY = {
    *  no band at all — it is priced from the rates it produces. */
   "career:income": 30,
   /** Corp seed money — huge, rare, and gates the whole feature. */
-  "corp:seed": 85,
-  "corp:expand": 40,
+  "corp:found": 85,
   "gang:equipment": 35,
   /** Economically interchangeable income investments compare by ROI. This is
    *  THE shared band: hacking infrastructure, hacknet upgrades and stock

@@ -1,14 +1,32 @@
-import { card, definitions, dot, hint, NONE, note, outcome, table, tiles, waiting, waitingPanel } from "../lib/dom.ts";
+import { card, definitions, dot, hint, NONE, outcome, table, tiles, waiting, waitingPanel } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtPct } from "../lib/format.ts";
 import { html } from "../lib/html.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
+import type { CorpAction } from "../../../shared/strategy/corp/decide.ts";
+
+function actionTarget(action: CorpAction): string {
+  const parts: string[] = [];
+  if ("division" in action) parts.push(action.division);
+  else if ("name" in action) parts.push(action.name);
+  else parts.push(action.unlock);
+  if ("city" in action) parts.push(action.city);
+  if ("position" in action) parts.push(action.position);
+  else if ("material" in action) parts.push(action.material);
+  return parts.join(" / ") || "—";
+}
 
 export const corpTab: Tab = {
   id: "corp",
   render(state: ProjectedState) {
     const c = state.topics.corp;
-    if (!c) return waitingPanel("Corporation", "the corporation probe", "getCorporation is 10 GB — it needs home headroom");
+    if (!c) {
+      const access = state.caps.corporation;
+      if (access.exists === "no" && state.caps.unlocked.corp === "yes") {
+        return waitingPanel("Corporation", "corporation founding", "waiting for the creation check or its one-shot funding grant");
+      }
+      return waitingPanel("Corporation", "the corporation probe", "getCorporation needs an existing corporation and home RAM headroom");
+    }
 
     const profit = c.revenue - c.expenses;
     const summary = tiles([
@@ -21,110 +39,39 @@ export const corpTab: Tab = {
       { label: "state", value: c.state },
     ]);
 
-    // `undefined` and `[]` are different facts here, and one shared
-    // empty-message reported them as the same one. `corp.divisions` publishes
-    // only when every step of its probe ran (priced.ts `finish` gates on
-    // `complete`), and a corporation that has no divisions publishes an empty
-    // array — so "waiting for the corp.divisions probe" was printed beside a
-    // Decision card reading stage `agriculture` / action `expandIndustry` off
-    // that very array. Corp actions are never executed (features/remaining.ts),
-    // so the empty case is not a first-minutes transient either: it stands
-    // until the operator expands by hand.
-    //
-    // awareness / popularity / productionMult are shown as plain columns next
-    // to `adverts` and deliberately not captioned as what the adverts bought:
-    // nothing in this repo calls hireAdVert, so any adverts present were not
-    // bought here and a causal reading would be ours, not the data's.
-    const divisions =
-      c.divisions === undefined
-        ? waiting("the corp.divisions probe", "getDivision is 10 GB — it runs every two minutes")
-        : table(
-            [
-              "division",
-              "industry",
-              "revenue",
-              "expenses",
-              "research",
-              "adverts",
-              "awareness",
-              "popularity",
-              "production",
-              "cities",
-              "products",
-            ],
-            c.divisions.map((d) => [
-              esc(d.name),
-              esc(d.industry || "—"),
-              fmtMoney(d.lastCycleRevenue),
-              fmtMoney(d.lastCycleExpenses),
-              fmtNum(d.researchPoints, 0),
-              String(d.numAdVerts),
-              fmtNum(d.awareness, 1),
-              fmtNum(d.popularity, 1),
-              `${fmtNum(d.productionMult, 2)}×`,
-              String(d.cities.length),
-              `${d.products.length}/${d.maxProducts}`,
-            ]),
-            "no divisions yet — the corp plan's expandIndustry stage is next",
-          );
+    const divisions = c.divisions === undefined
+      ? waiting("the corp.divisions probe", "office and warehouse detail runs every two minutes")
+      : table(
+          ["division", "industry", "revenue", "expenses", "research", "adverts", "cities", "products"],
+          c.divisions.map((d) => [
+            esc(d.name), esc(d.industry || "—"), fmtMoney(d.lastCycleRevenue), fmtMoney(d.lastCycleExpenses),
+            fmtNum(d.researchPoints, 0), String(d.numAdVerts), String(d.cities.length), `${d.products.length}/${d.maxProducts}`,
+          ]),
+          "no divisions yet",
+        );
 
-    const detail = (c.divisions ?? [])
-      .filter((d) => d.offices?.length)
-      .map((d) =>
-        card(
-          `${d.name} — offices`,
-          table(
-            [
-              "city",
-              "employees",
-              hint("jobs", "headcount by job title as last probed — no stage hires, and corp actions are not executed"),
-              "energy",
-              "morale",
-              "warehouse",
-              "level",
-              hint("smart supply", "the smart-supply stage is done only once every warehouse of the division has it on"),
-            ],
-            (d.offices ?? []).map((o) => {
-              const w = d.warehouses?.find((x) => x.city === o.city);
-              // A city with no warehouse is a THIRD state, not "smart supply
-              // off": the probe's warehouse-presence step only reads
-              // getWarehouse for cities that have one, so telemetry never said
-              // anything about supply or level here. Painting those cells as
-              // off/0 would be the panel asserting a fact of its own — and
-              // this is exactly the city the buyWarehouse stage is waiting on.
-              const jobs = Object.entries(o.jobs);
-              return [
-                esc(o.city),
-                `${o.numEmployees}/${o.size}`,
-                jobs.length
-                  ? `<div class="chips">${jobs
-                      .map(([title, count]) => `<span class="chip idle">${esc(title)} ${fmtNum(count, 0)}</span>`)
-                      .join("")}</div>`
-                  : NONE,
-                fmtNum(o.avgEnergy, 1),
-                fmtNum(o.avgMorale, 1),
-                w ? `${fmtNum(w.sizeUsed, 0)}/${fmtNum(w.size, 0)}` : "—",
-                w ? fmtNum(w.level, 0) : NONE,
-                w
-                  ? w.smartSupplyEnabled
-                    ? `${dot("good", "smart supply is on")} on`
-                    : `${dot("ready", "the corp plan's smart-supply stage targets a warehouse with it off")} off`
-                  : NONE,
-              ];
-            }),
-            { wrap: [2] },
-          ),
-        ),
-      )
-      .join("");
-
-    const offer = c.investmentOffer
-      ? definitions([
-          ["round", String(c.investmentOffer.round)],
-          ["funds", fmtMoney(c.investmentOffer.funds)],
-          ["shares", fmtNum(c.investmentOffer.shares, 0)],
-        ])
-      : note("no investment offer available");
+    const detail = (c.divisions ?? []).filter((d) => d.offices?.length).map((d) => card(
+      `${d.name} — offices`,
+      table(
+        ["city", "employees", hint("jobs", "observed headcount by job title"), "energy", "morale", "warehouse", "smart supply", "sales"],
+        (d.offices ?? []).map((o) => {
+          const w = d.warehouses?.find((entry) => entry.city === o.city);
+          const jobs = Object.entries(o.jobs);
+          const sales = w?.materials.filter((material) =>
+            material.desiredSellAmount === "MAX" && material.desiredSellPrice === "MP"
+          ).map((material) => material.name).join(", ");
+          return [
+            esc(o.city), `${o.numEmployees}/${o.size}`,
+            jobs.length ? `<div class="chips">${jobs.map(([title, count]) => `<span class="chip idle">${esc(title)} ${fmtNum(count, 0)}</span>`).join("")}</div>` : NONE,
+            fmtNum(o.avgEnergy, 1), fmtNum(o.avgMorale, 1),
+            w ? `${fmtNum(w.sizeUsed, 0)}/${fmtNum(w.size, 0)}` : NONE,
+            w ? (w.smartSupplyEnabled ? `${dot("good", "observed enabled")} on` : `${dot("ready", "observed disabled")} off`) : NONE,
+            sales || NONE,
+          ];
+        }),
+        { wrap: [2] },
+      ),
+    )).join("");
 
     const shares = definitions([
       ["total shares", fmtNum(c.totalShares, 0)],
@@ -135,36 +82,25 @@ export const corpTab: Tab = {
     ]);
 
     const plan = c.plan;
-    const actionSubject = plan
-      ? [plan.action.division ?? plan.action.industry, plan.action.city, plan.action.name ?? plan.action.material]
-          .filter((value): value is string => Boolean(value))
-          .join(" / ")
-      : "";
     const decision = plan
       ? tiles([
-          { label: "stage", value: plan.stage, sub: `${plan.completed.length} stage(s) complete` },
-          {
-            label: "selected",
-            value: plan.action.type,
-            sub: actionSubject || (plan.action.round !== undefined ? `round ${plan.action.round}` : undefined),
-          },
+          { label: "stage", value: plan.stage, sub: plan.status },
+          { label: "batch", value: `${plan.actions.length} action(s)`, sub: plan.detail },
         ]) +
-        (plan.completed.length
-          ? table(["completed stage"], plan.completed.map((stage) => [esc(stage)]), { left: [0] })
-          : note("no stages complete yet")) +
-        (plan.lastResult ? outcome(plan.lastResult) : "")
+        (plan.actions.length
+          ? table(
+              ["action", "target"],
+              plan.actions.map((action) => [
+                esc(action.type),
+                esc(actionTarget(action)),
+              ]),
+              "",
+            )
+          : "") +
+        (plan.lastResults ?? []).map(outcome).join("")
       : waiting("the first corporation decision");
 
-    return (
-      `<div class="col wide">` +
-      card("Corporation", summary + divisions) +
-      card("Decision", decision) +
-      detail +
-      `</div>` +
-      `<div class="col">` +
-      card("Shares", shares) +
-      card("Investment", offer) +
-      `</div>`
-    );
+    return `<div class="col wide">${card("Corporation", summary + divisions)}${card("Decision", decision)}${detail}</div>` +
+      `<div class="col">${card("Shares", shares)}</div>`;
   },
 };

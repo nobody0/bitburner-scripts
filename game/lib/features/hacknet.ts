@@ -146,7 +146,7 @@ function hashGoals(ctx: HacknetViewContext): HashGoalCandidate[] {
       goals.push({ name: HASH_UPGRADE.bladeSp, priority: 60 });
     }
   }
-  if (state.corp?.plan && state.corp.plan.action.type !== "idle") {
+  if (state.corp?.plan?.actions.length) {
     goals.push({ name: HASH_UPGRADE.corpFunds, priority: 55 });
   }
   if (state.corp?.plan?.stage.toLowerCase().includes("research")) {

@@ -17,9 +17,9 @@ import { factionsModule } from "./factions.ts";
 import { hacknetModule } from "./hacknet.ts";
 import { sleevesModule } from "./sleeves.ts";
 import { gangModule } from "./gang.ts";
+import { corpModule } from "./corp.ts";
 import {
   bladeburnerModule,
-  corpModule,
   goModule,
   progressionModule,
   stanekModule,
