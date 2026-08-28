@@ -30,10 +30,13 @@
       "labyrinthStagesCleared": 0,
       "routeEtaHoursAt1Hour": 30.6,
       "charismaAt1Hour": 278,
+      "augmentationsAt24Hours": 34,
+      "charismaAt24Hours": 1161,
       "what": "Cold BN15 start, 8 GB home, the full vanilla network plus the darknet. The labyrinth is the only Red Pill route.",
       "note": "NO RUN HAS YET PASSED ~1.1 VIRTUAL HOURS: darknet-enabled sim runs hard-hang (frozen virtual clock, hot JS loop, RSS spiral; also on bn1-speedrun seed 2 at 5d2fd3ff, where dnet is live post-Darkscape). With dnet disabled the same run completes its horizon — but the labyrinth IS the route, so end-to-end waits on the darknet fix. The dnet feature also never observes a host (plans every tick against an empty map). Isolation evidence in spec/progress.md. The route layer itself publishes honestly: labyrinth selected, five charisma-gated stages priced in closed form from measured exp rates, maze-scaled walks, 30.6h total dominated by the post-pill regrow stack.",
       "history": [
-        "2026-08-27 (model 10, rev fa9cfe79, 1-2h screens): labyrinth route selected with honest legs (charisma stage climbs measured via the exp curve; walks maze-scaled, unmeasured). Tian Di Hui joined once city needs were serialized; before that fix the run teleport-flapped between four city needs for an hour and never joined anything or took a job. Charisma 278 at 1.09h when the run froze."
+        "2026-08-27 (model 10, rev fa9cfe79, 1-2h screens): labyrinth route selected with honest legs (charisma stage climbs measured via the exp curve; walks maze-scaled, unmeasured). Tian Di Hui joined once city needs were serialized; before that fix the run teleport-flapped between four city needs for an hour and never joined anything or took a job. Charisma 278 at 1.09h when the run froze.",
+        "2026-08-28 (model 10, rev 1d673598, first freeze-free 24h runs): with the labyrinth's blanket install ban, 0 augs / 0 installs / charisma 424 in 24h. With installs PRICED instead (erased-progress veto): 34 augs / 7 installs / charisma 1161 / $3.5e14 and a 17h remaining estimate. The one blocker left is dnet's hold.ts hasCredential-means-walked inference — no walker has ever launched (see spec/progress.md)."
       ]
     }
   }
