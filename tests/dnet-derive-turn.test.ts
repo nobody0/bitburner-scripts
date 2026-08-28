@@ -669,3 +669,50 @@ describe("armour is resized at the order boundary", () => {
     expect(handle.announceProberRespawn(TARGET, 900, 2, () => {})).toBe(true);
   });
 });
+
+describe("the derive scheduler settles", () => {
+  /** The freeze this guards the shape of: `signalDerive` queues each pass on a
+   * bare microtask and `fileWork` awaits no timer anywhere, so a net that
+   * produces one fact per pass chains passes with the event loop never
+   * regaining control — no paint, no input.
+   *
+   * Be honest about what this file can and cannot show. The loop is an
+   * emergent timing property of a live net, and it does not form in this
+   * harness: after the first pass there is nothing left to describe, so no
+   * further fact is generated and the chain ends on its own whether or not the
+   * scheduler is correct. Attempts to force it here passed against the BROKEN
+   * scheduler too, which makes them worse than no test at all.
+   *
+   * So this pins only the property that is genuinely observable here — a quiet
+   * net settles and stays settled. The chain bound itself is verified on the
+   * `bn15-full` sim repro and by the in-game derive counter. */
+  test("a quiet net settles and stays settled", async () => {
+    const handle = await bootController();
+    let describes = 0;
+    const borrowed = mockNs();
+    const call = ((path: string, ...args: unknown[]) => {
+      if (path === "dnet.getServerDetails") describes++;
+      const fn = path.split(".").reduce<unknown>(
+        (held, key) => (held as Record<string, unknown> | undefined)?.[key],
+        borrowed as unknown,
+      );
+      if (typeof fn !== "function") throw new Error(`mock ns has no ${path}`);
+      return Promise.resolve((fn as (...a: unknown[]) => unknown)(...args));
+    }) as ((path: string, ...args: unknown[]) => Promise<unknown>) & {
+      guaranteeFit(p: readonly string[], use: (r: unknown) => unknown): Promise<unknown>;
+    };
+    call.guaranteeFit = (_paths, use) => Promise.resolve(use(call));
+    (globalThis as Record<string, unknown>)["ns_proxy"] = { call };
+
+    standProber(handle, VANTAGE, 11, true, () => 101);
+    standProber(handle, TARGET, 12, true, () => 102);
+    handle.wake("one-fact");
+    for (let turn = 0; turn < 5_000; turn++) await Promise.resolve();
+    const settled = describes;
+
+    // No timers are advanced here, so a settled controller must do nothing
+    // further no matter how long the microtask queue is drained.
+    for (let turn = 0; turn < 5_000; turn++) await Promise.resolve();
+    expect(describes).toBe(settled);
+  });
+});

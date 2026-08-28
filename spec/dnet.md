@@ -1467,6 +1467,45 @@ for, and its cost is the generation stamp: a stale agent can keep reporting from
 a run that no longer exists, which is why the generation is checked at every
 rendezvous.
 
+### The derive scheduler
+
+Derivation is fact-driven: `signalDerive()` queues one `fileWork` pass, and the
+pass is the unit of work. Three rules keep that from becoming a loop, and all
+three were learned by freezing the game.
+
+- **A pass is never re-entered, and facts arriving during one coalesce.**
+  `deriveQueued` is held for the whole pass; a fact that lands mid-pass sets
+  `deriveDirty`, which re-arms exactly one follow-up when the pass ends. It used
+  to clear before the pass was awaited, so every mid-pass fact queued a pass of
+  its own and one fact per pass chained for ever.
+- **The planner never re-derives on its own decisions.** `retireStaged`
+  synthesises a report for an order retired before pickup and marks it INTERNAL;
+  `onReport` skips the replan for those. Every caller empties `staged`
+  immediately beforehand, so the "this vantage ran dry" test is true by
+  construction there — the re-derive was guaranteed, not occasional, and it is
+  the edge that made the chain self-sustaining with no external event at all.
+- **The chain is bounded by a real timer, not by the clock reading.** Past
+  `DERIVE_CHAIN_BOUND` passes with no macrotask between them, the next rests on
+  `realmSleep`. The counter is cleared only by that rest, because only the rest
+  hands the event loop back. It must never key on `Date.now()`: under the
+  simulator that is virtual time (`sim/realm/timers.ts`), frozen for the whole
+  chain, so a clock-keyed bound fires in the sim and never in the game — which
+  is precisely the bug that shipped, since wall time advances every pass and
+  reset the counter each time. Slowness became the exemption criterion.
+
+`fileWork` awaits no timer anywhere, and a warm `nsp` call resolves on its memo
+without one either, so an unbounded chain is a pure microtask cascade: the page
+never paints and never takes input. That is the failure mode these rules exist
+to prevent, and a debugger paused inside it lands in `describeThrough` on the ns
+resident's chain every time.
+
+The controller has no other time-driven derive — the main loop waits on
+`dnet.nextMutation()` and deliberately does not race it, because a losing race
+leaves a `nextMutation` outstanding and the next call throws CONCURRENCY ERROR.
+So a **20 s fallback tick** runs beside that wait and signals a derive, and a net
+that stops mutating still plans. Without it, cutting the self-feed would trade a
+freeze for a silent stall.
+
 ### Transport: the realm
 
 **One convention, as engineering rather than fair play: the page realm carries

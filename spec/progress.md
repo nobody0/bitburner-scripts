@@ -1793,13 +1793,34 @@ The isolation evidence, for the darknet owner:
   are clean and only sim runs die. Diagnosis chain: clock-event tripwire
   silent at a 50k bound (so no timer events at all), engine-subsystem
   trace reads "tick-complete" (the freeze is in the post-tick microtasks),
-  then the counter. FIXED with the codebase's own proven shape (the
-  32-wake-race bound in game/lib/controller.ts): past 32 same-instant
-  chained passes, the next derive rests on a 200 ms realm timer so time can
-  advance; a clock advance resets the chain, so the bound only ever bites a
-  genuine feedback loop. Verified on the repro: bn15-full seed 1 now
-  completes the 2 h horizon that every previous darknet-enabled run froze
-  inside.
+  then the counter. First fix used the codebase's own 32-wake-race bound:
+  past 32 same-instant chained passes the next derive rests on a 200 ms realm
+  timer, and a clock advance resets the chain. That fixed the SIM and nothing
+  else.
+- CORRECTION (2026-08-28): the claim above that "the REAL game survives the
+  identical loop because its engine ticks in wall time" is exactly backwards,
+  and the live game froze on it. Wall time is what DISARMS that bound. The
+  chain counter reset whenever `Date.now()` moved, and under the simulator
+  `Date.now()` is virtual (`sim/realm/timers.ts:64`) and frozen for the whole
+  microtask chain — so the counter climbed and the rest fired. In the game the
+  wall clock advances on every pass, so the counter reset every time and the
+  rest was dead code in exactly the world the loop was real in. Slowness was
+  the exemption criterion, and since a pass costs ~6N projection clones plus
+  O(N*S) planning, every pass is slow. Debugger pauses during the live freeze
+  landed every time in `describeThrough` -> ns-proxy `Resident.call`, the one
+  line executed on every iteration of a chain that never yields.
+  REAL FIX, three parts: (1) `retireStaged` marks its synthetic report
+  INTERNAL and `onReport` skips the replan for it — that report is the planner
+  writing down a decision the same pass is still acting on, and because every
+  caller empties `staged` first, the "vantage ran dry" test was true by
+  construction, so the re-derive was guaranteed rather than occasional;
+  (2) `deriveQueued` is held for the DURATION of the pass with a `deriveDirty`
+  flag re-arming exactly one follow-up, so N mid-pass facts cost one pass and
+  not N; (3) the chain counter is no longer keyed on the clock at all — only
+  the timer rest clears it, because only the rest hands the event loop back.
+  Added with it: a 20 s fallback derive tick. There was none — the main loop
+  waits on `dnet.nextMutation()` and nothing else, so with the self-feed cut a
+  quiet net would have planned never, which is the opposite failure.
 
 Darknet internals are out of scope for the route layer; the route side stays
 estimation-pure and is unit-pinned up to the boundary.

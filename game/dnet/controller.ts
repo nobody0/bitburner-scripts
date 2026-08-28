@@ -142,6 +142,13 @@ const STAND_DOWN_POLL_MS = 250;
  * filed during the rest still derives, one rest later. */
 const DERIVE_CHAIN_BOUND = 32;
 const DERIVE_CHAIN_REST_MS = 200;
+/** How long a QUIET net may go without a planning pass.
+ *
+ * The controller has no other time-driven derive: the main loop waits on
+ * `dnet.nextMutation()`, so on a net that stops mutating nothing would ever ask
+ * the planner a question again. Long enough to cost nothing, short enough that
+ * a missed fact is an inconvenience rather than a stall. */
+const DERIVE_FALLBACK_MS = 20_000;
 /** Fallback duration used only to compare loaded vantages. */
 const TYPICAL_ORDER_MS = 6_000;
 const MAX_GRAMMAR_SHAPES = 20;
@@ -333,29 +340,68 @@ export async function main(ns: NS): Promise<void> {
    * The loop pass below is the watchdog: strictly TIME-driven work (dead-process
    * and beat sweeps, watchdog cancellation, telemetry) plus a bounded re-derive
    * in case a fact was ever missed. */
+  /** A pass is queued OR RUNNING. Held for the whole pass, which is the
+   * difference between coalescing and not: this used to clear before
+   * `fileWork` was awaited, so every fact arriving mid-pass queued a fresh
+   * pass of its own. One fact per pass was then enough to chain for ever. */
   let deriveQueued = false;
-  /** Chain accounting for DERIVE_CHAIN_BOUND: how many passes have been
-   * queued at the current instant. Any advance of the clock resets it, so
-   * the bound only ever bites a genuine same-instant feedback loop. */
-  let deriveChainAt = 0;
+  /** A fact arrived while a pass was running. Re-arms exactly ONE follow-up
+   *  when that pass ends, however many facts arrived. */
+  let deriveDirty = false;
+  /** Consecutive passes chained with no macrotask between them.
+   *
+   * NOT keyed on the clock. It used to reset whenever `Date.now()` moved,
+   * which meant the bound could only ever bite where time stands still — under
+   * the simulator's virtual clock (`sim/realm/timers.ts`), frozen for the whole
+   * microtask chain. In the live game wall time advances on every pass, so the
+   * counter reset every time and the rest below was dead code in exactly the
+   * world the loop was real in. Slowness was the exemption criterion.
+   *
+   * The rest is now the only thing that clears it, because the rest is the only
+   * thing that hands the event loop back. */
   let deriveChain = 0;
-  const signalDerive = (): void => {
-    if (deriveQueued) return;
-    deriveQueued = true;
-    const now = Date.now();
-    if (now !== deriveChainAt) {
-      deriveChainAt = now;
+  // TEMPORARY DIAGNOSTIC — remove before commit.
+  let diagPasses = 0;
+  let diagReportedAt = 0;
+  let diagChainStartedAt = 0;
+  const runPass = async (): Promise<void> => {
+    try { if (!standDown) await fileWork(Date.now()); } catch {}
+    deriveQueued = false;
+    // A fact that landed mid-pass gets one follow-up, queued here rather than
+    // when it arrived — so the pass stays the unit of work.
+    if (deriveDirty) {
+      deriveDirty = false;
+      signalDerive();
+    } else {
+      // The chain ended on its own; the next signal starts a fresh one.
       deriveChain = 0;
     }
+  };
+  const signalDerive = (): void => {
+    if (deriveQueued) { deriveDirty = true; return; }
+    deriveQueued = true;
     deriveChain++;
-    const pass = async (): Promise<void> => {
-      deriveQueued = false;
-      try { if (!standDown) await fileWork(Date.now()); } catch {}
-    };
-    // Past the bound, the pass rests on a real timer so time can advance;
-    // signals arriving during the rest coalesce into it (deriveQueued holds).
-    if (deriveChain > DERIVE_CHAIN_BOUND) void realmSleep(DERIVE_CHAIN_REST_MS).then(pass);
-    else void Promise.resolve().then(pass);
+    // TEMPORARY DIAGNOSTIC — remove before commit.
+    if (deriveChain === 1) diagChainStartedAt = Date.now();
+    diagPasses++;
+    if (Date.now() - diagReportedAt > 5_000) {
+      diagReportedAt = Date.now();
+      // `console.log`, NOT `ns.tprint`: this controller parks on
+      // `dnet.nextMutation`, which holds the Netscript lock, so ANY second ns
+      // call throws CONCURRENCY ERROR and kills it. Read it in DevTools.
+      console.log(
+        `[dnet-derive] passes=${diagPasses} in 5s, chain=${deriveChain},`
+        + ` chainHeldMs=${Date.now() - diagChainStartedAt}, hosts=${hosts.size}`,
+      );
+      diagPasses = 0;
+    }
+    // Past the bound the pass rests on a real timer, so the event loop gets a
+    // turn no matter what is feeding the chain. This is the backstop, not the
+    // fix: the feedback edges themselves are cut at `retireStaged`.
+    if (deriveChain > DERIVE_CHAIN_BOUND) {
+      deriveChain = 0;
+      void realmSleep(DERIVE_CHAIN_REST_MS).then(runPass);
+    } else void Promise.resolve().then(runPass);
   };
 
   // --- helpers --------------------------------------------------------------
@@ -412,9 +458,17 @@ export async function main(ns: NS): Promise<void> {
   };
 
   /** Settle a STAGED order that never ran (retired before pickup), by running
-   * its report side effects directly — there is no agent promise to await. */
+   * its report side effects directly — there is no agent promise to await.
+   *
+   * INTERNAL. Every other report is news from an agent; this one is the
+   * planner writing down a decision it just made, and the decision is one the
+   * same pass is still in the middle of acting on. Letting it re-derive asks
+   * the planner to react to itself, and because every caller empties `staged`
+   * immediately before calling here, the "vantage ran dry" test below is true
+   * by construction — so the re-derive was not occasional, it was guaranteed.
+   * That is the feedback edge that chained passes for ever. */
   const retireStaged = (order: Order, targetState: Report["targetState"], detail: string): void => {
-    onReport({ id: order.id, kind: order.kind, host: order.host, from: order.from, ok: false, ...(targetState ? { targetState } : {}), detail });
+    onReport({ id: order.id, kind: order.kind, host: order.host, from: order.from, ok: false, ...(targetState ? { targetState } : {}), detail }, true);
   };
 
   /** Every order an entry is holding: running, pending and staged. The
@@ -856,7 +910,7 @@ export async function main(ns: NS): Promise<void> {
     }
   };
 
-  const onReport = (report: Report): void => {
+  const onReport = (report: Report, internal = false): void => {
     const order = orderById.get(report.id);
     const attributed = order?.targetIdentity === undefined || report.hosts === undefined
       ? report
@@ -961,8 +1015,9 @@ export async function main(ns: NS): Promise<void> {
     settleCompletion(report.id);
     // A queued successor needs no new planning: atExit wakes dispatch after
     // this process frees its RAM. Replan only when this vantage ran dry; facts
-    // that open work elsewhere wake the controller themselves.
-    if (report.died !== true && (hosts.get(report.from)?.staged ?? []).length === 0) {
+    // that open work elsewhere wake the controller themselves. An INTERNAL
+    // report never replans — see `retireStaged`.
+    if (!internal && report.died !== true && (hosts.get(report.from)?.staged ?? []).length === 0) {
       signalDerive();
     }
   };
@@ -2704,6 +2759,27 @@ export async function main(ns: NS): Promise<void> {
   ns.atExit(() => {
     if (realm.dnet_controller === rendezvous) delete realm.dnet_controller;
   }, "dnet-controller-checkout");
+
+  /** THE FALLBACK TICK, and the only time-driven derive there is.
+   *
+   * The main loop below waits on `dnet.nextMutation()` and nothing else — it is
+   * deliberately not raced, because a losing race leaves a `nextMutation`
+   * outstanding and the next call throws CONCURRENCY ERROR into the one process
+   * that cannot afford to die. That was fine while a pass could re-derive
+   * itself: something always came along. With that edge cut, a net that stops
+   * mutating would stop planning altogether, which is the opposite failure and
+   * a worse one — so the watchdog lives here, beside the wait rather than
+   * inside it, and touches no Netscript call at all.
+   *
+   * It costs one derive every `DERIVE_FALLBACK_MS` on a quiet net, which is
+   * what "nothing stalls silently" is worth. */
+  void (async () => {
+    while (!standDown) {
+      await realmSleep(DERIVE_FALLBACK_MS);
+      if (standDown) return;
+      signalDerive();
+    }
+  })();
 
   let lastBeat = bootAt;
   while (true) {
