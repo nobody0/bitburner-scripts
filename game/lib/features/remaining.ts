@@ -2711,9 +2711,9 @@ function projectedDaedalusEconomics(
   const repFactionMult = (playerTopic?.mults as Record<string, number> | undefined)?.["faction_rep"] ?? 1;
   const standing = ctx.state.topics.factions?.standings?.find((s) => s.name === "Daedalus");
   const favor = standing?.favor ?? 0;
-  const invitePerson = {
+  const personAt = (hacking: number) => ({
     skills: {
-      hacking: Math.max(view.hackingSkill, DAEDALUS_HACKING),
+      hacking,
       strength: view.lowestCombatSkill,
       defense: view.lowestCombatSkill,
       dexterity: view.lowestCombatSkill,
@@ -2722,47 +2722,27 @@ function projectedDaedalusEconomics(
       intelligence: playerTopic?.skills?.intelligence ?? 0,
     },
     mults: { faction_rep: repFactionMult },
-  };
-  const projected = workRepPerSec(
-    "hacking",
-    invitePerson,
-    favor,
-    {
-      factionWorkRepGain,
-      shareBonus: ctx.state.topics.fleet?.sharePower ?? 1,
-      sf15Level: sfLevel(ctx.caps.sourceFiles, 15),
-      hasFocusAug: false,
-    },
-    true,
-  );
-  // d ln(rep rate) / d ln(hacking), by finite difference of the SAME
-  // transcribed formula at the player's CURRENT skills — the coupling that
-  // lets a hacking perturbation move the reputation legs it actually earns.
-  const livePerson = {
-    skills: {
-      hacking: Math.max(1, view.hackingSkill),
-      strength: view.lowestCombatSkill,
-      defense: view.lowestCombatSkill,
-      dexterity: view.lowestCombatSkill,
-      agility: view.lowestCombatSkill,
-      charisma: playerTopic?.skills?.charisma ?? 1,
-      intelligence: playerTopic?.skills?.intelligence ?? 0,
-    },
-    mults: { faction_rep: repFactionMult },
-  };
+  });
   const repCtx = {
     factionWorkRepGain,
     shareBonus: ctx.state.topics.fleet?.sharePower ?? 1,
     sf15Level: sfLevel(ctx.caps.sourceFiles, 15),
     hasFocusAug: false,
   };
+  const projected = workRepPerSec(
+    "hacking",
+    personAt(Math.max(view.hackingSkill, DAEDALUS_HACKING)),
+    favor,
+    repCtx,
+    true,
+  );
+  // d ln(rep rate) / d ln(hacking), by finite difference of the SAME
+  // transcribed formula at the player's CURRENT skills — the coupling that
+  // lets a hacking perturbation move the reputation legs it actually earns.
   const delta = 0.01;
-  const baseRep = workRepPerSec("hacking", livePerson, favor, repCtx, true);
-  const bumpedPerson = {
-    ...livePerson,
-    skills: { ...livePerson.skills, hacking: livePerson.skills.hacking * (1 + delta) },
-  };
-  const bumpedRep = workRepPerSec("hacking", bumpedPerson, favor, repCtx, true);
+  const liveHacking = Math.max(1, view.hackingSkill);
+  const baseRep = workRepPerSec("hacking", personAt(liveHacking), favor, repCtx, true);
+  const bumpedRep = workRepPerSec("hacking", personAt(liveHacking * (1 + delta)), favor, repCtx, true);
   const repRateHackingElasticity = baseRep > 0 ? (bumpedRep / baseRep - 1) / delta : undefined;
 
   const favorToDonate = ctx.state.topics.factions?.favorToDonate ?? favorNeededToDonate(1);
