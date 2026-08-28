@@ -1778,6 +1778,14 @@ The isolation evidence, for the darknet owner:
   as host-absent.
 - Harness note: the forced-GC pacing keys on VIRTUAL time, so a frozen
   clock starves the GC and turns a hang into an OOM spiral.
+- SHARPENED (2026-08-28, rev 45fc4fda — the hang survives the armour-leak
+  fixes and now fires at vt 7 MINUTES): in every captured instance the
+  freeze lands on the tick right after the first SUCCESSFUL darknet
+  backdoor ("dnet-N-xNNN backdoored, 2 hops out",
+  game/lib/features/dnet.ts:1232) — the next planning pass never returns.
+  Combined with the profile, the suspect is candidate/vantage enumeration
+  over a map whose first backdoored host unlocks a shape it cannot
+  terminate on.
 
 Darknet internals are out of scope for the route layer; the route side stays
 estimation-pure and is unit-pinned up to the boundary.
