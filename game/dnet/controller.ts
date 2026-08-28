@@ -973,9 +973,10 @@ export async function main(ns: NS): Promise<void> {
     const targetGb = wanted ? PROBER_ARMOURED_GB : PROBER_GB;
     // Room for the SECOND prober, on top of everything already standing. The
     // incumbent is still holding its own reserve, which `heldGb` counts.
-    const view = planningView(entry, now, expiryOpts());
-    if (view.maxRam === undefined) return false;
-    const free = view.maxRam - (view.blockedRam ?? 0) - heldGb(entry);
+    const expiry = expiryOpts();
+    const maxRam = fresh<number>(entry, "maxRam", now, expiry);
+    if (maxRam === undefined) return false;
+    const free = maxRam - (fresh<number>(entry, "blockedRam", now, expiry) ?? 0) - heldGb(entry);
     if (free < targetGb) return false;
     const offer = offerLaunch<DnetProberLaunch>({ kind: "dnet-prober", host, armoured: wanted });
     let pid = 0;
@@ -2000,21 +2001,21 @@ export async function main(ns: NS): Promise<void> {
     const armourCandidates: ArmourCandidate[] = [];
     for (const entry of hosts.values()) {
       if (entry.hostname === selfHost) continue;
-      // Free capacity beyond everything standing, spelled the same way
-      // `resizeProber` spells it so the two read the same host the same way.
-      // They ask different questions of it — the policy asks whether 2 GB is
-      // worth spending, the resize asks whether the changeover fits right now —
-      // and the resize's bar is the higher one, since it holds both probers for
-      // the width of a boot.
+      // Free capacity beyond everything standing.
+      //
+      // Read FIELD BY FIELD rather than through `planningView`: this runs for
+      // every host on every derive, and a projection clone per host is exactly
+      // the cost a CPU profile already named in this pass. Two freshness checks
+      // are all the question needs.
       //
       // NOT `durableRoomGb`: that already nets off the prober reserve, which
       // `heldGb` counts too, so the pair would subtract it twice.
-      const view = planningView(entry, at, expiry);
-      const free = view.maxRam === undefined
+      const maxRam = fresh<number>(entry, "maxRam", at, expiry);
+      const free = maxRam === undefined
         ? undefined
         // Add back the armour this host is already wearing, so an armoured host
         // does not read as unable to afford the armour it already has.
-        : view.maxRam - (view.blockedRam ?? 0) - heldGb(entry)
+        : maxRam - (fresh<number>(entry, "blockedRam", at, expiry) ?? 0) - heldGb(entry)
           + (entry.prober?.armoured === true ? ARMOUR_GB : 0);
       armourCandidates.push({
         hostname: entry.hostname,
