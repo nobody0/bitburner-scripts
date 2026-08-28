@@ -579,14 +579,45 @@ export function evaluateSelection(
   return evaluate(choices, view);
 }
 
-/** Best set that fits a budget. */
+/** Best set that fits a budget.
+ *
+ * TWO SOLVES when the first forecloses. The greedy is rate-ordered and the
+ * enemy graph makes that side-blind: an instantly-workable faction enters
+ * first on sheer rate and BANS a larger exclusive side for the whole install
+ * cycle, and the local search cannot cross the valley — dropping the one
+ * member alone loses value until every member of the other side is in.
+ * Measured on bn1-full: every seed joined the two-faction western city side
+ * (Sector-12 invites from the start city the moment money crosses its gate)
+ * and left the three-faction eastern side's cheap count shelves banned for
+ * the rest of the node. When the chosen set would foreclose factions not yet
+ * joined, solve once more with the foreclosing CHOICES banned — the freed
+ * side can then enter — and keep whichever solution's TOTAL value wins.
+ * Foreclosure by an already-joined member is sunk and re-solves nothing. */
 export function solvePortfolio(
   frontiers: ReadonlyMap<string, readonly FactionPackage[]>,
   view: FactionsView,
   budgetSec: number,
   seed?: PortfolioSolution,
 ): PortfolioSolution {
-  return localSearch(greedy(frontiers, view, budgetSec, seed), frontiers, view, budgetSec);
+  const first = localSearch(greedy(frontiers, view, budgetSec, seed), frontiers, view, budgetSec);
+  const joined = new Set(view.factions.filter((standing) => standing.joined).map((standing) => standing.name));
+  const foreclosers = new Set<string>();
+  for (const choice of first.choices) {
+    if (joined.has(choice.faction)) continue;
+    const standing = view.factions.find((entry) => entry.name === choice.faction);
+    if (!standing) continue;
+    for (const other of view.factions) {
+      if (other.joined || other.name === choice.faction || !frontiers.has(other.name)) continue;
+      if (standing.enemies.includes(other.name) || other.enemies.includes(choice.faction)) {
+        foreclosers.add(choice.faction);
+        break;
+      }
+    }
+  }
+  if (foreclosers.size === 0) return first;
+  const reduced = new Map([...frontiers].filter(([name]) => !foreclosers.has(name)));
+  const second = localSearch(greedy(reduced, view, budgetSec), reduced, view, budgetSec);
+  return second.value > first.value + 1e-12 ? second : first;
 }
 
 // --- budget ----------------------------------------------------------------
