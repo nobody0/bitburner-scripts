@@ -10,7 +10,7 @@ import { conclusiveAttempt } from "./courier.ts";
 import type { HoldTask } from "./hold.ts";
 import { compareQueuedDnetWork } from "./priority.ts";
 import { JOBS, isTaskKind, priorityOf, type TaskKind } from "./jobs.ts";
-import { STORM_PHISH_OVERLAP_MS, STORM_QUIET_MS } from "./rates.ts";
+import { STORM_PHISH_OVERLAP_MS, STORM_QUIET_MS, STORM_RESTART_BY_MS } from "./rates.ts";
 
 /** What there is to do out there, and who is doing it.
  *
@@ -1160,13 +1160,16 @@ export function planStorm(hosts: readonly DnetHost[], ctx: StormContext): StormP
   if (ctx.lastStormFiredAt !== undefined && ctx.now - ctx.lastStormFiredAt < STORM_QUIET_MS) {
     const left = STORM_QUIET_MS - (ctx.now - ctx.lastStormFiredAt);
     refuse(NET, "storm-in-flight", `our own storm fired ${Math.round((ctx.now - ctx.lastStormFiredAt) / 1000)}s ago; quiet for ${Math.round(left / 1000)}s more`);
-    // Still imminent, and this is the load-bearing case rather than a
-    // courtesy: the controller stamps `lastStormFiredAt` PESSIMISTICALLY at
-    // claim time, seconds before the engine's own 5 s warning and the phase
-    // that actually restarts the fleet. The mass restart therefore lands
-    // INSIDE this quiet window, so standing armour down here would disarm
-    // everyone just before the only event it exists for.
-    return { imminent: true, refused };
+    // Imminent only until the restart WAVE has passed, which is a much shorter
+    // window than the quiet period this gate enforces. The burst restarts every
+    // movable survivor once, in one synchronous block ~5 s in, and does nothing
+    // restart-shaped afterwards — so armour worn past that point is worn for an
+    // event that has already happened.
+    //
+    // The lead-in is the controller's own pessimism: `lastStormFiredAt` is
+    // stamped at claim time, before the call, so this opens ahead of the
+    // engine's warning rather than behind it.
+    return { imminent: ctx.now - ctx.lastStormFiredAt < STORM_RESTART_BY_MS, refused };
   }
 
   // 2. Prefer a live, stasis-linked seed holder, then break ties by name.

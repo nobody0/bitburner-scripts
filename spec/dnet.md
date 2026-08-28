@@ -1279,21 +1279,42 @@ against the shipped fleet's 72.17 stranded GB-h and 3.9 unrecovered hosts:
 
 | arm | armours when | armour GB-h | stranded GB-h | dodged | unrecovered | total cost vs shipped |
 | --- | --- | --- | --- | --- | --- | --- |
-| `firing` | the storm is being fired, or burning | 1.04 | 23.17 | 28.8 | 1.0 | `-47.96`, CI `-72.31..-23.61`, 13/16 |
-| `ready` | also while only the phish window is shut | 4.02 | 23.85 | 35.1 | 0.9 | `-44.30`, CI `-66.42..-22.19`, 14/16 |
+| `firing` | the storm is being fired, or burning | 0.47 | 23.55 | 28.6 | 0.8 | `-48.16`, CI `-75.87..-20.45`, 12/16 |
+| `ready` | also while only the phish window is shut | 2.58 | 28.11 | 39.4 | 1.2 | `-41.48`, CI `-69.94..-13.02`, 13/16 |
 
-`ready` buys minutes of lead time and dodges a fifth more restarts, but it wears
-armour through the established net's resting state and the extra 3 GB-h costs
-more than the extra dodges save. **Production ships `firing`** — `StormPlan.imminent`
-— and `awaitingPhishWindow` is reported separately so the alternative stays
-measurable rather than becoming a fork.
+`ready` buys minutes of lead time and dodges a third more restarts, but it wears
+armour through the established net's resting state and the extra 2 GB-h costs
+more than the extra dodges save. **Production ships `firing`** —
+`StormPlan.imminent` — and `awaitingPhishWindow` is reported separately so the
+alternative stays measurable rather than becoming a fork. At 0.47 GB-h against
+the 72.17 the unarmoured fleet strands, the armour is not far off free.
+
+**Taking it off matters as much as putting it on**, and there are two rules:
+
+- **Armour is a fuse, not a coat.** The successor an armoured prober spawns
+  comes back UNARMOURED. It cannot need the armour again for the same event —
+  `mutationLock` freezes the ordinary clock for the whole burst and
+  `restartAllDarknetServers` walks the fleet once, so no host is restarted twice
+  by one storm. And if the restart came from the ordinary per-tick draw instead,
+  it cleared the backdoor that justified the armour, so `planArmour` would not
+  ask again either. The controller re-arms through `resizeProber` if it still
+  wants to, out of a smaller allocation than the 5.15 GB the dying process held.
+- **The window closes when the wave has passed**, not when it is safe to fire
+  again. `STORM_RESTART_BY_MS` (15 s) is the horizon after our own pessimistic
+  stamp by which the restart block has certainly run; `STORM_QUIET_MS` (35 s) is
+  a different question with a longer answer, and using it kept armour on for
+  more than twice as long as it could possibly be useful.
+
+Together those two halved the armour bill — 1.04 GB-h to 0.47 — while slightly
+*improving* the recovery tail, because armour spends itself where it is needed
+instead of idling on hosts that have already taken their hit.
 
 What armour does NOT buy is throughput. Caches per hour are flat and money spans
-zero on both arms (`firing` `+$7m/h`, CI `-52.83..66.76`). **The capacity ledger
-is the proven result. There is no measured earnings effect, and none should be
-claimed.** That is not an argument against the armour: this lane's reconquest
-replants at zero virtual cost, so it prices the capacity a restart strands and
-not the disruption it causes.
+zero on both arms (`firing` `-$12m/h`, CI `-103.98..79.77`). **The capacity
+ledger is the proven result. There is no measured earnings effect, and none
+should be claimed.** That is not an argument against the armour: this lane's
+reconquest replants at zero virtual cost, so it prices the capacity a restart
+strands and not the disruption it causes.
 
 A stasis-linked host is never armoured: `isImmutable` is
 `openServer || isConnectedTo || hasStasisLink` and `restartServer` returns early

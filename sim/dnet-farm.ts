@@ -494,6 +494,11 @@ export function runFarmCase(
       if (armoured.has(name)) {
         run.restartsDodged++;
         agents.set(name, {});
+        // The armour is SPENT. The successor spawns unarmoured, because no host
+        // is restarted twice by one storm — `mutationLock` freezes the ordinary
+        // clock and `restartAllDarknetServers` walks the fleet once — so a coat
+        // kept on after the wave has passed is paid for nothing.
+        armoured.delete(name);
         continue;
       }
       // Unarmoured: the host has nothing left standing and must wait for a

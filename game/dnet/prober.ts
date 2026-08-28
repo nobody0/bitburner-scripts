@@ -1,7 +1,7 @@
 import type { NS } from "@ns";
 import { captureLaunch, offerLaunch, temporaryRunOptions } from "../lib/launch-shared.ts";
 import type { DnetProberLaunch } from "./launch.ts";
-import { live, PROBER_ARMOURED_GB } from "./shared.ts";
+import { live, PROBER_GB } from "./shared.ts";
 
 /** This file, as the engine names it. A `spawn` takes a path, not a module. */
 const PROBER_FILE = "dnet/prober.js";
@@ -48,7 +48,9 @@ const ARMOUR_SPAWN_DELAY_MS = 1;
  * declares, pinned by `tests/ram-budget.test.ts`. There are two sizes:
  * `PROBER_CALLS` (`dnet.probe`, `exec`, `dnet.connectToSession`) at
  * `PROBER_GB`, and `PROBER_ARMOURED_CALLS` — the same plus `spawn` — at
- * `PROBER_ARMOURED_GB`. The armour hook is the only place this file calls
+ * `PROBER_ARMOURED_GB`. A stasis launch pays only for `dnet.probe`; its
+ * controller-managed agents are started by an atomic ns-proxy lease. The
+ * armour hook is the only place this file calls
  * anything billable, and it is gated on `launch.armoured` for exactly that
  * reason: a prober that spawned without having been sized for it would be
  * killed mid-call by the engine's dynamic RAM check. Everything else here is
@@ -93,7 +95,18 @@ export async function main(ns: NS): Promise<void> {
     ns.atExit(() => {
       const g = live();
       if (!g) return;
-      const offer = offerLaunch<DnetProberLaunch>({ kind: "dnet-prober", host, armoured: true });
+      // The successor comes back UNARMOURED, because armour is a fuse rather
+      // than a coat: it has just been spent, and it cannot be needed again for
+      // the same event. `mutationLock` freezes the ordinary clock for the whole
+      // burst and `restartAllDarknetServers` walks the fleet once, so no host is
+      // restarted twice by one storm. And if this was the ordinary per-tick
+      // draw instead, the restart cleared the backdoor that justified the armour
+      // — so `planArmour` would not ask for it again either.
+      //
+      // The controller re-arms through `resizeProber` if it still wants to, at
+      // an order boundary and out of a smaller allocation than the 5.15 GB this
+      // process was holding.
+      const offer = offerLaunch<DnetProberLaunch>({ kind: "dnet-prober", host });
       // The controller is the only thing that knows whether this death was
       // ordered. A deliberate kill must not respawn, or every replacement and
       // every resize becomes a respawn loop.
@@ -103,7 +116,7 @@ export async function main(ns: NS): Promise<void> {
       }
       ns["spawn"](
         PROBER_FILE,
-        temporaryRunOptions({ threads: 1, ramOverride: PROBER_ARMOURED_GB, spawnDelay: ARMOUR_SPAWN_DELAY_MS }),
+        temporaryRunOptions({ threads: 1, ramOverride: PROBER_GB, spawnDelay: ARMOUR_SPAWN_DELAY_MS }),
         offer.launchId,
       );
     }, "dnet-prober-armour");

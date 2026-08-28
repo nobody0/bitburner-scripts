@@ -585,6 +585,21 @@ export const STORM_BURST_MS = 30_000;
  * stamp being taken at claim time rather than at the engine's own clock. */
 export const STORM_QUIET_MS = 35_000;
 
+/** How long after our own fire stamp the restart wave can still be ahead of us.
+ *
+ * `launchWebstorm` sleeps 5 s on its warning toast and then, in ONE synchronous
+ * block, deletes, moves and `restartAllDarknetServers()`. Every later phase only
+ * adds hosts and rebalances, and `mutationLock` freezes the ordinary clock
+ * throughout — so no host is restarted twice by one storm, and after this point
+ * nothing in the burst can restart anything.
+ *
+ * That makes it the moment armour stops being worth wearing, which is a
+ * different question from `STORM_QUIET_MS` (when it is safe to fire again) and
+ * a much shorter answer. The margin over the engine's 5 s covers our stamp
+ * being taken pessimistically at claim time, before the call is even made.
+ * Source: src/DarkNet/effects/webstorm.ts:41-49 */
+export const STORM_RESTART_BY_MS = 15_000;
+
 /** How recently a `.d.cache` must have landed for a storm to fire. Matching
  * the storm's 30-second burst keeps all downtime inside the three-minute dead
  * cache window. A wider arm raised mean caches slightly but reduced money and

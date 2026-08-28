@@ -6,6 +6,7 @@ import { handoffLaunch } from "../game/lib/launch-shared.ts";
 import {
   DNET_PROTOCOL,
   PROBER_ARMOURED_GB,
+  PROBER_GB,
   dnetRealm,
   type ControllerHandle,
   type HostEntry,
@@ -218,9 +219,13 @@ describe("the prober lends its ns and then does nothing", () => {
     const [spawned] = spawns();
     expect(spawned!.file).toBe("dnet/prober.js");
     expect(spawned!.options["spawnDelay"]).toBeGreaterThan(0);
-    // Sized for the surface it is about to use, including the `spawn` it will
-    // need to defend itself again.
-    expect(spawned!.options["ramOverride"]).toBe(PROBER_ARMOURED_GB);
+    // UNARMOURED, and smaller than the process that spawned it. Armour is a
+    // fuse: the restart it defended against cannot happen twice in one storm,
+    // and the ordinary per-tick draw clears the backdoor that would have
+    // justified it. The controller re-arms through `resizeProber` if it still
+    // wants to.
+    expect(spawned!.options["ramOverride"]).toBe(PROBER_GB);
+    expect(spawned!.options["ramOverride"]).toBeLessThan(PROBER_ARMOURED_GB);
     // The controller was told BEFORE the spawn, so no repair path can exec a
     // duplicate into the gap.
     expect(live.respawns()).toEqual([{ host: HOST, pid: PROBER_PID, launchId: spawned!.args[0] as number }]);
