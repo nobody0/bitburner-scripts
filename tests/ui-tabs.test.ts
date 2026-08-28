@@ -315,8 +315,8 @@ describe("tab rendering", () => {
     // A P/L is signed OUTSIDE the currency mark, and coloured by direction.
     expect(html).toContain(`<span class="bad">-$4.000e8</span>`);
     // No records were folded, so the projection never watched this ledger open.
-    // `tradeCashFlow` is cumulative and survives a controller handoff, so a first
-    // sighting of it says nothing about when trading started: the denominator is
+    // A first non-zero `tradeCashFlow` sighting says nothing about when trading
+    // started: the denominator is
     // genuinely absent, and "unknown" is a different statement from "has not
     // traded yet". Dividing here is what produced a rate against the age of the
     // browser tab.

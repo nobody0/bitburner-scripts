@@ -78,16 +78,14 @@ describe("stock capital and earnings series", () => {
     // Not `[[0, 10_000]]`: nothing has been realised because nothing has traded.
     expect(state.stockSeries.realized).toEqual([]);
     expect(state.stockSeries.unlockSpend).toEqual([]);
-    // An absent ledger is not evidence that the ledger has not traded: a
-    // handoff-rebuilt topic looks exactly like this while the parked ledger
-    // holds hours of flow. So the clock stays unarmed either way.
+    // An absent ledger is not evidence that this emitter has not traded, so the
+    // clock stays unarmed.
     expect(state.stockRateSince).toBeNull();
     expect(state.sawStockLedgerOpen).toBe(false);
   });
 
   test("the measured-rate clock starts at the first WATCHED trade", () => {
-    // An explicit zero is the one proof that nothing has traded yet this
-    // install: the ledger survives a handoff and only an install zeroes it.
+    // An explicit zero is proof that this emitter has not traded yet.
     const state = appendRecords(emptyState(), [
       stockRecord(0, { tradeCashFlow: 0 }),
       stockRecord(1_000, { tradeCashFlow: -10_000 }),
@@ -121,22 +119,16 @@ describe("stock capital and earnings series", () => {
     expect(state.stockSeries.realized).toEqual([[0, 0], [1_000, 0]]);
   });
 
-  test("a backwards market tick is a controller handoff, and drops nothing", () => {
-    // `market.tick` is `memory.history.tick` off a module-level `let`, so a
-    // build push restarts it at 0 — while `gameGlobal.stockFlows`, the ledger
-    // this was read as closing out, is parked in the page realm precisely so
-    // the same push cannot zero it. An install is a different artifact and a
-    // different file, so it can never be seen from inside one stream.
+  test("a backwards market tick is a controller restart, and drops nothing", () => {
     const state = appendRecords(emptyState(), [
       stockRecord(0, { tradeCashFlow: 0, unlockSpend: 5.2e9, portfolioValue: 0, portfolioCost: 0, market: { tick: 500, cyclesSeen: 6, lastFlipCount: 0 } }),
       stockRecord(1_000, { tradeCashFlow: 4e8, unlockSpend: 5.2e9, portfolioValue: 0, portfolioCost: 0, market: { tick: 501, cyclesSeen: 6, lastFlipCount: 0 } }),
       // The successor process: its market clock restarts, and its rebuilt topic
-      // carries no ledger until the next `execute()` merges the surviving one.
+      // carries no ledger until the next stock action.
       stockRecord(2_000, { portfolioValue: 0, portfolioCost: 0, market: { tick: 1, cyclesSeen: 0, lastFlipCount: 0 } }),
       stockRecord(3_000, { tradeCashFlow: 4.1e8, unlockSpend: 5.2e9, portfolioValue: 0, portfolioCost: 0, market: { tick: 2, cyclesSeen: 0, lastFlipCount: 0 } }),
     ]);
-    // Every pre-handoff point is still there, and the ledger's own history is
-    // continuous across the gap rather than restarting from a cliff.
+    // Every pre-restart point is still there.
     expect(state.stockSeries.realized).toEqual([[0, 0], [1_000, 4e8], [3_000, 4.1e8]]);
     expect(state.stockSeries.value).toEqual([[0, 0], [1_000, 0], [2_000, 0], [3_000, 0]]);
     expect(state.stockSeries.unlockSpend).toEqual([[0, 5.2e9], [1_000, 5.2e9], [3_000, 5.2e9]]);
@@ -144,11 +136,7 @@ describe("stock capital and earnings series", () => {
     expect(state.stockRateSince).toBe(1_000);
   });
 
-  test("a ledger that vanishes after having been present is a handoff", () => {
-    // `stockModule.reset` deletes the whole topic, but only at an install —
-    // which is a new artifact. Inside one stream the same shape is a successor
-    // controller whose rebuilt topic has no ledger yet, so the curve waits for
-    // the next merge instead of being thrown away.
+  test("a ledger that vanishes during a controller restart does not erase history", () => {
     const state = appendRecords(emptyState(), [
       stockRecord(0, { tradeCashFlow: 4e8, portfolioValue: 0, portfolioCost: 0 }),
       stockRecord(1_000, {}),

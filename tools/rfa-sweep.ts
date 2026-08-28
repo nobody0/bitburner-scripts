@@ -1,13 +1,6 @@
 import { isSweepableFile } from "../shared/deployment.ts";
 import type { RfaSession } from "./rfa-session.ts";
 
-export interface SweepResult {
-  deleted: string[];
-  /** Stale files the game refused to delete because they are still running. */
-  skipped: string[];
-  hosts: number;
-}
-
 /** Pure half: which of `fileNames` this sweep would delete. Kept free of I/O so
  * the ownership rule can be tested against a real in-game listing without a
  * socket. */
@@ -21,31 +14,23 @@ export function planSweep(
 
 /** Remove every stale artifact of this project from `hosts`.
  *
- * A refusal is never fatal: `deleteFile` returns false for a script the game is
- * still running, which is exactly what protects the outgoing generation during
- * a build handoff. */
+ * Sync has already killed the fleet, so any listing or deletion failure is a
+ * failed transaction and must keep the wrapper parked. */
 export async function sweepStaleFiles(
   session: RfaSession,
   owned: ReadonlySet<string>,
   keep: ReadonlySet<string>,
   hosts: readonly string[],
-  options: { dryRun?: boolean } = {},
-): Promise<SweepResult> {
+): Promise<string[]> {
   const deleted: string[] = [];
-  const skipped: string[] = [];
   for (const host of hosts) {
-    const names = await session.getFileNames(host).catch(() => undefined);
-    // A host that cannot be listed is skipped rather than aborting the sweep:
-    // the fleet changes between the server listing and this loop.
-    if (!names) continue;
+    const names = await session.getFileNames(host);
     for (const filename of planSweep(names, owned, keep)) {
-      if (options.dryRun) {
-        deleted.push(`${host}:${filename}`);
-        continue;
+      if (!await session.deleteFile(host, filename)) {
+        throw new Error(`failed to delete stale file ${host}:${filename}`);
       }
-      if (await session.deleteFile(host, filename)) deleted.push(`${host}:${filename}`);
-      else skipped.push(`${host}:${filename}`);
+      deleted.push(`${host}:${filename}`);
     }
   }
-  return { deleted, skipped, hosts: hosts.length };
+  return deleted;
 }

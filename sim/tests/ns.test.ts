@@ -145,8 +145,8 @@ lane({ feature: "world", bn: 1 }).describe("running game/ in the synthetic world
     expect(result.stoppedBecause).toBe("goal");
     // No script may die of anything but a deliberate kill.
     expect(result.crashes).toEqual([]);
-    // The controller announces itself, which proves start.js's main ran.
-    expect(result.output[0]).toContain("start.js online");
+    // The controller announces itself, proving the wrapper spawned main.js.
+    expect(result.output[0]).toContain("main.js online");
     expect(result.records).toBeGreaterThan(100);
     expect(result.validity).toBe("valid");
   }, 10_000);

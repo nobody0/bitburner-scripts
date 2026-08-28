@@ -9,6 +9,10 @@
       "target": "start.js"
     },
     {
+      "source": "game/main.ts",
+      "target": "main.js"
+    },
+    {
       "source": "game/lib/ns-resident.ts",
       "target": "lib/ns-resident.js"
     },

@@ -2836,8 +2836,7 @@ function readablePlan(state: GameState): ProgressionPlan | undefined {
   return plan;
 }
 
-/** The previous route decision, surviving a build handoff: module state dies
- * with the old bundle, but the published plan lives in the realm store. */
+/** Recover the previous route decision from the published controller state. */
 function previousChoice(ctx: NeedContext): RouteChoice | undefined {
   if (progressionMemory.choice) return progressionMemory.choice;
   const plan = readablePlan(ctx.state);
@@ -3787,9 +3786,8 @@ export const goModule: FeatureModule = {
     goTurnReadyAt = undefined;
     resetGoPlaybookLine();
     goPlaybookEntry = undefined;
-    // Drop board/seed work crossing a prestige. The worker itself remains the
-    // single V9 owner across controller handoffs; its backend is rebuilt after
-    // this reset before the successor game is evaluated.
+    // Drop board/seed work crossing a prestige. Rebuild the V9 backend before
+    // the successor game is evaluated.
     if (testGoRuntime) void testGoRuntime.reset();
     else resetGoNeuralWorkerRuntime();
     goTickPhase = undefined;

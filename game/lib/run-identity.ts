@@ -53,10 +53,7 @@ function lineageFrom(markerValue: SaveMarker): LineageIdentity {
 
 /** Resolve identity before recording starts. This is acquisition, not sending,
  * and therefore runs in both ordinary and --perf builds. */
-export async function resolveRunIdentity(ns: NS, handoff = false): Promise<ArtifactIdentity> {
-  const inherited = gameGlobal.artifactIdentity;
-  if (handoff && inherited) return inherited;
-
+export async function resolveRunIdentity(ns: NS): Promise<ArtifactIdentity> {
   let saved = marker(ns.read(SAVE_ID_FILE));
   if (!saved) {
     const id = newId();

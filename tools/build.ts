@@ -21,11 +21,7 @@ export interface BuildOptions {
   minifyNames?: boolean;
 }
 
-/** In-game filename of the build stamp. game/start.ts compares it against its
- * baked-in __BUILD_ID__ each tick and respawns itself when they differ, so a
- * push is enough to roll a new version — no manual restarts. */
-export const BUILD_ID_FILE = "build-id.txt";
-
+/** Unique identity embedded in every artifact emitted by one build. */
 function createBuildId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -211,10 +207,7 @@ export async function buildScripts(
     built.push(await bundleEntry(config, entry, filename, buildId, options, goWorkerSource));
   }
 
-  const artifacts = [...built];
-  await writeFile(path.join(config.buildDir, BUILD_ID_FILE), buildId, "utf8");
-  artifacts.push({ filename: BUILD_ID_FILE, content: buildId });
-  return artifacts;
+  return built;
 }
 
 if (import.meta.main) {

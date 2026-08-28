@@ -24,8 +24,8 @@ export interface ProxyLaunch extends ScriptLaunch {
   readonly gone: () => void;
 }
 
-/** `nsMain` is the long-lived script's own `ns` — `start.js` on home, which
- * never returns (game/start.ts). It is the one `ns` in the realm that has
+/** `nsMain` is the long-lived script's own `ns` — `main.js` on home, which
+ * never returns (game/main.ts). It is the one `ns` in the realm that has
  * statically paid for `exec` (1.3 GB), so every launch the proxy makes and
  * every proxied `exec` routes through it and costs the bundle nothing more. */
 export interface NsProxyGlobals {

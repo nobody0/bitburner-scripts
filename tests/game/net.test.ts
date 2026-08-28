@@ -146,9 +146,7 @@ describe("reapStrayScripts", () => {
     expect(stub.killed).toEqual([11]);
   });
 
-  test("registered workers survive a build handoff", async () => {
-    // After a handoff the dispatcher ledger is fresh but the realm registry
-    // still holds every live op, so nothing may be killed.
+  test("registered workers are not mistaken for strays", async () => {
     const stub = proxy({
       "pserv-0": [
         { pid: 20, filename: "worker/worker.js", args: [1] },

@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildView, resetStockState } from "../game/lib/features/stock.ts";
-import { gameGlobal, type StockFlows } from "../game/lib/globals.ts";
+import { buildView } from "../game/lib/features/stock.ts";
 import { emptyBoard, noGrants } from "../game/lib/features/index.ts";
 import { initState } from "../game/lib/state.ts";
 import { unknownCapabilities } from "../shared/features/unlock.ts";
@@ -826,30 +825,5 @@ describe("when to liquidate — the signal, not the solver", () => {
     // are asked properly.
     expect(buildView(ctxWith(undefined))?.liquidate).toBe(false);
     expect(buildView(ctxWith({ ...ending }))?.liquidate).toBe(false);
-  });
-});
-
-describe("the self-measured trade ledger", () => {
-  test("survives a build handoff, and only an install clears it", () => {
-    // The ledger cannot live in a module `let`. A build push replaces this
-    // module but not the page realm, so a fresh instance would start at zero and
-    // then republish that zero over the accumulated total at its next trade —
-    // erasing money that was really earned from both the viewer's earnings
-    // curve and `earnedSinceInstall`. `farmTarget` is parked on `gameGlobal` for
-    // exactly this reason.
-    delete gameGlobal.stockFlows;
-
-    // What `execute()` does after a trade.
-    const ledger: StockFlows = (gameGlobal.stockFlows ??= { tradeCashFlow: 0, unlockSpend: 0 });
-    ledger.tradeCashFlow += -4e8;
-    ledger.tradeFlowSince ??= 1_000;
-    ledger.unlockSpend += 5.2e9;
-
-    // A handoff: the module is new, the realm is not.
-    expect(gameGlobal.stockFlows).toEqual({ tradeCashFlow: -4e8, tradeFlowSince: 1_000, unlockSpend: 5.2e9 });
-
-    // An install is the one thing that may zero it, and it says so explicitly.
-    resetStockState();
-    expect(gameGlobal.stockFlows).toBeUndefined();
   });
 });

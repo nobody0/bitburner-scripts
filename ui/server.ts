@@ -82,7 +82,7 @@ function metadataFor(dir: string, name: string, prefix: string): RunCatalogEntry
     return {
       version: 1,
       file,
-      hello: { run: file, src, script: src === "game" ? "start.js" : "sim", startedAt: createdAt },
+      hello: { run: file, src, script: src === "game" ? "main.js" : "sim", startedAt: createdAt },
       emitters: [file],
       records: 0,
       firstT: null,
@@ -181,7 +181,7 @@ function backfillLegacyMetadataIn(dir: string, prefix: string): void {
       hello: {
         run: emitter,
         src: source,
-        script: source === "game" ? "start.js" : "sim",
+        script: source === "game" ? "main.js" : "sim",
         startedAt: createdAt,
       },
       emitters: [emitter],

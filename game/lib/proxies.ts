@@ -1,6 +1,7 @@
 import { createNsProxy, type ProxyPlacer } from "./ns-proxy.ts";
 import { proxyHandle as handle, proxyRealm as realm, type ProxyGlobals } from "./ns-proxy-shared.ts";
 import type { ResidentAsk } from "../../shared/ram/broker.ts";
+import { MAIN_SCRIPT_GB } from "./ram.ts";
 
 export { nsp, nspLong } from "./ns-proxy-shared.ts";
 
@@ -32,16 +33,6 @@ export { nsp, nspLong } from "./ns-proxy-shared.ts";
 const NSP_BUDGET_GB = 14.4;
 const NSP_LONG_BUDGET_GB = 2.4;
 
-/** `start.js`'s ENTIRE static cost: 1.6 GB base plus `ns.exec`, and nothing
- * else in the whole bundle is billable. That is the point of the ns proxy, and
- * `tests/ram-budget.test.ts` asserts the member list exhaustively.
- *
- * It must equal the numeric literal in `game/start.ts`'s `ns.ramOverride(...)`,
- * which cannot import this: the static analyser reads that literal before the
- * script is launched, so it has to be written out. The test pins the two
- * together. */
-export const START_SCRIPT_GB = 2.9;
-
 /** A fresh game's home RAM. */
 const FRESH_HOME_GB = 8;
 
@@ -50,7 +41,7 @@ const FRESH_HOME_GB = 8;
  * itself need a resident. Everything the bootstrap does fits inside it several
  * times over: `nuke` 0.05, `scp` 0.6, `hasRootAccess` 0.05,
  * `getServerMaxRam` 0.05. */
-export const HOME_BOOTSTRAP_EXECUTABLE_GB = FRESH_HOME_GB - START_SCRIPT_GB;
+export const HOME_BOOTSTRAP_EXECUTABLE_GB = FRESH_HOME_GB - MAIN_SCRIPT_GB;
 
 /** Home, blind, capped at what a fresh game is guaranteed to have. This is the
  * placer both residents boot with; `bootstrapResidentHost` replaces it the
@@ -73,9 +64,8 @@ export function fixedHostPlacer(host: string, capacityGb: number): ProxyPlacer {
   };
 }
 
-/** Create the residents if this realm has none. Idempotent: a build handoff
- * re-enters here with the previous instance's handles still published, and
- * adopting them keeps the running residents instead of orphaning their RAM. */
+/** Create the current controller's residents if this bundle has not already
+ * initialized them. Cold launch cleanup removes handles from older runs. */
 export function initProxies(): void {
   const held = realm();
   held.ns_proxy ??= createNsProxy({ label: "nsp", budgetGb: NSP_BUDGET_GB, place: homeBootstrapPlacer });

@@ -2,80 +2,61 @@
 
 ## Source, build, deployment
 
-The repository has three deliberately separate layers:
+`game/` contains authored TypeScript and is the only deployable source tree.
+`tools/build.ts` bundles the explicit `bitburner.config.json` entrypoints into
+standalone JavaScript; imported `shared/` code disappears into those bundles.
 
-1. `game/` contains authored TypeScript and no generated JavaScript. It is the
-   only directory containing deployable entrypoints (enforced by config
-   validation). Those entrypoints may import self-contained pure code from
-   `shared/`; esbuild folds that code into standalone artifacts, so no external
-   module is required in the game. `shared/` cannot import any other project
-   directory or a runtime package (`@ns` is permitted for erased types only).
-2. `tools/build.ts` reads the explicit entrypoint allowlist and bundles each
-   entry to `build/` with esbuild.
-3. A sync pushes only those built artifacts to the configured Bitburner server
-   through the Remote File API. The implementation is `tools/sync.ts`
-   (`runSync` + `SyncOptions`), reached through either transport: the ui/ hub
-   runs it in-process over its persistent game connection (POST `/sync`, JSON
-   body of options), and the `bun run sync` CLI (`tools/rfa-server.ts`) parses
-   the same options from flags — `--perf`, `--readable`, `--no-sweep`,
-   `--sweep-dry-run`, `--types-only` — and forwards them to the hub when one
-   is running, falling back to a one-shot listener when none is.
+Startup has two root artifacts:
 
-Runtime helpers are named with the build id already baked into the controller
-(`worker/worker.<build>.js`, `lib/ns-resident.<build>.js`). A sync pushes those
-immutable files before replacing `start.js`, then pushes `build-id.txt` last.
-The running controller therefore keeps using its own helpers until the complete
-new set exists. Build ids are timestamp-plus-random identities, not counters:
-they require no shared mutable state and remain unique across branches and
-concurrent builds.
+- `start.js` is the autoexec and sync wrapper. Its honest static cost is 4.1 GB
+  (base + `killall` + `spawn`). Normal startup immediately spawns `main.js`.
+- `main.js` is the controller. The wrapper launches it temporary with a 3.2 GB
+  RAM override, zero delay, and duplicate prevention.
 
-Library modules are imported by entrypoints and disappear into their bundles;
-they are not separate in-game files unless promoted to explicit entries.
+Every build embeds one `__BUILD_ID__` in all artifacts, but no build-stamp file
+or runtime adoption protocol exists. A controller launch always clears the
+page-realm operational caches and rebuilds from game state.
 
-## Remote File API direction
+## Clean sync transaction
 
-Bitburner opens a WebSocket connection to the server in this repository. After
-that connection exists, the tool sends JSON-RPC 2.0 requests to the game. The
-tools use:
+Bitburner's v3.0.1 Remote File API can push, list and delete files, but cannot
+kill or launch processes. `sync-control.txt` bridges that gap with three
+versioned phases: `prepare`, `ready`, and `commit`.
 
-- `pushFile` to create or replace an allowlisted script;
-- `getDefinitionFile` to retrieve the exact Netscript TypeScript definitions.
+1. The external process completes the local build and writes `prepare`, naming
+   a unique request id and every accessible host.
+2. `main.js` launches `start.js --sync` and exits. The wrapper runs `killall`
+   over every named host, home last and with its own safety guard, then writes
+   `ready`.
+3. The external process pushes every artifact and strictly deletes stale
+   project-owned `.js` files.
+4. Only after all writes and deletions succeed does it write `commit`. The
+   wrapper spawns the new `main.js` and exits.
 
-Those operations are intentionally separate: `sync` only builds and pushes,
-while `types` only refreshes the tracked definition file.
+A failure before commit leaves the wrapper parked. A later prepare request with
+a new id repeats the kill and resumes the transaction safely. There is no
+legacy deployment detection or compatibility handoff.
 
-The ui/ hub owns the Remote File API port for its whole lifetime and the game
-stays connected to it. That permanence is the point: a port that is open only
-during a sync forces the game's auto-reconnect (a nonzero
-`RemoteFileApiReconnectionDelay`) to fail every interval in between — console
-spam on each attempt, plus an error-toast cycle after every disconnect. A
-held-open connection costs nothing (the game only answers requests) and makes
-syncs immediate. Only the CLI fallback — used when no hub is running — listens
-one-shot, timing out after 30 seconds without a game connection so a stray
-invocation cannot hold the port forever. The destructive `restore.js`
-maintenance entrypoint is excluded from normal builds and is built and pushed
-only by `save:restore`.
+Both transports use `tools/sync.ts`: the UI hub invokes it in-process through
+POST `/sync`, while `bun run sync` forwards to the hub or falls back to a
+one-shot Remote File API listener. `--perf` and `--readable` modify the build;
+`--types-only` retrieves definitions without restarting scripts. Sweep bypasses
+do not exist.
 
-`sync` calls `deleteFile`, gated by a derived ownership rule rather than a
-manifest: `ownedDirectories()` (`shared/deployment.ts`) reads the directories
-the build's own targets write into, and `isSweepableFile()` admits only a `.js`
-file inside one of them that this build and the previous one did not push. A
-renamed or retired artifact is therefore collected the moment it leaves
-`bitburner.config.json`, with nothing to keep up to date — a hand-maintained
-list of former names is wrong the first time someone forgets it.
+## Ownership and deletion
 
-Three further layers stand behind that rule. `getFileNames` returns only
-`server.scripts` and `server.textFiles`, so `.msg`/`.lit`/`.exe`/`.cct` are not
-even enumerable; `BaseServer.removeFile` refuses to delete a running script,
-which is what protects the outgoing worker generation during a handoff; and the
-`.js` restriction spares a player's own text files inside our directories.
-`tests/rfa-sweep.test.ts` drives the rule over a transcribed in-game listing
-containing every one of those categories and asserts the delete set is exactly
-this project's stale artifacts.
+The sweep derives owned directories from configured targets. Only stale `.js`
+files directly inside those directories are deletable. Root files, game files,
+player text files, and `data/` remain protected. Because the fleet has already
+been killed, an inaccessible host or refused deletion fails the transaction
+instead of being skipped.
+
+The destructive `restore.js` maintenance entrypoint remains outside normal
+builds and is pushed only by `save:restore`.
 
 ## Testing boundary
 
-Pure strategy functions belong outside `main(ns)`. Unit-test those functions
-with Bun's test runner. The RFA request/session layer is tested with an in-memory
-socket; live-game verification remains a small smoke test after installation.
-
+Pure decisions and protocol parsing are unit-tested with Bun. RAM analysis pins
+the shipped wrapper at 4.1 GB and the controller within its 3.2 GB allocation.
+The simulator registers both real entrypoints and boots through `start.js`, so
+the same zero-delay spawn path runs in simulation and in game.

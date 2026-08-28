@@ -53,7 +53,6 @@ import {
   type RamSupplyState,
 } from "../../../shared/strategy/ram-supply.ts";
 import { TOR_COST } from "../../../shared/strategy/dnet/rates.ts";
-import { gameGlobal } from "../globals.ts";
 import { bestIncomePerSec, bestReinvestmentReturnPerDollarSec, moneyRateValue, moneyStepValue } from "../income.ts";
 import { buildView, drainCompletions, initDriver, pump, type DriverState } from "../dispatch-driver.ts";
 import { merge, recordProbeFailure, set, type GameState } from "../state.ts";
@@ -71,11 +70,8 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedCon
  * slower by orders of magnitude, which is the whole reason the frame schedules
  * by cadence rather than running everything every pass. */
 
-/** Module-level, not realm-level: the ledger is per-controller-instance by
- * design. A build handoff gives the incoming controller a fresh ledger while
- * its workers keep running, and liveness is recovered from the realm registry
- * (worker_info) rather than from this — see reapStrayScripts. */
 let state: DriverState | undefined;
+let farmTarget = "";
 
 export function hackingState(): DriverState {
   return (state ??= initDriver());
@@ -88,13 +84,10 @@ export function hackingState(): DriverState {
  * so a second run in the same process would otherwise inherit the first one's
  * heap and dispatcher stats.
  *
- * The realm registry is cleared here and NOWHERE else. Across a build handoff
- * it must survive — the incoming controller has a fresh ledger while the old
- * workers keep running, and that registry is the only proof they are alive. A
- * node reset is the opposite case: every script was killed, so every op id in
- * there is unreportable and every pending completion describes a game that no
- * longer exists. Left alone they would leak across every reset and make
- * reapStrayScripts treat dead ops as live. */
+ * Every script was killed at a node reset, so every registered op is
+ * unreportable and every pending completion describes a game that no longer
+ * exists. Left alone they would leak across resets and make reapStrayScripts
+ * treat dead ops as live. */
 export function resetHackingState(): void {
   const globals = workerGlobals();
   globals.worker_info!.clear();
@@ -112,6 +105,7 @@ export function resetHackingState(): void {
   if (shotgunPumpTimer !== undefined) clearTimeout(shotgunPumpTimer);
   shotgunPumpTimer = undefined;
   shotgunPumpTarget = undefined;
+  farmTarget = "";
   state = initDriver();
   pumpMaxMs = 0;
   pumpMsSum = 0;
@@ -784,7 +778,7 @@ function marginalRamIncome(
   const solvedPerGb = solution ? capitalIndependentScore(solution) : undefined;
   // The rollup fallback must be the capital-independent field too: the plain
   // `moneyPerSecPerGb` is the blended score, and reading it here whenever the
-  // directive is momentarily absent (controller handoff, evaluator reset)
+  // directive is momentarily absent during an evaluator reset
   // reintroduced the manipulation double-count on exactly the passes that
   // re-arbitrate pooled money.
   const observedPerGb = solvedPerGb ?? ctx.state.topics.farm?.moneyPerSecPerGbCapitalIndependent;
@@ -1798,10 +1792,10 @@ async function runPump(
   lastPumpAt = performance.now();
 
   const target = result.directive.farm?.host ?? "";
-  const current = gameGlobal.farmTarget ?? "";
+  const current = farmTarget;
   if (target !== current) {
     switched = { from: current, to: target };
-    gameGlobal.farmTarget = target;
+    farmTarget = target;
   }
   return result;
 }

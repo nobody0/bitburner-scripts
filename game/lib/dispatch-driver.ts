@@ -418,9 +418,8 @@ async function startOp(ns: NS, state: DriverState, action: HgwAction, opId: numb
   // Source (imports participate in static dependency/RAM analysis): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Script/RamCalculations.ts#L448-L480
   if (!state.deployed.has(host)) return false;
   const globals = state.globals;
-  // A missing registry means the realm slots were swept out from under this
-  // epoch (augmentation install, build handoff) — every worker is dead and the
-  // successor owns the rendezvous. Fail the op instead of resurrecting the map.
+  // A missing registry means startup or prestige cleanup removed the worker
+  // rendezvous. Fail the op instead of resurrecting the map.
   if (!globals.worker_info || !globals.worker_jobs) return false;
 
   // The pure action's additionalMsec was measured at `plannedAt`; workers turn

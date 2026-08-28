@@ -18,7 +18,7 @@ const config: BitburnerConfig = {
   port: 12525,
   server: "home",
   buildDir: `build-test-perf-${process.pid}`,
-  entries: [{ source: "game/start.ts", target: "start.js" }],
+  entries: [{ source: "game/main.ts", target: "main.js" }],
 };
 
 /** The darknet controller is a SEPARATE bundle built with the same options,
@@ -34,7 +34,7 @@ const dnetConfig: BitburnerConfig = {
  * source. Keep modest strategy headroom while preventing regressions toward
  * full-precision checkpoints or an unstripped playbook (the certificate
  * corpus alone would be tens of MB). */
-const MAX_START_SOURCE_BYTES = 5_500_000;
+const MAX_MAIN_SOURCE_BYTES = 5_500_000;
 
 afterAll(async () => {
   await rm(config.buildDir, { recursive: true, force: true });
@@ -57,13 +57,12 @@ function memberStrings(source: string): Map<string, number> {
 
 describe("compile-time telemetry elimination", () => {
   test("default build contains the telemetry client", async () => {
-    const [main, buildId] = await buildScripts(config, { telemetry: true });
+    const [main] = await buildScripts(config, { telemetry: true });
     expect(main!.content).toContain("WebSocket");
     expect(main!.content).toContain("telemetry");
     expect(main!.content).toContain("start.boot");
     expect(main!.content).toContain("start.crash");
-    expect(main!.content).toContain(buildId!.content);
-    expect(main!.content.length).toBeLessThanOrEqual(MAX_START_SOURCE_BYTES);
+    expect(main!.content.length).toBeLessThanOrEqual(MAX_MAIN_SOURCE_BYTES);
   });
 
   test("--perf build eliminates telemetry entirely, payloads included", async () => {
@@ -78,9 +77,6 @@ describe("compile-time telemetry elimination", () => {
     for (const payloadMarker of [
       "start.boot",
       "start.crash",
-      "start.superseded",
-      "start.respawn",
-      "start.respawn_failed",
       "net.rooted",
       "fleet.reclaimed",
       "fleet.reaped",

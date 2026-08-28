@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { claimControllerEpoch, shouldReportCrash } from "../game/start.ts";
+import { shouldReportCrash } from "../game/main.ts";
+import { planKillOrder } from "../game/start.ts";
+import { parseSyncControl, syncControl } from "../shared/deployment.ts";
 
 /** START.JS — the two decisions boot makes.
  *
@@ -14,24 +16,6 @@ import { claimControllerEpoch, shouldReportCrash } from "../game/start.ts";
  * silent single point of failure: a bad epoch leaves two controllers farming
  * the same fleet, and a bad crash filter either
  * buries real failures or hides them entirely. */
-
-describe("the controller epoch is what makes one instance the controller", () => {
-  test("a fresh realm claims the first epoch", () => {
-    // Cold boot after a page reload: the realm is new and holds no counter.
-    const realm: { controllerEpoch?: number } = {};
-    expect(claimControllerEpoch(realm)).toBe(1);
-    expect(realm.controllerEpoch).toBe(1);
-  });
-
-  test("a handoff into a live realm supersedes the incumbent", () => {
-    // The outgoing controller is still running here; it exits on its next pass
-    // precisely BECAUSE this claim moved the counter past its own epoch.
-    const realm = { controllerEpoch: 7 };
-    expect(claimControllerEpoch(realm)).toBe(8);
-    expect(realm.controllerEpoch).toBe(8);
-  });
-
-});
 
 describe("only real crashes are reported", () => {
   test("ScriptDeath is a clean shutdown, not a failure", () => {
@@ -51,5 +35,22 @@ describe("only real crashes are reported", () => {
     // An error merely CLAIMING the message must still report; the marker is
     // the name, and only Bitburner sets it.
     expect(shouldReportCrash(new Error("ScriptDeath"))).toBe(true);
+  });
+});
+
+describe("clean sync control", () => {
+  test("kills every remote host once and home last", () => {
+    expect(planKillOrder(["home", "n00dles", "darkweb", "n00dles"], "home")).toEqual([
+      "n00dles",
+      "darkweb",
+      "home",
+    ]);
+  });
+
+  test("round-trips valid control messages and rejects malformed input", () => {
+    const prepare = { id: "sync-1", phase: "prepare" as const, hosts: ["home", "home"] };
+    expect(parseSyncControl(syncControl(prepare))).toEqual({ ...prepare, hosts: ["home"] });
+    expect(parseSyncControl('{"id":"","phase":"ready"}')).toBeUndefined();
+    expect(parseSyncControl("not json")).toBeUndefined();
   });
 });

@@ -380,7 +380,7 @@ export interface ProjectedState {
    * Null with that flag set is a market that has genuinely not traded; null
    * with it clear is an attach (or a compacted replay) that arrived after the
    * ledger was already running, where the denominator is not on the wire at
-   * all: the driver holds it as `StockFlows.tradeFlowSince` and does not
+   * all: the driver holds `tradeFlowSince` privately and does not
    * publish it. A panel has to say so rather than divide a whole install's
    * realised P/L by the age of the attach, which is what the previous
    * "first record I happened to see" arming did. */
@@ -719,24 +719,20 @@ const SAMPLE_RING = 400;
  * out a "previous install" mid-stream, on two sentinels that cannot mean an
  * install: one artifact IS one install. `ui/store.ts` keys the run file on
  * `hello.identity.install.id`, that id is keyed on `lastAugReset` and is stable
- * across controller restarts and build handoffs, and the simulator rotates the
+ * across controller restarts, and the simulator rotates the
  * JSONL on prestige — so an install boundary is a different file, loaded as a
  * different run, and cannot appear inside one record stream at all.
  *
- * What CAN appear mid-stream is a controller HANDOFF, and both old sentinels
- * were handoff signals:
+ * What CAN appear mid-stream is a controller restart, and both old sentinels
+ * were restart signals:
  *  - `market.tick` is `memory.history.tick` off a module-level `let`, so it
  *    restarts at 0 whenever a build push replaces the module instance;
  *  - the ledger vanishing is the same event seen from the other side — the
  *    rebuilt topic starts empty and `tradeCashFlow` is merged again only by the
  *    next `execute()`.
- * Both fired while the thing they claimed to close out was still running:
- * `gameGlobal.stockFlows` is parked in the page realm precisely so a handoff
- * cannot zero it, and only `resetStockState` — an install — deletes it. So the
- * reset threw away the live install's whole capital history and pushed a
- * phantom closed book carrying the current cumulative realised, which the tab
- * then counted a second time on top of the still-live topic. The market and the
- * ledger both survive a handoff; so, now, do the curves. */
+ * Neither is an install boundary. Treating either as one threw away the live
+ * install's capital history, so the curves remain part of the same run artifact
+ * across a controller restart. */
 function foldStockSeries(state: ProjectedState, t: number, stock: StockState | undefined): void {
   if (!stock) return;
   const series = state.stockSeries;
@@ -745,10 +741,8 @@ function foldStockSeries(state: ProjectedState, t: number, stock: StockState | u
   if (typeof stock.unlockSpend === "number") push(series.unlockSpend, t, stock.unlockSpend);
   if (typeof stock.tradeCashFlow === "number") {
     // The measured-rate clock is armed only by having WATCHED the ledger open.
-    // An explicit zero is proof that no trade has happened yet this install —
-    // the ledger survives a handoff and only an install zeroes it — while the
-    // ledger merely being ABSENT proves nothing, because a handoff-rebuilt
-    // topic carries no ledger while the parked one holds hours of flow.
+    // An explicit zero proves this emitter has not traded yet. An absent ledger
+    // proves nothing because the driver publishes it only when it executes.
     //
     // Arming on the first non-zero figure the viewer happened to see divided a
     // whole install's realised P/L by the age of the ATTACH: a live attach

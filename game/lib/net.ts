@@ -138,11 +138,9 @@ export async function reclaimFleet(
 /** Continuous safety net run every sweep: kills workers whose process is no
  * longer registered.
  *
- * Liveness is tested against the realm-level worker registry, NOT the
- * dispatcher's own ledger: a build handoff gives the new controller a fresh
- * ledger while its workers keep running, so using the ledger here would kill
- * the whole in-flight fleet on every push. The registry dies only with the
- * realm, which is exactly when those workers really are unreachable. */
+ * Liveness is tested against the worker registry, not the dispatcher's planning
+ * ledger. The registry tracks the actual processes that may still be finishing
+ * work after their originating batch has left the planner. */
 export async function reapStrayScripts(
   call: NsProxy,
   hosts: string[],

@@ -21,7 +21,6 @@ import {
 } from "../../../shared/strategy/stock/decide.ts";
 import type { StockManipulation, StockPlan as StockPlanDigest, StockState } from "../../../shared/telemetry/topics/stock.ts";
 import { isScriptDeath } from "../errors.ts";
-import { gameGlobal, type StockFlows } from "../globals.ts";
 import { moneyRateValue, moneyStepValue } from "../income.ts";
 import { merge } from "../state.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "./index.ts";
@@ -57,10 +56,15 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "
 let memory: StockMemory = initStockMemory();
 let lastPlan: StockPlan | undefined;
 let lastResult: { action: string; ok: boolean; detail: string; at: number } | undefined;
-/** This install's trade ledger, created on first use. Held in the page realm so
- * it outlives a build handoff — see `StockFlows` for why that matters. */
+interface StockFlows {
+  tradeCashFlow: number;
+  tradeFlowSince?: number;
+  unlockSpend: number;
+}
+let stockFlows: StockFlows | undefined;
+
 function flows(): StockFlows {
-  return (gameGlobal.stockFlows ??= { tradeCashFlow: 0, unlockSpend: 0 });
+  return (stockFlows ??= { tradeCashFlow: 0, unlockSpend: 0 });
 }
 
 export function resetStockState(): void {
@@ -71,9 +75,7 @@ export function resetStockState(): void {
   memory = initStockMemory();
   lastPlan = undefined;
   lastResult = undefined;
-  // An install is the one event that may zero the ledger, and it does so here
-  // rather than by a module instance being replaced.
-  delete gameGlobal.stockFlows;
+  stockFlows = undefined;
 }
 
 /** Hosts the farm could actually drive right now — the other half of the

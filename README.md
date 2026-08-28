@@ -5,10 +5,10 @@ A clean-sheet Bitburner automation codebase. The predecessor scripts
 
 Four parts (see [spec/repo-layout.md](spec/repo-layout.md)):
 
-- **game/** — the only code synced into the game: `start.js` (startup script,
-  the core loop, the game-state store, feature probes and drivers), the
+- **game/** — the only code synced into the game: the tiny `start.js` autoexec
+  and sync wrapper, `main.js` (the core loop, game-state store, probes and drivers), the
   telemetry logger, the RAM-dodge stub, and the puppet worker the HWGW
-  dispatcher drives. 3.6 GB static, budget-tested.
+  dispatcher drives. Wrapper and controller RAM are budget-tested.
 - **shared/** — the pure engine: HWGW targeting/dispatch
   ([spec/targeting.md](spec/targeting.md)), the RAM heap, goals, telemetry
   schema, and the feature registry
@@ -91,9 +91,9 @@ an unambiguous phrase; cite the branch (`@master` or `@2023`) explicitly.
    the dashboard. You can instead run `bun run sync` from a terminal.
    There is deliberately no file watcher: only an explicit action can push a
    build. A disconnected game makes the attempt fail after 30 seconds instead
-   of leaving a stale listener. The running `start.js` detects the new build
-   stamp (`build-id.txt`)
-   and hands off to a fresh instance of itself — no manual restart required.
+   of leaving a stale listener. Sync asks `main.js` to launch the tiny wrapper;
+   the wrapper kills every script, parks during the push and stale-file sweep,
+   then starts a completely cold `main.js`.
 
 Bitburner is the WebSocket client for file sync (port 12525, this repo is the
 server); the in-game telemetry logger is a WebSocket client of the UI hub
@@ -107,8 +107,8 @@ filename:
 
 ```json
 {
-  "source": "game/start.ts",
-  "target": "start.js"
+  "source": "game/main.ts",
+  "target": "main.js"
 }
 ```
 
@@ -120,22 +120,18 @@ listed by hand: the build's targets name the directories it writes into
 (`worker/`, `lib/`), and a `.js` file inside one of them that the current or
 previous build did not push is stale and gets deleted. Nothing at the server
 root is ever touched — that is where every game-generated file lives (`.msg`,
-`.lit`, `.exe`, `.cct`) and where `start.js` and `build-id.txt` are simply
+`.lit`, `.exe`, `.cct`) and where `start.js` and `main.js` are simply
 overwritten — and neither is `data/`, which the running controller writes to.
-`--no-sweep` disables it; `--sweep-dry-run` prints the delete set instead.
 
 The root rule has one narrow exception: the game exposes copied `dnet/`
 artifacts on darkweb as root-level basenames. Sync therefore owns only the
 configured `agent.js` and `overseer.js` version families at that root; every
 other darkweb root file remains protected.
 
-The worker and RAM-dodge helper are immutable per build: their filenames carry
-the same build id baked into `start.js`. Helpers are pushed first, then the
-stable controller, with `build-id.txt` last as the commit point. The ids use a
-timestamp plus a random suffix rather than a mutable counter, so concurrent
-builds and branches cannot claim the same version. The previous generation is
-kept for one sync — the outgoing controller's in-flight workers still reference
-it — and collected by the one after.
+Every artifact carries the same embedded build identity. No build stamp or
+runtime handoff exists: all processes are dead before files are replaced, and
+`sync-control.txt` commits only after the complete push and strict stale sweep
+succeed. A failure leaves the wrapper parked for a safe retry.
 
 `game/restore.ts` is a maintenance entrypoint, not part of that normal allowlist.
 Only `bun run save:restore` builds and pushes `restore.js`.
@@ -150,7 +146,7 @@ the controller decides from — and telemetry is the optional step that also
 sends it over the wire. So `--perf` buys no WebSocket, no serialization, no
 ring buffer and a smaller bundle, at identical game behaviour and identical
 static RAM. The tests pin this: both bundles must contain the same set of
-proxied ns call sites and cost the same 2.9 GB.
+proxied ns call sites and stay within the same 3.2 GB controller allocation.
 
 ## Simulation / A-B testing
 

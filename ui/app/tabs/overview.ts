@@ -303,19 +303,16 @@ export const overviewTab: Tab = {
     // Two vocabularies, and this predicate was written against one of them.
     // `action.failed`/`action.blocked` are SIM records (sim/world.ts,
     // sim/run.ts); a live GAME run reports a break as `start.crash`
-    // (game/start.ts), `start.respawn_failed`, `feature.failed` or
+    // (game/main.ts), `feature.failed` or
     // `ram.starvation` (game/lib/controller.ts), or `telemetry.dropped`
     // (game/lib/telemetry.ts). Without those, a run whose controller crashed
     // showed the crash in plain grey, a "problems" badge of 0, and "nothing
-    // matches this filter". `start.superseded` is deliberately NOT here: it is
-    // the clean side of an epoch handoff, the partner of `start.respawn`, and
-    // painting every intentional restart red is how a badge stops meaning
-    // anything. Anything added to those emitters gets checked against this list.
+    // matches this filter". Anything added to those emitters gets checked
+    // against this list.
     const isFailure = (name: string): boolean =>
       name === "action.failed"
       || name === "action.blocked"
       || name === "start.crash"
-      || name === "start.respawn_failed"
       || name === "feature.failed"
       || name === "ram.starvation"
       || name === "proxy.slow"

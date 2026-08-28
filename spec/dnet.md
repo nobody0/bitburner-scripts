@@ -1461,8 +1461,8 @@ passes every sim run and dies in the game.
 **Agents and probers can outlive their controller.** `reclaimFleet`
 (`game/lib/net.ts`) walks
 only servers from the ordinary `ns.scan` snapshot, and darknet hosts are never
-in it — so a dnet worker survives a controller death, a cold boot, a build handoff
-and a page reload. That is precisely the durability BN15's flavour text asks
+in it — so a dnet worker can survive an isolated controller failure. That is
+the durability BN15's flavour text asks
 for, and its cost is the generation stamp: a stale agent can keep reporting from
 a run that no longer exists, which is why the generation is checked at every
 rendezvous.
@@ -1575,7 +1575,7 @@ code (`game/dnet/shared.ts`):
    non-destructive, immutable `DnetSnapshot`; home replaces its read projection
    wholesale and never folds observations. The snapshot carries a versioned
    `DnetRecoveryState` which home returns only when launching a replacement
-   controller, so controller death or a build handoff preserves the map without
+   controller, so isolated controller failure preserves the map without
    creating a second mutator.
 3. **A foreign generation is refused**, by the controller's election and by every
    agent on every pass. Agents outlive controllers, so a live script from a dead

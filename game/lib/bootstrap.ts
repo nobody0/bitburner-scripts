@@ -4,11 +4,11 @@ import { fixedHostPlacer, nsp, recycleResidents, setProxyPlacer } from "./proxie
 
 /** Stand the ns residents somewhere worth standing, before anything else runs.
  *
- * This is the whole reason `start.js` can cost 2.9 GB. It owns `ns.exec` and
+ * This is the whole reason `main.js` stays small. It owns `ns.exec` and
  * nothing else, so it cannot scan, cannot root and cannot copy — every one of
  * those is a billable member. What it CAN do is exec a resident onto home
  * blind, on the arithmetic that a fresh game has 8 GB of home RAM and
- * `start.js` takes 2.9 of it (`HOME_BOOTSTRAP_EXECUTABLE_GB`). That first
+ * `main.js` takes 3.2 of it (`HOME_BOOTSTRAP_EXECUTABLE_GB`). That first
  * resident is small and temporary, and its only job is this function.
  *
  * The two targets are hardcoded, and that is the point. `n00dles` and
@@ -21,7 +21,7 @@ import { fixedHostPlacer, nsp, recycleResidents, setProxyPlacer } from "./proxie
  * resident there costs the farm almost nothing.
  *
  * Once one of them holds the payload the residents are recycled onto it, which
- * kills the temporary home resident and hands its 5.1 GB back. From here the
+ * kills the temporary home resident and hands its 4.8 GB back. From here the
  * automation is entirely proxied, and the controller later swaps in a
  * fleet-wide placer that can grow the resident onto something bigger.
  *
@@ -37,7 +37,7 @@ export async function bootstrapResidentHost(): Promise<string | undefined> {
   for (const host of BOOTSTRAP_HOSTS) {
     try {
       // `nuke` throws if the host is already rooted, so ask first. A rooted
-      // host on a fresh game means a handoff or a reload, not an error.
+      // host on a fresh game means a reload, not an error.
       if (!await call("hasRootAccess", host)) await call("nuke", host);
       if (!await call("hasRootAccess", host)) continue;
       if (!await call("scp", payload, host)) continue;

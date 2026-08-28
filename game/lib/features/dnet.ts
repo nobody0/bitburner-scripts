@@ -66,8 +66,8 @@ import { slotRates } from "../income.ts";
  * `game/dnet/agent.ts`.
  *
  * The controller is the sole authority for darknet knowledge. `DnetHomeState`
- * holds a read projection plus the checkpoint used only to bridge controller
- * death or a build handoff. Only the vault and installed-backdoor ledger cross
+ * holds a read projection plus the checkpoint used to recover from controller
+ * failure. Only the vault and installed-backdoor ledger cross
  * a page reload through disk. */
 
 /** How long a silent controller is given before home re-seeds. Four missed beats
@@ -480,9 +480,8 @@ const dnet: FeatureDriver = {
     // see darkweb and nothing else, so without this the map stops at the first
     // hop. See spec/dnet.md.
     const now = Date.now();
-    // The generation is the install epoch: agents survive a controller cold
-    // boot and a build handoff, so a report has to be tied to the world it was
-    // gathered in, not to this process.
+    // The generation is the install epoch, so a delayed report is tied to the
+    // world it was gathered in rather than merely to this process.
     const progression = ctx.state.topics.progression;
     const generation = `${progression?.bitNode ?? 0}:${progression?.lastAugReset ?? 0}`;
     if (home.recovery?.generation !== generation) {

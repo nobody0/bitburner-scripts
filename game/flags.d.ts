@@ -4,9 +4,7 @@
  * is eliminated. Never reference this outside `game/`. */
 declare const __TELEMETRY__: boolean;
 
-/** Unique id of the build baked into each game bundle (tools/build.ts); the
- * same id is pushed as build-id.txt so running scripts can detect that a
- * newer version was synced and respawn themselves. Game bundles only. */
+/** Unique id baked into every artifact emitted by one build. */
 declare const __BUILD_ID__: string;
 
 /** V9 worker bundle emitted by tools/build.ts and embedded into start.js so

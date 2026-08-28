@@ -70,7 +70,7 @@ export const stockTab: Tab = {
     // actually watched land; null with `sawStockLedgerOpen` set means the market
     // has genuinely not traded yet, and null with it clear means we attached
     // after the ledger was already running — the driver holds that start as
-    // `StockFlows.tradeFlowSince` and does not publish it, so the denominator is
+    // `tradeFlowSince` privately and does not publish it, so the denominator is
     // not on the wire and the honest answer is "unknown". A compacted run is the
     // same case by construction: its history before the tail is gone.
     // `ageMs`, not `state.lastT` arithmetic: the run's own clock is the shared
@@ -89,7 +89,7 @@ export const stockTab: Tab = {
           ? hint("rate unknown", "a compacted run keeps only the last write of each topic, so the first trade is not in it")
           : state.sawStockLedgerOpen
             ? "no trade yet"
-            : hint("rate unknown", "attached after the first trade: the ledger is cumulative and survives a controller handoff, so when it opened is not on the wire");
+            : hint("rate unknown", "attached after the first trade, so the opening time is not in the loaded records");
 
     const capitalTiles = tiles([
       {

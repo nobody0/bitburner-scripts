@@ -19,7 +19,7 @@ const priceOfCalls = (calls: readonly string[]): number => {
 import { getFunctionRamCost } from "../sim/ns/ram-costs.ts";
 import { priceCall, UNKNOWN_CALL_GB } from "../game/lib/ns-proxy.ts";
 import { nsMainGlobal } from "../game/lib/ns-proxy-shared.ts";
-import { START_SCRIPT_GB } from "../game/lib/proxies.ts";
+import { MAIN_SCRIPT_GB, START_SCRIPT_GB } from "../game/lib/ram.ts";
 import { DEFAULT_SPREAD_LIMITS } from "../shared/strategy/dnet/plan.ts";
 
 /** The order kinds that run through the agent switch. */
@@ -46,6 +46,7 @@ const RAM_COSTS: Record<string, number> = {
   "ns.getPlayer": 0.5,
   "ns.getResetInfo": 1,
   "ns.exec": 1.3,
+  "ns.spawn": 2.0,
   "ns.getServerSecurityLevel": 0.1,
   "ns.getServerMoneyAvailable": 0.1,
   "ns.scp": 0.6,
@@ -71,6 +72,7 @@ const BASE_GB = 1.6;
 /** Single-sourced with the bootstrap arithmetic, so the two cannot drift:
  * home's 5.1 GB bootstrap window is 8 GB minus exactly this. */
 const START_BUDGET_GB = START_SCRIPT_GB;
+const MAIN_BUDGET_GB = MAIN_SCRIPT_GB;
 
 const config: BitburnerConfig = {
   host: "127.0.0.1",
@@ -79,6 +81,7 @@ const config: BitburnerConfig = {
   buildDir: `build-test-ram-${process.pid}`,
   entries: [
     { source: "game/start.ts", target: "start.js" },
+    { source: "game/main.ts", target: "main.js" },
     { source: "game/worker/worker.ts", target: "worker/worker.js" },
     { source: "game/dnet/controller.ts", target: "dnet/controller.js" },
     { source: "game/dnet/agent.ts", target: "dnet/agent.js" },
@@ -143,20 +146,20 @@ describe("in-game static RAM budget", () => {
     // static analyzer itself must resolve to the declared 2.9 GB.
     const [start] = await buildScripts(config, { telemetry: true });
     const analysis = analyzeScriptRam(start!.content);
-    expect(analysis.overridden).toBe(true);
+    expect(analysis.overridden).toBe(false);
     expect(analysis.cost).toBe(START_BUDGET_GB);
   });
 
-  test("the override decoy is doing real work, not masking an empty walk", async () => {
+  test("the wrapper does not use an override decoy", async () => {
     // Strip the appended decoy declaration and the pessimistic walk must
     // reappear; if this ever reads 2.9 without the decoy, the analyzer port
     // is broken and the previous test proves nothing.
     const [start] = await buildScripts(config, { telemetry: true });
     const withoutDecoy = start!.content.replace(/async function main\(ns\)\{ns\.ramOverride\([\d.]+\)\}\s*$/, "");
-    expect(withoutDecoy.length).toBeLessThan(start!.content.length);
+    expect(withoutDecoy).toBe(start!.content);
     const analysis = analyzeScriptRam(withoutDecoy);
     expect(analysis.overridden).toBe(false);
-    expect(analysis.cost).toBeGreaterThan(START_BUDGET_GB);
+    expect(analysis.cost).toBe(START_BUDGET_GB);
   });
 
   test("the --perf build costs exactly the same static RAM", async () => {
@@ -164,7 +167,7 @@ describe("in-game static RAM budget", () => {
     const [perfBuild] = await buildScripts(config, { telemetry: false });
     for (const build of [telemetryBuild!, perfBuild!]) {
       const analysis = analyzeScriptRam(build.content);
-      expect(analysis.overridden).toBe(true);
+      expect(analysis.overridden).toBe(false);
       expect(analysis.cost).toBe(START_BUDGET_GB);
     }
   });
@@ -182,9 +185,7 @@ describe("in-game static RAM budget", () => {
     // Only the shipped flavour carries the appended RAM-override decoy — the
     // names-preserved flavour provably must not (see the next test) — so it
     // is removed before comparing what the renaming itself produced.
-    const decoy = "async function main(ns){ns.ramOverride(2.9)}";
-    expect(shipped!.content).toContain(decoy);
-    expect(billableSurface(shipped!.content.replace(decoy, ""))).toEqual(billableSurface(readable!.content));
+    expect(billableSurface(shipped!.content)).toEqual(billableSurface(readable!.content));
   });
 
   test("a names-preserved deployment still runs the real controller", async () => {
@@ -194,13 +195,13 @@ describe("in-game static RAM budget", () => {
     // exits. The build must skip the decoy exactly when the surviving
     // declaration already satisfies the analyzer (`sync --readable` deploys
     // such bundles), and keep it when identifier minification renamed `main`.
-    const decoy = "async function main(ns){ns.ramOverride(2.9)}";
+    const decoy = "async function main(ns){ns.ramOverride(3.2)}";
     const [readable] = await buildScripts(config, { telemetry: true, minifyNames: false });
     expect(readable!.content).not.toContain(decoy);
-    expect(analyzeScriptRam(readable!.content).overridden).toBe(true);
+    expect(analyzeScriptRam(readable!.content).overridden).toBe(false);
     const [shipped] = await buildScripts(config, { telemetry: true });
-    expect(shipped!.content).toContain(decoy);
-    expect(analyzeScriptRam(shipped!.content).overridden).toBe(true);
+    expect(shipped!.content).not.toContain(decoy);
+    expect(analyzeScriptRam(shipped!.content).overridden).toBe(false);
   });
 
   test("start.js stays within its fresh-game budget", async () => {
@@ -224,7 +225,7 @@ describe("in-game static RAM budget", () => {
     //
     // Anything else appearing here is a leak — see the next test for why that
     // is so easy to do by accident.
-    expect(new Set(members)).toEqual(new Set(["ns.disableLog", "ns.exec"]));
+    expect(new Set(members)).toEqual(new Set(["ns.disableLog", "ns.killall", "ns.spawn"]));
   });
 
   test("no source file compiled into start.js names an ns member as a property", async () => {
@@ -240,9 +241,17 @@ describe("in-game static RAM budget", () => {
     // billing 0.2 GB. Both survived review for months because nothing checked.
     const [start] = await buildScripts(config, { telemetry: true, minifyNames: false });
     const { members } = staticRam(start!.content);
-    const allowed = new Set(["ns.disableLog", "ns.exec"]);
+    const allowed = new Set(["ns.disableLog", "ns.killall", "ns.spawn"]);
     const leaked = members.filter((member) => !allowed.has(member));
     expect(leaked).toEqual([]);
+  });
+
+  test("main.js fits its explicit 3.2 GB launch allocation", async () => {
+    const [, main] = await buildScripts(config, { telemetry: true, minifyNames: false });
+    const { total, members } = staticRam(main!.content);
+    expect(total).toBeLessThanOrEqual(MAIN_BUDGET_GB);
+    expect(new Set(members)).toEqual(new Set(["ns.disableLog", "ns.exec"]));
+    expect(START_BUDGET_GB + MAIN_BUDGET_GB).toBeLessThanOrEqual(8);
   });
 
   test("the controller can never reach the save", async () => {
@@ -251,10 +260,10 @@ describe("in-game static RAM budget", () => {
     // an accidental import here is the difference between a bug and lost
     // progress. String literals survive minification, so this runs on the
     // shipped artifact.
-    const [start] = await buildScripts(config, { telemetry: true });
-    expect(start!.content).not.toContain("indexedDB");
-    expect(start!.content).not.toContain("location.reload");
-    expect(start!.content).not.toContain("restore-payload");
+    const [, main] = await buildScripts(config, { telemetry: true });
+    expect(main!.content).not.toContain("indexedDB");
+    expect(main!.content).not.toContain("location.reload");
+    expect(main!.content).not.toContain("restore-payload");
   });
 
   test("restore.js stays cheap and read-only against the game", async () => {

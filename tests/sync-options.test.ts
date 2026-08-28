@@ -14,11 +14,9 @@ describe("parseSyncArgs", () => {
   });
 
   test("every modifier flag maps to its option", () => {
-    expect(parseSyncArgs(["--sync", "--perf", "--readable", "--no-sweep", "--sweep-dry-run"])).toEqual({
+    expect(parseSyncArgs(["--sync", "--perf", "--readable"])).toEqual({
       perf: true,
       readable: true,
-      noSweep: true,
-      sweepDryRun: true,
     });
   });
 
@@ -31,6 +29,7 @@ describe("parseSyncArgs", () => {
   test("an unknown flag is an error, not a silent default push", () => {
     expect(() => parseSyncArgs(["--sync", "--redable"])).toThrow("unknown flag --redable");
   });
+
 });
 
 describe("syncOptionsFrom", () => {

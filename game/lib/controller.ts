@@ -9,6 +9,7 @@ import type { Need } from "../../shared/strategy/needs.ts";
 import { forecastAt, unknownForecast, usableForecastSec } from "../../shared/strategy/progression/forecast.ts";
 import { FEATURE_IDS } from "../../shared/features/ids.ts";
 import { HOME_RESERVE_GB, ramArena, type ArenaPlan, type BrokerHost } from '../../shared/ram/broker.ts';
+import { parseSyncControl, SYNC_CONTROL_FILE } from "../../shared/deployment.ts";
 import { setProxyEventSink, type ProxyPlacer } from "./ns-proxy.ts";
 import { disposeProxies, nsp, nspLong, residentAsks, setProxyPlacer } from "./proxies.ts";
 import { isScriptDeath } from "./errors.ts";
@@ -18,7 +19,6 @@ import { hackingState, pumpOnWake, takeTargetSwitch } from "./features/hacking.t
 import { noteTickLateness, resetTickHealth } from "./tick-health.ts";
 import { armWake, realmSleep, sleepOrWake } from "./wake.ts";
 import { workerGlobals } from "./worker-shared.ts";
-import { handoffLaunch, temporaryRunOptions } from "./launch-shared.ts";
 import { takeRouteChange } from "./features/remaining.ts";
 import { driverEnabled, featureModule, grantsFor, resetAllFeatures, selectDueModules } from "./features/index.ts";
 import type { ClaimContext, NeedContext } from "./features/index.ts";
@@ -67,20 +67,17 @@ export async function runController(
   ns: NS,
   tel: Telemetry | undefined,
   sink: TelemetrySink | undefined,
-  mode: "cold" | "handoff",
-  epoch: number,
   /** Injected feature switches. Absent in the game; a simulation supplies them
    *  to isolate one feature. A decision, so deliberately not behind TELEMETRY. */
   featureOverrides?: FeatureOverrides,
 ): Promise<void> {
   TELEMETRY: if (__TELEMETRY__) {
-    tel!.event("start.boot", { mode, build: __BUILD_ID__, epoch });
+    tel!.event("start.boot", { build: __BUILD_ID__ });
     // ns-proxy.ts has no `tel`; give it a sink so slow exec retries are
-    // visible. Cleared alongside each dispose below so a superseded
-    // controller's tel never receives a successor's events.
+    // visible. Cleared when the controller exits for sync.
     setProxyEventSink((name, data) => tel!.event(name, data));
   }
-  ns.tprint(`start.js online (${mode}, build ${__BUILD_ID__})`);
+  ns.tprint(`main.js online (build ${__BUILD_ID__})`);
 
   const state = initState();
   if (featureOverrides) state.featureOverrides = featureOverrides;
@@ -158,11 +155,11 @@ export async function runController(
   // hand them the real placer: the next respawn takes the best block going.
   setProxyPlacer(placeResident);
 
-  let reportedRespawnFailure: string | undefined;
+  let reportedSyncFailure: string | undefined;
   let nextTick = Date.now();
   // A BitNode reset makes the next sweep behave like a cold boot: the fleet
   // the heap describes has ceased to exist.
-  let coldSweep = mode === "cold";
+  let coldSweep = true;
   // Who holds Player.currentWork, carried between passes. The arbiter is pure,
   // so the incumbency it needs to protect a running activity from a marginally
   // better bidder has to live out here.
@@ -198,58 +195,28 @@ export async function runController(
   };
 
   for (let tick = 0; ; tick++) {
-    // Yield to a newer controller (manual restart, double autoexec, handoff).
-    if (gameGlobal.controllerEpoch !== epoch) {
-      TELEMETRY: if (__TELEMETRY__) {
-        tel!.event("start.superseded", { epoch });
-        tel!.dispose();
-        setProxyEventSink(undefined);
-      }
-      // Unconditional, and outside the telemetry label: a superseded
-      // controller that leaves its residents running holds their RAM for the
-      // rest of the run, and the successor cannot see them to reap them.
-      await disposeProxies();
-      return;
-    }
-
-    // Self-update: a newer build was pushed -> hand off to a fresh instance.
-    const pushedBuild = ns.read("build-id.txt").trim();
-    if (pushedBuild !== "" && pushedBuild !== __BUILD_ID__) {
-      // Share is the only worker mode with no natural completion/idle drain.
-      // Resolve its descriptor-installed lifetime gate before handing control
-      // to the new build; one-shots finish and pooled workers idle out.
-      for (const [id, worker] of workerGlobals().worker_info ?? []) {
-        if (worker.mode !== "share") continue;
-        worker.stop?.();
-        TELEMETRY: if (__TELEMETRY__) tel!.event("worker.retire", { id, mode: worker.mode });
-      }
-      const pid = await handoffLaunch(
-        { kind: "start", buildId: pushedBuild },
-        (launchId) => ns.exec("start.js", "home", temporaryRunOptions({ threads: 1 }), launchId),
-      );
+    const sync = parseSyncControl(ns.read(SYNC_CONTROL_FILE));
+    if (sync?.phase === "prepare") {
+      const pid = ns.exec("start.js", "home", {
+        threads: 1,
+        temporary: true,
+        preventDuplicates: true,
+      }, "--sync");
       if (pid !== 0) {
         TELEMETRY: if (__TELEMETRY__) {
-          tel!.event("start.respawn", { from: __BUILD_ID__, to: pushedBuild });
           tel!.dispose();
-            setProxyEventSink(undefined);
+          setProxyEventSink(undefined);
         }
         await disposeProxies();
         return;
       }
-      if (reportedRespawnFailure !== pushedBuild) {
-        reportedRespawnFailure = pushedBuild;
-        TELEMETRY: if (__TELEMETRY__) {
-          tel!.event("start.respawn_failed", { from: __BUILD_ID__, to: pushedBuild });
-        }
-        ns.tprint(`WARNING: failed to start build ${pushedBuild}; keeping ${__BUILD_ID__} online and retrying`);
+      if (reportedSyncFailure !== sync.id) {
+        reportedSyncFailure = sync.id;
+        ns.tprint(`WARNING: failed to launch the sync wrapper for request ${sync.id}; retrying`);
       }
-      // Realm timer, matching the main tick's `sleepOrWake`: this loop never
-      // parks on an ns call, so no future async arm can trip the engine's
-      // concurrency kill. The `ns.read` above surfaces a kill next pass.
-      await realmSleep(TICK_MS);
-      continue;
+    } else {
+      reportedSyncFailure = undefined;
     }
-    reportedRespawnFailure = undefined;
 
     // `playerDirty` short-circuits the cadence rather than replacing it: a
     // multiplier change makes the held snapshot wrong, not just old, and the
@@ -727,7 +694,6 @@ function onWorldReset(state: GameState, kind: PrestigeKind): void {
   state.mirrorDirty.clear();
   state.probeFailures = {};
   delete state.probeBatch;
-  gameGlobal.farmTarget = undefined;
   // Tick lateness measures this loop, not a feature, so it is reset here with
   // the rest of the controller's own state.
   resetTickHealth();

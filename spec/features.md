@@ -269,10 +269,10 @@ needs/claims arbitration, and the controller runs it first.
 
 ### Runtime continuity and prestige
 
-Startup and game-world reset are independent. A build handoff and a loaded
-save are both `none` at the game-world level, but only the handoff inherits a
-live realm and worker registry. A fresh page load has no previous identity and
-bootstraps from observation. Under a surviving realm, `shared/reset.ts`
+Deployment and game-world reset are independent. Sync deliberately kills every
+script and clears controller-owned realm state before `main.js` starts again;
+there is no runtime adoption path. A fresh page load likewise bootstraps from
+observation. Under a surviving realm, `shared/reset.ts`
 classifies the tuple `(currentNode, lastAugReset, lastNodeReset)` as `none`,
 `augmentation`, or `bitnode`; BitNode wins because source-file prestige also
 advances the augmentation timestamp. Comparing `lastNodeReset` also catches
@@ -298,19 +298,15 @@ Two rules that are easy to get backwards:
   depends on when the reset landed. A snapshot that is only probably fresh is
   the same class of bug as a heap describing a dead fleet. Rescan; do not keep
   it to save latency.
-- **The realm worker registry is cleared here and nowhere else.** Across a
-  build handoff it must survive — the incoming controller has a fresh ledger
-  while the old workers keep running, and the registry is the only proof they
-  are alive. A node reset is the opposite: every script was killed, so every
-  op id in it is unreportable.
-- **`stock`'s self-measured trade ledger must survive too** (`StockFlows` on
-  `gameGlobal`, like `farmTarget`). It is the only record of what the market
+- **The realm worker registry is cleared on world reset and clean sync.** In
+  both cases every script was killed, so every op id in it is unreportable.
+- **`stock`'s self-measured trade ledger is controller-owned state.** It is the
+  only record of what the market
   actually earned — the game's own money-sources ledger counts an open
   position's purchase as money gone — and it is republished onto the topic at
-  every trade. Held in a module `let` it restarted at zero on each build push
-  and the next trade wrote that zero over the real total, corrupting both the
-  viewer's earnings curve and `earnedSinceInstall`. Only an install may clear
-  it, and `resetStockState` does so explicitly.
+  every trade. A clean sync gets a fresh module and therefore a fresh ledger;
+  there is intentionally no deployment-continuity exception. World resets call
+  `resetStockState` explicitly.
 
 ## The simulator
 

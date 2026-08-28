@@ -20,11 +20,6 @@ export interface ScriptLaunch {
   readonly kind: string;
 }
 
-export interface StartLaunch extends ScriptLaunch {
-  readonly kind: "start";
-  readonly buildId: string;
-}
-
 interface PendingLaunch {
   descriptor: ScriptLaunch;
   acknowledge: () => void;

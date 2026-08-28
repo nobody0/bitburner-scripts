@@ -380,23 +380,14 @@ const side: FeatureDriver = {
     const remaining = queue.filter((contract) => !finished.has(contractKey(contract)));
     const failedByOrigin: Record<ContractOrigin, number> = { network: 0, darknet: 0 };
     for (const failure of failures) failedByOrigin[failure.origin ?? "network"]++;
-    // The published topic is REHYDRATED state: the realm global survives a
-    // build handoff, so a record written by a build that predates this census
-    // carries no `contractsByOrigin` at all. Dereferencing it would throw
-    // before this tick published anything — the same reason `contractTotal`
-    // and `solvableTotal` are read defensively above. With no census to
-    // decrement, publish none and let the probe's next sweep supply it.
-    const censusBefore = topic.contractsByOrigin as Partial<SideState["contractsByOrigin"]> | undefined;
     const originAfter = (origin: ContractOrigin): SideState["contractsByOrigin"][ContractOrigin] => {
-      const before = censusBefore![origin] ?? { observed: 0, solvable: 0 };
+      const before = topic.contractsByOrigin[origin];
       return {
         observed: Math.max(0, before.observed - solvedByOrigin[origin]),
         solvable: Math.max(0, before.solvable - solvedByOrigin[origin] - failedByOrigin[origin]),
       };
     };
-    const contractsByOrigin = censusBefore === undefined
-      ? undefined
-      : { network: originAfter("network"), darknet: originAfter("darknet") };
+    const contractsByOrigin = { network: originAfter("network"), darknet: originAfter("darknet") };
     ctx.state.contractQueue = remaining;
     // The line describes THIS batch. Cumulative earnings are published as
     // structured per-origin totals, so restating them here would be both a
@@ -414,7 +405,7 @@ const side: FeatureDriver = {
         .map((contract) => ({ host: contract.host, file: contract.file, origin: contractOrigin(contract) })),
       contractTotal: Math.max(0, (topic.contractTotal ?? topic.contracts.length) - solved),
       solvableTotal: Math.max(0, solvableTotal - solved - failures.length),
-      ...(contractsByOrigin !== undefined ? { contractsByOrigin } : {}),
+      contractsByOrigin,
       failures: allFailures
         .slice(0, 8)
         .map(({ data: _data, answer: _answer, ...summary }) => summary),

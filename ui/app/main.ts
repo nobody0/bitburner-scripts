@@ -39,7 +39,7 @@ const run = {
   id: null as string | null,
   src: null as "game" | "sim" | null,
   live: false,
-  /** Install artifact to resume after a brief emitter handoff. Set only when
+  /** Install artifact to resume after a brief emitter restart. Set only when
    * the loaded live run ends; choosing a replay clears it. */
   resumeArtifact: null as string | null,
   records: null as LogRecord[] | null,
@@ -767,8 +767,8 @@ function connect(): void {
         ? undefined
         : liveRuns.find((entry) => entry.id === run.resumeArtifact);
       if (resumed) {
-        // A game build handoff briefly closes one telemetry emitter before its
-        // successor says hello. Resume the same install from the fresh tail.
+        // A clean sync briefly closes one emitter before its successor says
+        // hello. Resume the same install from the fresh tail.
         attachLive(resumed);
       } else if (run.id === null) {
         if (liveRuns.length > 0) attachLive(liveRuns[0]!);

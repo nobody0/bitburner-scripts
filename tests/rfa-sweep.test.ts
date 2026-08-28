@@ -29,7 +29,6 @@ const HOME_LISTING = [
   "relaySMTP.exe",
   "DeepscanV1.exe",
   "contract-4823-foodnstuff.cct",
-  "build-id.txt",
   "start.js",
   "restore.js",
   "restore-payload.txt",
@@ -82,28 +81,18 @@ describe("sync stale-file sweep", () => {
     expect(planSweep(current, OWNED, KEEP)).toEqual([]);
   });
 
-  test("a refused delete is a skip, not a failed sync", async () => {
+  test("a refused delete fails the transaction", async () => {
     const { session, deletions } = fakeSession(
       { home: HOME_LISTING },
       new Set(["worker/unused.js"]),
     );
-    const result = await sweepStaleFiles(session, OWNED, KEEP, ["home"]);
-    expect(result.skipped).toEqual(["home:worker/unused.js"]);
-    expect(result.deleted).toHaveLength(2);
+    await expect(sweepStaleFiles(session, OWNED, KEEP, ["home"])).rejects.toThrow("failed to delete stale file");
     expect(deletions).toHaveLength(3);
   });
 
-  test("a dry run deletes nothing", async () => {
-    const { session, deletions } = fakeSession({ home: HOME_LISTING });
-    const result = await sweepStaleFiles(session, OWNED, KEEP, ["home"], { dryRun: true });
-    expect(deletions).toEqual([]);
-    expect(result.deleted).toHaveLength(3);
-  });
-
-  test("an unlistable host is skipped rather than aborting the fleet sweep", async () => {
+  test("an unlistable host fails the transaction", async () => {
     const { session, deletions } = fakeSession({ home: HOME_LISTING, blade: ["worker/unused.js"] });
-    const result = await sweepStaleFiles(session, OWNED, KEEP, ["home", "vanished", "blade"]);
-    expect(result.deleted).toContain("blade:worker/unused.js");
-    expect(deletions).toHaveLength(4);
+    await expect(sweepStaleFiles(session, OWNED, KEEP, ["home", "vanished", "blade"])).rejects.toThrow("no such server");
+    expect(deletions).toHaveLength(3);
   });
 });

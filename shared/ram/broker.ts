@@ -12,8 +12,8 @@ export const RESIDENT_BASE_GB = 1.6;
  * cold boot there is none, and after one there is a snapshot that still counts
  * the process the respawn just killed. Held unconditionally, because the old
  * split (4.1 cold, 3.6 once n00dles was rooted) left the boot-path sweep's
- * 4.1 GB exec racing the farm on home. It also exceeds the 3.6 GB a build
- * handoff briefly needs for two `start.js` instances. */
+ * 4.1 GB exec racing the farm on home. It also admits the 4.1 GB sync wrapper
+ * after the controller has yielded its own allocation. */
 export const HOME_RESERVE_GB = 4.1;
 
 /** The bootstrap host's reserved SLICE: ONE resident at Go-turn size.

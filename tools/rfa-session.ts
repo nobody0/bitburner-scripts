@@ -53,15 +53,14 @@ export class RfaSession {
     return result as string[];
   }
 
-  /** undefined when the file does not exist — an absent build stamp is an
-   * ordinary state (fresh save), not an error. */
+  /** Undefined when the file does not exist. */
   async getFile(server: string, filename: string): Promise<string | undefined> {
     const result = await this.request("getFile", { server, filename }).catch(() => undefined);
     return typeof result === "string" ? result : undefined;
   }
 
-  /** false when the game refuses — deleting a script that is still running is
-   * the expected refusal, and it must be a skip rather than a failed sync. */
+  /** False on refusal or transport failure; strict sync turns that into a
+   * failed transaction and leaves the wrapper parked. */
   async deleteFile(server: string, filename: string): Promise<boolean> {
     const result = await this.request("deleteFile", { server, filename }).catch(() => undefined);
     return result === "OK";

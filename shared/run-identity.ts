@@ -1,7 +1,7 @@
 /** Hierarchical identity for recorded run artifacts.
  *
  * An emitter is a process/socket lifetime. An install is the useful replay
- * artifact. Several emitters (a deployment handoff, reconnect, or manual
+ * artifact. Several emitters (a clean sync, reconnect, or manual
  * restart) may therefore contribute to the same install. */
 
 export type LineageKind = "game" | "sim";
@@ -26,7 +26,7 @@ export interface BitNodeRunIdentity {
 }
 
 export interface InstallRunIdentity {
-  /** Stable through controller restarts and build handoffs within this install. */
+  /** Stable through controller restarts within this install. */
   id: string;
   /** Game reset epoch, or simulator virtual epoch. */
   startedAt: number;

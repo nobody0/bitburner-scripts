@@ -36,8 +36,7 @@ export interface GameState {
   /** Last error per probe id; cleared when the probe next succeeds. */
   probeFailures: Record<string, string>;
   probeBatch?: ProbeBatch;
-  /** Last tick each feature driver ran, by feature id. Survives handoffs, so a
-   *  build push does not restart every cadence. */
+  /** Last tick each feature driver ran, by feature id. */
   featureLastRun: Record<string, number>;
   /** Wall-clock time of the last unconditional ns.getPlayer snapshot. Kept
    * private so time-sensitive strategies can advance totalPlaytime honestly. */
@@ -62,10 +61,7 @@ export interface GameState {
    *
    * Kept outside topics for the same reason as `contractQuarantine`: the topic
    * carries a rounded projection and the store keeps the exact running sum, so
-   * repeated publishing never rounds an already-rounded total. In `GameState`
-   * rather than a module `let` because a build handoff replaces the module and
-   * not the world, and a counter that restarted at zero would republish those
-   * zeroes over money that was really earned (see `StockFlows`). */
+   * repeated publishing never rounds an already-rounded total. */
   contractLedger?: {
     since?: number;
     totals: Partial<Record<ContractOrigin, ContractOriginTotals>>;
@@ -97,11 +93,8 @@ function emptyState(): GameState {
   };
 }
 
-/** Rehydrate the realm's store, or create it. On handoff the incoming
- * controller inherits everything the outgoing one knew — but its telemetry run
- * is new, so every known topic is marked dirty and the next flush republishes a
- * full snapshot rather than leaving the UI blank until each cadence comes
- * round again. */
+/** Return the current controller's realm store, or create it. main.ts deletes
+ * the previous store before a post-sync launch. */
 export function initState(): GameState {
   const existing = gameGlobal.state;
   if (!existing) {

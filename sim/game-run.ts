@@ -57,7 +57,7 @@ import {
 import type { ExperimentIdentity } from "../shared/experiment.ts";
 import { AUGMENTATION_TABLE } from "./vendor/bitburner/src/Augmentation/AugmentationTable.ts";
 import type { GameState } from "../game/lib/state.ts";
-import { START_SCRIPT_GB } from "../game/lib/proxies.ts";
+import { START_SCRIPT_GB } from "../game/lib/ram.ts";
 import { gameGlobal } from "../game/lib/globals.ts";
 import { setGoNeuralRuntimeForTest } from "../game/lib/features/remaining.ts";
 
@@ -84,6 +84,7 @@ const DNET_CONTROLLER = "dnet/controller.js";
 const DNET_AGENT = "dnet/agent.js";
 const DNET_PROBER = "dnet/prober.js";
 const START_SCRIPT = "start.js";
+const MAIN_SCRIPT = "main.js";
 
 export interface GameRunOptions {
   goal: Goal;
@@ -252,14 +253,12 @@ export interface GameRunResult {
 }
 
 /** Realm slots game/ owns. Cleared before and after a run so a process that
- * hosts more than one (tests) cannot leak a controller epoch or a live worker
+ * hosts more than one (tests) cannot leak controller state or a live worker
  * registry into the next. */
 const REALM_SLOTS = [
   "spawning_scripts",
-  "controllerEpoch",
   "artifactIdentity",
   "state",
-  "farmTarget",
   "worker_info",
   "worker_jobs",
   "worker_wake",
@@ -419,8 +418,8 @@ async function runGameInstalled(
   const terminal = { host: save?.currentServer ?? "home" };
   const initialHomeFiles = new Set(
     save
-      ? [START_SCRIPT, NS_RESIDENT, WORKER_SCRIPT, DNET_CONTROLLER, DNET_AGENT, DNET_PROBER, "build-id.txt", ...save.homeFiles, ...(options.homeFiles ?? [])]
-      : [START_SCRIPT, NS_RESIDENT, WORKER_SCRIPT, DNET_CONTROLLER, DNET_AGENT, DNET_PROBER, "build-id.txt", "NUKE.exe", "hackers-starting-handbook.lit", ...(options.homeFiles ?? [])],
+      ? [START_SCRIPT, MAIN_SCRIPT, NS_RESIDENT, WORKER_SCRIPT, DNET_CONTROLLER, DNET_AGENT, DNET_PROBER, ...save.homeFiles, ...(options.homeFiles ?? [])]
+      : [START_SCRIPT, MAIN_SCRIPT, NS_RESIDENT, WORKER_SCRIPT, DNET_CONTROLLER, DNET_AGENT, DNET_PROBER, "NUKE.exe", "hackers-starting-handbook.lit", ...(options.homeFiles ?? [])],
   );
   const permanentDarknetAccess = (): boolean => bitnode === 15 || (world.player.sourceFiles["15"] ?? 0) > 0;
   if (permanentDarknetAccess()) initialHomeFiles.add("DarkscapeNavigator.exe");
@@ -618,9 +617,7 @@ async function runGameInstalled(
     ...(go ? { go } : {}),
     processes: new ProcessTable(world.servers, clock),
     files: fileStore,
-    // Empty build id: the controller's self-update branch compares against its
-    // own __BUILD_ID__ and skips when the pushed value is blank.
-    contents: new Map([["home\0build-id.txt", ""]]),
+    contents: new Map(),
     scripts: new Map<string, ScriptMain>(),
     network,
     ramCtx: ramCostContext(bitnode, world.player.sourceFiles),
@@ -774,6 +771,7 @@ async function runGameInstalled(
   // evaluation cannot outrun them.
   const [
     { main: startMain },
+    { main: mainMain },
     { resetAllFeatures },
     { initState },
     nsResident,
@@ -783,6 +781,7 @@ async function runGameInstalled(
     dnetProber,
   ] = await Promise.all([
     import("../game/start.ts"),
+    import("../game/main.ts"),
     import("../game/lib/features/index.ts"),
     import("../game/lib/state.ts"),
     import("../game/lib/ns-resident.ts"),
@@ -956,7 +955,8 @@ async function runGameInstalled(
   host.scripts.set(DNET_CONTROLLER, dnetController.main as ScriptMain);
   host.scripts.set(DNET_AGENT, dnetAgent.main as ScriptMain);
   host.scripts.set(DNET_PROBER, dnetProber.main as ScriptMain);
-  host.scripts.set(START_SCRIPT, ((ns: NS) => startMain(ns, options.features)) as ScriptMain);
+  host.scripts.set(START_SCRIPT, startMain as ScriptMain);
+  host.scripts.set(MAIN_SCRIPT, ((ns: NS) => mainMain(ns, options.features)) as ScriptMain);
 
   const scenarioId = scenarioFingerprint({
     simulatorModel: SIMULATOR_MODEL_VERSION,

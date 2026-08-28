@@ -49,10 +49,8 @@ import type { DarknetProfit } from "../../shared/telemetry/topics/dnet.ts";
  * 4. **A credential never reaches telemetry.** It lives in the controller's
  *    private checkpoint; the published record carries a boolean. */
 
-/** A version on the global SHAPE. It moves because agents outlive controllers
- * and a build handoff leaves both on disk: an agent from the previous build
- * reading a global whose shape moved under it is a bug with no symptom.
- * Refusing by number makes it exit instead. */
+/** Version the shared controller/agent data shape. A mismatched participant
+ * exits instead of reading a global whose layout it does not understand. */
 export const DNET_PROTOCOL = 13;
 
 /** The script base every allocation starts from. Transcribed rather than read,

@@ -41,8 +41,8 @@ Defined in `shared/telemetry/schema.ts`. Three kinds, all carrying
   `telemetry.dropped`).
 - **debug** — free-form diagnostics; first to be dropped under buffer pressure.
 
-`start.boot` includes the baked build ID, mode, and controller epoch. Exceptions
-escaping the `start.js` controller emit `start.crash` with the same identity and
+`start.boot` includes the baked build ID. Exceptions escaping the `main.js`
+controller emit `start.crash` with the same identity and
 a structured error before being rethrown; Bitburner's normal `ScriptDeath`
 cancellation marker is deliberately excluded.
 
@@ -156,19 +156,18 @@ discrete and holds run minutes to regime cycles, so any window short enough to
 respond reads zero with spikes, and the tab reports one measured scalar instead.
 Two properties of the fold are not visible in the panel and are pinned by
 `tests/ui-stock-series.test.ts`. The ledger is genuinely ABSENT until the
-install's first trade, so it is never plotted as $0. And the curves survive a
-CONTROLLER HANDOFF, because one run artifact is one install: JSONL persistence is
+emitter's first trade, so it is never plotted as $0. And the curves survive a
+controller restart because one run artifact is one install: JSONL persistence is
 keyed by install identity, so a `market.tick` that goes backwards or a
-`tradeCashFlow` that vanishes is a new emitter process attaching, not a reset —
-and the page-realm market outlives that process. The viewer used to read either
-signal as an install boundary and drop every curve, which threw the book away on
-every deployment. An install ends the artifact instead, so there is nothing left
-to detect.
+`tradeCashFlow` that vanishes is a new emitter process attaching, not an install
+reset. The viewer used to read either signal as an install boundary and drop
+every curve. An install ends the artifact instead, so there is nothing left to
+detect.
 
 One consequence has no fix in the viewer: the measured $/sec needs the moment
 this install's ledger opened, and a viewer that attaches mid-ledger cannot know
-it. `tradeCashFlow` is cumulative and survives a handoff, so a first observation
-of it says nothing about when trading started. The rate's denominator therefore
+it. A first non-zero `tradeCashFlow` observation says nothing about when trading
+started. The rate's denominator therefore
 arms only on an observed zero followed by a non-zero figure, and the panel
 renders "attached after the first trade" as its own state rather than dividing by
 the time since it happened to connect. Putting the open on the wire —
@@ -384,10 +383,9 @@ changes nothing about what the script does.
 
 ## Run identity and artifacts
 
-Emitter `run` ids still identify one process and its monotonic `seq` space, but
+Emitter `run` ids identify one process and its monotonic `seq` space, while
 JSONL persistence is keyed by the install identity in the hello message. A
-deployment handoff therefore starts a new emitter without fragmenting the
-install replay.
+clean sync restart starts a new emitter without fragmenting the install replay.
 
 The hierarchy is `lineage -> BitNode visit -> install`. A real lineage UUID is
 stored in `data/run-lineage.txt` on `home`, whose text files survive both kinds
