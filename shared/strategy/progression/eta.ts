@@ -117,8 +117,11 @@ export interface RouteRates {
   postInstallCharismaSkillMult: number;
   /** Per-stage labyrinth walk estimates from the darknet driver, keyed by
    * stage index. An active walker's own pace and A* remainder beat any
-   * fallback; stages with no entry are priced from the maze-size fallback. */
-  labyrinthWalks?: Readonly<Record<number, { sec: number; measured: boolean }>>;
+   * fallback; stages with no entry are priced from the maze-size fallback.
+   * `investedSec` is the walk time already spent — a reset erases the maze
+   * and the position (upstream prestigeDarknetState runs on every install),
+   * so the erased-progress veto charges it. */
+  labyrinthWalks?: Readonly<Record<number, { sec: number; measured: boolean; investedSec?: number }>>;
   /** Formula-projected Daedalus work rep/sec at the invite gate, for pricing
    * the reputation leg before any Daedalus work has been measured. Derived by
    * the driver from the transcribed rep formulas; never a live measurement. */
@@ -342,16 +345,27 @@ export function regrowInstallOverride(input: {
  * benefit is credited against its cost). The renewal cadence's overhead term
  * prices the flat replay; this prices the selected route's CURRENT-stage
  * reset-sensitive legs, which that flat term cannot see: banked gate money,
- * a live hacking climb, a live charisma climb. Favor-banked reputation is
- * deliberately NOT counted — a crossing install converts it rather than
- * erasing it, and bankedFavorActivationValue already prices the conversion —
- * and augCount needs are ADVANCED by installs, not erased. */
+ * a live hacking climb, a live charisma climb, and — on the labyrinth route —
+ * a walk already in progress, because upstream's prestigeDarknetState runs on
+ * every augmentation install and drops the maze with the walker's position.
+ * Favor-banked reputation is deliberately NOT counted — a crossing install
+ * converts it rather than erasing it, and bankedFavorActivationValue already
+ * prices the conversion — and augCount needs are ADVANCED by installs, not
+ * erased. The darknet BEACHHEAD rebuild is also erased and not yet priced:
+ * no measurement of it exists until runs actually install (see
+ * spec/progress.md); the walk term at least stops a reset mid-maze. */
 export function optionalInstallErasedSec(
   needs: readonly RouteNeed[] | undefined,
   view: EndgameView,
   rates: RouteRates,
+  route?: RouteId,
 ): number {
   let erased = 0;
+  if (route === "labyrinth") {
+    for (const walk of Object.values(rates.labyrinthWalks ?? {})) {
+      erased += Math.max(0, walk.investedSec ?? 0);
+    }
+  }
   for (const need of needs ?? []) {
     if (need.kind === "money") {
       const banked = Math.min(view.money, need.target);

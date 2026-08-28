@@ -175,7 +175,10 @@ describe("endgame routes", () => {
   test("labyrinth rewards must be installed in sequence before The Red Pill", () => {
     const first = stepEndgame(view({ darknetFullAccess: true })).routes.find((route) => route.id === "labyrinth")!;
     expect(first.blocker).toContain(LABYRINTH_AUGMENTATIONS[0]);
-    expect(first.optionalInstall).toBe(false);
+    // Optional installs are allowed pre-pill and PRICED by the cadence's
+    // erased-progress veto (charisma re-climb, invested walk) — a blanket ban
+    // here starved a 24h BN15 run of every install and every faction aug.
+    expect(first.optionalInstall).toBe(true);
 
     const queued = stepEndgame(view({
       darknetFullAccess: true,

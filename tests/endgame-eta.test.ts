@@ -280,6 +280,15 @@ describe("route ETAs", () => {
       view({ bitNode: 15, charismaSkill: 1_900 }),
       { ...noRates(), charismaSkillPerSec: 2 },
     )).toBe(1_899 / 2);
+    // A walk in progress is erased by a reset (prestigeDarknetState drops the
+    // maze and the walker's position on every install) — but only the
+    // labyrinth route pays route time for it.
+    const midWalk: RouteRates = {
+      ...noRates(),
+      labyrinthWalks: { 0: { sec: 300, measured: true, investedSec: 450 } },
+    };
+    expect(optionalInstallErasedSec([], view({ bitNode: 15 }), midWalk, "labyrinth")).toBe(450);
+    expect(optionalInstallErasedSec([], view({ bitNode: 15 }), midWalk, "daedalus")).toBe(0);
   });
 
   test("route evaluation for all BitNodes remains comfortably below the 10ms budget", () => {

@@ -2740,9 +2740,9 @@ function projectedDaedalusEconomics(
 function labyrinthWalkEstimates(
   dnetTopic: GameState["topics"]["dnet"],
   view: EndgameView,
-): Record<number, { sec: number; measured: boolean }> | undefined {
+): Record<number, { sec: number; measured: boolean; investedSec?: number }> | undefined {
   const walkers = dnetTopic?.lab?.walkers ?? [];
-  let best: { pace: number; leftSec: number } | undefined;
+  let best: { pace: number; leftSec: number; investedSec: number } | undefined;
   for (const walker of walkers) {
     if (walker.believedLeft === undefined || !(walker.attempts > 0)) continue;
     const elapsedSec = (walker.beatAt - walker.startedAt) / 1_000;
@@ -2750,10 +2750,12 @@ function labyrinthWalkEstimates(
     const pace = walker.attempts / elapsedSec;
     if (!(pace > 0)) continue;
     const leftSec = walker.believedLeft / pace;
-    if (!best || pace > best.pace) best = { pace, leftSec };
+    if (!best || pace > best.pace) best = { pace, leftSec, investedSec: elapsedSec };
   }
   if (!best) return undefined;
-  return { [labyrinthStageIndex(view)]: { sec: best.leftSec, measured: true } };
+  return {
+    [labyrinthStageIndex(view)]: { sec: best.leftSec, measured: true, investedSec: best.investedSec },
+  };
 }
 
 /** Aggregate skill power still on the shelf: per-augmentation ln-mults of
@@ -3277,7 +3279,7 @@ function progressionRefresh(ctx: NeedContext): void {
   // are untouched, and favor-banked reputation is deliberately not counted
   // as erased (a crossing install converts it; bankedFavorActivationValue
   // already prices that).
-  const erasedSec = optionalInstallErasedSec(selectedEta?.needs ?? selectedStatus?.needs, view, rates);
+  const erasedSec = optionalInstallErasedSec(selectedEta?.needs ?? selectedStatus?.needs, view, rates, choice?.route);
   if (marginalInstall === true && !routeRequiresInstall && !pastPointOfNoReturn && resetValueMult < erasedSec) {
     marginalInstall = false;
   }
