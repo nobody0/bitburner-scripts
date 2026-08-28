@@ -337,10 +337,18 @@ export async function main(ns: NS): Promise<void> {
    * cannot fit the launch and a refused darknet check alike, and it writes its
    * reason only to the launching script's own log. Retrying it silently every
    * pass is indistinguishable from having nothing to do. */
-  const launchRefusals = new Map<string, { kind: string; threads: number; wantedGb: number; at: number }>();
+  const launchRefusals = new Map<string, { kind: string; threads: number; wantedGb: number; since: number }>();
   const noteLaunchRefused = (entry: HostEntry, order: Order, why: string): void => {
     const wantedGb = order.ramOverrideGb * order.threads;
-    launchRefusals.set(entry.hostname, { kind: order.kind, threads: order.threads, wantedGb, at: Date.now() });
+    // ONCE per incident, not once per pass. A refused dispatch is retried on
+    // every derive, so logging each attempt buries the signal it exists to give
+    // — one speedrun seed produced 1,300 identical lines. `since` holds the
+    // FIRST sighting for the same reason: how long a host has been failing is
+    // the number worth reading, and a stamp renewed every pass reads "0s" for
+    // ever. The panel refusal is the durable statement; this is its first cry.
+    const since = launchRefusals.get(entry.hostname)?.since;
+    launchRefusals.set(entry.hostname, { kind: order.kind, threads: order.threads, wantedGb, since: since ?? Date.now() });
+    if (since !== undefined) return;
     // `console.log`, never `ns.tprint`: this controller parks on
     // `dnet.nextMutation`, which holds the Netscript lock, so a second ns call
     // throws CONCURRENCY ERROR and kills it.
@@ -389,10 +397,6 @@ export async function main(ns: NS): Promise<void> {
    * The rest is now the only thing that clears it, because the rest is the only
    * thing that hands the event loop back. */
   let deriveChain = 0;
-  // TEMPORARY DIAGNOSTIC — remove before commit.
-  let diagPasses = 0;
-  let diagReportedAt = 0;
-  let diagChainStartedAt = 0;
   const runPass = async (): Promise<void> => {
     try { if (!standDown) await fileWork(Date.now()); } catch {}
     deriveQueued = false;
@@ -410,20 +414,6 @@ export async function main(ns: NS): Promise<void> {
     if (deriveQueued) { deriveDirty = true; return; }
     deriveQueued = true;
     deriveChain++;
-    // TEMPORARY DIAGNOSTIC — remove before commit.
-    if (deriveChain === 1) diagChainStartedAt = Date.now();
-    diagPasses++;
-    if (Date.now() - diagReportedAt > 5_000) {
-      diagReportedAt = Date.now();
-      // `console.log`, NOT `ns.tprint`: this controller parks on
-      // `dnet.nextMutation`, which holds the Netscript lock, so ANY second ns
-      // call throws CONCURRENCY ERROR and kills it. Read it in DevTools.
-      console.log(
-        `[dnet-derive] passes=${diagPasses} in 5s, chain=${deriveChain},`
-        + ` chainHeldMs=${Date.now() - diagChainStartedAt}, hosts=${hosts.size}`,
-      );
-      diagPasses = 0;
-    }
     // Past the bound the pass rests on a real timer, so the event loop gets a
     // turn no matter what is feeding the chain. This is the backstop, not the
     // fix: the feedback edges themselves are cut at `retireStaged`.
@@ -1186,9 +1176,15 @@ export async function main(ns: NS): Promise<void> {
    * locks that pair; retries cover an externally killed resident and the
    * engine's transient zero while a prior allocation is being reaped. */
   const MANAGED_DISPATCH_ATTEMPTS = 3;
-  /** How long one `connectToSession + exec` lease may take before the dispatch
-   *  gives the host back. The proxy's own placement retry is unbounded, so
-   *  without this the launch window is held for the rest of the run. */
+  /** How long the WHOLE managed dispatch may take, retries included, before it
+   *  gives the host back.
+   *
+   * The proxy's own placement retry is unbounded, so without a deadline the
+   * launch window is held for the rest of the run. It must stay well inside
+   * `LAUNCH_WINDOW_MS`: this dispatch holds a pid-less window, and if the window
+   * could expire underneath it another pass would dispatch concurrently and
+   * double-launch. One budget across all attempts rather than one per attempt,
+   * so that stays true however the retry count moves. */
   const MANAGED_DISPATCH_TIMEOUT_MS = 5_000;
   const dispatchManaged = async (entry: HostEntry): Promise<void> => {
     if (!stasisLinked.has(entry.hostname)) return;
@@ -1208,13 +1204,20 @@ export async function main(ns: NS): Promise<void> {
     const offer = offerLaunch<DnetAgentLaunch>({ kind: "dnet-agent", host: entry.hostname });
     let pid = 0;
     let failureCode = 0;
+    const deadline = Date.now() + MANAGED_DISPATCH_TIMEOUT_MS;
     for (let attempt = 0; attempt < MANAGED_DISPATCH_ATTEMPTS && pid === 0; attempt++) {
+      const budgetMs = deadline - Date.now();
+      if (budgetMs <= 0) break;
       try {
         // TIME-BOUNDED. The window above is already claimed, and the lease can
         // wait for ever: `NsProxy#respawn` retries placement in an unbounded
         // loop with no failure exit, so a resident the fleet cannot afford
-        // leaves this await unsettled and the host wedged behind it. Losing the
-        // race costs one refused dispatch; not having it cost the host.
+        // leaves this await unsettled and the host wedged behind it.
+        //
+        // Abandoning a lease that later succeeds is safe: `restoreRefusedLaunch`
+        // withdraws the launch descriptor, so a late `exec` produces a child
+        // that captures nothing and exits on its first line rather than a second
+        // agent nobody is tracking.
         const outcome = await Promise.race([
           nsp.guaranteeFit(
           ["dnet.connectToSession", "exec"],
@@ -1231,7 +1234,7 @@ export async function main(ns: NS): Promise<void> {
             return { pid: launched, code: launched === 0 ? 0 : 200 };
           },
           ),
-          realmSleep(MANAGED_DISPATCH_TIMEOUT_MS).then(() => ({ pid: 0, code: 0 })),
+          realmSleep(budgetMs).then(() => ({ pid: 0, code: 0 })),
         ]);
         pid = outcome.pid;
         failureCode = outcome.code;
@@ -2092,12 +2095,23 @@ export async function main(ns: NS): Promise<void> {
       });
     // A launch the ENGINE refused is a fault, not a routing gap.
     const refusedLaunches: Refusal[] = [...launchRefusals.entries()]
-      .filter(([host]) => hosts.get(host)?.agent === undefined)
+      // A host that has since taken an agent, or gone entirely, has nothing to
+      // report. The `undefined` case has to be explicit: a retired host is
+      // removed from the map, and `hosts.get(host)?.agent === undefined` would
+      // answer `undefined` for it too and keep its refusal on screen for ever.
+      .filter(([host]) => {
+        const entry = hosts.get(host);
+        if (entry === undefined) {
+          launchRefusals.delete(host);
+          return false;
+        }
+        return entry.agent === undefined;
+      })
       .map(([host, refused]): Refusal => ({
         host,
         why: "launch-refused",
         detail: `the engine refused ${refused.kind} x${refused.threads}`
-          + ` (${refused.wantedGb.toFixed(2)}GB wanted) ${Math.round((at - refused.at) / 1000)}s ago`
+          + ` (${refused.wantedGb.toFixed(2)}GB wanted), failing for ${Math.round((at - refused.since) / 1000)}s`
           + " — the reason is in the launcher's own script log",
       }));
     const refusals = [...plan.refused, ...routeless, ...refusedLaunches];
