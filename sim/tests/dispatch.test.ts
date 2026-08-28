@@ -383,8 +383,7 @@ describe("HWGW dispatcher", () => {
     const result = planFarm(world.view(), memory, [], { jit: true });
     memory = result.memory;
 
-    // The old path saw unused prep RAM, set `borrow`, skipped proper JIT and
-    // opened eager farm batches beside the still-pending ordered queue.
+    // Pending ordered JIT work prevents the eager path from opening beside it.
     expect(memory.dispatch.nextBatchId).toBe(batchIdBefore);
     expect(memory.dispatch.pendingJitBatchCount).toBeGreaterThan(0);
     expect(memory.dispatch.pendingJitBatchCount).toBeLessThanOrEqual(pendingBefore);
@@ -713,9 +712,8 @@ describe("HWGW dispatcher", () => {
     // In a clean steady state NO grow should be reduced: the launch-time
     // re-derivation and sizeBatchAtLanding's plan-time sizing read the same
     // predicted ledger, so they agree unless something moved in between (a
-    // hack shrunk on the arrival-money brake, a hack cancelled, an
-    // out-of-band money change). Measured on this fixture: 14 grows, 0
-    // reduced. That agreement is the useful assertion — a reduction here
+    // hack shrunk on the arrival-money brake, a hack cancelled, or an
+    // out-of-band money change). That agreement is the useful assertion — a reduction here
     // would mean the two sizings disagree, which is a bug, not a correction.
     // The clamp's own behaviour is pinned as a unit in prediction.test.ts.
     for (const grow of grows) {
@@ -911,8 +909,7 @@ describe("HWGW dispatcher", () => {
   });
 
   test("never asks ns.exec for a fractional thread count", () => {
-    // The eager path used to pass `hackThreadsAtLanding`'s unrounded result
-    // straight to `ns.exec({threads})`; the fraction belongs on
+    // The fractional strength belongs on
     // `strengthThreads`, where the JIT path already puts it.
     //
     // The fixture has to produce a shortfall or the assertion is vacuous:
@@ -2112,9 +2109,8 @@ describe("share stop requests", () => {
     expect(requestShareStops(memory, first, 12)).toBe(16);
     expect(first).toEqual([{ type: "stopShare", opId: 1 }]);
 
-    // The 16 GB pending stop already covers this ask: no second victim. The
-    // old accounting skipped stopping workers entirely, so every repeated call
-    // for the same shortfall stopped a fresh worker on top of the pending one.
+    // The 16 GB pending stop already covers this request, so no second victim
+    // is selected.
     const repeat: Action[] = [];
     expect(requestShareStops(memory, repeat, 12)).toBe(16);
     expect(repeat).toEqual([]);

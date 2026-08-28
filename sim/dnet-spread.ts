@@ -68,12 +68,8 @@ export const price = (calls: readonly string[]): number => {
 
 /** Each reserve comes from the SAME call list production sizes it with.
  * Ordinary hosts need local `exec + connectToSession`; stasis hosts deliberately
- * keep only the 1.8 GB topology observer and launch jobs through the shared
- * resident's atomic authority lease.
- *
- * This used to be `price(["dnet.probe"])` for the entire fleet, which quietly
- * omitted the `exec` and `connectToSession` that make a host recoverable, and
- * so modelled an ordinary fleet 1.35 GB per host cheaper than the one we actually run. */
+ * keep only the topology observer and launch jobs through the shared resident's
+ * atomic authority lease. */
 export const PROBER_GB = price(PROBER_CALLS);
 export const PROBER_ARMOURED_SIM_GB = price(PROBER_ARMOURED_CALLS);
 export const PROBER_STASIS_GB = price(PROBER_STASIS_CALLS);

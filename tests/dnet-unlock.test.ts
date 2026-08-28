@@ -53,8 +53,7 @@ describe("buying DarkscapeNavigator.exe", () => {
   });
 
   test("locked is not the same as switched off, which is what makes the purchase possible", () => {
-    // The bug this pins: gating the purchase on `activeFeatures.has("dnet")`
-    // deadlocks, because that set comes from driverEnabled and so excludes dnet
+    // `activeFeatures` comes from driverEnabled and excludes dnet
     // exactly while it is locked — the state in which we need to buy it.
     const locked = deriveCapabilities({ bitNode: 1, sourceFiles: {}, hasDarknetProgram: false });
     expect(locked.unlocked.dnet).toBe("no");

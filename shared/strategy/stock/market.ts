@@ -132,9 +132,8 @@ export function favouredSide(forecast: number): PositionSide {
 /** Round-trip cost as a FRACTION of notional, from the live ask/bid.
  *
  * Both legs cross the spread: you buy at ask and sell at bid, so the loss is
- * `(ask - bid) / ask` of the position before any price movement. This is the
- * number the old sizing logic omitted entirely, and it is 10x-200x the
- * commission on a position large enough to be worth opening. */
+ * `(ask - bid) / ask` of the position before any price movement. Position
+ * sizing must include this cost as well as commissions. */
 export function roundTripCostFraction(ask: number, bid: number): number {
   if (!(ask > 0) || !(bid > 0)) return Infinity;
   return Math.max(0, (ask - bid) / ask);
@@ -148,9 +147,8 @@ export function roundTripCost(shares: number, ask: number, bid: number): number 
 /** Ticks a position must be held before the expected drift clears its round
  * trip. Infinite when the drift is the wrong sign or zero.
  *
- * This is the honest replacement for the old code's "assume 10 ticks": rather
- * than assert a hold length and size against it, derive the hold length the
- * position actually requires and refuse the trade if the horizon is shorter. */
+ * Derive the required hold length from the position instead of assuming one;
+ * refuse the trade when the available horizon is shorter. */
 export function breakEvenTicks(params: {
   shares: number;
   ask: number;
@@ -336,7 +334,7 @@ export function unlockCosts(mults: StockNodeMults | undefined): UnlockCosts {
  *
  * `1` means hacked money arrives at full value and the market competes with it
  * on the merits. `Infinity` means hacking earns nothing and every dollar has to
- * come from somewhere else — BN8. Used to decide how hard `stock` bids for money
+ * come from somewhere else — BN8. This decides how hard `stock` bids for money
  * and how much of the farm it may commandeer for manipulation. */
 export function manipulationLeverage(mults: StockNodeMults | undefined): number {
   const gain = mults?.ScriptHackMoneyGain ?? 1;

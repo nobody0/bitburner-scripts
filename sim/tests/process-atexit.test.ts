@@ -17,12 +17,9 @@ import { darkwebServerSpec } from "../network.ts";
  * The killed script's own await rejects with ScriptDeath only afterwards, on a
  * microtask, and any ns call in that zombie continuation throws.
  *
- * Dnet teardown and any future restart recovery depend on every clause, and
- * each was separately wrong in the simulator before this suite existed: `killed`
- * was set before the handlers ran (no ns call worked at all), and RAM was
- * freed after them with re-entrant kill a no-op (spawn could never fit). A
- * wrong version here would let the survival design pass in the simulator and
- * die in the game — the exact failure a simulator exists to prevent.
+ * Dnet teardown and restart recovery depend on every clause. These tests keep
+ * simulator teardown ordering aligned with the game so recovery behavior is
+ * meaningful.
  *
  * A server restart adds one more rule: killServerScripts walks live Maps.
  * Synchronous exec and spawn(0) replacements are appended during that walk and

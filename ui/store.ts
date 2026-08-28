@@ -83,10 +83,8 @@ export class RunStore {
 
   /** Open the JSONL for append, with a PERMANENT error listener.
    *
-   * A WriteStream whose 'error' has no listener throws out of the EventEmitter,
-   * which under Bun exits the process — so ENOSPC on one run used to take every
-   * other live run's buffered tail and held spans with it. A failed stream is a
-   * reported condition instead: writes stop, `recordCount` stops climbing (the
+   * A WriteStream whose 'error' has no listener throws out of the EventEmitter.
+   * A failed stream is a reported condition: writes stop, `recordCount` stops climbing (the
    * catalog must not advertise records that were never written), and the next
    * emitter connect retries the open through `attach`, which is the only
    * recovery available to a hub that must not be restarted. */
@@ -167,9 +165,8 @@ export class RunStore {
 
   #metaWrittenAt = 0;
 
-  /** The sidecar was rewritten (stat + write + rename, all synchronous) on
-   * every ingest batch — twice a second per emitter, forever. A live run's
-   * catalog data is served from this in-memory store, and the resume path
+  /** Throttle synchronous sidecar writes. A live run's catalog data is served
+   * from this in-memory store, and the resume path
    * reads the sidecar only after detach() forces a final write, so a sidecar
    * that lags a couple of seconds costs nothing. */
   #writeMetadataThrottled(): void {
@@ -190,9 +187,8 @@ export class RunStore {
    * one sampled once, and keeping only the opening record would make the two
    * indistinguishable. Two records bound the interval exactly.
    *
-   * Measured on a live 2.58 GB run: `progression` was 50% of the file, sent
-   * every 200 ms, and its 13.8 KB of plan/needs/multipliers changed on 12 of
-   * 1259 consecutive pairs. */
+   * Whole-topic state can be large and high-frequency even when its payload is
+   * unchanged, so collapsing spans materially reduces stored telemetry. */
   #writeState(record: StateRecord, line: string): void {
     const payload = JSON.stringify(record.data);
     const span = this.#spans.get(record.key);
@@ -320,10 +316,8 @@ export class RunStore {
       writeFileSync(temporary, JSON.stringify(this.metadata(), null, 2) + "\n");
       renameSync(temporary, this.#metaFile);
     } catch (error) {
-      // Synchronous, and reached from append() on every batch, so the same
-      // ENOSPC/EACCES that breaks the writer would throw out of the hub's
-      // websocket callback and exit the process — losing every live run's tail
-      // to a failure in one run's sidecar. The sidecar only caches what the
+      // Synchronous and reached from append() on every batch. The sidecar only
+      // caches what the
       // JSONL already holds (the resume path is its one reader), so a stale one
       // is worth a log line, not the hub. Logged once: the throttle still fires
       // every couple of seconds per emitter.

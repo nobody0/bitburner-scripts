@@ -22,12 +22,8 @@ import type { Blocker } from "./requirements.ts";
 import { INSTALL_FINAL_SWEEP_SEC } from "../progression/forecast.ts";
 import { INSTALL_OVERHEAD_SEC } from "../progression/eta.ts";
 
-/** Choosing a SET of faction pushes, rather than one faction and how far.
- *
- * The predecessor of this module picked the single best `value/etaSec` package,
- * walked that one faction's concave envelope, and consulted the best runner-up
- * only as a stopping threshold. Three things are not expressible that way, and
- * all three change the answer:
+/** Choose a set of faction pushes rather than one faction and depth. Three
+ * cross-package effects determine the answer:
  *
  *  - **Overlap.** Most augmentations are sold by several factions. Their value
  *    is realised once, not once per seller, so the value of a set is the value
@@ -38,7 +34,7 @@ import { INSTALL_OVERHEAD_SEC } from "../progression/eta.ts";
  *    together than summed apart — and the sum is what a per-faction ETA does.
  *  - **One work slot.** Reputation work is sequential across the set. A
  *    per-package `etaSec` is a critical path for that package alone and cannot
- *    be added up, which is why nothing previously tried to.
+ *    be summed across packages.
  *
  * So the decision unit here is the whole install cycle: a budget of seconds,
  * and the best set of `(faction, reputation target)` pairs that fits in it.
@@ -419,9 +415,8 @@ function compatible(faction: string, chosen: readonly Choice[], view: FactionsVi
 
 /** Greedy on marginal value per marginal second.
  *
- * This is the arithmetic the predecessor already had — revalue a faction after
- * the chosen set has supplied its shared augmentations — applied to the whole
- * set instead of once to a runner-up. Value over a union is monotone and
+ * Revalue each faction after the chosen set supplies shared augmentations.
+ * Value over a union is monotone and
  * submodular and the work term is additive, so this carries the standard
  * `(1 - 1/e)` guarantee. */
 function greedy(
@@ -600,10 +595,8 @@ export function solvePortfolio(
  * fact a second time. Worse, it can make the grid admit NOTHING — a route's
  * terminal package is deliberately exempt from horizon filtering, and a budget
  * that cannot hold it would silently plan around the augmentation the node
- * cannot end without. Reaching at least the longest package also guarantees the
- * property that makes replacing the old selector safe: whatever single package
- * the predecessor would have chosen is inside some budget on this grid, so the
- * set solver can never do worse than it. */
+ * cannot end without. Reaching at least the longest package also ensures every
+ * individually feasible package appears inside some budget on this grid. */
 export function budgetGrid(horizonSec: number, longestPackageSec = 0, samples = HORIZON_SAMPLES): number[] {
   const reach = Math.max(
     Number.isFinite(horizonSec) ? horizonSec : 0,

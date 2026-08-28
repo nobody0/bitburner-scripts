@@ -1245,10 +1245,8 @@ export interface GoPassWhenLostV1 {
   rolloutPlies?: number;
 }
 /** Bank a lost game instead of playing it into the ground. Node power pays
- * blackScore * difficulty * streak win or lose, and the value-first argmax
- * never selects the exact-0 terminal pass while any move scores above zero —
- * so a dead position used to spiral: fill our own liberties, get captured,
- * repeat on the shrinking remainder while White passes, ending near zero.
+ * blackScore * difficulty * streak win or lose, so a dead position should pass
+ * rather than sacrifice the remaining score.
  * This rule only ever fires while White's pass is on the table (our pass ends
  * the game immediately), we are behind, and the chosen move cannot guarantee
  * banking more than passing does even against White's kindest reply. */

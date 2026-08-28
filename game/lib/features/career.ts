@@ -72,9 +72,8 @@ let lastCompletion: WorkCompletionNotice | undefined;
 const companyRates = new Map<string, ActivityRateSample>();
 /** action key -> earliest retry time, latched when EXECUTING that action
  * THREW. The idle wake keeps this driver hot at frame rate so a freed slot is
- * consumed immediately — but the same heat turns one throwing call into five
- * proxy calls per second, forever (measured: 1,389 applyToCompany throws in
- * five minutes against a world that refuses the call). A throw is not a
+ * consumed immediately — but the same heat can repeat a throwing call five
+ * times per second. A throw is not a
  * refusal the next frame can cure; it gets a cool-down. A `false` return is
  * not backed off: that is the game answering, and the next pass may succeed. */
 const executeBackoff = new Map<string, number>();

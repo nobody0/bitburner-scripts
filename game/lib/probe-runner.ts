@@ -27,15 +27,10 @@ import {
  * feature drivers on the capabilities this produces. Sending the results is
  * ./telemetry-sink.ts's job and nobody else's.
  *
- * There is no budget arithmetic here any more, and no placement. Probes used to
- * be priced against a dodge budget the home reserve pinned near 2.5 GB — far
- * below a corporation read (20 GB) or an SF4-less augmentation sweep (80 GB) —
- * so a pass packed what fit, leased a host per stub, split the expensive probes
- * into steps, and recorded what it could not afford with its price. The ns
- * resident (./ns-proxy.ts) took all of that over: it carries its own broker
- * lease, prices each member as a body first calls it, and respawns larger when
- * its budget fills. A pass is therefore just "whose `everyMs` is up", and a
- * probe body is ordinary sequential code whose only failure mode is a throw.
+ * Budget arithmetic and placement belong to the ns resident (./ns-proxy.ts),
+ * which carries its own broker lease, prices members on first call, and
+ * respawns larger when needed. A pass therefore selects probes whose `everyMs`
+ * is due, and a probe body remains ordinary sequential code.
  *
  * What survives is the ISOLATION. A probe's failure is recorded against that
  * probe and costs its neighbours nothing — which matters because ns.gang.*,

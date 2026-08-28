@@ -148,7 +148,7 @@ async function bundleEntry(
 export const GO_PLAYBOOK_MODULE = "game/lib/generated/go-playbook.phase.js";
 
 /** Bundle the V9 engine as a classic worker. The resulting source is embedded
- * into start.js and opened through a Blob URL in game, which keeps deployment
+ * into the controller bundle and opened through a Blob URL in game, which keeps deployment
  * atomic and avoids relying on Bitburner's script server as a Worker URL.
  *
  * The merged phase playbook cannot join the IIFE bundle (it inflates its
@@ -165,7 +165,7 @@ export async function bundleGoWorkerSource(): Promise<string> {
     target: "es2022",
     logLevel: "warning",
     // The worker never runs under ns: it executes as a Blob-URL Worker and is
-    // embedded into start.js as a string literal the game's static RAM parser
+    // embedded into main.js as a string literal the game's static RAM parser
     // never reads, so full minification (syntax included) is safe here.
     minify: true,
   });

@@ -87,8 +87,7 @@ export const stanekTab: Tab = {
         "at",
         "rot",
         "power",
-        // Charge is two numbers priced very differently, and the panel used to
-        // print only the cheaper one. The count enters the effect at the power
+        // Charge has two differently priced components. The count enters the effect at the power
         // 0.07 — nearly flat, so grinding it is close to worthless — while the
         // peak charge is the logarithmic term that dominates it, and
         // `charged effect` is the only figure on this tab that says what the

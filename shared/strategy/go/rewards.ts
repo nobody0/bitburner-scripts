@@ -8,8 +8,7 @@ import {
 } from "./rules.ts";
 import { addRepToFavor } from "../factions/rep.ts";
 
-/** Two games cover the every-second-win favor cadence. Longer policy horizons
- * performed worse on held-out BN1 seeds. */
+/** Two games cover the every-second-win favor cadence used by the planner. */
 export const GO_PLANNING_GAMES_MAX = 2;
 
 /** `bonusPower` and `komi` are v3.0.1 game data; the remaining fields are
@@ -34,12 +33,11 @@ export const GO_REWARD_RULES: Readonly<Record<GoRewardOpponent, {
   // Runtime records never tune the policy: they are outcomes, not an excuse to
   // learn around an incomplete predictor.
   //
-  // Win probabilities refit 2026-08-18 from one 3,072-game combined arena
+  // Win probabilities come from the committed 3,072-game combined-arena report
+  // `go-ai/derivatives/combined-arena-final-3072.json`, reproduced by
+  // `bun run go:combined:arena --games 3072 --unrouted-baseline` with
   // (512 per opponent, start phase 118301, stride 41213, defense seed
-  // 20260819) against the deployed runtime. The previous values predated the
-  // playbook entirely and priced Illuminati at a coin flip while the shipped
-  // runtime wins 98.6% of its games, so the controller was systematically
-  // avoiding the opponent its certified lines had made safest.
+  // 20260819) against the deployed runtime.
   //
   // scoreFraction and aiSecondsPerPlayableNode remain the 2026-08-14 fit (tie
   // roll 0.5, seed start 123456, 128 games per opponent and 512 for
@@ -58,8 +56,7 @@ export const GO_REWARD_RULES: Readonly<Record<GoRewardOpponent, {
   // expensive four-game deployed TypeScript arena sample.
   // The daemon has no playbook, so both numbers are the same measurement:
   // 264/304 pooled over the strip-derivative install arena and two seed-wait
-  // control arms, 2026-08-17/18. The old 0.129 came from two 128-game gates of
-  // a superseded checkpoint.
+  // control arms, 2026-08-17/18.
   "????????????": { bonusPower: 2, komi: 9.5, priorWinProbability: 0.868421, neuralBaselineWinProbability: 0.868421, scoreFraction: 0.408, aiSecondsPerPlayableNode: 0.596 },
 };
 
@@ -528,13 +525,10 @@ export function rankGoGames(view: GoRewardView): GoGameCandidate[] {
       );
       // Rank by the AVERAGE saving rate over the candidate's whole planning
       // tree, not the first game's instantaneous rate. Power per second is
-      // roughly board-size-invariant (score and duration both scale with
-      // area), but the effect curve is logarithmic — so a short game's
-      // first-game rate cannot be sustained by chaining, and pricing it as if
-      // it could made six diminishing 27s games look ~6x better than one
-      // thick 159s game that actually delivers its saving. The tree already
-      // contains each candidate's own diminishing tail; dividing by the full
-      // tree duration (wait charged once) compares them honestly.
+      // roughly board-size-invariant (score and duration both scale with area),
+      // but the effect curve is logarithmic, so a first-game rate cannot be
+      // sustained across a chain. Divide each diminishing tree by its full
+      // duration, charging the wait once.
       const continuationSaved = Math.max(
         0,
         horizon.transientSecSaved + horizon.favorSecSaved - totalSecSaved,

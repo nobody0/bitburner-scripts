@@ -23,8 +23,7 @@ function need(partial: Partial<Need> & Pick<Need, "kind" | "target" | "have">): 
 
 describe("need direction", () => {
   test("karma is satisfied by going DOWN, everything accumulating by going up", () => {
-    // The bug this pins: treating karma like a normal stat makes a satisfied
-    // gang precondition look permanently blocking, and career never stops.
+    // Karma requirements decrease toward a negative threshold.
     expect(needDirection("karma")).toBe("atMost");
     expect(isSatisfied({ kind: "karma", target: -54_000, have: -54_000 })).toBe(true);
     expect(isSatisfied({ kind: "karma", target: -54_000, have: -60_000 })).toBe(true);

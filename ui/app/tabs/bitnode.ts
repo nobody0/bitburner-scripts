@@ -182,9 +182,8 @@ function forecastCard(forecast: TimeForecast, now: number): string {
 }
 
 type Plan = NonNullable<NonNullable<ProjectedState["topics"]["progression"]>["plan"]>;
-// Both were split out of `progression` (shared/telemetry/topics/progression.ts):
-// they move far faster than the plan they used to ride on, and a state record
-// republishes its whole topic.
+// Both are separate from `progression` because state records republish their
+// whole topic and these values change on a faster cadence.
 type RamArena = NonNullable<ProjectedState["topics"]["ramArena"]>;
 type Route = NonNullable<Plan["routes"]>[number];
 type ResourceMarginal = NonNullable<Plan["marginals"]>[MarginalResource];
@@ -230,7 +229,7 @@ const MARGINAL_LABELS: Record<MarginalResource, string> = {
  * at.
  *
  * This is the exchange rate the arbitration table's `return/$` and `marginal`
- * columns are denominated in, and nothing in the viewer used to show it. An
+ * columns use. An
  * `estimated` zero is a real modelled answer — "the selected plan has no
  * dependency on this resource" — and stays visually distinct from `unknown`,
  * which is an absent observation (shared/strategy/progression/marginal.ts). */
@@ -273,8 +272,7 @@ function routeCard(plan: Plan, now: number): string {
           label: "chosen route",
           value: chosen,
           // Same words as the table row, from one helper: the chosen route can
-          // BE the non-drivable one, and this tile used to caption it
-          // "available".
+          // be non-drivable.
           sub: selected
             ? `${Number.isFinite(selected.etaSec) ? fmtTime(selected.etaSec * 1_000) : "∞"} ETA · ${routeStatus(selected).label}`
             : "",
@@ -388,7 +386,7 @@ function cadenceCard(plan: Plan, hasSeries: boolean): string {
       // it: `installVerdict` drops the rate both when the frontier concluded
       // there is nothing left to push for (verdict "install") and when it has
       // not run yet or no route ETA exists (verdict "no-data"). Only `verdict`
-      // separates the two, so a booting run used to read as a finished one.
+      // separates the two states.
       sub:
         decision.verdict === "no-data"
           ? "no verdict yet — needs a route ETA and a push rate"
@@ -587,9 +585,8 @@ export const bitnodeTab: Tab = {
     // `completion` exists ONLY once the selected route is mechanically finished,
     // so its presence already says "the node can be ended now" — and the states
     // inside it are not interchangeable. Without SF4 (and outside BN4) the driver
-    // never arms anything and the run parks forever waiting for a human to click
-    // destroyW0r1dD43m0n; that state used to be captioned "central speedrun
-    // plan", which is the one thing it is not. `ready` is not tested: the
+    // never arms anything and the run waits for a human to click
+    // destroyW0r1dD43m0n. `ready` is not tested: the
     // producer hardcodes it true whenever the object exists.
     const completion = p.plan?.completion;
     const completionTile: Tile = completion

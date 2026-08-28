@@ -15,9 +15,7 @@ import { DARKSCAPE_COST, TOR_COST } from "./rates.ts";
  * a fresh BN1/SF0 matched pair with only the SF4.3 automation allowance, equal
  * post-purchase cash, and Darkscape pre-granted only to the treatment. It uses
  * seeds 1..3, caps a local forecast delta at the 24-hour route horizon, takes
- * the median, discounts it by 10% for aggregate-Go optimism, and floors it.
- * Raw 2026-08-24 deltas at the 12-minute early checkpoint were 0, 23,443,167.63
- * and 190,586.08 seconds; capped samples were 0, 86,400, 86,400. */
+ * the median, discounts it by 10% for aggregate-Go optimism, and floors it. */
 export const DARKSCAPE_EARLY_BN1_ROUTE_SECONDS = 77_760;
 
 export interface DarkscapeView {

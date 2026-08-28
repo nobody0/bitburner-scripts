@@ -50,16 +50,14 @@ import {
 } from "../shared/strategy/progression/decide.ts";
 import { scoreAugMults, weightsFromMarginals } from "../shared/strategy/factions/augs.ts";
 
-/** The live BN12 measurement: money clears its own gate long before anything
- * else binds, reputation is the only binding part of the route, hacking is the
- * climb behind it. */
+/** Representative route-channel values used by the progression fixtures. */
 const WORTH = new Map([["money", 1_000], ["hacking", 19_174], ["reputation", 49_505]]);
 import { canSolve, solve } from "../shared/strategy/side/contracts.ts";
 import { shockMultiplier, stepSleeves } from "../shared/strategy/sleeves/decide.ts";
 import { distinctRotations, packFragments } from "../shared/strategy/stanek/pack.ts";
 // stock has outgrown this file — see tests/stock.test.ts
 
-// --- assignment (shared by gang, sleeves, bladeburner) -----------------------
+// --- independent assignment --------------------------------------------------
 
 describe("assignment", () => {
   test("independent assignment is the exact per-agent argmax", () => {
@@ -96,8 +94,6 @@ describe("assignment", () => {
     expect(result.approximated).toBe(true);
   });
 });
-
-// --- gang --------------------------------------------------------------------
 
 describe("gang", () => {
   const member = (name: string, task = "Unassigned") => ({
@@ -879,11 +875,8 @@ describe("darknet", () => {
     // breaks halfway leaves the TERMINAL stranded deep in a net that is
     // rearranging around it.
     //
-    // The trigger is the mutation, not the clock. Adjacency used to be given a
-    // ~27s shelf life and refused past it, which made this refuse far more
-    // often than it succeeded — and cost far more than a stranded terminal,
-    // because the spread planner reads the same edges and every agent went
-    // blind on that timer.
+    // The trigger is a board mutation, not elapsed time: adjacency is unchanged
+    // until a move changes the board.
     const now = 10_000_000;
     const edges = [
       { hostname: "darkweb", at: now, present: true, neighbours: ["dn-0"], depth: -1 },
@@ -1088,12 +1081,8 @@ describe("progression", () => {
   });
 
   test("a long node does NOT suppress the cadence — it wants frequent installs", () => {
-    // The old rule amortized the accrued value over the remaining node, so a
-    // distant ending forbade every optional install. The renewal form is
-    // independent of remaining time — now structurally: the verdict only
-    // takes routeEtaKnown, so a magnitude cannot creep back in; only
-    // INSTALL_MIN_PAYBACK_SEC (a stepProgression gate) protects the
-    // too-close-to-the-end case.
+    // Renewal is independent of remaining node time. The separate
+    // INSTALL_MIN_PAYBACK_SEC gate protects the neighbourhood of node end.
     const verdict = installVerdict({ routeEtaKnown: true, resetValueMult: 0.5, pushMarginalRate: 1e-4 });
     expect(verdict.verdict).toBe("install");
   });
@@ -1165,10 +1154,8 @@ describe("progression", () => {
     const strong = weightsFromMarginals(WORTH, { hackingTarget: 3_000, multipliers: { hacking: 15 } });
     expect(weak.hacking).toBeGreaterThan(strong.hacking!);
     expect(strong.hacking).toBeGreaterThan(baseline.hacking!);
-    // NO RENORMALISATION back to the baseline total. The predecessor rescaled
-    // the whole objective so an override could not move the install cadence;
-    // these are seconds, and a package that really is worth more is entitled
-    // to say so.
+    // These values are seconds, so a more valuable package may increase the
+    // total instead of being normalized back to the baseline.
     const total = (weights: Record<string, number>) => Object.values(weights).reduce((sum, w) => sum + w, 0);
     expect(total(weak)).toBeGreaterThan(total(baseline));
   });
@@ -1359,12 +1346,8 @@ describe("progression", () => {
   });
 
   test("the early tranche stops a one-augmentation reset, not the first install", () => {
-    // It used to demand a QUARTER of the whole gate before the first install —
-    // `ceil(30 / 4)` = eight distinct funded augmentations. A cold BN1 start has
-    // one faction joined at that point, offering five in total, so the gate
-    // could not open from where the planner had reached and seed 1 ran four
-    // hours with zero installs. Consolidation guards the expensive half of the
-    // gate; this only has to reject a reset that buys a single augmentation.
+    // The early tranche rejects a one-augmentation reset. Consolidation guards
+    // the expensive half of the gate separately.
     expect(earlyCountBatchAllowed(30, 0, 1)).toBe(false);
     expect(earlyCountBatchAllowed(30, 0, 2)).toBe(true);
     expect(earlyCountBatchAllowed(30, 6, 1)).toBe(false);
@@ -1519,17 +1502,8 @@ describe("progression", () => {
 });
 
 describe("progression survives its own published plan", () => {
-  // THE BUG, from a live BN12 run: `progressionRefresh` read `plan.forecasts.node`
-  // unguarded. The plan outlives the bundle that wrote it — module state dies on a
-  // rebuild, the topic does not, which is the whole point of `previousChoice` — so
-  // after a build that ADDED `forecasts`, the refresh threw
-  // "Cannot read properties of undefined (reading 'node')" on every pass. It threw
-  // before publishing, so it could never replace the plan that was breaking it: the
-  // BitNode tab read "waiting for the progression planner" indefinitely while every
-  // other feature ran normally, and the only evidence was one `feature.failed`
-  // record in the log.
-  //
-  // A plan from an older bundle must be DISCARDED, not dereferenced.
+  // Published plans can outlive the bundle that created them. An incompatible
+  // shape must be discarded before any nested field is read.
   function ctxWith(plan: unknown) {
     const state = initState();
     state.topics.player = {

@@ -11,9 +11,9 @@ import {
 import { solveCycle, type RamCaps, type TargetStatics } from "../shared/strategy/targeting.ts";
 import type { ServerView, WorldView } from "../shared/world.ts";
 
-/** Secondary-prep feasibility on a SMALL fleet. The old gate subtracted the
- * farm's saturation envelope (the minimum-interval role grid — tens of TB for
- * a fast target at low skill) from the fleet, so `fleetGb - depthCap` was 0
+/** Secondary-prep feasibility on a small fleet. Subtracting the farm's full
+ * saturation envelope (the minimum-interval role grid) would make
+ * `fleetGb - depthCap` zero
  * on every early fleet and a second target could never start prepping. The
  * fixed gate subtracts the farm's minimum sustaining envelope (one slot per
  * role) times a starvation headroom; the income actually lost to a prep
@@ -56,8 +56,8 @@ describe("achievable farm envelope", () => {
     expect(envelope).toBeGreaterThan(0);
     expect(SECONDARY_PREP_FARM_HEADROOM * envelope).toBeLessThan(SMALL_FLEET_GB);
 
-    // The corrected gate leaves real RAM for a secondary prep where the old
-    // subtrahend (depthCapGb alone) left exactly 0.
+    // The sustaining envelope leaves RAM for secondary prep; depthCapGb alone
+    // would leave exactly zero.
     const farmEnvelopeGb = Math.min(depthCapGb(model), SECONDARY_PREP_FARM_HEADROOM * envelope);
     expect(Math.max(0, SMALL_FLEET_GB - farmEnvelopeGb)).toBeGreaterThan(0);
     expect(Math.max(0, SMALL_FLEET_GB - depthCapGb(model))).toBe(0);
@@ -72,7 +72,7 @@ describe("achievable farm envelope", () => {
     expect(solution).toBeDefined();
     const model = { ...solution!, jitSaturationGb: 500 };
     // A fleet past saturation: min(saturation, headroom * minimum envelope)
-    // can never exceed the saturation number the old gate used.
+    // can never exceed the saturation ceiling.
     const envelope = minimumFarmEnvelopeGb(solution!, NOODLES, ctx, 1e6, undefined);
     const farmEnvelopeGb = Math.min(depthCapGb(model), SECONDARY_PREP_FARM_HEADROOM * envelope);
     expect(farmEnvelopeGb).toBeLessThanOrEqual(depthCapGb(model));

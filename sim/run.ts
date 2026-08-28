@@ -199,7 +199,7 @@ export function runSim(options: RunOptions): RunResult {
   if (options.farm) {
     // HWGW engine: completions are coalesced into the next pass, and the
     // dispatcher is told about actions the world refused so reservations
-    // never leak (the earlier rewrite's dispatcher bug; see README).
+    // never leak.
     let farmMemory = initFarm();
     let pending: CompletionEvent[] = [];
     replan = (event?: CompletionEvent): void => {
@@ -448,10 +448,8 @@ if (import.meta.main) {
   // That isolation is exactly what makes the seeds safe to run CONCURRENTLY —
   // no seed can observe another. Bounded by the core count rather than
   // unbounded, because a fully-loaded machine makes every seed slower and the
-  // per-seed wall clock is itself a number people read. Awaiting each child
-  // inside the loop, as this used to, left 11 of 12 cores idle for the whole
-  // run and made a three-seed profile take three times as long as a one-seed
-  // one for no reason.
+  // per-seed wall clock is itself a number people read. Launch all bounded
+  // children before awaiting them so independent seeds run concurrently.
   if (driver === "game" && runSeeds.length > 1 && !child) {
     const base = args.filter((a, i) => a !== "--seeds" && args[i - 1] !== "--seeds");
     const lanes = Math.max(1, Math.min(runSeeds.length, (navigator.hardwareConcurrency || 4) - 1));

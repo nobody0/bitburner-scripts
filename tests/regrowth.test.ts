@@ -97,13 +97,8 @@ describe("fresh-cycle regrowth curves", () => {
   test("an extrapolation may not be worse than the caller's recent-rate estimate", () => {
     // The fit is cumulative since cycle start; far outside the observed span it
     // reads the slow bootstrap as the future regime. `fallbackSec` is the
-    // caller's linear estimate at the RECENTLY measured rate, and acceleration —
+    // caller's linear estimate at the recently measured rate, and acceleration —
     // the only thing this fit exists to capture — can only shorten an estimate.
-    //
-    // MEASURED on a cold `bn1-full` start, where there is no prior cycle to
-    // anchor to: twenty minutes in, income $28.7k/s against a $100b gap (forty
-    // days linear), the unbounded fit returned 2.8 million years on 30.6% of
-    // samples, and that became a 1.7e14 BN-second money marginal.
     const sparse = [
       { sec: 60, money: 1, hacking: 2, combat: 1 },
       { sec: 120, money: 2, hacking: 3, combat: 1 },

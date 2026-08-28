@@ -46,9 +46,8 @@ import { killWorkersForCritical, settleArenaShareExits } from './dispatch-driver
  * a catch-up clamp so a game stall cannot produce a burst of passes. */
 export const TICK_MS = 200;
 const PLAYER_EVERY_TICKS = 10; // 2s
-/** The fleet sweep: scan, root, deploy, and the capability gate whose delta the
- *  reset walk keys off. Genuinely 30 s work — it is not the probe cadence, which
- *  it used to be by accident. */
+/** The 30 s fleet sweep: scan, root, deploy, and run the capability gate whose
+ * delta the reset walk keys off. Probe cadence is derived separately below. */
 const SWEEP_EVERY_TICKS = 150; // 30s
 /** Acquisition cadence, DERIVED from the probe table rather than chosen here.
  *
@@ -115,13 +114,9 @@ export async function runController(
       //
       // `HOME_RESERVE_GB` is held farm-free unconditionally and is sized for
       // the COMMON resident. It must not be a refusal ceiling: a resident
-      // whose minimum has grown past it (measured: the main proxy at 7.1 GB
-      // min after singularity pricing) would get `undefined` here forever —
+      // whose minimum has grown past it would get `undefined` here forever —
       // and since every view refresh is itself a proxied call, that is a
-      // permanent deadlock, not a wait. Measured on bn1-speedrun seed 2: the
-      // first install killed the fleet view, the resident spun on
-      // `proxy.slow` for 22,514 attempts (6.25 virtual hours) and the whole
-      // economy flatlined at $573k. Attempt home at the minimum instead: on
+      // permanent deadlock, not a wait. Attempt home at the minimum instead: on
       // the post-install boot home is empty and the exec succeeds; against a
       // busy farm the exec fails and the respawn retries exactly as it does
       // today, but never permanently.
@@ -133,14 +128,8 @@ export async function runController(
     if (heap?.host(host.hostname) === undefined) {
       return { host: host.hostname, gb, release: () => {} };
     }
-    // The PREFERRED size first, but never only: against a farm-packed heap a
-    // 60 GB preferred lease fails where the 7 GB minimum would fit, and
-    // returning undefined here left the resident spinning on `proxy.slow`
-    // for 6.25 virtual hours (22,514 attempts) while every proxied call —
-    // including the sweep that would have refreshed the view — sat dead and
-    // the economy flatlined. Step down to the minimum, then to home's
-    // unconditional reserve, and let the arena's carve grow the resident
-    // back to its preference on a later respawn.
+    // Try the preferred size first, then step down to the minimum and home's
+    // unconditional reserve. A later respawn can grow the resident again.
     const minLeaseGb = Math.round(minGb * 100) / 100;
     const preferredLease = heap.reserveOn(host.hostname, gb, true);
     const lease = preferredLease ?? heap.reserveOn(host.hostname, minLeaseGb, true);
@@ -180,9 +169,7 @@ export async function runController(
   // Loop-body dodge work must never take the controller down: a DodgeExecError
   // is one lost placement race (the farm refilled a host between the broker's
   // stale free-RAM view and the exec), and every one of these paths reruns on
-  // its own cadence. Measured on bn1-full: an uncaught probe throw at fleet
-  // saturation killed the controller at 14.5h and the run sat dead for ten
-  // hours. Kills still propagate — ScriptDeath is a shutdown, not a failure.
+  // its own cadence. Kills still propagate — ScriptDeath is a shutdown, not a failure.
   const contained = async (phase: string, run: () => Promise<void>): Promise<void> => {
     try {
       await run();
@@ -324,9 +311,8 @@ export async function runController(
     // one. Adding a probe that needs to be read every second needs no change
     // here.
     //
-    // Runs AFTER the sweep block so that on a sweep tick the gate lands first and
-    // this pass sees fresh capabilities and a fresh scan — the ordering the sweep
-    // used to give it by construction.
+    // Run after the sweep block so a sweep tick publishes its gate and fresh
+    // server scan before acquisition probes observe them.
     if (tick % PROBE_EVERY_TICKS === 0) {
       await runProbes(ns, probes, state);
     }
@@ -523,12 +509,9 @@ export async function runController(
     let wakePromise = armWake(workerGlobals());
     // Wake-storm bound. A wake pump can itself CAUSE the next wake: the pump
     // stops or starts a share worker, its atExit signals, and the loop runs
-    // again — a self-sustaining cycle that starved the tick body entirely.
-    // Measured on bn1-speedrun seed 2: 27,000 wake races inside one 200 ms
-    // window once share sizing sat on a decision boundary; the controller
-    // never ticked again and the run sat dead to the horizon. A real 200 ms
-    // window fits at most a handful of genuine landing bursts, so a generous
-    // cap changes nothing in normal operation and converts the pathological
+    // again — a self-sustaining cycle that can starve the tick body. A real
+    // 200 ms window fits at most a handful of genuine landing bursts, so the
+    // cap converts the pathological
     // cycle into an ordinary tick.
     let wakeRaces = 0;
     let lastWakePumpAt = 0;
@@ -547,9 +530,8 @@ export async function runController(
       if (active.unlocked["hacking"] !== "yes") continue;
       // Coalesce wake-pumps to one per landing slot. The wake exists to catch
       // the min-security instant after a weaken lands; on a large fleet
-      // landings are continuous, and pumping the full planner per landing did
-      // unbounded work per unit of game time (measured: 32-race storms every
-      // tick, the controller crawling at ~10 game-ms per storm). Extra wakes
+      // landings are continuous, so pumping the full planner per landing would
+      // do unbounded work per unit of game time. Extra wakes
       // inside one slot coalesce into the next allowed pump; nothing is lost
       // because the pump reads the completion QUEUE, not the wake itself.
       if (Date.now() - lastWakePumpAt < 50) continue;
@@ -685,9 +667,8 @@ function onWorldReset(state: GameState, kind: PrestigeKind): void {
   // Every module's own reset, by registry walk rather than by name — module
   // state AND each feature's published topics, which is why the walk takes
   // the state. Naming features (or their topic fields) here is exactly the
-  // coupling the registry removes: the per-field delete blacklist this used
-  // to carry left one feature's topic alive across a reset, and the new
-  // node's first route decision read the old run's Red Pill out of it.
+  // Registry-owned resets prevent feature topics from surviving into a new
+  // node and contaminating its first route decision.
   resetAllFeatures(state, kind);
   state.featureLastRun = {};
   state.mirrors = {};

@@ -1,12 +1,8 @@
 /** The in-flight ledger, held in landing order instead of rebuilt in it.
  *
  * Every consumer of the ledger wants the same thing — operations in
- * `(landing, opId)` order, folded forward from now — and every one of them
- * used to get it by materialising an array over `byTarget` and sorting it. At
- * the depths the scheduler is built for that is the dominant cost of a pass: a
- * live run at 21k in-flight operations paid ~4 full materialisations and ~3
- * sorts per pass, ~250k short-lived objects, and the GC that follows.
- * `MAX_LIVE_WORKERS` is 400,000, so the answer cannot be "carry less depth".
+ * `(landing, opId)` order, folded forward from now. Maintaining that order
+ * avoids repeated materialization and sorting at scheduler depth.
  *
  * Insertions are tail-biased (a batch's operations land after everything
  * already in flight) and removals head-biased (they land in order), but

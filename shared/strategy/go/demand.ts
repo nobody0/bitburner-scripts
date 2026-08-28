@@ -18,14 +18,7 @@ import type { GoEtaDemand } from "./rewards.ts";
  *   3. how much of that resource the lifted subsystem really supplies — its
  *      live share of announced income.
  *
- * The predecessor hand-wrote a resource-to-opponent map, folded the share into
- * the seconds, and let contributions accumulate without a share-scaled ceiling.
- * The consumer then clipped the total at the install horizon, so every
- * money-attributed opponent clipped to the SAME number and the share vanished:
- * Hacknet production, three percent of a mature run's income, was priced as if
- * it were the whole economy and the controller farmed Netburners for hours.
- *
- * The invariant that replaces it: `seconds` is unshared and capped at the
+ * `seconds` is unshared and capped at the
  * runway, `share` rides alongside, and the consumer multiplies. A subsystem
  * supplying fraction s of a bottleneck can never be credited with more than
  * `s * runway`, however much evidence restates the same claim. */
@@ -73,9 +66,7 @@ function clamp01(value: number): number {
  * Hacknet capacity gates deliberately resolve to MONEY. A Hacknet RAM upgrade
  * is bought with the player's dollars from whatever source earned them, so it
  * is a money bottleneck like any other — and the reward that lifts three
- * percent of the money rate then earns three percent of the credit for it.
- * Routing them straight to Netburners at full attribution, as the predecessor
- * did, is the same unverified full-credit that broke the ranking. */
+ * percent of the money rate then earns three percent of the credit for it. */
 function channelForNeedKind(need: Need): ValuedResource | undefined {
   const currency = currencyForNeed(need);
   if (currency !== undefined) return currency;
@@ -159,9 +150,8 @@ export function goDemands(view: GoDemandView): Partial<Record<GoRewardOpponent, 
   }
   for (const need of view.openNeeds) {
     const channel = channelForNeedKind(need);
-    // The board's own measured economics when it has them, and the shared
-    // nominal window when it does not. The predecessor charged a weight-10 need
-    // the ENTIRE runway, which is how the horizon saturated in the first place.
+    // Use the board's measured economics when present and the shared nominal
+    // window otherwise; need weights do not grant the whole runway.
     if (channel !== undefined) addChannel(channel, rankingValueSec(need));
   }
 
@@ -170,8 +160,8 @@ export function goDemands(view: GoDemandView): Partial<Record<GoRewardOpponent, 
   // so only the crime slice of it is reachable by a crime-success reward. With
   // no published crime at all this is zero, which drops the crime money leg
   // entirely: no SF4 means the same missing source file hides both the rate and
-  // whether it is already at its cap, and crediting unverified elasticity at
-  // full strength is the pattern that produced this bug.
+  // whether it is already at its cap, so unverified elasticity receives no
+  // full-strength credit.
   const moneyShares = { ...shares, career: (shares.career ?? 0) * crimeIncomeFraction(view) };
   const demands: Partial<Record<GoRewardOpponent, GoEtaDemand>> = {};
   for (const opponent of GO_REWARD_OPPONENTS) {

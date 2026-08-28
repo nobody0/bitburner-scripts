@@ -163,9 +163,8 @@ describe("the alternatives-and-worth table", () => {
   });
 
   test("a route marginal prices its currency, INCLUDING a measured zero", () => {
-    // The live BN12 number: the farm clears the Daedalus money gate long before
-    // anything else on the route binds, so a relative income increase saves no
-    // seconds at all. That is an answer, and career's crime is scored by it.
+    // A measured zero is a valid marginal: a relative income increase saves no
+    // route time, and career's crime is scored accordingly.
     const worth = channelWorth(postNeeds([]), {
       money: { state: "estimated", secondsPerRelativeRate: 0 },
       hacking: { state: "estimated", secondsPerRelativeRate: 19_174 },

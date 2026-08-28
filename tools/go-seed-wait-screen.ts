@@ -7,9 +7,8 @@
  * how many turns actually waited, and decision latency.
  *
  * The policy-only contract reports no win probability — the daemon19 value
- * head is neutral by construction — so a daemon19 arm can only ever measure
- * zero waits and identical games. That is worth running once as evidence
- * rather than assuming it.
+ * head is neutral by construction, so a daemon19 arm is expected to measure
+ * zero waits and identical games; the screen verifies that expectation.
  *
  * Usage:
  *   bun run go:seedwait:screen --profile small5 [--opponent Illuminati]

@@ -124,11 +124,7 @@ scenarioDescribe("scenario: arbiter outcomes", () => {
   }, 120_000);
 
   /** Career and factions both want `Player.currentWork`, with a farm earning
-   * money in the background. This is the live BN12 failure in miniature: crime
-   * paid $1.8e4/s against a farm at $3.25e8/s and held the slot for 5.8 hours
-   * while the only source of faction reputation was denied `slot-held` on every
-   * pass. Nothing about it was BitNode-specific — the slot was allocated by a
-   * band that could not see the difference. */
+   * money in the background. The slot must be allocated by relative route value. */
   async function slotContentionRun(options: { joinedRep?: number }): Promise<{
     holders: string[];
     deniedFactions: number;

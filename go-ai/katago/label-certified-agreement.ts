@@ -4,9 +4,8 @@
  * A certified action wins against every modeled White outcome, but that is a
  * statement about the *seeded* opponent, not about Go. When KataGo also
  * approves the action, it is ordinary strong Go and may train the shared board
- * representation. When KataGo disagrees, the action is only justified jointly
- * with the exact behaviour input, and training it as a board pattern is what
- * made the 2026-08-17 Illuminati gate 52 games worse.
+ * representation. When KataGo disagrees, the action is justified only jointly
+ * with the exact behaviour input and must not train as a general board pattern.
  *
  * This tool only labels. It writes the two component-preserving subsets and a
  * summary; it never edits the source shard, invents authority, or trains.

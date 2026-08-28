@@ -222,8 +222,7 @@ let renderedTab: string | undefined;
  * each tab readable as a description of its layout. What the string is then
  * used for is the difference between a stable page and one that fights the
  * reader: assigning it to `innerHTML` destroys every node in the panel, and
- * with them the selection, the caret, hover, an open disclosure and every
- * scroll offset. On a live run that happened twice a second.
+ * with them the selection, caret, hover, open disclosures, and scroll offset.
  *
  * `morph` instead edits the live tree until it matches, leaving untouched any
  * subtree that already agrees — which is nearly all of it, since a frame
@@ -542,8 +541,7 @@ async function loadStored(file: string): Promise<void> {
       // `ok` is checked before the body is ever parsed: the hub answers a swept
       // or renamed run with a 404 whose body is the text "not found", and the
       // per-line guard below cannot tell that apart from a live run's partial
-      // trailing write — so a missing run used to commit as "replay — 0
-      // records", an empty run the file never was.
+      // trailing write, so reject a missing run rather than committing an empty replay.
       const response = await fetch(`/runs/${encodeURIComponent(file)}`);
       if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
       const text = await response.text();
@@ -757,11 +755,8 @@ function connect(): void {
       refreshSimButton();
       if (simRunning) setStatus("sim running…");
       refreshPicker();
-      // A snapshot arrives on EVERY /live open (ui/server.ts websocket.open)
-      // and is indistinguishable on the wire from the first one. This branch
-      // used to treat each of them as first load, so a two-second socket blip
-      // discarded a replay's retained records and scrub position and attached
-      // whatever live run the hub happened to list first. Auto-attach only when
+      // A snapshot arrives on every /live open and is indistinguishable from
+      // the initial one. Auto-attach only when
       // nothing is loaded.
       const resumed = run.resumeArtifact === null
         ? undefined
@@ -775,10 +770,8 @@ function connect(): void {
         else if (storedRuns.length > 0) void loadStored(storedRuns[0]!.file);
         else render();
       } else if (run.live && liveRuns.some((entry) => entry.id === run.id)) {
-        // Re-folded from the new snapshot rather than appended to the state
-        // already held: appendRecords has no seq dedupe across snapshots (that
-        // filter lives inside attachLive), so folding this tail in on top of
-        // the old one would double-count every counter and event.
+        // Re-fold from the new snapshot rather than appending to held state;
+        // appendRecords does not deduplicate sequence numbers across snapshots.
         attachLive(liveRuns.find((entry) => entry.id === run.id)!);
       } else if (run.live) {
         // The snapshot carries the whole live list, so a run missing from it has
@@ -800,9 +793,8 @@ function connect(): void {
       if (existing < 0) liveRuns.push({ ...msg.run, state: [], tail: [] });
       else liveRuns[existing] = { ...liveRuns[existing], ...msg.run };
       refreshPicker();
-      // Gated on "nothing loaded" rather than on this being the only live run:
-      // pressing sync while a deliberately chosen replay was open started a
-      // game run, and that used to yank the operator straight off the replay.
+      // Gate on "nothing loaded" so starting a game run does not replace a
+      // deliberately selected replay.
       const summary = liveRuns.find((entry) => entry.id === msg.run!.id);
       if (summary && (run.id === null || run.resumeArtifact === msg.run.id)) {
         attachLive(summary);
@@ -932,8 +924,7 @@ $("simrun").addEventListener("click", async () => {
     if (!res.ok) {
       simRunning = false;
       refreshSimButton();
-      // statusText as the fallback: an error response carrying no `error` key
-      // used to render as "sim error: undefined".
+      // Use statusText when an error response has no structured `error` key.
       setStatus(`sim error: ${body.error ?? res.statusText}`);
     } else {
       // Left disabled on purpose: sim-status and sim-finished own the button

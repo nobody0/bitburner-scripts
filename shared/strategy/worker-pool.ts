@@ -62,11 +62,8 @@ export interface PoolWorker {
 
 /** Idle workers of one (kind, role), grouped by exact thread count.
  *
- * `planTake` used to materialise, filter and sort the WHOLE worker map on every
- * call, once per op launched — O(ops x workers) per pass plus an array
- * allocation each time, and only on the pooled path, which by construction is
- * the one that runs at high process counts (32k observed live, ~400k targeted).
- * The index answers the only two questions the planner asks: an idle worker of
+ * The index avoids materialising and sorting the whole worker map for every
+ * launched operation. It answers the only two questions the planner asks: an idle worker of
  * exactly N threads (hack, which must land as one call), and idle workers
  * largest-first composing N threads (the divisible kinds).
  *
@@ -150,11 +147,8 @@ function seek(list: readonly PoolWorker[], workerId: number): number {
   return lo;
 }
 
-/** Ascending workerId within a size is exactly what the old implementation
- * produced: a STABLE sort by descending threads over `workers.values()`, whose
- * insertion order is spawn order, and workerIds are issued monotonically.
- * Preserving that order is what keeps `planTake`'s choice — and therefore the
- * emitted action stream — unchanged by the introduction of this index. */
+/** Keep worker ids ascending within a size. IDs follow spawn order, so this
+ * preserves deterministic `planTake` choices and emitted action order. */
 function addIdle(pool: WorkerPoolMemory, worker: PoolWorker): void {
   const key = idleKey(worker.kind, worker.role, workerOwner(worker));
   let bucket = pool.idle.get(key);

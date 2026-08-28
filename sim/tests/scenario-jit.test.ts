@@ -59,7 +59,7 @@ const baselines = BASELINES as unknown as JitBaselineFile;
 assertBaselineProvenance(baselines, SIMULATOR_MODEL_VERSION, SIMULATOR_VENDOR_COMMIT);
 
 /* -------------------------------------------------------------------------- *
- * Shared measurement helpers — one copy of what used to be six.
+ * Shared measurement helpers.
  * -------------------------------------------------------------------------- */
 
 /** Dollars per second earned between two sample times. */
@@ -312,7 +312,7 @@ const FRAG_PRIMARY = { ...COMPACT, hostname: "fragmentation-compact" } as const;
  * pipeline to re-shape. Trimmed to this, the compact server holds the slot for
  * ten minutes of compounding first, and the migration then has to re-shape a
  * mature pipeline — 81 GB workers to ~2.9 TB ones — against a fleet whose slabs
- * were bought for the old shape. That is the fragmentation being measured, and
+ * fit the earlier shape. That is the fragmentation being measured, and
  * it is why this row costs minutes of wall clock where the others cost seconds. */
 const FRAG_RIVAL = { ...WIDE, hostname: "fragmentation-wide", moneyAvailable: 4e9, currentMoney: 1e11 } as const;
 
@@ -505,9 +505,7 @@ runScenario({
   what: "retargets across different worker shapes while fleet slabs change",
   steadyFromMs: 5 * 60_000,
   pressureFromMs: 60_000,
-  // The mid-run retarget thrashes the batcher for the rest of the run
-  // (measured: 12,803 skipped batches against zero allocation failures), which
-  // costs roughly six wall minutes for the twenty virtual ones.
+  // The mid-run retarget makes this a long-running fragmentation case.
   timeoutMs: 600_000,
   options: {
     goal: parseGoals(["earn:1e30"]),
@@ -671,18 +669,8 @@ runScenario({
     // Below that the roles cannot be reordered, which is the only thing the
     // grid has to guarantee.
     //
-    // MEASURED, on this fixture's ~4.3% Illuminati step. Before the Go driver
-    // published its post-game player snapshot the controller learned the new
-    // multiplier on its ordinary 2 s cadence, and the per-kind means came out
-    // h=-4.24 g=-10.60 w=-15.50 ms -- every op early, in proportion to its own
-    // length, with 11.26 ms between a batch's hack and its own W2. That is more
-    // than two landing gaps: the batch reordered, and the run finished holding
-    // 85.2% of the target's money. With the snapshot published at game end the
-    // same step gives h=-1.42 g=-4.39 w=-4.87, shear 3.45 ms, and 100.0%.
-    //
-    // Income is deliberately not compared between those two runs: they diverge
-    // into different fleets (peak-usable 133 TB against 64 TB), so only the
-    // within-batch geometry and the band are like for like.
+    // Compare within-batch geometry rather than income because multiplier
+    // changes may also lead the runs into different fleet shapes.
     //
     // Asserted present first: `meanOf` reads 0 for a kind the telemetry never
     // reported, so an emitter that stopped publishing the split would make the
@@ -828,16 +816,7 @@ runScenario({
   // The deepest pipeline in the ladder: skill 1000 against a
   // requiredHackingSkill-1 target on a 2 TB home, so hack time collapses and
   // the landing grid carries the most operations per virtual second of any
-  // fixture here. Measured 223.7s wall-clock; the previous 180s budget cut it
-  // off mid-run, which reported a timeout instead of the comparison the case
-  // exists to make. A budget, not a threshold — raise it if the machine is
-  // slower, never to make a red result green.
-  //
-  // Raised 360s -> 900s on 2026-08-21: the same machine ran this case at
-  // 186.0s, 187.1s, 255.5s and 340.8s on identical code in one session. The
-  // last of those left 5% of the budget, so the next slow run would have
-  // reported a timeout instead of the comparison. The measured spread is the
-  // reason for the margin, not pessimism about the code.
+  // fixture here. This is a wall-clock budget, not a correctness threshold.
   timeoutMs: 900_000,
   options: {
     goal: parseGoals(["earn:1e30"]),
@@ -860,13 +839,9 @@ runScenario({
     // solveCycle bounds it (`period = max(ramSec/farmGb, jointPeriod,
     // interval)` -- a max of periods is a min of rates). The RAM-seconds term
     // alone prices a cadence the game forbids: `solved()` deliberately solves
-    // uncapped, so `score` is income per RAM-second with no landing interval
-    // in it, and multiplying by the fleet asserts a batch every 8.7 ms against
-    // a 20 ms minimum landing gap (HWGW_MIN_INTERVAL_MS = 4 * 5 ms). Measured
-    // before this was applied: "predicted" 115.5 batches/sec against a legal
-    // ceiling of 50, which made realizedShare 0.55 and invited the conclusion
-    // that the dispatcher was 2.5x slow when it was in fact running at 91% of
-    // the fastest cadence that exists.
+    // uncapped, so `score` is income per RAM-second with no landing interval in
+    // it. The prediction must therefore also apply the minimum landing-gap
+    // ceiling.
     const perBatchSolved = solution.incomePerBatch + solution.stockIncomePerBatch;
     const cadenceCeilingPerSec = (1_000 / HWGW_MIN_INTERVAL_MS) * perBatchSolved;
     const ramBoundPerSec = solution.score * Math.min(fleetGb, solution.jitSaturationGb ?? fleetGb);

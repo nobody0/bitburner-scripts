@@ -233,9 +233,8 @@ export interface DarknetState {
    *  the controller-input path. The driver tick publishes `knowledge` without them, so
    *  a panel that guarded on `knowledge` and then read these threw on the first
    *  tick before the direct probe landed; they stay optional for that reason,
-   *  and the driver has always read its own copy that way (`remaining.ts`,
-   *  `stasisLinked ?? []`). Everything darkweb-specific home used to read here
-   *  is gone: darkweb's prober observes it on the mutation clock and
+   *  and the driver reads its own copy that way (`remaining.ts`,
+   *  `stasisLinked ?? []`). Darkweb's prober observes its local facts on the mutation clock and
    *  includes the result in its snapshot, so the darknet has exactly one prober. */
   stasisLinkLimit?: number;
   stasisLinked?: string[];
@@ -406,11 +405,8 @@ export interface DarknetState {
 
 export interface DarknetPlan {
   /** Hosts ranked by how much of the graph a stasis link on them keeps alive.
-   *
-   *  There is no `action` here any more. The two it used to carry —
-   *  `authenticate` and `stasis` — were unexecutable from home by construction,
-   *  so the panel rendered a selected action beside a refusal explaining why it
-   *  would not happen. See `shared/strategy/dnet/decide.ts`. */
+   * Home cannot execute authentication or stasis actions; see
+   * `shared/strategy/dnet/decide.ts`. */
   ranked: { hostname: string; depth: number; unlocks: number }[];
   /** Charisma the traversal is blocked on, posted to the needs board. */
   charismaNeeded?: number;

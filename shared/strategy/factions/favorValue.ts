@@ -6,9 +6,6 @@ import type { FactionsView } from "./state.ts";
  *
  * Favor persists through augmentation installs, so — unlike node power — its
  * value must be priced over the remaining NODE, not the remaining install.
- * (The measured failure: with an install imminent every Go candidate priced
- * at exactly zero and play stopped on a finished board, even though favor
- * earned in those minutes would have accelerated every later cycle.)
  *
  * Grounded in the real mechanics, favor has exactly two channels:
  *  1. RATE — faction work rep scales with (1 + favor/100). Worth something

@@ -357,10 +357,7 @@ export const PRIORITY = {
   /** A prerequisite purchase on the ROUTE'S TERMINAL PATH — currently the
    *  port openers for a progression-posted blocking root need. Above
    *  aug-fund (90) and donate (70): completion is worth the whole remaining
-   *  horizon, and no reserve it displaces can be. Measured on bn1-full
-   *  seed 2: the node's last step (root w0r1d_d43m0n) needed $280m of
-   *  openers while $120e12 sat banked, and at band 65 the claim was granted
-   *  $0 under the faction reserves for the final 37 minutes of the run. */
+   *  horizon, and no reserve it displaces can be. */
   "hacking:critical-access": 111,
 } as const;
 
@@ -732,9 +729,7 @@ export function resolveClaims(input: ArbiterInput): ArbiterResult {
         // band-wide clearing lambda is the wrong price at one boundary — a
         // pool that exactly covers the continuous demand clears at zero (no
         // scarcity), yet a step spending from it forces exactly that demand
-        // out. Measured: a $318m RAM rung priced 8.6e-5 bought ahead of a
-        // working-capital reserve that demanded the whole $360m pool at
-        // 1.72e-3, because the covered band quoted lambda 0. The $1 floor is
+        // out. The $1 floor is
         // the same boundary: a step at least as large as the pool displaces
         // the FIRST demanded dollar, whose price the fill only reveals on a
         // positive pool.
@@ -754,14 +749,8 @@ export function resolveClaims(input: ArbiterInput): ArbiterResult {
         // Nothing left that can be PRICED. That is not the same as nothing
         // left that should be BOUGHT: `priceStep` declines a step whose value
         // or whose income rate is `unknown`, because it must not sequester
-        // cash on invented evidence. Dropping those outright changed
-        // behaviour rather than encoding it — measured on bn1-speedrun seed 1,
-        // infrastructure purchases were suppressed, peak fleet fell
-        // 9,052 -> 8,540 GB and time-to-$1b regressed 2.321h -> 2.594h.
-        //
-        // So an unpriceable step falls back to the ORIGINAL greedy-by-priority
-        // rule below instead of being denied. Encoding a decision we cannot
-        // yet price must leave that decision exactly as it was.
+        // cash on invented evidence. An unpriceable step therefore falls back
+        // to the greedy-by-priority rule below instead of being denied.
         if (!winner) break;
         if (stepIterations >= STEP_LOOP_CAP) {
           capHit = true;

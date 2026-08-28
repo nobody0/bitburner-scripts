@@ -9,7 +9,7 @@ import { realmSleep } from "./wake.ts";
  * Bitburner charges a script's RAM by the ns members its SOURCE references,
  * and it charges by member NAME across the whole bundle regardless of the
  * receiver — a local called `exec`, even `RegExp.prototype.exec`, bills the
- * full 1.3 GB (see game/dnet/attempt.ts). start.js is one bundle holding the
+ * full 1.3 GB (see game/dnet/attempt.ts). main.js is one bundle holding the
  * controller, every feature driver and every probe, so a single dotted ns
  * member anywhere under game/lib/** is charged to home.
  *
@@ -400,7 +400,7 @@ class Resident {
   }
 
   async #invoke(path: string, args: unknown[]): Promise<unknown> {
-    // `exec` is the one member start.js owns statically (1.3 GB, paid once).
+    // `exec` is the one member main.js owns statically (1.3 GB, paid once).
     // Routing it through nsMain keeps it off every resident's budget, and home
     // is also the only host holding the TOR edge to `darkweb` — which is what
     // retires the dodger's `pinHost`.
@@ -519,11 +519,8 @@ class Resident {
   /** Kill the resident and stand a new one up, retrying until it lands.
    *
    * ONE acquisition rule governs the whole loop: never let go of a reservation
-   * without holding the next one. A respawn that released its placement and
-   * then asked for one again lost the race to the dispatcher, which packed the
-   * host in between — measured on a live run, the main resident ended up back
-   * on home permanently while foodnstuff read as 0 free. Recycles are
-   * frequent, so that race is not rare.
+   * without holding the next one. Releasing first permits the dispatcher to
+   * consume the host before the replacement reserves it.
    *
    * So the held reservation is REUSED whenever it still fits and we are not
    * trying to grow, and otherwise the replacement is taken while the old one
@@ -581,10 +578,8 @@ class Resident {
           ? SLOW_REEMIT_MS[slowEmits - 1]
           : nextSlowAt + SLOW_PERIOD_MS;
       }
-      // The loudest case used to be the quietest. `incident` is assigned only in
-      // the branch where a placement WAS obtained, so a placer that can never
-      // grant the floor — the one situation that stalls for ever — left it "" and
-      // warned never. Name that case instead of skipping it.
+      // `incident` is assigned only after a placement is obtained. Name the
+      // permanently unplaced case explicitly instead of suppressing its warning.
       const label = incident !== "" ? incident : `${this.#label}:unplaced:${minGb}`;
       if (waitMs >= WARN_AFTER_MS && !warnedIncidents.has(label)) {
         warnedIncidents.add(label);

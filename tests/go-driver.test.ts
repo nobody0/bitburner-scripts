@@ -226,9 +226,8 @@ describe("Go live seed observation", () => {
   });
 
   test("publishes a score and territory that match the board beside them", async () => {
-    // The fixture has no komi: the core probe has not run yet, which is the
-    // state every new game starts in. The score used to be withheld in that
-    // window, leaving the PREVIOUS game's numbers next to a fresh board.
+    // The fixture has no komi because the core probe has not run yet. The fresh
+    // board still publishes its own score and territory.
     const state = goState();
     expect(state.topics.go?.komi).toBeUndefined();
     const clock = { playtimes: [...ANCHOR_READS, 10_000], sleeps: [] as number[] };

@@ -16,9 +16,10 @@ import { needKey } from "../needs.ts";
 
 export interface SleeveState {
   index: number;
-  /** 0-100. Multiplies DOWN everything the sleeve produces. */
+  /** 0-100. Reduces work stats and faction reputation, but not money,
+   * crime karma, or kills. */
   shock: number;
-  /** 1-100. Scales what the sleeve shares back to the player. */
+  /** 1-100. Scales experience shared to the player and crime karma. */
   sync: number;
   city: string;
   skills: Record<string, number>;

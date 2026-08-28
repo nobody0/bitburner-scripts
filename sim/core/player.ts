@@ -185,11 +185,8 @@ export class SimPlayer {
  *
  * Every nested object is COPIED, not shared. The controller stores this in its
  * game-state store and decides from it, so handing back live references would
- * make the "snapshot" silently track the world — a stored player from ten
- * minutes ago would report the current skill vector, and any test comparing
- * them would pass for the wrong reason. That was a real latent bug here: the
- * previous implementation spread `this.person`, so `skills`, `exp` and `mults`
- * all aliased the live objects. */
+ * make the snapshot silently track the world. Copy `skills`, `exp`, and
+ * `mults` so stored records remain immutable observations. */
 export function playerRecord(person: Person, player: SimPlayer, totalPlaytime: number): Player {
   return {
     hp: { ...person.hp },

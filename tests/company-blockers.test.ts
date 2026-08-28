@@ -2,10 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type { PlayerRequirement } from "@ns";
 import { estimateBlockerSec, evaluate, type RequirementView } from "../shared/strategy/factions/requirements.ts";
 
-/** The work-line model behind company blocker ETAs: a 400k companyRep gate
- * used to be priced at the nominal 0.1 s/rep = 40,000s, which pushed every
- * megacorp faction package past the planning horizon and starved career of
- * the apply->work->invite chain. */
+/** The work-line model behind company blocker ETAs. Company reputation gates
+ * use the reachable job ladder rather than a nominal seconds-per-rep constant. */
 
 function view(overrides: Partial<RequirementView> = {}): RequirementView {
   return {
@@ -92,9 +90,8 @@ describe("jobTitle blockers (Silhouette's disjunction)", () => {
 
   test("the OR resolves to the cheapest reachable title from the data, not a hardcoded track", () => {
     // For a profile qualifying on both ladders, CFO (800k rep on the
-    // Business track) is genuinely cheaper than CTO (3.2M rep) — the choice
-    // comes from the position data, not a preferred-track rule. The old
-    // heuristic dead-ended CEO requests on the Software track entirely.
+    // Business track) is genuinely cheaper than CTO (3.2M rep); position data,
+    // not a preferred-track heuristic, must choose the route.
     const dual = evaluate(disjunction, view({ companyWork }));
     expect(dual).toHaveLength(1);
     expect(dual[0]!.subject).toBe("Chief Financial Officer");

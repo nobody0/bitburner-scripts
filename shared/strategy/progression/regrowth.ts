@@ -139,16 +139,10 @@ export function cycleProgressEta(
   const totalSec = last.t * Math.pow(wanted / last.y, 1 / exponent);
   // EXTRAPOLATION MAY NOT BE WORSE THAN THE RECENT RATE. `fallbackSec` is the
   // caller's linear estimate at the rate measured over its recent window; this
-  // fit is cumulative since cycle start, so far outside the observed span it is
-  // reading the slow bootstrap as the future regime and compounding it.
-  //
-  // MEASURED on a cold `bn1-full` start, which is exactly where the prior-cycle
-  // guard below cannot help because there is no prior: twenty minutes in, with
-  // income at a healthy $28.7k/s and a $100b gap — forty days linear — the fit
-  // returned 8.78e13 s, 2.8 million years, on 30.6% of samples. That became a
-  // 1.7e14 BN-second money marginal, which bought `career` the work slot on 90%
-  // of passes, which starved faction reputation, which meant no augmentation was
-  // ever installed, which kept the curve flat and confirmed the fit. The
+  // fit is cumulative since cycle start, so far outside the observed span it can
+  // read the slow bootstrap as the future regime and compound it. Cap that
+  // extrapolation at the recent linear rate so it cannot distort downstream
+  // marginals and starve other route work. The
   // acceleration this fit exists to capture can only SHORTEN an estimate; when
   // it lengthens one it is extrapolating noise.
   const bounded = fallbackSec > 0 ? Math.min(totalSec, fallbackSec) : totalSec;
@@ -158,8 +152,7 @@ export function cycleProgressEta(
 /** Estimate a fresh cycle with the preceding completed cycle as a shape prior.
  *
  * Two observations just after prestige are enough to fit a power curve, but
- * nowhere near enough to extrapolate a $10k bootstrap to $100b. The resulting
- * exponent noise previously produced multi-million-year node forecasts. A
+ * nowhere near enough to extrapolate a $10k bootstrap to $100b. A
  * completed cycle gives us the missing cold-start shape. We scale that shape
  * by progress observed at the same elapsed time (so SF12 and newly installed
  * augmentations move the prediction), then phase toward the current fit as it

@@ -388,9 +388,7 @@ describe("release: letting a body out of a call it is waiting on", () => {
     expect(r.host.crashes).toEqual([]);
     const report = await handle.done;
     expect(report).toMatchObject({ ok: false, died: true, detail: "killed mid-order" });
-    // The host is EMPTY, and that is the point. The worker used to spawn its own
-    // successor from inside this kill, which is what put `spawn` — 2.0 GB on
-    // every thread — into its surface. The controller launches what comes next.
+    // The host is empty after cancellation; the controller launches any successor.
     expect(r.processes.ps("darkweb")).toHaveLength(0);
     expect(r.entry()?.agent, "the handle must be dropped so the host reads free").toBeUndefined();
   });

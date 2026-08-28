@@ -281,7 +281,7 @@ describe("augmentation pricing", () => {
     const level5 = augCost(nfg, priceCtx({ neurofluxLevel: 5 }));
     expect(level5.repCost / level0.repCost).toBeCloseTo(Math.pow(1.14, 5), 10);
     expect(level5.moneyCost / level0.moneyCost).toBeCloseTo(Math.pow(1.14, 5), 10);
-    // NOT 1.9 — the predecessor scripts use 1.9 here and overprice it wildly.
+    // The v3.0.1 NeuroFlux multiplier is 1.14 per level.
     expect(level5.repCost / level0.repCost).not.toBeCloseTo(Math.pow(1.9, 5), 2);
   });
 
@@ -621,9 +621,6 @@ describe("augmentation scoring", () => {
     // The leg finishes in `remaining / augsPerSec`, so one slot removes
     // `1 / augsPerSec` of it — `worth / remaining`. Slots therefore get MORE
     // valuable as the gate closes, because the last one unblocks the gate.
-    // The predecessor ramped the other way, from 1 down to a 1/5 floor, to keep
-    // cheap filler from dominating a high-impact augmentation; filler and
-    // multipliers are quoted in the same seconds now and compete on merit.
     const worth = new Map([["augmentations", 30_000]]);
     expect(countSlotWeight(worth, 30)).toBeCloseTo(1_000, 9);
     expect(countSlotWeight(worth, 1)).toBeCloseTo(30_000, 9);
@@ -737,12 +734,8 @@ function standing(name: string, offers: { hacking: boolean; field: boolean; secu
 }
 
 describe("work type selection weighs everything the work produces", () => {
-  // MEASURED on a live BN12 install: progression posted `combatSkills 219 /
-  // 1500` at weight 5, career took the work slot with Mug, and The Black Hand
-  // sat at "idle" — while its FIELD work would have paid combat experience AND
-  // reputation from the same second. The chooser picked on reputation alone and
-  // the claim announced reputation alone, so nothing in the auction could see
-  // the second half of what faction work does.
+  // Faction work can produce combat experience and reputation in the same second;
+  // both outputs participate in work-type selection and slot pricing.
   const tetrads = standing("Tetrads", { hacking: true, field: true, security: true });
 
   const choose = (over: Partial<FactionsView> = {}) =>
@@ -838,8 +831,7 @@ describe("work type selection — found in the real game", () => {
   });
 
   test("without the work slot it says only one activity can run", () => {
-    // The panel previously showed the intended work as if it were running,
-    // which read as a contradiction against the game's own display.
+    // Without the shared slot, intended work must not be reported as running.
     const { decision } = stepFactions(
       factionsView({
         factions: [standing("Tetrads", { hacking: false, field: true, security: true })],
@@ -1006,9 +998,7 @@ describe("faction breakpoint package planner", () => {
         catalog,
         horizonSec: 100_000,
         moneyAvailable: 1e15,
-        // The old continuation guard saw that its last A order was still
-        // running and idled, even though completing A promoted B. This is the
-        // exact stale-work state observed in the full BitNode simulation.
+        // Current work for A is stale once completing A promotes B.
         currentWork: { kind: "faction", faction: "A", workType: "hacking", focused: true },
       }),
       first.memory,
@@ -1048,13 +1038,8 @@ describe("faction breakpoint package planner", () => {
   });
 
   test("never records a runner-up that the chosen package has already foreclosed", () => {
-    // WAS: "moves to a compatible fresh package when a completed package's
-    // recorded runner is enemy-blocked". The recovery is no longer needed
-    // because the state cannot arise. The old selector chose its runner-up by
-    // rate alone, so it would happily nominate B while committing to A — and
-    // joining A bans B for the whole cycle. The plan is a SET now, and a set is
-    // built under the mutual-enemy constraint, so B is never in it and C (the
-    // compatible faction) is the runner from the start.
+    // The plan is built under the mutual-enemy constraint, so a faction
+    // foreclosed by the chosen package cannot be recorded as its runner-up.
     //
     // This matters beyond bookkeeping: the runner-up is the opportunity cost
     // that decides when to STOP pushing the chosen faction. Costing it against
@@ -1365,10 +1350,7 @@ describe("faction breakpoint package planner", () => {
   });
 
   test("a deep breakpoint competes with ENDING the cycle, not only with switching", () => {
-    // WAS: "pushes the best faction farther when switching is much worse" —
-    // which pushed A all the way to its deepest breakpoint whenever no other
-    // faction offered a better rate. That comparison was missing its third
-    // option. Reputation is not the only cost of going deeper: ten times the
+    // Reputation is not the only cost of going deeper: ten times the
     // grind for one more augmentation also delays the install that switches the
     // first one on, and an install is what every earned multiplier is waiting
     // for. With nothing banked at A yet, there is nothing for a reset to
@@ -1835,10 +1817,7 @@ describe("faction breakpoint package planner", () => {
   });
 
   test("count pressure versus multiplier quality is decided by measurement, not a ramp", () => {
-    // The predecessor RAMPED this: count worth 1 unit per slot early, decaying
-    // to a 1/5 floor near closure so quality would break the closing ties.
-    // Both halves were a policy nobody measured. Which of the two matters is
-    // now whatever the route says it is — and on a route that is genuinely
+    // Which side matters is determined by route measurements; on a route genuinely
     // gated on augmentation COUNT, filling a slot sooner really is worth more
     // than a 30% hacking multiplier.
     const factions = [packageStanding("cheap"), packageStanding("quality")];
@@ -1882,13 +1861,8 @@ describe("faction breakpoint package planner", () => {
   });
 
   test("pushes past the pre-join breakpoint when joining forecloses the alternative", () => {
-    // WAS: "keeps the pre-join stopping point when joining forecloses the
-    // runner-up". Both names describe the same trap from opposite sides. A and
-    // B ban each other, so committing to A means B will not happen this cycle —
-    // and the old selector nonetheless priced A's next breakpoint against
-    // switching to B, stopped at the shallow one, and then had no runner to
-    // switch to. Stopping to preserve an option that no longer exists is not
-    // caution. With B excluded from the set by the enemy constraint, A's deeper
+    // A and B ban each other, so committing to A means B will not happen this
+    // cycle. With B excluded from the set by the enemy constraint, A's deeper
     // breakpoint is measured against ending the cycle, and wins.
     const { firstA, firstB, catalog, first } = enemyChoice();
     expect(first.decision.objective?.intent?.repTarget).toBe(1_000);
@@ -2087,15 +2061,8 @@ describe("faction breakpoint package planner", () => {
 });
 
 describe("the last-chance drain", () => {
-  // THE BUG: the driver's `aug-fund` money claim was derived from
-  // `plan.objective.augmentations`. By the time the drain runs the objective is
-  // complete, so there was no objective augmentation, no claim, no grant — and
-  // `nextPurchase` tests the GRANTED budget, so it bought nothing. Every install
-  // silently threw away the cash on hand, and once the install barrier started
-  // blocking on "an augmentation is still purchasable" the run deadlocked
-  // outright: progression waited for a purchase that factions was never funded to
-  // make. The decision has to publish what it WOULD buy so a claim can be derived
-  // from the plan rather than from the already-funded action.
+  // The decision publishes what it would buy so the claim phase can fund the
+  // final drain before the action is selected from the granted budget.
   const nfg = aug(NEUROFLUX, { baseCost: 750_000, baseRepRequirement: 0, factions: ["CyberSec"] });
   const owned = aug("Owned Thing", { factions: ["CyberSec"] });
 
@@ -2540,14 +2507,9 @@ describe("patience — waiting for the bankroll before committing the order", ()
     // would charge the 1.9x queue escalation to everything the rest of the
     // run still plans to buy.
     //
-    // `dear` must be an augmentation this cycle actually COMMITS to, which now
-    // takes both a reachable reputation gate and enough value to be worth the
-    // grind. Previously any unreachable gate would do, because the planner
-    // extended one faction's ladder for as long as nothing else competed — it
-    // would spend seven hundred seconds earning favor worth 0.4% more, and the
-    // sweep stayed shut as a side effect of that grind rather than because
-    // anything was still owed. A budgeted plan declines that trade, so a fixture
-    // that relies on it is testing the flaw rather than the invariant.
+    // `dear` must be an augmentation this cycle actually commits to: its
+    // reputation gate must be reachable and its value must justify the grind.
+    // An unreachable or uneconomic gate cannot keep the purchase sweep closed.
     const decision = step({
       factions: [{ ...standing("CyberSec", { hacking: true, field: true, security: true }), rep: 1e5 }],
       catalog: new Map([

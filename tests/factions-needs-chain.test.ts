@@ -105,8 +105,7 @@ describe("non-objective gates", () => {
   test("ending-by-destroy releases the install-shaped money reserves", () => {
     // A destroy erases augs, favor and the cash itself — the aug-fund and
     // donation reserves must release so speedup spending (infrastructure RAM)
-    // can win the money instead. Measured failure: a ~$9e14 sweep reserve
-    // outbid the RAM purchase that would have finished the node.
+    // can win the money instead.
     const fixture = (endingByDestroy: boolean) => ({
       state: {
         topics: {

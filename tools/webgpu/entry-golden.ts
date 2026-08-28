@@ -417,9 +417,8 @@ async function main(): Promise<unknown> {
     failures.push(`K=8 19x19 board-to-move p95 ${planningK8.boardToMove.p95}ms exceeded 50ms`);
   }
   // Deployment strict K=1 evaluates one finalist and skips the value batch;
-  // hold it to the measured envelope recorded in go-ai/BASELINES.md
-  // (2026-08-16: p95 2.4ms finalization / 3.0ms board-to-move) rather than
-  // the loose K=8 bound.
+  // hold it to the envelope recorded in go-ai/BASELINES.md rather than the
+  // loose K=8 bound.
   if (planningDeployment.gpuAndSelection.p95 >= 15) {
     failures.push(`deployment K=1 finalization p95 ${planningDeployment.gpuAndSelection.p95}ms exceeded 15ms`);
   }

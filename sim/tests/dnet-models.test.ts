@@ -90,9 +90,8 @@ const QUIET_WORLD: PacketWorld = {
 
 describe("every model mints a real password", () => {
   test("passwordFormat is derived from the password and passwordLength measures it", () => {
-    // The two facts a solver seeds itself from. `passwordFormat` was hardcoded
-    // "numeric" before this, which breaks the moment a model draws letters —
-    // and several do above difficulty 8.
+    // Derive both solver seed facts from the generated password; several models
+    // draw letters above difficulty 8.
     for (const modelId of ALL_MODELS) {
       for (const difficulty of DIFFICULTIES) {
         for (let seed = 1; seed <= 12; seed++) {

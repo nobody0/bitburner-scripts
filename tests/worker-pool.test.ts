@@ -207,7 +207,7 @@ describe("worker pool idle index", () => {
       noteSpawn(pool, { workerId, hostname: "home", kind: "hack", role: "h", threads: 4, effectThreads: 4, gb: 1.7 }, 0);
       noteJobDone(pool, workerId, 0);
     }
-    // Spawn order is 7, 3, 9 but ids are what the old stable sort ordered by.
+    // Spawn order is 7, 3, 9; selection order is by id.
     expect(ids(planTake(pool, "hack", 4, new Set(), "h"))).toEqual([3]);
     expect(ids(planTake(pool, "hack", 4, new Set([3]), "h"))).toEqual([7]);
   });

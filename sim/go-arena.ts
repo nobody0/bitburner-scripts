@@ -56,8 +56,7 @@ export const GO_ARENA_OPPONENTS: readonly GoArenaOpponent[] = [
 ] as const;
 
 /** Engine-tick seeds spread across the WHRNG's 30,000-second period. The tick
- * stride is coprime to 150,000, avoiding the narrow phase classes produced by
- * the old +4,000 ms corpus. */
+ * stride is coprime to 150,000 so the corpus covers the phase ring. */
 export function goArenaSeeds(count: number, start = 1_000): number[] {
   const periodTicks = 150_000;
   const strideTicks = 104_729;

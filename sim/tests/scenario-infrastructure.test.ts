@@ -237,13 +237,8 @@ scenarioDescribe("scenario: bootstrap from a cold start", () => {
 });
 
 scenarioDescribe("scenario: prep reaches a hackable state", () => {
-  // The other half, isolated. A fresh server starts above min security and
-  // below max money, and NOTHING earns until it is prepped. Measured on the
-  // unprepped fixture: 30 virtual minutes produced 11 weakens, 0 hacks and
-  // $0 — security crawled 10 -> 4.5 against a floor of 3, with one weaken in
-  // flight at a time and no allocation failures. The farm was working
-  // correctly and simply could not finish, which is indistinguishable from a
-  // broken economy unless prep is measured on its own.
+  // A fresh server starts above min security and below max money, and earns
+  // nothing until prep makes measurable progress.
   test("a fresh target is driven toward min security", async () => {
     const run = await freshRun(1_000, 30);
     expect(run.result.validity).not.toBe("invalid-for-goal");
@@ -258,11 +253,6 @@ scenarioDescribe("scenario: target selection respects time-to-prep", () => {
   // a server that needs 30+ minutes of weakening earns strictly less than a
   // poor score on one that is hackable now. Early game this is the whole
   // ballgame: n00dles is trivial to prep and bootstraps both cash and skill.
-  //
-  // Measured on this fixture: with an easy target (skill 1, security 1, huge
-  // growth) and a fatter one (security 10) both available, the farm selected
-  // the fatter one for 1801 of 1801 samples, landed 0 hacks, and earned $0 in
-  // 30 virtual minutes. The easy target was never chosen.
   //
   // This is the isolated form of the BN1 symptom: with a prepped target the
   // same code earns $978b and builds a 472 TB fleet in the same 30 minutes,

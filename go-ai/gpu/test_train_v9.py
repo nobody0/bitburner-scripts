@@ -475,8 +475,7 @@ class SelectiveHeadTest(unittest.TestCase):
 
     def test_sparse_external_teacher_without_top_k_boundary_stays_finite(self) -> None:
         # A one-action adviser row has fewer outsiders than a four-move
-        # shortlist. Its missing boundary used to be -inf, and the tunable
-        # boundary expression turned -inf - -inf into NaN before masking.
+        # shortlist. Its absent boundary must remain finite through masking.
         example = ProposalExample(
             1, "", [], 0, [0], [1], [0],
             [[0.0] * 13], 0, [0], [], [], "katago")
@@ -1327,7 +1326,7 @@ class PackedReplayTest(unittest.TestCase):
                         "example": {**record["example"], "episode": episode,
                                     "source": source},
                     }) + "\n")
-                # Deliberately last: the old final prefix slice erased it.
+                # Deliberately last to verify the final prefix retains it.
                 output.write(json.dumps({
                     **record,
                     "example": {**record["example"], "episode": 21,

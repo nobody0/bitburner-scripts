@@ -158,15 +158,8 @@ describe("career request queue", () => {
 });
 
 describe("the slot lock is bounded by the progress it protects", () => {
-  // THE BUG, from a live BN12 run: the lock was posted at `career:progress-lock`
-  // (100) with `holdUntil: Number.MAX_SAFE_INTEGER` and released only by the
-  // completion event. The arbiter refuses pre-emption until `holdUntil` passes, so a
-  // completion that never arrived — the watcher failing to arm is enough — held
-  // `Player.currentWork` for ever. `factions work:Tetrads` was denied `slot-held`
-  // every pass, so "factions has not finished its final purchase and donation sweep"
-  // never cleared and the run could not end. Career also re-committed the longest
-  // crime available the instant each one finished, so even a working event only
-  // opened a window career took straight back.
+  // A progress lock expires when the current unit completes. The deadline is the
+  // backstop when no completion notification arrives.
   const HEIST_MS = 600_000;
 
   function workClaim(over: {
@@ -215,7 +208,7 @@ describe("the slot lock is bounded by the progress it protects", () => {
     const claim = workClaim({ cyclesWorked: 1_500, observedAt: 0, now: 0 });
     expect(claim.priority).toBe(PRIORITY["career:progress-lock"]);
     expect(claim.holdUntil).toBe(HEIST_MS / 2);
-    // Never the old unbounded value — that is what wedged the run.
+    // A missing completion notification must not make the lock unbounded.
     expect(claim.holdUntil).not.toBe(Number.MAX_SAFE_INTEGER);
   });
 
@@ -278,11 +271,8 @@ describe("the slot lock is bounded by the progress it protects", () => {
 });
 
 describe("training versus route reputation", () => {
-  // This used to be a named special case: `priorityForDecision` recognised the
-  // string "Algorithms", looked up the fleet's experience rate, and scaled the
-  // blocking band by the share of the XP that would actually be lost. That is
-  // the general rule — our rate over the best rate, times what the channel is
-  // worth — applied to one hardcoded course, so the rule replaced it.
+  // Training is worth its rate relative to the best available rate, multiplied
+  // by the route value of that channel.
   const HACKING_WORTH = 19_000;
 
   function algorithms(externalExpPerSec: number): ReturnType<typeof stepCareer> {
@@ -337,14 +327,8 @@ describe("training versus route reputation", () => {
 });
 
 describe("factions holds the slot across a breakpoint hand-off", () => {
-  // THE BUG, measured on a live BN12 run: reaching the objective's reputation
-  // breakpoint closed the only gap `nextWorkFaction` looks at, so factions posted no
-  // slot claim for one pass. Dropping the claim is how an incumbent RELEASES the slot
-  // (arbiter rule 3), and the planner only picks its next breakpoint on its own 30 s
-  // cadence — so at EVERY breakpoint the slot came free, `career` filled it with a
-  // 10-minute Heist, and faction work waited out the lock. The trace showed 91 s of
-  // reputation per 650 s cycle: a 14% duty cycle, turning a 14 h Daedalus grind
-  // into ~100 h.
+  // A completed intermediate breakpoint must not release the slot while the
+  // joined faction still has unfinished augmentation reputation work.
   function factionClaims(over: {
     rep?: number;
     repTarget?: number;
@@ -436,12 +420,8 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
   });
 
   test("the claim PREDICTS its reputation instead of remembering a measured one", () => {
-    // The claim has to price itself on the passes the planner exits early —
-    // joining, travelling, no target yet — and those are exactly the passes on
-    // which no rate has ever been measured. The predecessor bid the EWMA there,
-    // which is zero at a faction never worked, and `{ reputation: 0 }` prices as
-    // unpriced and hands the slot to any crime holding cash. Reputation is
-    // exactly predictable, so there is no reason to bid a memory.
+    // The claim must price itself before a measured work rate exists. The game
+    // formula provides a nonzero prediction for work the faction supports.
     const skills = { hacking: 300, strength: 200, defense: 200, dexterity: 200, agility: 200, charisma: 200 };
     const claim = slotClaim({ rep: 100, workTypes: ["hacking", "field", "security"], skills })!;
     const person = {
@@ -508,12 +488,8 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
   });
 
   test("the travel fare is claimed from the BLOCKER, not from an already-published travel", () => {
-    // MEASURED: 85 executions logging "waiting for $200,000 travel grant" with
-    // $57.7m free. The claim phase sees the PREVIOUS plan, the driver decides
-    // travel at tick time and refuses to move without the grant already in
-    // hand — so a fare claimed off the published action is always one pass
-    // late, and by the next pass the objective has rotated and the action is
-    // gone. Same anticipation contract as the purchase and work RAM claims.
+    // Claims are evaluated before the driver publishes its next action, so the
+    // blocker must anticipate the fare needed by that action.
     const cityBlocker = [{ faction: "Tetrads", kind: "city", subject: "Chongqing" }];
     expect(travelFund({ blockers: cityBlocker }), "claimed before the action exists").toBeDefined();
     expect(travelFund({ blockers: cityBlocker })!.amount).toBe(200_000);
@@ -535,8 +511,7 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
   });
 
   test("nothing left to work toward DOES release the slot", () => {
-    // Otherwise factions would sit on the slot doing nothing and career could never
-    // earn again — the mirror image of the bug.
+    // A claimant with no remaining work must release the slot.
     expect(slotClaim({ offers: [] }), "no offers at all").toBeUndefined();
     expect(
       slotClaim({ offers: [{ faction: "The Covenant", repReq: 50_000, owned: true }] }),
@@ -554,12 +529,8 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
 });
 
 describe("the work slot is priced in BN-seconds, not banded", () => {
-  // A fixed `career:income` said the same thing whether crime out-earned the hacking
-  // farm tenfold or was a rounding error beside it. So did the spans that replaced
-  // it: `repFraction * 60 + moneyFraction * 80` ranked money above reputation as a
-  // matter of policy, in every node, forever. A claim now announces the RATES it
-  // produces and the arbiter prices them against the field, using what progression
-  // measured each channel to be worth in BN-seconds off the route.
+  // A claim announces its rates, and the arbiter prices them against the field
+  // using progression's BN-second value for each channel.
   test("fractions are clamped, and nothing announced is not a fraction of nothing", () => {
     expect(rateFraction(500, 1_000)).toBe(0.5);
     expect(rateFraction(2_000, 1_000), "cannot exceed the best").toBe(1);
@@ -635,8 +606,7 @@ describe("the work slot is priced in BN-seconds, not banded", () => {
   test("career announces the rates its chosen option would produce", () => {
     const claim = slotClaimFor(careerState({ crimePerSec: 1_000 }));
     expect(claim.produces).toMatchObject({ money: 1_000 });
-    // Not a band. The old claim carried `career:income` / `career:blocking-need`
-    // and nothing else, which is what made it incomparable with faction work.
+    // The rate announcement makes this comparable with faction work.
     expect(claim.holdUntil).toBeUndefined();
   });
 
@@ -651,9 +621,7 @@ describe("the work slot is priced in BN-seconds, not banded", () => {
   });
 
   test("out-earned by the farm, the same crime loses the slot to reputation work", () => {
-    // THE MEASURED FAILURE, from a live BN12 run: crime at $1.8e4/s held
-    // Player.currentWork for 5.8 hours while the farm earned $3.25e8/s and the
-    // only source of reputation in the run was denied `slot-held` every pass.
+    // A small incremental money rate loses when reputation has more route value.
     const state = careerState({ crimePerSec: 1_000, farmPerSec: 4_000_000 });
     const worth = new Map([["money", MONEY_WORTH], ["reputation", REP_WORTH]]);
     expect(slotWinner(slotClaimFor(state), worth)).toBe("factions");
@@ -661,9 +629,7 @@ describe("the work slot is priced in BN-seconds, not banded", () => {
 
   test("a blocking need career barely serves no longer buys it the slot", () => {
     // Progression posts the Daedalus money gate at weight 5, urgency blocking.
-    // Every crime pays SOME money, so every crime used to be banded blocking —
-    // and `career:blocking-need` (109) outranks route reputation work (91)
-    // whatever the contribution is actually worth. Here it is worth nothing:
+    // Urgency alone does not grant the slot. Here the contribution is worth nothing:
     // the same route's own marginal prices a relative income increase at zero,
     // because the farm clears that gate long before anything else on the route.
     const state = careerState({

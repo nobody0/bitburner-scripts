@@ -7,10 +7,8 @@
  * completion timer with it.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/engine.tsx#L415-L441
  *
- * A live run measured 107 s of mean landing error while `pumpMaxMs` — the only
- * cost signal we had — was reporting a healthy-looking 92 ms peak: peak pass
- * cost cannot distinguish "one expensive pass" from "the thread is gone". This
- * measures the consequence directly, and it is free: the controller already
+ * Peak pass cost cannot distinguish one expensive pass from sustained event-loop
+ * starvation. This measures the consequence directly; the controller already
  * computes the quantity at its sleep boundary and throws it away.
  *
  * Deliberately not `landingError`: that is a lagging indicator (a late landing

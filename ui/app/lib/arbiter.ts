@@ -7,10 +7,7 @@ import type { DecisionEpisode, ProjectedState } from "../project.ts";
  * tab.
  *
  * The arbiter allocates money and the work slot ACROSS features
- * (shared/strategy/arbiter.ts), so its output is not any one tab's — the
- * "Needs & investment arbiter" card used to sit on the progression tab and the
- * decision history was scattered per feature, which put the arbitration
- * evidence everywhere except beside the arbitration. Both now live here. */
+ * (shared/strategy/arbiter.ts), so its output belongs in a global drawer. */
 
 type Arbitration = NonNullable<ProjectedState["topics"]["arbitration"]>;
 

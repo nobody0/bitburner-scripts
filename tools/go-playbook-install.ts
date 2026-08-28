@@ -45,7 +45,7 @@ if (residual.deployedArtifactPayloadSha256 !== SMALL5_GO_MODEL.payloadSha256) {
   );
 }
 
-/** The installed copy is embedded verbatim (as a string) into start.js, whose
+/** The installed copy is embedded verbatim (as a string) into main.js, whose
  * static-RAM guard conservatively scans the raw artifact text for dotted
  * `ns.member` references. The playbook's standalone runtime is dead code in
  * the worker, but its dotted calls would still trip that scan, so rewrite

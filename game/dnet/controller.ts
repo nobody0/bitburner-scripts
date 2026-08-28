@@ -375,24 +375,15 @@ export async function main(ns: NS): Promise<void> {
    * The loop pass below is the watchdog: strictly TIME-driven work (dead-process
    * and beat sweeps, watchdog cancellation, telemetry) plus a bounded re-derive
    * in case a fact was ever missed. */
-  /** A pass is queued OR RUNNING. Held for the whole pass, which is the
-   * difference between coalescing and not: this used to clear before
-   * `fileWork` was awaited, so every fact arriving mid-pass queued a fresh
-   * pass of its own. One fact per pass was then enough to chain for ever. */
+  /** A pass is queued OR RUNNING. Hold this for the whole pass so facts that
+   * arrive mid-pass coalesce into one follow-up. */
   let deriveQueued = false;
   /** A fact arrived while a pass was running. Re-arms exactly ONE follow-up
    *  when that pass ends, however many facts arrived. */
   let deriveDirty = false;
   /** Consecutive passes chained with no macrotask between them.
    *
-   * NOT keyed on the clock. It used to reset whenever `Date.now()` moved,
-   * which meant the bound could only ever bite where time stands still — under
-   * the simulator's virtual clock (`sim/realm/timers.ts`), frozen for the whole
-   * microtask chain. In the live game wall time advances on every pass, so the
-   * counter reset every time and the rest below was dead code in exactly the
-   * world the loop was real in. Slowness was the exemption criterion.
-   *
-   * The rest is now the only thing that clears it, because the rest is the only
+   * This is not clock-keyed: only a macrotask rest clears it, because rest is the only
    * thing that hands the event loop back. */
   let deriveChain = 0;
   const runPass = async (): Promise<void> => {
@@ -1512,13 +1503,7 @@ export async function main(ns: NS): Promise<void> {
     // reaping its window starts a second launch onto RAM the first one holds.
     if (inbound.pid !== undefined) return livePids.get(livenessKey(inbound.pid, entry.hostname)) ?? true;
     // No pid: the LAUNCHER still owns this window and has not exec'd yet. This
-    // is the one case a clock has to decide, because nothing else can — and it
-    // used to answer a bare `true` for ever. `refreshLiveness` only asks about
-    // windows that HAVE a pid, so a pid-less one was never even examined, and
-    // this single value gates `reapGhostLaunches`, `releaseStranded`,
-    // `reconcilePending` and dispatch itself. A launcher that died between
-    // claiming the host and exec'ing wedged it for the rest of the run, holding
-    // its order so the planner would not re-route the work either.
+    // is the one case a clock has to decide, because nothing else can.
     return Date.now() - inbound.at <= LAUNCH_WINDOW_MS;
   };
 
@@ -2020,9 +2005,8 @@ export async function main(ns: NS): Promise<void> {
     const stormHosts = [...hosts.values()].map((entry) => {
       const view = planningView(entry, at, expiry);
       // `view` FIRST and `entry` never: `planningView` expresses staleness by
-      // DELETING keys, so spreading it over the raw entry resurrects all of
-      // them and `planStorm` would read a twelve-minute-old `stormSeed`,
-      // `caches` or `blockedRam` as a fresh observation.
+      // DELETING keys, so spreading it over the raw entry would resurrect stale
+      // `stormSeed`, `caches`, or `blockedRam` observations.
       return {
         ...view,
         agentAlive: entry.agent !== undefined,
@@ -2754,12 +2738,8 @@ export async function main(ns: NS): Promise<void> {
       };
       return {
         recovery,
-        // ONLY ADOPTED AGENTS. A launch window is an intention, not a resident:
-        // this used to report `pendingOrder` as the active job with its full
-        // declared RAM and stamp `lastBeatAt` at the current instant on every
-        // read — so a launch that never arrived rendered as a live resident
-        // holding its whole allocation and could never go stale, because asking
-        // refreshed its own beat. Under-reporting one tick of a real launch
+        // ONLY ADOPTED AGENTS. A launch window is an intention, not a resident.
+        // Under-reporting one tick of a real launch
         // window is the honest trade; `processInbound` still gates dispatch, so
         // nothing double-launches for want of counting it.
         residents: liveEntries().filter((entry) => entry.agent !== undefined).map((entry) => {
@@ -2929,10 +2909,8 @@ export async function main(ns: NS): Promise<void> {
     for (const entry of hosts.values()) {
       const active = entry.agent;
       if (active === undefined) continue;
-      // Settling alone would only drop OUR handle: the process may be alive and
-      // merely slow, and would then hold the host's whole RAM budget for ever
-      // while the map reads it as unstaffed and re-plants it. Ask it to stop,
-      // then take the pid.
+      // Settling alone drops only our handle. Stop a live overdue process before
+      // taking its pid so it cannot retain RAM while the map replants the host.
       if (jobWatchdogExpired(active, at)) cancelActive(entry);
     }
     residentsSeenEver = Math.max(residentsSeenEver, liveEntries().length);

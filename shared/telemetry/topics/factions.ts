@@ -190,10 +190,8 @@ export interface FactionPlan {
 /** What one favor event buys at a joined faction, in work-seconds — the
  * `factionFavorPointValues` digest, published rather than recomputed.
  *
- * Go prices its own favor rewards from this. It used to call
- * `buildFactionsView` + `factionFavorPointValues` itself on every five-second
- * tick, rebuilding the whole augmentation catalogue and re-walking every
- * joined faction's rep ladder to read three numbers. Favor value is a
+ * Go prices its own favor rewards from this rather than rebuilding the
+ * augmentation catalogue and faction reputation ladders. Favor value is a
  * factions fact; Go is a consumer of it. */
 export interface FavorPointValueDigest {
   remainingWorkSec: number;

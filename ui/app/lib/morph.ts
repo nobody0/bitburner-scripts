@@ -6,11 +6,8 @@
  * in the panel and rebuilds it, which also throws away everything the BROWSER
  * was holding on those nodes and that no amount of application state can name:
  * the text selection, the caret, `:hover` and `:active`, a native tooltip
- * mid-appear, an open `<details>`, a scroll offset, focus. The viewer used to
- * capture and restore a hand-picked subset of that (scroll offsets, the
- * focused input's caret) which is both incomplete — a selection cannot be
- * restored that way at all — and beside the point: none of it needed to be
- * destroyed.
+ * mid-appear, an open `<details>`, a scroll offset, focus. These browser-owned
+ * states cannot be reconstructed completely after rebuilding the tree.
  *
  * So the string is parsed into a detached tree and the LIVE tree is edited to
  * match it. A node whose subtree already equals the new one is not touched at

@@ -35,13 +35,10 @@ export function programCreateTimeMs(program: ProgramOption, hacking: number, int
 
 /** What the career slot would deliver if it did NOT write this program.
  *
- * Both channels matter, and the old money-only comparison saw one of them.
- * The slot also produces posted-need progress — faction and company rep,
+ * Both channels matter. The slot also produces posted-need progress—faction and company rep,
  * karma, combat stats — that nothing else on the board can produce. A
  * ten-minute BruteSSH write is ten minutes a blocking karma or companyRep
- * need does not advance, and that cost does not appear in dollars. Measured:
- * early runs spent the first ten to thirty minutes writing openers with the
- * whole server-access pipeline stalled behind them. */
+ * need does not advance, and that cost does not appear in dollars. */
 export interface ProgramAlternative {
   /** Money per second the slot reverts to earning once the top need is
    * saturated — its income fallback, not the top option's own rate. */
@@ -58,9 +55,8 @@ export interface ProgramAlternative {
  * price of a dollar (`valueSecPerDollar`, a money waterline lambda). TOR is
  * included in the purchase only when it has not already been acquired.
  *
- * Without a price for money — no auction has priced a money band yet — the
- * comparison degrades to the historical money-only test rather than
- * fabricating an exchange rate. */
+ * Without a price for money—before any money band has been priced—the
+ * comparison uses money alone rather than fabricating an exchange rate. */
 export function preferProgramCreation(
   program: ProgramOption,
   hacking: number,

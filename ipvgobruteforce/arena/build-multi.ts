@@ -838,10 +838,8 @@ async function playCommittedGame(ns, route, telemetry) {
   if (route.policyEntryPhase !== undefined) {
     // The board was created inside the entry phase, so any difference here
     // means a browser hiccup crossed a 200 ms tick after creation and the
-    // committed entry state is already unreachable. The old code waited for
-    // the 150,000-phase ring to come back around, which froze the script for
-    // 8+ hours with no output; fail loudly instead so recovery forfeits and
-    // replaces this board.
+    // committed entry state is already unreachable. Fail loudly so recovery
+    // forfeits and replaces this board.
     const entryGap = (phaseNow(ns.getPlayer().totalPlaytime)
       - route.policyEntryPhase + PHASES) % PHASES;
     if (entryGap !== 0) {

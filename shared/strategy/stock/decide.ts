@@ -12,9 +12,8 @@
  *    horizon is the INSTALL, not the BitNode.
  *  - **The unlocks survive an install.** `hasWseAccount`, `hasTixApiAccess` and
  *    `has4SDataTixApi` are never cleared by `prestigeAugmentation`; only a
- *    BitNode reset clears them. So they amortize over the whole NODE. Two
- *    different horizons, pulling in opposite directions, and the old single
- *    `horizonSec` was wrong for both.
+ *    BitNode reset clears them. They therefore amortize over the whole NODE,
+ *    independently of the position's install horizon.
  *  - **There is no reason to trade on a short horizon.** Every round trip pays
  *    `2 x spreadPerc%` of notional plus $200k, and the expected drift needed to
  *    clear that takes a knowable number of ticks ({@link breakEvenTicks}). If
@@ -27,10 +26,8 @@
  *
  * Pure: no clock, no randomness, no ns. `stepStock` returns a PLAN, sized at
  * full ambition and independent of what the arbiter granted; {@link fundedActions}
- * narrows it to what the grant pays for. That split is deliberate — deriving the
- * plan FROM the grant is circular (no plan means no claim means no grant means
- * no plan), which is exactly how the previous version deadlocked and never
- * placed a single trade. */
+ * narrows it to what the grant pays for. Deriving the plan from the grant would
+ * be circular: without a plan there is no claim and therefore no grant. */
 
 /** Pinned sources for prestige survival, market access, transactions, and
  * short-sale gates described by this solver:
@@ -71,10 +68,9 @@ import {
  * position at full ambition and lets the shared money arbiter compare that
  * marginal return with every other investment. Public `maxShares`, available
  * cash, transaction costs and the profitability gates below are the limits. */
-/** Forecast distance from 0.5 required to OPEN a position. 0.6 for a long,
- *  matching the threshold the predecessor scripts settled on
- *  (`bitburner-2023/src/main.ts:761`) — a wide band is what stops the estimator's
- *  noise from paying the spread. */
+/** Forecast distance from 0.5 required to open a position. The wide entry band
+ * keeps estimator noise from repeatedly paying the spread.
+ * Reference: `bitburner-2023/src/main.ts:761` at commit 43e8585. */
 export const ENTER_BAND = 0.09;
 /** Forecast distance required to KEEP one. Narrower than ENTER_BAND on purpose:
  *  the gap is the hysteresis that stops a symbol oscillating around 0.5 from
@@ -153,9 +149,7 @@ export interface StockView {
   /** Whether any feature other than the market itself (and progression's own
    *  install machinery) bid for money in the last arbitration. The viability
    *  floor is insurance against a COUNTERPARTY taking the last viable dollars
-   *  through a one-pass claim gap; with nobody bidding, the premium — a
-   *  floor-sized slice held out of every fresh entry — is pure drag (measured:
-   *  a 7% median shortfall on the isolation ladder's hour). */
+   *  through a one-pass claim gap; with nobody bidding, the premium is pure drag. */
   moneyContested?: boolean;
 
   /** The market's MEASURED realized rate since the last install, when one
@@ -179,13 +173,10 @@ export interface StockView {
 
 export interface StockMemory {
   history: MarketHistory;
-  /** sym -> the side we committed to and the market tick we committed at. The
-   *  point of persisting this is that manipulation is SLOW: nudges accumulate at
-   *  0.1 per influencing op on a 0..100 scale, so a controller that re-derives
-   *  its direction from scratch every 5 s would thrash the position and never
-   *  let the manipulation converge. The predecessor scripts got this right with
-   *  a sticky `wantedPosType` (`bitburner-2023/src/main.ts:694`) and it is the
-   *  one design of theirs worth keeping verbatim. */
+  /** sym -> the side we committed to and the market tick we committed at.
+   * Manipulation nudges accumulate at 0.1 per influencing op on a 0..100 scale,
+   * so the direction remains sticky across controller passes.
+   * Reference: `bitburner-2023/src/main.ts:694` at commit 43e8585. */
   intent: Record<string, { side: PositionSide; sinceTick: number }>;
 }
 
@@ -639,10 +630,8 @@ function rankSymbol(params: {
  * identity rather than assuming the constant keeps the mapping genuinely
  * injectable: a caller that supplies a different one gets a rebuild, and a
  * caller that supplies the same one gets a pointer compare.
- *
- * Rebuilding it per call cost real time. Scanning it per SYMBOL, which is what
- * `rankSymbol` and this function both used to do, cost that much again times
- * thirty-three, at controller cadence, for the whole run. */
+ * This avoids rebuilding and rescanning the fixed mapping for each symbol at
+ * controller cadence. */
 let hostsForSymbolsCache: { source: Readonly<Record<string, string>>; hosts: Map<string, string[]> } | undefined;
 
 function hostsForSymbols(symbolByHost: Readonly<Record<string, string>>): ReadonlyMap<string, string[]> {
@@ -796,16 +785,13 @@ function planEntry(params: {
  * **4S Market Data itself ($1b) is deliberately never bought.** It unlocks the
  * in-game ticker UI, not the script API: `getForecast` and `getVolatility` check
  * `has4SDataTixApi`, and `purchase4SMarketDataTixApi` does NOT require
- * `has4SData` first (NetscriptFunctions/StockMarket.ts @ v3.0.1). So the $1b buys
- * an automated player exactly nothing, and the previous version's only unlock
- * purchase was the one purchase with no value.
+ * `has4SData` first (NetscriptFunctions/StockMarket.ts @ v3.0.1). The $1b UI
+ * unlock therefore provides no script capability.
  *
  * Everything here amortizes against `unlockHorizonSec`, the NODE horizon, not the
  * install horizon — none of these three flags is cleared by
- * `prestigeAugmentation`. Pricing them against the install cadence (as the old
- * shared `horizonSec` did) made the highest-leverage purchase in the feature look
- * unaffordable at any bankroll below ~$100b, which in BN8 is unreachable without
- * it: a deadlock dressed as prudence.
+ * `prestigeAugmentation`; pricing them against the shorter install cadence would
+ * undervalue persistent access.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/StockMarket.ts
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Prestige.ts */
 function unlockLadder(
@@ -907,10 +893,8 @@ function planReserve(
 ): StockPlan["reserve"] {
   // The working capital is the BANKROLL — cash plus the book at liquidation
   // value — not merely what happens to be liquid this pass. A position's sale
-  // proceeds land between two driver ticks, and a reserve sized on the
-  // pre-sale cash leaves them undefended for exactly that gap: measured on
-  // bn8-manipulation seed 1, a $390m sale was scooped by a $318m RAM rung in
-  // the 500 ms before the next stock plan existed. Claims are full-ambition
+  // proceeds land between two driver ticks, and a reserve sized on pre-sale
+  // cash leaves them undefended for that gap. Claims are full-ambition
   // requests (the arbiter reserves only what the pool actually holds), so
   // sizing over the book is free while nothing lands and exactly right the
   // instant something does.
@@ -978,9 +962,8 @@ function computeBlindMarketShape(): { cycleEdge: number } {
  * fixed $100k commissions per round trip eat the whole per-cycle edge and the
  * closed form's net is <= 0. The same break-even the rate formula encodes,
  * solved for the bankroll — in a node whose only income is the market,
- * spending below this line is not a trade-off, it is the end of the economy
- * (measured on bn8-full: a run drained to $38k placed zero further trades for
- * twenty-three virtual hours, because no position clears its commission). */
+ * spending below this line is not a trade-off: no position can clear its
+ * commission. */
 export function blindViableBankroll(): number {
   const { cycleEdge } = blindMarketShape();
   return cycleEdge > 0 ? (2 * COMMISSION) / cycleEdge : Infinity;
@@ -1048,11 +1031,7 @@ function planManipulation(params: {
   const out: ManipulationIntent[] = [];
 
   // Only hosts the farm can actually work: rooted, skill-reachable, present in
-  // THIS world. Publishing the full metadata host list broadcast intents for
-  // servers that did not exist in the run's network, and the "manipulation"
-  // profile spent the whole run influencing nobody (measured: influence keys
-  // fulcrumassets/4sigma/... against a network whose only symbol hosts were
-  // foodnstuff, sigma-cosmetics and joesguns).
+  // THIS world. Do not publish manipulation intents for absent symbol hosts.
   const farmable = new Set(view.farmableHosts);
   const hostsBySymbol = hostsForSymbols(view.symbolByHost);
   const consider = (sym: string, side: PositionSide, notional: number): void => {

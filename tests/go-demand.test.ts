@@ -232,9 +232,8 @@ describe("Go demand attribution", () => {
   /** Both forecasts in `saturatingMoney` run 9,000s, so that is the runway. */
   const SATURATED_RUNWAY = 9_000;
 
-  /** Money evidence far in excess of the horizon, restated three ways: the
-   * shape that used to saturate every money-attributed opponent to the same
-   * clipped number and erase the share entirely. */
+  /** Money evidence far in excess of the horizon, restated three ways to verify
+   * that clipping preserves each opponent's attribution share. */
   function saturatingMoney(): Parameters<typeof goDemands>[0] {
     return {
       horizons: {
@@ -273,9 +272,8 @@ describe("Go demand attribution", () => {
       canEarnFactionRep: true,
       canRunBladeburner: true,
     });
-    // Buying Hacknet RAM spends dollars from whatever earned them, so lifting
-    // three percent of the money rate earns three percent of the credit — not
-    // the full attribution the hand-written opponent map used to hand over.
+    // Buying Hacknet RAM spends dollars from every income source, so a source
+    // receives credit only in proportion to its share of the money rate.
     expect(demands.Netburners?.share).toBeCloseTo(0.03, 9);
     expect(demands["The Black Hand"]?.share).toBeCloseTo(0.8, 9);
   });

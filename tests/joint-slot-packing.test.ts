@@ -3,10 +3,8 @@ import { makeHackContext } from "../shared/formulas.ts";
 import { solveCycle, type RamCaps, type TargetStatics } from "../shared/strategy/targeting.ts";
 import { WORKER_RAM } from "../shared/world.ts";
 
-/** The pipeline-aware score used to count hack and grow slots independently
- * over the same hosts, so a hack and a grow that each fit the largest host
- * could coexist on paper while never being placeable simultaneously — the
- * dispatcher then discovered the conflict and slowed the whole landing grid.
+/** The pipeline-aware score packs hack and grow slots jointly over the same
+ * hosts so every scored combination is simultaneously placeable.
  * The joint model admits a cadence only when its resident hack AND grow
  * blocks pack into the host topology together. */
 

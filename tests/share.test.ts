@@ -72,9 +72,7 @@ describe("marginal share cutover", () => {
   test("RAM beyond the depth cap is NOT free — only the marginal crossing decides", () => {
     // The depth cap describes the CURRENT target's pipeline, not the farm's
     // appetite: surplus above it is growth headroom (prep for the next target,
-    // and the bigger targets skill growth unlocks). Treating it as idle and
-    // handing it to share was measured on bn1-progression seed 1 as hacking
-    // income $18.05q -> $12.23q (-32%) for the same augmentation count.
+    // and the bigger targets skill growth unlocks), so it is not idle share capacity.
     const capped = shareCutover(curve, 100, 60);
     const uncapped = shareCutover(curve, 100);
     expect(capped.cutoverGb).toBe(uncapped.cutoverGb);

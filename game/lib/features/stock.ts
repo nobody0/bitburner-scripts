@@ -50,8 +50,8 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "
  * The plan/fund split is the other structural rule. `stepStock` sizes a position
  * at full ambition with NO knowledge of the money grant, the claim is posted from
  * that plan, and only then does `fundedActions` cut it to what was granted.
- * Deriving the plan from the grant is circular — no plan, no claim, no grant, no
- * plan — and that circle is why the previous version never placed a trade. */
+ * Deriving the plan from the grant would be circular: no plan means no claim,
+ * and therefore no grant from which to derive a plan. */
 
 let memory: StockMemory = initStockMemory();
 let lastPlan: StockPlan | undefined;
@@ -81,11 +81,9 @@ export function resetStockState(): void {
 /** Hosts the farm could actually drive right now — the other half of the
  * manipulation loop.
  *
- * `hacking` prices price impact into its target score, but only for a symbol
- * `stock` already holds. So if `stock` picks on pure edge and lands on a megacorp
- * whose server is out of skill range, the tie-in never engages: the first
- * end-to-end BN8 run held three megacorps, landed 380 grows, and moved no price
- * at all. Reading the same server snapshot the dispatcher does closes it.
+ * `hacking` prices price impact into its target score only for a symbol `stock`
+ * already holds. Restricting choices to farmable hosts ensures the dispatcher
+ * can actually land the influencing operations the stock plan assumes.
  *
  * The same three conditions the target evaluator uses (`isCandidate` plus a skill
  * check), because a host that fails any of them cannot carry an influencing op.
@@ -97,14 +95,8 @@ export function resetStockState(): void {
  * `ns.stock.getOrganization` API in production". `SYMBOL_BY_HOST` is that
  * constant, and `sim/tests/stock-parity.test.ts` pins it against the vendored
  * `SERVER_METADATA.org`.
- *
- * This used to re-derive it every pass anyway, from the live server topic joined
- * against a `stock.organizations` probe — an `Object.values(servers)` scan plus
- * a Map build at controller cadence, for an answer that cannot change. The probe
- * existed only to feed that join, and paid `getOrganization` RAM for data the
- * bundle ships, which is exactly what the `stock.forecast` probe already refuses
- * to do; it is gone. Only the FARMABLE half is dynamic, and it now walks the 33
- * hosts that carry a symbol rather than the whole network. */
+ * Only farmability is dynamic, so the join walks the fixed symbol-host mapping
+ * rather than probing organizations or scanning the whole network. */
 function farmableHosts(ctx: DriverContext): string[] {
   const servers = ctx.state.topics.servers;
   const skill = ctx.state.topics.player?.skills.hacking ?? 0;
@@ -175,16 +167,8 @@ export function buildView(ctx: DriverContext): StockView | undefined {
   const nodeHorizonSec = usableForecastSec(ctx.horizons.node) ?? 0;
   const positionHorizonSec = usableForecastSec(ctx.horizons.install) ?? secondsForTicks(TICKS_PER_CYCLE);
 
-  // Liquidate on IMMINENCE, not on phase.
-  //
-  // THE BUG this replaces: `plan.phase === "ending"`. That legacy cash-ratio
-  // phase was not a statement that an install was close. On a real BN1 run
-  // with $72t banked and a Daedalus route
-  // ~525h out it latched on the first tick and never cleared: 9811 progression
-  // records, every one of them "ending", and the market sat flat the entire run
-  // refusing FSIG at a 0.673 forecast and a 3.4-tick break-even. The phase is the
-  // ANNOUNCEMENT that conversion is coming; it is not the moment to convert.
-  //
+  // Liquidate on install imminence, not on a cash-ratio phase; the latter does
+  // not establish that conversion is close.
   // What imminence actually means is that nothing is left except the book and what
   // the book will pay for. `factions` still earning reputation, or a paid graft in
   // flight, both mean there is time to keep trading. A `stock` blocker is our own
@@ -209,8 +193,7 @@ export function buildView(ctx: DriverContext): StockView | undefined {
   // Contested = any money bid last pass from a feature that is neither the
   // market nor progression's own install machinery. This arms the
   // viability-floor insurance in planReserve — with no counterparty, the
-  // floor's premium is pure drag on a pure-market world (measured: a 7%
-  // median shortfall over the isolation ladder's hour).
+  // floor's premium is unnecessary in a pure-market world.
   const moneyContested = [
     ...(ctx.state.topics.arbitration?.grants ?? []),
     ...(ctx.state.topics.arbitration?.denied ?? []),
@@ -232,9 +215,8 @@ export function buildView(ctx: DriverContext): StockView | undefined {
     hasWseAccount: topic.hasWseAccount ?? false,
     hasTixApi: topic.hasTixApiAccess ?? false,
     has4SApi: topic.has4SDataApi ?? false,
-    // Shorts are BN8 or SF8.2. Emitting one without them throws inside the stub,
-    // and the old code did exactly that on every tick a bearish symbol topped
-    // the ranking, which blocked every long ranked below it.
+    // Shorts require BN8 or SF8.2; emitting one without access throws inside
+    // the stub and prevents lower-ranked actionable longs from being considered.
     canShort: ctx.caps.bitNode === 8 || (ctx.caps.sourceFiles["8"] ?? 0) >= 2,
     fourSigmaDisabled: ctx.caps.restrictions.disable4SData === true,
     farmableHosts: farmableHosts(ctx),
@@ -255,12 +237,10 @@ export function buildView(ctx: DriverContext): StockView | undefined {
  * inside the same stub) PLUS the current book at mark-to-market. Cashflow
  * alone counts an open position's purchase as money gone, so mid-hold it
  * reads deeply negative exactly while the strategy is working; adding the
- * book back makes the number what it claims to be — the market's total
- * wealth contribution per second. Deliberately NOT the 2-minute money-sources
- * probe: its stale mid-hold snapshots mixed with a live portfolio value made
- * the measurement vanish at precisely the post-sale pass the reserve most
- * needs it. Undefined until positive over a positive interval — a losing or
- * not-yet-traded book falls back to the solver's closed-form expectations. */
+ * book back makes the number the market's total wealth contribution per second.
+ * Do not combine the 2-minute money-sources probe with a live portfolio value;
+ * their sampling times differ. Undefined until positive over a positive
+ * interval, so a losing or not-yet-traded book uses closed-form expectations. */
 function measuredStockIncomePerSec(portfolioCost: number): number | undefined {
   const ledger = flows();
   if (ledger.tradeFlowSince === undefined) return undefined;
@@ -361,9 +341,8 @@ async function execute(ctx: DriverContext, actions: StockAction[]): Promise<void
   // sweep sample is up to seconds stale. Without this, a sale's proceeds land
   // in the arbiter's pool while this feature's own next plan still reads the
   // pre-sale pocket change — too small to post the working-capital reserve —
-  // and the one or two passes before the sweep catches up are exactly enough
-  // for another feature's standing claim to spend the entire bankroll
-  // (measured: a $390m liquidation scooped by a $318m home-RAM rung).
+  // and the passes before the sweep catches up allow another standing claim
+  // to spend the released bankroll.
   if (ctx.state.topics.player) {
     merge(ctx.state, "player", { money: cash });
   }
@@ -626,8 +605,7 @@ function valueCurve(claim: Claim, ctx: ClaimContext): ClaimValueCurve | undefine
     // comes from has two fixed $100k commissions per round trip, so the rate
     // reaches zero at a computable bankroll floor — below it the market can
     // never rebuild, and in a node with no other income that is the end of
-    // the economy, not a reallocation (measured: a bn8-full run drained to
-    // $38k placed zero further trades for twenty-three virtual hours). Price
+    // the economy, not a reallocation. Price
     // the q-th dollar hyperbolically against that floor: the marginal at the
     // full amount is the measured average, and it rises toward
     // value x (1 + amount/floor) as the remaining capital approaches the

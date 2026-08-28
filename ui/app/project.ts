@@ -125,10 +125,8 @@ export interface FarmSample {
 /** The cumulative figures a batch kind's series are differenced from. */
 export interface BatchCounters {
   batches: number;
-  /** Ops launched by settled batches of this kind. Kept for the reset test —
-   * a counter moving backwards is an install — not for a curve: the matching
-   * `landed` is equal to it by construction and used to be retained beside it
-   * for a band that could never open. */
+  /** Ops launched by settled batches of this kind. Kept as a reset sentinel,
+   * not a curve: matching `landed` is equal by construction. */
   ops: number;
   moneyEarned: number;
   /** Summed start-to-settle spans, and the graded / in-order counts, retained
@@ -153,10 +151,8 @@ export interface BatchCounters {
 
 /** One batch kind's curves.
  *
- * There is deliberately no launched-against-landed pair here. It used to carry
- * one, as running totals, on the reasoning that the BAND between the two was
- * the ops that never arrived and that differentiating both would destroy it.
- * The band does not exist: a batch settles only once its last op lands, so the
+ * There is deliberately no launched-against-landed pair. The band does not
+ * exist: a batch settles only once its last op lands, so the
  * per-kind sums of `ops` and `landed` are equal in every run, and the chart
  * built on them drew one curve twice for a long time without anyone noticing.
  *
@@ -180,9 +176,7 @@ export interface BatchKindSeries {
  *
  * One install, because one artifact IS one install — the run file is keyed on
  * the install id and a prestige starts a new one — so no curve here can ever
- * span an install boundary and none of them is ever dropped mid-stream. See
- * `foldStockSeries`, which used to drop them on a signal that meant something
- * else entirely.
+ * span an install boundary and none is dropped mid-stream. See `foldStockSeries`.
  *
  * The pairing is the same idea as `BatchKindSeries`: what is being read is the
  * BAND between two levels, not either level's rate. `value` against `cost` is
@@ -360,8 +354,7 @@ export interface ProjectedState {
   farmWindowMs: number;
   /** The span the newest rate points were actually differenced over, in ms.
    *
-   * A separate field because the two genuinely diverge and the panel used to
-   * print the requested one as though it were this one. `baselineFor`
+   * A separate field because requested and actual spans genuinely diverge. `baselineFor`
    * deliberately falls back to the oldest sample it holds, so early against a
    * long-cycle target the real span is seconds under a caption claiming
    * minutes; and a gap in the rollup stream — a stalled emitter, or a replay of
@@ -715,16 +708,13 @@ const SAMPLE_RING = 400;
  * even when in fact it had not yet traded. Each series is pushed only when its
  * OWN inputs are present.
  *
- * NOTHING IS DROPPED HERE, and that is a correction. This fold used to close
- * out a "previous install" mid-stream, on two sentinels that cannot mean an
- * install: one artifact IS one install. `ui/store.ts` keys the run file on
+ * Nothing is dropped here: one artifact is one install. `ui/store.ts` keys the run file on
  * `hello.identity.install.id`, that id is keyed on `lastAugReset` and is stable
  * across controller restarts, and the simulator rotates the
  * JSONL on prestige — so an install boundary is a different file, loaded as a
  * different run, and cannot appear inside one record stream at all.
  *
- * What CAN appear mid-stream is a controller restart, and both old sentinels
- * were restart signals:
+ * A controller restart can appear mid-stream:
  *  - `market.tick` is `memory.history.tick` off a module-level `let`, so it
  *    restarts at 0 whenever a build push replaces the module instance;
  *  - the ledger vanishing is the same event seen from the other side — the
@@ -761,26 +751,17 @@ function foldStockSeries(state: ProjectedState, t: number, stock: StockState | u
  *
  *  - GAUGES, pushed as they arrive: occupancy, engine lateness, the ops-adrift
  *    residual, the since-install landing error. Folded BEFORE the windowing
- *    below, deliberately — making them wait for a baseline a full window old
- *    left every health curve empty for the first thirty seconds of a run, and
- *    permanently on a short one.
+ *    below, deliberately, because gauges do not require a window baseline.
  *  - WINDOWED quantities — the allocation share, the batch settle rate, the
  *    mean batch span and the in-order share — which are differenced against a
- *    sample one batch period old rather than against the previous rollup.
- *    The last two used to be folded with the gauges, which quietly made them
- *    lifetime means: their denominators are cumulative for the dispatcher's
- *    whole life, so the card built to answer "is it getting worse" could not.
+ *    sample one batch period old rather than against the previous rollup. The
+ *    denominators are lifetime cumulative, so differencing is required to
+ *    produce current-window means.
  *    See `BatchCounters`. The farm publishes at 1 Hz but its cycle is one
  *    weakenTime, minutes against a real target, so an adjacent-sample
- *    difference asks "how many batches settled during this particular second",
- *    whose honest answer is almost always exactly zero. Measured on a live run:
- *    the allocation shares swung between 0% and 100% because each one-second
- *    bucket happened to contain launches of exactly one kind. That was not a
- *    fault in the farm; it was the wrong resolution.
- *
- * There used to be a third: per-kind `ops` against `landed` as running totals,
- * kept undifferenced to preserve the band between them. See `BatchKindSeries`
- * for why that band never existed.
+ *    difference asks only what settled during that second and is too noisy for
+ *    a multi-minute batch period. Per-kind `ops` and `landed` are intentionally
+ *    absent; see `BatchKindSeries`.
  *
  * The window follows the target's weaken time, which IS the batch period, and
  * is reported on the state so the panel can say what it averaged over.

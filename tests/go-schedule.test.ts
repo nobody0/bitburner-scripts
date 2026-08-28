@@ -99,8 +99,8 @@ describe("favor value near an install", () => {
   });
 
   test("a short game outranks a long one on a short runway, but neither is zeroed", () => {
-    // The 2026-08-18 tail: ~139s forecast left. The 27s Illuminati game beats
-    // the 159s daemon game per second — but the forecast is an ESTIMATE, so
+    // The shorter Illuminati game wins on value per second, but the forecast is
+    // an estimate, so
     // the daemon keeps positive value rather than being cliffed to zero
     // (treating the deadline as a wall idled Go whenever the forecast sat
     // short for longer than it promised).

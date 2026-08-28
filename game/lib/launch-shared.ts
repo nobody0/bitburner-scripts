@@ -4,11 +4,7 @@
  * pass the child as its one argument; the child looks that id up at the top of
  * main() and acknowledges the capture before doing any work.
  *
- * Nothing here serializes. Descriptors used to share ONE realm slot, which
- * meant a launch had to hold a FIFO from publish until the child had booted
- * and read it — and a child cannot boot inside its parent's turn, so every
- * exec in the whole automation queued behind one engine cycle each. A darknet
- * vantage opening a frontier of five paid ten of them in a row. Keying by
+ * Nothing here serializes. Keying by
  * launch id removes the shared slot and with it the reason to queue: each
  * child can only ever find its own descriptor, so launches overlap freely.
  *

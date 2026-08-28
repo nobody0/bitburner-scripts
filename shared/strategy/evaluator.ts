@@ -791,8 +791,7 @@ export function stepEvaluator(
   if (!noMoneyIncentive && !bestPrepped && (!farmEntry || currentScore <= 0)) {
     // Only entered when the result can matter: with an EARNING incumbent both
     // consumers below are unreachable (`!farmEntry` and `currentScore <= 0`),
-    // and the momentary not-prepped dip after every hack landing used to run
-    // this whole per-candidate solve loop for nothing.
+    // avoiding a per-candidate solve during momentary post-hack prep dips.
     //
     // Nothing prepped anywhere: farm the best target anyway (the dispatcher
     // preps it, then fires hacks). "Best" here MUST be prep-aware, not raw
@@ -801,11 +800,8 @@ export function stepEvaluator(
     // income. Weigh each candidate by the income it can deliver within the
     // prep horizon AFTER its own (skill-discounted) prep finishes.
     //
-    // The INCUMBENT competes on the same terms — this is not only the cold
-    // start. A 0-score incumbent used to hold the slot forever while nothing
-    // was prepped, which is how a BN8 farm spent six hours prepping a
-    // worthless target while the only positive-score (manipulated) hosts sat
-    // ignored.
+    // The incumbent competes on the same terms; a zero-score target must not
+    // retain the slot merely because no candidate is currently prepped.
     const valueOf = (candidate: TargetEntry): number => {
       const plan = prepOf(candidate);
       if (!plan) return -1;
@@ -838,9 +834,9 @@ export function stepEvaluator(
     } else if (
       // Contest the incumbent ONLY when it earns nothing at all. An earning
       // farm target dips out of `prepped` for a moment after every hack lands,
-      // and contesting it in those windows yanks the farm onto a cold target
-      // (measured: hacking-early 16.1m -> 20.6m). A worthwhile upgrade of an
-      // EARNING farm goes through the prep pick below and switches when
+      // and contesting it in those windows would yank the farm onto a cold
+      // target. A worthwhile upgrade of an earning farm goes through the prep
+      // pick below and switches when
       // prepped; only a zero-score incumbent (BN8's worthless-money targets)
       // has nothing to lose by switching cold.
       best &&
@@ -857,22 +853,18 @@ export function stepEvaluator(
 
   // Prep pick: highest opportunity-cost NET over the horizon — income gained
   // after the switch minus income the farm loses while the prep segment holds
-  // its share (shared/strategy/economics.ts; the legacy 15-minute rule
-  // generalized to the farm's depth cap). A flat score margin can't see that
-  // a 3-hour prep on a 30-minute horizon is worthless, or that a depth-capped
-  // farm preps for free. Measured: −14% median time to earn:1e9 vs the old
-  // 5%-margin rate·(T−prepTime) pick, 10/10 seeds.
+  // its share (shared/strategy/economics.ts). A flat score margin cannot see that
+ // a 3-hour prep on a 30-minute horizon is worthless, or that a depth-capped
+  // farm preps for free.
   const farmModel = farmEntry?.solution;
   const currentRateNow = farmIncomeRate(farmModel, fleetGb);
   // A secondary prep may only take RAM the farm's pipeline can survive
   // losing: the fleet above the farm's minimum sustaining envelope (one slot
   // per role), plus headroom. This is a FEASIBILITY floor, not the income
   // trade — `evaluatePrep` below prices the farm income actually lost to a
-  // candidate reservation. The old subtrahend was `depthCapGb` (the
-  // minimum-interval saturation envelope, which prices the future fleet for
-  // infrastructure); on any early fleet it exceeded `fleetGb` by orders of
-  // magnitude and made a second prep mathematically impossible. The `min`
-  // keeps the gate at least as open as the old one on fleets past saturation.
+  // candidate reservation. Bound the minimum-interval `depthCapGb` saturation
+  // envelope by the sustaining footprint so early fleets can admit a secondary
+  // prep while saturated fleets retain the same ceiling.
   const farmEnvelopeGb = farmModel && farmEntry
     ? Math.min(
         depthCapGb(farmModel),
@@ -904,10 +896,9 @@ export function stepEvaluator(
     memory.farmReadyHost === farmHost &&
     memory.farmReadySince !== undefined &&
     now - memory.farmReadySince >= farmEntry.solution!.weakenTimeS * 1_000;
-  // A COLD farm prep cannot use the whole fleet: its waves are one target's
-  // weaken cover plus atomic grows, and everything beyond that idles for the
-  // whole prep (measured live: a 78 TB fleet at ~50% while the farm target
-  // prepped, 63 targets waiting). Selling capacity the farm's quote assumed is
+  // A cold farm prep cannot use the whole fleet: its waves are one target's
+  // weaken cover plus atomic grows, and capacity beyond that idles. Selling
+  // capacity the farm's quote assumed is
   // still forbidden — the cold-prep allowance is bounded by what remains after
   // BOTH the farm's protected envelope and its own outstanding prep demand.
   const farmPrepPlan = farmEntry ? prepOf(farmEntry) : undefined;
@@ -950,9 +941,8 @@ export function stepEvaluator(
         maxPrepGb: candidatePrepGb,
         // In the cold window nothing else earns from this RAM, so the fleet-
         // share allocation heuristic has nothing to trade against: hand the
-        // stopgap the WHOLE spare allowance and let it prep at the latency
-        // floor. Measured live without this: the stopgap sat "RAM-bound" on
-        // ~1 TB while 85% of the fleet idled.
+        // stopgap the whole spare allowance and let it prep at the latency
+        // floor.
         ...(firstIncomeWindowElapsed ? {} : { prepGb: candidatePrepGb }),
         reinvestmentReturnPerDollarSec: reinvestmentRate,
       });

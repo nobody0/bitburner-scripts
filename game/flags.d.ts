@@ -7,6 +7,6 @@ declare const __TELEMETRY__: boolean;
 /** Unique id baked into every artifact emitted by one build. */
 declare const __BUILD_ID__: string;
 
-/** V9 worker bundle emitted by tools/build.ts and embedded into start.js so
+/** V9 worker bundle emitted by tools/build.ts and embedded into main.js so
  * Bitburner does not need a separately addressable browser-worker file. */
 declare const __GO_NEURAL_WORKER_SOURCE__: string;

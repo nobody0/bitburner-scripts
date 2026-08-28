@@ -166,9 +166,7 @@ describe("donation parity", () => {
   });
 
   test("favorNeededToDonate matches, and is the RENAMED multiplier", () => {
-    // v3.0.1 renamed RepToDonateToFaction -> FavorToDonateToFaction. The
-    // predecessor scripts still use the old name, which reads as undefined and
-    // silently makes the gate NaN.
+    // v3.0.1 exposes the multiplier as FavorToDonateToFaction.
     expect(favorNeededToDonate(currentNodeMults.FavorToDonateToFaction)).toBe(vendoredFavorNeeded());
     expect(favorNeededToDonate(1)).toBe(150);
   });

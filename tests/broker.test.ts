@@ -20,8 +20,7 @@ describe('the arena floor', () => {
     expect(cold.reserves).toEqual({ home: HOME_RESERVE_GB });
     expect(cold.guaranteedDynamicGb).toBeCloseTo(HOME_RESERVE_GB - RESIDENT_BASE_GB);
 
-    // The old ladder dropped home to 3.6 GB once n00dles was rooted, which
-    // left the boot-path sweep's 4.1 GB exec racing the farm on home.
+    // Keep enough home reserve for the boot-path sweep even after another host is rooted.
     expect(ramArena(hosts(), [], 1).reserves.home).toBe(HOME_RESERVE_GB);
   });
 

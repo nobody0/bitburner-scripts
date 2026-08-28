@@ -82,8 +82,7 @@ describe("valuing one upgrade", () => {
   });
 
   test("the valuation is monotone in farm value — no threshold cliff", () => {
-    // The old model switched branches at 80% fleet utilization, so the same
-    // upgrade could be worth LESS the more valuable fleet RAM became.
+    // Increasing farm value must not reduce the value of the same upgrade.
     const server = node({ ram: 16, ramUsed: 4, production: 0.02 });
     const rates = [0, 1, 10, 100, 1_000, 10_000];
     const values = rates.map((rate) => upgradeValue(server, "ram", hashBasis, rate).value);
@@ -95,8 +94,7 @@ describe("building the view from a real topic", () => {
   const basis: HacknetBasis = { hashMode: false, hashDollarValue: 1, fleetUtilization: 0, fleetDemanded: false };
 
   test("a fresh node is worth buying even with no BitNode row observed", () => {
-    // `?? 0` here used to read as "a fresh node earns nothing", which stopped
-    // the very first node from ever being bought and froze the feature cold.
+    // Missing observed production on a fresh node uses the modeled rate, not zero.
     const view = buildView(
       ctxOf({ nodes: [], purchaseNodeCost: 1_000, maxNumNodes: 30 } as Partial<HacknetState>, { bitNode: 999 }),
       1e9,

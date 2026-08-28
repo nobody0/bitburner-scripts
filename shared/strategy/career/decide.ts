@@ -40,13 +40,8 @@ import {
  * career's claim on the work slot with (`../income.ts`). An option is worth
  * what it DELIVERS, measured against whoever else could deliver the same thing.
  *
- * It used to be `Σ needWeight_k · progress_k/sec`, and the difference is the
- * denominator. That form scored a rate against a need's remaining gap while
- * ignoring who else was closing it, so a crime paying $1.8e4/s against a $1e11
- * gate the farm was closing at $3.25e8/s scored as though it were the only
- * thing moving — and, because the band came from the need's urgency rather
- * than the size of the contribution, took the exclusive work slot for six
- * hours to deliver four ten-thousandths of the progress.
+ * Normalising by the best competing rate prevents a small contribution to a
+ * rapidly advancing channel from monopolising the exclusive work slot.
  *
  * A need nobody posted is worth nothing, so career does not grind karma nobody
  * wants; a channel nobody has priced yet leaves the option unpriced, and those
@@ -251,15 +246,8 @@ export function needValues(board: NeedBoard): Map<string, NeedValue> {
  * priced in. No board filtering and no normalisation: an option produces what
  * it produces, and what that is WORTH is decided once, by `slotValue`, against
  * the same table the arbiter uses.
- *
- * The predecessor folded the board in here, as `(perSec / remaining) * weight`.
- * Two things were wrong with it and both bit. It scored a rate against a need's
- * remaining gap while ignoring who else was closing that gap — so career scored
- * its $1.8e4/s crime against a $1e11 target the farm was closing at $3.25e8/s,
- * and took the work slot for four ten-thousandths of the progress. And the
- * skill variant divided by remaining EXPERIENCE, clamped at 1e-9, so one
- * mis-derived multiplier turned a routine strength need into a score of 6.3e8
- * and silently decided every career ranking in the run. */
+ * Remaining need size is intentionally absent: channel competition and worth
+ * are resolved centrally, avoiding singular scores near a completed gate. */
 function collectRates(entries: readonly ProducedRate[]): {
   rates: ProducedRate[];
   produces: Record<RateChannel, number>;
@@ -498,24 +486,14 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
 
   for (const crime of view.crimes) options.push(planCrime(crime, view));
   for (const course of view.courses) {
-    // Never start a course we cannot pay for — a full funding window, not
-    // merely "any positive grant": the course drains continuously, and a $1
-    // grant used to admit a $2,400/s class.
+    // Require a full funding window because courses drain continuously; any
+    // smaller positive grant is insufficient authorization to start one.
     if (course.costPerSec > 0 && view.moneyGranted < course.costPerSec * TRAINING_FUND_WINDOW_SEC) continue;
     options.push(planCourse(course, view));
   }
   for (const program of view.programs ?? []) {
-    // Only what was ASKED for. `CareerView.programs` is documented as
-    // "requested by another feature", but the driver offered every creatable
-    // opener, and an unrequested one produces nothing the board prices: its
-    // `file:` rate is zero, `collectRates` drops it, and it arrives at the
-    // ranking as `unpriced/0`. Two such options then decided the slot on the
-    // money tie-break — where a program's `moneyPerSec` is
-    // `-purchaseCost / seconds`, so the LONGEST, most expensive write looks
-    // cheapest. Measured: a save with hacking 78 and intelligence 355 (which
-    // halves relaySMTP's level requirement to 72.5, making a 2h14m write
-    // eligible) chose it over a 29-minute FTPCrack, re-affirmed it every five
-    // seconds, and resumed it after every reload.
+    // Only requested programs belong in the menu. An unrequested opener has no
+    // priced `file:` output and could otherwise win an unpriced money tie-break.
     if (!values.has(needKey({ kind: "file", subject: program.name }))) continue;
     options.push(planProgram(program, values, view));
   }
@@ -544,9 +522,8 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
       options.push(planInstant({ type: "travel", subject: value.subject }, value));
     } else if (value.kind === "jobTitle" && value.subject) {
       const title = value.subject;
-      // The title's track comes from the position table, never from string
-      // matching — the old heuristic routed "Chief Executive Officer" onto
-      // the Software track, which terminates at CTO and can never satisfy it.
+      // Resolve the title's track from the position table; title strings do not
+      // reliably identify the track that can reach them.
       const field = trackFieldFor(title);
       if (field !== undefined) {
         const held = [...(view.companies ?? [])].filter((entry) => Object.hasOwn(jobs, entry.name));
@@ -612,13 +589,8 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
   // is worth a ten-thousandth, and says so.
   const servesNeed = (entry: ScoredAction): boolean =>
     entry.rates.some((rate) => values.has(needKey({ kind: rate.kind, subject: rate.subject })));
-  // NO PHASE RULE. There used to be one here: "if nothing is posted and the
-  // background out-earns crime, study the route's skill instead" — a hand-made
-  // approximation of a comparison the valuation now makes properly, since a
-  // course's experience is priced against the fleet's on the same channel. Its
-  // one remaining job was covering the window where nothing had a price at all,
-  // and that window closed when the board became a source of channel worth: a
-  // posted skill gate prices the course whether or not a forecast exists yet.
+  // No phase override is needed: a course competes with fleet experience on
+  // the same channel, and a posted skill gate supplies worth before a forecast.
   ranked.sort((a, b) => {
     const value = compareSlotValues(a.value, b.value);
     if (value !== 0) return value;

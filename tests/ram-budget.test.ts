@@ -357,9 +357,8 @@ describe("in-game static RAM budget", () => {
     // `kill`) all go through a borrowed `ns` in BRACKET notation, so they are
     // billed to the lender rather than to this process.
     //
-    // This list used to hold `getServerMaxRam`, for a dotted call at the top of
-    // the main loop whose result was thrown away. That was fatal, and silently:
-    // the launch allocation is `CONTROLLER_GB` (1.6, base plus a free mutation
+    // Every direct Netscript call here must fit the controller allocation.
+    // The launch allocation is `CONTROLLER_GB` (1.6, base plus a free mutation
     // clock), while `WorkerScript.dynamicRamUsage` STARTS at the 1.6 base and
     // adds each distinct member as it is called — so the first `getServerMaxRam`
     // reached 1.65 against a 1.6 allocation and the engine killed the controller
@@ -699,8 +698,7 @@ describe("in-game static RAM budget", () => {
     // has just made that host immutable, and which the controller refuses by
     // name when no neighbour could re-plant it.
     expect(JOB_METHODS["pin"]).not.toContain("spawn");
-    // A pin no longer clears a 16 GB host beside the prober, and that is the
-    // point rather than a regression: the prober absorbed the resident and got
+    // A pin does not clear a 16 GB host beside the prober: the prober absorbed the resident and got
     // bigger, so `pin` DISPLACES it exactly as `walk` does. Both jobs need
     // every byte and both end by leaving the host empty for `planSpread`, so
     // the prober beside them is killed rather than reserved around. Reserving
@@ -786,10 +784,8 @@ describe("the written-down price table", () => {
   });
 
   test("no worker carries a launcher, so there is only one price", () => {
-    // There used to be two prices per kind, differing by exactly the 2.0 GB of
-    // `spawn`: a worker that had to become the next order carried its own
-    // launcher, a controller-dispatched one did not. Every worker is dispatched
-    // now — the controller execs it through the host's prober `ns` — so the
+    // Every worker is controller-dispatched through the host prober, so no
+    // worker price includes `spawn` and each kind has one price.
     // distinction has nothing left to describe.
     //
     // `spawn` survives in exactly one place, and it is not an order: the

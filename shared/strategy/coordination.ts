@@ -101,11 +101,9 @@ export function needDigest(need: Need): NeedDigest {
   };
 }
 
-/** Round to 3 significant digits. The digest is a REPORT, not a ledger: the
- * arbiter itself works on exact values, but publishing per-cent precision
- * makes the digest differ on every pass a money amount drifts, and the
- * change-filtered store then writes ~5 records per second for the whole run.
- * Three digits is what any reader of the board actually consumes. */
+/** Round to 3 significant digits. The digest is a report, not a ledger: the
+ * arbiter works on exact values, while excessive reporting precision makes
+ * the change-filtered digest churn whenever money drifts. */
 function sig3(value: number): number {
   return roundSigFigs(value, 3);
 }

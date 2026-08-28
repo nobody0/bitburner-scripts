@@ -251,8 +251,7 @@ describe("career as the needs-board consumer", () => {
   });
 
   test("which skill to train follows the route's own marginals, not a named fallback", () => {
-    // `defaultSkill` used to name the course a phase rule would study. Whichever
-    // channel the route actually values now selects it, and a node where
+    // Whichever channel the route values selects the course, so a node where
     // charisma is what binds reaches that answer by itself.
     const courses = [
       { name: "Algorithms", skill: "hacking", expPerSec: 8, costPerSec: 960, location: "Rothman University" },
@@ -409,7 +408,7 @@ describe("a program contests the slot on the time it blocks it", () => {
   });
 
   test("the duration discount survives the self-raise", () => {
-    // THE REGRESSION PIN. A program is the only producer of its own `file:`
+    // A program is the only producer of its own `file:`
     // channel and `raiseBest` lifts the field to our own announced rate, so the
     // rate fraction is — correctly — 1. Any attempt to price duration by scaling
     // that rate divides straight back out and this test fails.
@@ -474,7 +473,7 @@ describe("program creation economics", () => {
 
   test("compares player-slot opportunity cost with TOR plus purchase price", () => {
     const brute = PORT_OPENER_PROGRAMS[0]!;
-    // 600s write. Unpriced money keeps the historical money-only comparison:
+    // 600s write. Unpriced money keeps a money-only comparison:
     // 600 * 1000 = $600k < $700k (TOR included) writes; 600 * 2000 = $1.2m
     // against the $500k program alone does not.
     expect(preferProgramCreation(brute, 50, 0, { moneyPerSec: 1_000, valueSec: 0 }, false)).toBe(true);
@@ -582,8 +581,7 @@ describe("career serves the company chain", () => {
   });
 
   test("a jobTitle need routes through the position table, never a dead-end track", () => {
-    // The old string heuristic sent Chief Executive Officer to the Software
-    // track, which terminates at CTO. The table lookup must pick the title's
+    // The Software track terminates at CTO. The table lookup must pick CEO's
     // real track (Business) at an employer whose ladder contains it.
     const decision = stepCareer(
       view({
@@ -624,8 +622,8 @@ describe("a program nobody asked for", () => {
   });
 
   test("does not win the slot by being the most expensive thing on an empty board", () => {
-    // The regression itself: before the gate, both wrote as unpriced zeros and
-    // -5e6/8030 beat -1.5e6/1728, so the 2h14m option won.
+    // Without the request gate both options are unpriced; their negative-cost
+    // tie-break would select the longer write.
     const decision = stepCareer(
       view({ programs: [ftpCrack, relaySmtp], planningHorizonSec: HORIZON }),
       postNeeds([]),
@@ -683,8 +681,7 @@ describe("work the planner has abandoned", () => {
   });
 
   test("is stopped even when the menu is empty entirely", () => {
-    // The cold-start shape: no crime table yet, no funded course, nothing
-    // requested. Previously this returned idle and inherited the work.
+    // With no requested action, unrelated current work must still be stopped.
     const decision = stepCareer(
       view({ currentWork: { kind: "create_program", subject: "relaySMTP.exe" } }),
       postNeeds([]),

@@ -32,10 +32,8 @@ export function fleetFrom(
   //
   // Player-owned machines are EXCLUDED from the inference: the game reports
   // `home` with all five ports open regardless of which crackers exist.
-  // Counting it claimed a full toolkit on a BruteSSH-only run, which silently
-  // disabled every opener purchase, froze rooting at the 1-port tier for the
-  // whole node, and made w0r1d_d43m0n permanently unrootable (measured
-  // 2026-08-18: 13 of 71 servers rooted, arena 7.6 GB, run wedged).
+  // Count only opener-induced ports; server state is not evidence that the
+  // corresponding executable is owned.
   // Source (each cracker increments openPortCount once): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L549-L622
   let portOpeners = 0;
   for (const server of Object.values(servers)) {

@@ -17,9 +17,8 @@ import { mulberry32 } from "../sim/core/rng.ts";
 
 /** The set solver is a heuristic with a declared shape — greedy seed, local
  * search, relaxation bound. What has to be pinned is not its internals but the
- * three claims that justified replacing a working single-faction selector:
- * that it matches the exhaustive optimum where exhaustive is affordable, that
- * it never scores below the package the old selector would have taken, and that
+ * three public guarantees: it matches the exhaustive optimum where exhaustive
+ * is affordable, never scores below the best single package, and ensures that
  * a shared augmentation is paid for once. */
 
 const WORTH: ChannelWorth = new Map<string, number>([
@@ -219,8 +218,7 @@ describe("a shared augmentation is acquired once", () => {
   test("the union pays ONE escalating price ladder, not one per faction", () => {
     // Reputation cost carries no queue term but money does, so a set of n
     // purchases pays n escalating prices ONCE. Pricing each faction's package
-    // from a fresh queue depth understates a joint set, which is precisely what
-    // hid multi-faction plans from the old selector.
+    // from a fresh queue depth understates a joint set.
     const catalog = new Map([
       ["a1", aug("a1", { factions: ["A"], baseCost: 1e8, baseRepRequirement: 100, mults: { hacking: 1.2 } })],
       ["b1", aug("b1", { factions: ["B"], baseCost: 1e8, baseRepRequirement: 100, mults: { hacking: 1.2 } })],

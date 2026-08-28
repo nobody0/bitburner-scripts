@@ -35,10 +35,8 @@ import { hackingModule } from "./hacking.ts";
  * features, what contended resources it is bidding for, and how to throw away
  * everything it derived from a world that no longer exists.
  *
- * The point of bundling the four is that the controller never names a feature.
- * Before this existed, `onBitNodeReset` called `resetHackingState()` directly,
- * so every new feature meant editing the loop; now the loop walks the registry.
- * Filling in a feature is a local change to one file.
+ * Bundling the four means the controller never names a feature; it walks the
+ * registry, and adding a feature remains local to its registration.
  *
  * All fourteen are implemented. `tests/features.test.ts` enforces a module per
  * feature exactly as it enforces a probe, a topic and a tab, so a new feature

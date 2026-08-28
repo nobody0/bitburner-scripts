@@ -48,25 +48,14 @@ export function progressBanksAt(input: {
 
 /** Whether the slot lock still applies, and until when.
  *
- * THE BUG this replaces: the lock was posted at `career:progress-lock` (100) with
- * `holdUntil: Number.MAX_SAFE_INTEGER`, released only by the completion event. The
- * arbiter refuses pre-emption until `holdUntil` passes, so a completion event that
- * never arrived — the watcher failing to arm is enough — locked `Player.currentWork`
- * to career permanently. On a live BN12 run `factions work:Tetrads` was denied
- * `slot-held` on every pass, so "factions has not finished its final purchase and
- * donation sweep" could never clear and the run could not end. Career meanwhile
- * re-committed the longest crime available ($/sec ranking, 10-minute Heist) the
- * moment each one finished, so even a working event only opened a window career
- * immediately took back.
- *
- * The lock is now bounded by the moment the progress actually banks. Before it, the
+ * The lock is bounded by the moment the progress actually banks. Before it, the
  * lock is real and absolute — cancelling a crime at 99% throws the whole thing away.
  * After it, career competes for the slot at its ordinary band, so the end of a crime
  * is a fair re-evaluation rather than an automatic renewal.
  *
  * An unknown boundary yields NO lock, which is the deliberate direction. A lock we
- * cannot bound is a lock we cannot guarantee to release, and the failure it caused
- * is the whole run stalling; losing one partial crime is recoverable. In practice
+ * cannot bound is a lock we cannot guarantee to release; losing one partial crime
+ * is recoverable. In practice
  * `undefined` only happens before the crime table has been probed, which is brief.
  *
  * Continuous work is never locked: it banks every engine cycle, so it can be

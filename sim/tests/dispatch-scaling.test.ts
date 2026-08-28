@@ -1,10 +1,4 @@
-/** How the cost of ONE dispatcher pass scales with pipeline depth.
- *
- * A live run measured the planner at 5 ms per pass with ~1k operations in
- * flight, 30 ms at 10k, and 100 ms (with 851 ms GC spikes) at 21k, at which
- * point it owned the main thread outright: the game's engine cycle and every
- * `netscriptDelay` ride the same timer queue, so ops landed a mean 107 s late
- * and 28,600 batches were skipped on their deadline.
+/** How the cost of one dispatcher pass scales with pipeline depth.
  *
  * `MAX_LIVE_WORKERS` is 400,000 and stays there — the pipeline is meant to
  * reach that depth — so the fix is for the pass to stop scaling with depth,
@@ -12,8 +6,7 @@
  * else: a RATIO between two depths, never a wall-clock budget, because the
  * absolute number is a property of the machine that ran it.
  *
- * Treat the bound as a ratchet in the style of `sim/tests/baselines/jit.json`:
- * tighten it when a change earns it, never loosen it to make a lane green.
+ * Treat the bound as a ratchet in the style of `sim/tests/baselines/jit.json`.
  */
 import { expect } from "bun:test";
 import { trackOp, type Tracked } from "../../shared/strategy/dispatch.ts";

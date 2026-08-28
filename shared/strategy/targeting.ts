@@ -23,15 +23,8 @@ import {
  * large ones use a bounded grid/refinement search. Both stay inside the
  * refresh budgets pinned by sim/tests/targeting.test.ts.
  *
- * Scores are $/GB/sec at the PREPPED steady state (minSec, moneyMax): the
- * right unit for a RAM-bound dispatcher. The insight came from an earlier
- * rewrite's `analyze-profit.js` (`nobody0/bitburner`, no longer checked out —
- * see README's citation note); we compute it with exact thread counts instead
- * of its log-approximation. The `@2023` predecessor scores differently
- * and arguably better — `src/_lib/optimizer.ts:123` weights money per thread by
- * op duration, `(moneyHack + moneyStocks)·hackChance / (1 + growPerHack·3.2 +
- * weakPerHack·4) / hackTime`, which prices grow and weaken holding RAM longer.
- * spec/progress.md tracks that as an open audit question.
+ * Scores are $/GB/sec at the PREPPED steady state (minSec, moneyMax), using
+ * exact thread counts for a RAM-bound dispatcher.
  *
  * RAM-seconds are UNWEIGHTED by hack chance: our HWGW batches always launch
  * all four ops (the RAM is spent whether the hack lands or not); only income
@@ -321,8 +314,7 @@ export function solveCycle(
     // against the FRACTION of moneyMax moved, which is `steal` on either side —
     // and BOTH sides carry the hack chance: a failed hack drains nothing (no
     // short influence), and it leaves the server at moneyMax so the paired
-    // grow moves a zero fraction (no long influence either). Fixes the
-    // long-side overvaluation spec/targeting.md used to acknowledge.
+    // grow moves a zero fraction (no long influence either).
     const stockIncome = manipulation ? chance * steal * manipulation.valuePerOp : 0;
     const expectedHackThreads = hackThreads * (0.25 + 0.75 * chance);
     const experience = experiencePerThread *

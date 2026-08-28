@@ -66,11 +66,7 @@ export interface GangDecision {
   wantedWarning?: string;
 }
 
-/** Policy threshold for accepting an ascension reset. Ascension clears member
- * experience and non-augmentation upgrades in exchange for the reported
- * multiplier gain; 1.15 is deliberately a strategy choice, not an upstream
- * formula.
- * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Gang/GangMember.ts#L273-L339 */
+/** A deliberate policy threshold, not an upstream formula or crossover. */
 export const ASCEND_THRESHOLD = 1.15;
 
 /** Engage territory warfare only above this win chance. Any clash can kill a

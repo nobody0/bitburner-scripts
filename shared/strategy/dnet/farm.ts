@@ -510,7 +510,7 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
     const helperThreads = helper === undefined
       ? 0
       : Math.min(Math.floor(helper.freeGb / inputs.gbPerThread.reclaim), maxReclaim);
-    // Self wins ties: it is the free case (no admin check) and the old shape.
+    // Self wins ties because it requires no remote-admin check.
     const remote = helper !== undefined && helperThreads > selfThreads;
     const reclaimThreads = Math.max(1, remote ? helperThreads : selfThreads);
     const forecast = reclaimForecast(host, inputs.charisma, reclaimThreads);

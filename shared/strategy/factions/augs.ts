@@ -200,13 +200,8 @@ export function augMoneyCost(
  * off the route. `scoreAug` sums `weight · ln(mult)`, so an augmentation's score
  * comes out in the same seconds the work slot, the needs board and the install
  * cadence are all denominated in.
- *
- * These used to be a hand-tuned table — `hacking: 1`, `faction_rep: 2`,
- * `crime_money: 0.2` — with a per-route override pile on top and a final
- * renormalisation to stop the overrides from moving the install cadence. The
- * renormalisation is the tell: the numbers had no unit, so any change to them
- * had to be neutralised before it reached a decision. See
- * `weightsFromMarginals`. */
+ * Values are derived from route marginals rather than unitless tuning weights;
+ * see `weightsFromMarginals`. */
 export type ObjectiveWeights = Record<string, number>;
 
 export interface RouteWeightContext {
@@ -227,14 +222,9 @@ export interface RouteWeightContext {
 
 /** Effects the multiplier table does not express at all, in BN-seconds.
  *
- * Only what can be stated as a RATE on a priced channel survives here. The
- * predecessor also carried `CashRoot Starter Kit: 0.05` and `BitRunners
- * Neurolink: 0.1` for their free port opener and one-off cash. Both are real
- * and neither had a unit; re-denominating a number nobody derived just moves
- * the guess, and the effects are already priced where they land — the opener
- * through the server-access needs the board posts for it, and Neurolink's
- * hacking multipliers through its own `mults`. They are gone rather than
- * restated.
+ * Only effects expressible as a rate on a priced channel belong here. One-off
+ * opener and cash effects are priced where they land, while Neurolink's hacking
+ * effects arrive through its multiplier table.
  *
  * THE RED PILL is not here either, and deliberately: it is a route GATE, not a
  * rate. Its worth is "the run cannot end without it", which belongs to the
@@ -249,10 +239,10 @@ export function augBonusSec(name: string, worth: ChannelWorth): number {
   return Math.log(1 / BASE_FOCUS_BONUS) * (worth.get("reputation") ?? 0);
 }
 
-/** A multiplier on EXPERIENCE is worth less than the same multiplier on the
- * stat, because a stat grows as a fractional power of its experience. The
- * predecessor scripts apply `sqrt` to the multiplier; in log space that is
- * exactly a factor of 0.5 on the contribution, which is how it lands here. */
+/** A multiplier on experience is worth less than the same stat multiplier
+ * because skill grows as a fractional power of experience. The square-root
+ * response is a factor of 0.5 in log space.
+ * Reference: `bitburner-2023/src/_lib/augmentations.ts` at commit 43e8585. */
 const EXP_DISCOUNT = 0.5;
 
 /** BN-seconds one distinct slot in a finite installed-augmentation gate is
@@ -264,10 +254,8 @@ const EXP_DISCOUNT = 0.5;
  * increase in the acquisition rate to save. Slots therefore get MORE valuable
  * as the gate closes, because the last one really does unblock the whole gate.
  *
- * The predecessor ramped the other way, from 1 down to a 1/5 floor, to stop
- * cheap filler dominating a high-impact augmentation. That floor is no longer
- * needed: filler and multipliers are now quoted in the same seconds and
- * compete on merit. Infinite or unpriced count routes get nothing. */
+ * Filler and multipliers are quoted in the same seconds and compete directly;
+ * infinite or unpriced count routes get nothing. */
 export function countSlotWeight(worth: ChannelWorth, remaining: number): number {
   const total = worth.get("augmentations") ?? 0;
   if (!(total > 0) || !Number.isFinite(remaining) || remaining <= 0) return 0;
@@ -362,8 +350,7 @@ export function weightsFromMarginals(worth: ChannelWorth, context?: RouteWeightC
     if (value > 0) weights[field] = value;
   }
 
-  // The two NONLINEAR sensitivities, which are derivations rather than
-  // preferences and survive the table they used to live in.
+  // These nonlinear sensitivities are formula-derived, not policy weights.
   //
   // skill = m · (32·ln(exp + 534.6) − 200), so around a high target
   // −d ln(requiredExp) / d ln(m) = target / (32m): a direct skill multiplier
@@ -390,11 +377,8 @@ export function weightsFromMarginals(worth: ChannelWorth, context?: RouteWeightC
       weights[skill] = Math.max(weights[skill] ?? 0, (worth.get("combat") ?? 0) * response);
     }
   }
-  // NO RENORMALISATION. The predecessor rescaled the whole objective back to
-  // its pre-override total, because the numbers had no unit and any change to
-  // them moved the install cadence for no measured reason. These are seconds:
-  // a larger total means the package really is worth more, and the cadence is
-  // entitled to see it.
+  // Do not renormalise: these values are seconds, so a larger total represents
+  // a genuinely more valuable package and must affect install cadence.
   return weights;
 }
 
@@ -994,8 +978,7 @@ function placeAugsByPriority(entries: readonly AugInfo[], inSet: { has(name: str
  * rescan-per-placement and a build-the-whole-Kahn-apparatus-per-call version
  * measurably drowned in their own per-call overhead. */
 function greedyOrder(candidates: readonly PurchaseCandidate[]): PurchaseCandidate[] {
-  // Dedupe by name exactly as the Map the scan used to build did: last value
-  // wins (first occurrence fixes nothing — order comes from the priority).
+  // Dedupe by name with last-value wins; priority determines final order.
   const byName = new Map<string, PurchaseCandidate>();
   for (const candidate of candidates) byName.set(candidate.name, candidate);
   const entries = [...byName.values()];
@@ -1055,8 +1038,8 @@ function placeByPriority(
       break;
     }
     if (!advanced) {
-      // A prerequisite cycle, or a self-prerequisite. Emit the rest in a
-      // stable order rather than looping forever — the old fallback.
+      // A prerequisite cycle or self-prerequisite cannot advance; emit the
+      // remainder in stable order rather than looping forever.
       order.push(...entries
         .filter((candidate) => !placed.has(candidate.name))
         .sort((a, b) => (a.name < b.name ? -1 : 1)));
@@ -1100,10 +1083,9 @@ function improveOrder(
 /** Can this augmentation be bought right now?
  *
  * Reputation suffices, OR donation can close the gap with the money left AFTER
- * paying for the augmentation itself. That second clause is materially better
- * than a plain `rep >= repReq` test — it is the difference between "wait for
- * reputation" and "pay for it", and the predecessor scripts get it right
- * (src/_lib/augmentations.ts:148-167) where most scripts do not. */
+ * paying for the augmentation itself. This distinguishes "wait for reputation"
+ * from "pay for it".
+ * Reference: `bitburner-2023/src/_lib/augmentations.ts:148-167` at commit 43e8585. */
 export function canAfford(input: {
   moneyCost: number;
   repCost: number;

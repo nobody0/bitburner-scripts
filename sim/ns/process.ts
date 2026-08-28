@@ -188,9 +188,7 @@ export class ProcessTable {
     // Sweep in ROUNDS: each round snapshots the table (preserving the
     // upstream one-pass kill order), and a process an atExit handler started
     // mid-teardown (worker respawn chains, dnet handoffs) is caught by the
-    // next round. A single snapshot left such a late arrival alive — prestige
-    // then threw on resetPidCounter, the install callback never relaunched,
-    // and the run sat dead to the horizon. Measured on bn1-speedrun seed 2.
+    // next round. Continue until atExit handlers stop creating processes.
     while (this.#processes.size > 0) {
       if (killed > 100_000) throw new Error("killAll cannot drain: atExit handlers keep spawning processes");
       for (const process of [...this.#processes.values()]) {

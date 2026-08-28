@@ -916,9 +916,7 @@ async function runGameInstalled(
       else host.crashes.push({ pid: 0, filename: callback, error: "home has too little RAM for install callback" });
     });
     } catch (error) {
-      // A failed prestige orchestration previously vanished: the throw landed
-      // in the already-killed caller's frame and the run sat dead to the
-      // horizon reporting "valid". Record it as the crash it is.
+      // Record prestige-orchestration failures explicitly before propagating them.
       host.crashes.push({ pid: 0, filename: "onPrestige", error: String(error) });
       throw error;
     }

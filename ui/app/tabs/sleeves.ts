@@ -90,15 +90,9 @@ export const sleevesTab: Tab = {
       skillColumn("cha", "cha", (x) => x.skills.charisma),
     ], { defaultSort: { key: "index", dir: 1 }, empty: "no sleeves" });
 
-    // What used to stand here was a per-sleeve `purchasableAugs` table beside a
-    // "next sleeve" cost tile. Neither field is written by anything: the only
-    // producer of this topic is `sleeves.core`, which emits count and the digest
-    // list, so the whole column rendered one empty card on every frame of every
-    // run. Multipliers ARE on the wire (the probe copies `Sleeve.mults`) and
-    // were rendered nowhere — they are the published evidence of what sleeve
-    // augmentations have bought, and part of the numerator behind every score in
-    // the Decision card. Chips plus `describeMults` is the vocabulary the
-    // augmentation panels already use for exactly this shape of data.
+    // The topic publishes sleeve multipliers but no per-sleeve offer table or
+    // next-sleeve cost. Render the available evidence without inventing missing
+    // purchase state; reuse the augmentation panels' multiplier vocabulary.
     const multRows = s.sleeves
       .filter((x) => x.mults !== undefined)
       .map((x) => {
@@ -133,7 +127,7 @@ export const sleevesTab: Tab = {
       ? // No "solver" tile: this one read `"exact"` as a literal. It happened to
         // be true — `assignSleeves` is an exclusive-key DP with no combination
         // budget, unlike `assignCoupled` — but the plan record carries no
-        // `approximated` flag the way `GangPlan.assignment` and `StanekPlan` do,
+        // `approximated` flag the way `StanekPlan` does,
         // so the claim was the panel's, not the run's, and a replay of an older
         // record would keep making it for a solver that had since grown a cap.
         // Publishing `approximated` on `SleevesPlan` is the repair.

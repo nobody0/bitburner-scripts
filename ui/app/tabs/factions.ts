@@ -42,9 +42,7 @@ import type { Tab } from "./index.ts";
  *     shown beside it because "why this long a cycle" is a decision, not a
  *     constant.
  *  3. **Factions** — every faction the game has, whether we are in, how close
- *     an invitation is, and exactly what is still missing. This replaces what
- *     used to be three separate cards (standings, invitations, blockers) that
- *     each showed a different subset of the same 34 rows.
+ *     an invitation is, and exactly what is still missing, in one shared row.
  *  4. **Augmentations** — the whole catalogue: what state each one is in, what
  *     it gives, what it is worth to THIS run, and who sells it. Not just the
  *     ones our current factions offer — which faction to join is the decision
@@ -240,9 +238,8 @@ function planCard(state: ProjectedState): string {
 
   if (plan.lastResult) {
     // Every singularity call's `false` return is a MODELLED OUTCOME, not an
-    // error, so a rejection is shown as a result rather than swallowed. Dated
-    // from its own `at`: undated, an hour-old failure reads as what just
-    // happened, which is the most common way this row misled.
+    // error, so a rejection is shown as a result rather than swallowed. Date it
+    // from its own `at` so stale results cannot appear current.
     const cls = plan.lastResult.ok ? "good" : "bad";
     parts.push(
       `<div class="row"><span class="muted">last</span> ` +
@@ -445,9 +442,8 @@ interface FactionRow {
   joined: boolean;
   invited: boolean;
   reachable: boolean;
-  /** True once the driver has EVALUATED this faction's requirements. No gate is
-   *  a different state from "nothing missing", and it used to render as a `wait`
-   *  dot claiming "0 requirement(s) still missing". */
+  /** True once the driver has evaluated this faction's requirements. No gate is
+   * distinct from an evaluated gate with nothing missing. */
   evaluated: boolean;
   /** [0, 1] toward an invitation; 1 once joined or invited, absent while the
    *  requirements have not been evaluated. */
@@ -569,8 +565,8 @@ function factionRows(state: ProjectedState): FactionRow[] {
     // A sorted COPY. `g.missing` is the array inside ProjectedState, which the
     // live fold keeps across renders, so sorting in place would permanently
     // reorder wire data under every other consumer and under a replay re-fold.
-    // Ranked by cost, worst first: the cell shows four of them, and the one
-    // requirement that decides the row is the one that used to hide behind "+2".
+    // Rank worst cost first so the cell's bounded preview includes the
+    // requirement that determines the row.
     const missing = [...(g?.missing ?? [])].sort(
       (a, b) => blockerSec(b, incomePerSec) - blockerSec(a, incomePerSec),
     );
@@ -606,8 +602,7 @@ function factionStatus(row: FactionRow): { status: Status; tooltip: string } {
   if (row.bannedBy.length > 0) {
     return { status: "bad", tooltip: `banned this install cycle by ${row.bannedBy.join(", ")}` };
   }
-  // Without a gate this used to claim "0 requirement(s) still missing", which is
-  // the fabricated-zero reading of an unevaluated row.
+  // An absent gate is unevaluated, not evidence of zero missing requirements.
   if (!row.evaluated) return { status: "wait", tooltip: "invite requirements not evaluated yet" };
   return { status: "wait", tooltip: `${row.missing.length} requirement(s) still missing` };
 }
@@ -859,10 +854,7 @@ function augColumns(state: ProjectedState): Column<AugRow>[] {
 
 // --- portfolio -------------------------------------------------------------
 
-/** The committed SET and the cycle length it was solved for.
- *
- * The plan used to be one faction, so the panel could describe it in a line.
- * It is now an ordered set costed together, and two things about it have to be
+/** The committed ordered set and its jointly costed cycle length. Two things have to be
  * arguable rather than trusted: which pushes are in it and in what order, and
  * why THIS cycle length. Both are published, so both are shown. */
 function portfolioCard(state: ProjectedState): string {
@@ -909,9 +901,8 @@ function portfolioCard(state: ProjectedState): string {
   // The committed budget is on the wire; do not re-derive it. The published curve
   // is often NOT this pass's sweep — the sweep runs on the forecast's
   // recalibration tick and a repriced pass republishes the last one, and a latched
-  // objective carries an older curve still while `budgetSec` moves on. An argmax
-  // then marks the OLD sweep's winner and the panel contradicts its own "cycle
-  // budget" tile, with nothing to notice it by. Tolerance rather than ===, the way
+  // objective may carry an earlier curve while `budgetSec` moves on. Recomputing
+  // an argmax would contradict the published cycle budget. Use tolerance rather than ===, the way
   // a committed package is re-found by `repTarget`: these grid values are `pow()`
   // doubles carried through JSON.
   const isCommitted = (sample: HorizonSample): boolean => Math.abs(sample.sec - portfolio.budgetSec) <= 1e-9;

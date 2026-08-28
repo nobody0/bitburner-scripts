@@ -110,12 +110,8 @@ function buildRows(state: ProjectedState): Row[] {
   // so the hack-time context and the roll percentiles below cannot disagree.
   //
   // That topic field is SF5/BN5-gated, so in most nodes it is permanently
-  // ABSENT rather than late — which makes the old `?? 1` a wrong answer rather
-  // than a stale one, asserted as fact in a tooltip. BN2's ServerMaxMoney of
-  // 0.08 printed a generated-money range 12.5x too high with this save's roll
-  // clamped to p0 underneath it (the meter's own max sitting below the stated
-  // minimum was the visible tell), and BN14's HackingSpeedMultiplier of 0.3 put
-  // every hack time out by 3.3x. `effectiveBitNodeMultipliers` is free, needs
+  // absent rather than late. Do not substitute 1 and present generated ranges
+  // as facts. `effectiveBitNodeMultipliers` is free, needs
   // no SF5, lets an observed table win field by field where one exists, and is
   // the same call the game's own consumers make (game/lib/features/factions.ts).
   // Undefined from it is an unknown BitNode, and every reading that multiplies
@@ -313,11 +309,8 @@ type Kind = (typeof KINDS)[number];
 const KIND_SEG: Record<Kind, string> = { hack: "s1", grow: "s2", weaken: "s3" };
 const KIND_SERIES: Record<Kind, string> = { hack: "--series-1", grow: "--series-2", weaken: "--series-3" };
 
-/** Where planner occupancy stops being healthy. The measured baseline of a
- * well-behaved run is ~5% of wall time; the run that produced a 107s mean
- * landing error sat at 60-100%. These are the panel's own thresholds — the
- * driver does not yet enforce a budget, so nothing here can be derived from
- * one. */
+/** Panel-only planner-occupancy thresholds. The driver does not enforce a
+ * corresponding budget, so these are presentation policy. */
 const OCCUPANCY_TARGET = 0.2;
 const OCCUPANCY_CRITICAL = 0.4;
 /** Tick lateness in ms: one engine cycle is 200ms, so a quarter of it is a
@@ -340,9 +333,8 @@ type Pipeline = NonNullable<FarmRollup["pipelines"]>[number];
 /** One panel per ACTIVE pipeline, built from what the dispatcher reports it is
  * running rather than from a fixed farm/prep pair.
  *
- * The panel used to hardcode "farm target" and "prepping" as two tiles, which
- * silently assumed there is exactly one of each and that a farm is always a
- * batch cycle. Neither holds: the mode can be hwgw, hgw or shotgun, and a
+ * Derive panels from active pipelines instead of assuming one farm and one prep
+ * tile. The mode can be hwgw, hgw or shotgun, and a
  * second prep is a pipeline the dispatcher can already fund. Reading the list
  * means a new pipeline kind shows up here without this file changing. */
 function pipelinePanels(state: ProjectedState): string {
@@ -792,7 +784,7 @@ function throughputStrip(state: ProjectedState): string {
   const stalled = measured && perSec === 0 && adriftNow > 0;
   // The span the newest rate points were ACTUALLY differenced over, not the one
   // the panel asked for — early against a long-cycle target the real span is
-  // seconds under a caption that used to claim minutes.
+  // seconds even when the requested window spans minutes.
   const span = state.farmWindowActualMs;
   const spanTip = (span === undefined
     ? "no two rollups have been differenced yet, so nothing has been averaged over anything"
@@ -1049,8 +1041,8 @@ function batchHistoryDetail(state: ProjectedState): string {
  * A cumulative mean per kind is a number no individual batch resembles, which
  * is what put the per-batch view above it.
  *
- * The launched-against-landed chart these columns used to carry is GONE. Those
- * two counters are equal by construction: a batch settles only once its last op
+ * Do not chart launched against landed: those counters are equal by
+ * construction because a batch settles only once its last op
  * lands, so the per-kind sums of `ops` and `landed` never differ and the chart
  * drew one curve twice. Loss is `abandoned` here, and the adrift curve above. */
 function perKindDetail(state: ProjectedState, kinds: [string, BatchAggregateReport][]): string {
@@ -1637,9 +1629,8 @@ export const hackingTab: Tab = {
               // A different question from the row above, and the two are not
               // required to agree: that one counts SKIPS, whose parts sum to the
               // whole, this one counts BATCHES that missed, deduped per batch.
-              // One exceeding the other is not a bug. It exists because a
-              // pipeline once dropped every weakenTime for 4.7 hours and
-              // telemetered as `deadline: 1` while earning nothing.
+              // One exceeding the other is valid because one counts skipped
+              // parts while the other deduplicates missed batches.
               ...(farm.missedWindow
                 ? [[
                     `<span title="${esc(
@@ -1710,10 +1701,8 @@ export const hackingTab: Tab = {
                 `${d.meanMs.toFixed(2)}ms mean` +
                   `<span class="muted"> (|max| ${d.maxAbsMs.toFixed(2)})</span>`,
               ]),
-              // Cost and consequence, adjacent on purpose: the landing error
-              // above is what the planner occupancy below produces, one
-              // weaken-time later. A live run showed a 107-SECOND mean landing
-              // error with nothing here but "worst pump 92ms".
+              // Cost and consequence are adjacent: planner occupancy can
+              // surface later as landing error.
               [
                 `<span title="${esc(
                   "main-thread time spent planning, as a share of wall time. The game engine, netscriptDelay and " +

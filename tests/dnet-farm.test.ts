@@ -231,8 +231,7 @@ describe("the reclaim rung is priced, not guessed", () => {
   test("...and the SAME host is not stalled once it can afford a second thread", () => {
     // `getRamBlockRemoved` is linear in threads, so the stall is a property of
     // (host, charisma, THREADS) and not of the host alone. Pricing the rung at
-    // one thread and then running it at what fits would refuse work that was
-    // affordable all along — which is the bug this ordering exists to stop.
+    // one thread and then running it at what fits would refuse affordable work.
     const cramped = host({ difficulty: 30, blockedRam: 16, freeGb: 12 });
     expect(reclaimForecast(cramped, 1, 2)!.rawPerCallGb).toBeGreaterThan(RECLAIM_MIN_PER_CALL_GB);
     const plan = planFarm([cramped], inputs({ charisma: 1, wantedGb: 20 }));
@@ -463,7 +462,7 @@ describe("a cramped block is ground from next door", () => {
   });
 
   test("self wins whenever it affords as many threads — the free case stays the default", () => {
-    // Both sides afford two threads: no `from`, exactly the old shape.
+    // Both sides afford two threads, so the free self-hosted case wins.
     const selfSufficient = host({
       host: "dn-tight", difficulty: 2, blockedRam: 12, freeGb: 12, hasCredential: true,
     });

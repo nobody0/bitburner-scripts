@@ -36,8 +36,7 @@ const ramHost = (hostname: string, maxRam: number): ServerSpec => ({
 });
 
 function rhoWorld(): SimWorld {
-  // Captured 2026-08-25: 65,536 GB home + 59,392 GB purchased +
-  // 3,948 GB rooted-server RAM = 128,876 GB total.
+  // Match the fleet shape encoded by this regression fixture.
   const purchased = [
     ...Array.from({ length: 13 }, (_, index) => ramHost(`pserv-${index}`, 4_096)),
     ...Array.from({ length: 3 }, (_, index) => ramHost(`pserv-small-${index}`, 2_048)),
@@ -76,10 +75,9 @@ describe("live rho-construction regressions", () => {
     const generation = runtime!.generation;
     const kind = runtime!.solution.kind;
 
-    // The captured live run climbed through this range while max-hardware
-    // remained selected. Re-solving the same target changes the economical
-    // thread shape substantially, but fractional launch strength can absorb
-    // that drift without retiring a healthy physical worker envelope.
+    // Re-solving the same target changes the economical thread shape, but
+    // fractional launch strength can absorb that drift without retiring a
+    // healthy physical worker envelope.
     world.person.skills.hacking = 1_000;
     const second = planFarm(world.view(), memory, [], { pooling: true });
 

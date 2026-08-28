@@ -1,21 +1,4 @@
-/** Exact assignment over a small set of agents and tasks.
- *
- * Three features reduce to the same shape — gang members to tasks, sleeves to
- * activities, bladeburner actions to a schedule — and in every case the set is
- * small enough that the EXACT optimum is computable rather than approximated.
- * That matters for the project's standard of evidence: "exhaustive over
- * members x tasks for a fixed stat vector" is a proof, not a heuristic, and
- * three features get to make that claim from one implementation.
- *
- * Two shapes are needed:
- *
- *  - **Independent** — each agent picks its best task and the choices do not
- *    interact. Trivially optimal: argmax per agent. Gang task assignment is
- *    ALMOST this, except the wanted-level penalty couples them.
- *  - **Coupled** — the total depends on the combination, because a shared
- *    penalty or a per-task capacity links the agents. Solved by exhaustive
- *    search over all assignments, which is `tasks^agents` and therefore only
- *    viable while both are small; the caller declares the budget. */
+/** Independent assignment over a small set of agents and tasks. */
 
 export interface AssignmentResult<A, T> {
   /** Chosen task per agent, in agent order. */

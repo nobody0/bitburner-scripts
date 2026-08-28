@@ -639,8 +639,7 @@ export class DarknetSystem {
    *
    * The labyrinth goes down FIRST, exactly as upstream orders it —
    * `addLabyrinth()` then `addRandomDarknetServers()` — because
-   * `addServerToNetwork` links a host to the lab when it lands on the deepest
-   * row. Placing it last, as this used to, meant only one host ever reached it. */
+   * `addServerToNetwork` links a host to the lab when it lands on the deepest row. */
   populate(): void {
     if (this.#populated) return;
     this.#populated = true;

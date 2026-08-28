@@ -17,17 +17,13 @@ import type { ProjectedState } from "../project.ts";
 
 /** Where an augmentation stands, as a WORD.
  *
- * A coloured dot used to carry all of this, which meant "installed", "bought
- * but not yet installed" and "reputation already banked for it" rendered
- * identically — three states that call for three different actions. They are
- * distinct here because the panel exists to answer exactly that question.
+ * Installed, queued, and reputation-banked states require different actions,
+ * so the panel names them rather than encoding them in one coloured dot.
  *
  * Two of the nine are deliberately NOT conclusions. `owned` is a purchase whose
  * install state nothing on the wire can settle, and `unknown` is an
  * augmentation with no live offer — no price, no reputation gate, no seller
- * list from this node. Both used to be answered with a confident word taken
- * from an absence (`installed`, and `short`/`locked` respectively), which is
- * the one thing this panel must not do. */
+ * list from this node. Neither absence supports a stronger conclusion. */
 export type AugState =
   | "installed"
   | "queued"
@@ -137,8 +133,8 @@ export function augRows(state: ProjectedState): AugRow[] {
   // entry per queued NeuroFlux level — while `progression.ownedAugs` is
   // `ResetInfo.ownedAugs`, installed only.
   //
-  // The panel used to take the queue from `progression.plan.queuedAugmentations`
-  // alone. That is a 60 s driver's digest, while `factions` merges a purchase
+  // Do not take the queue from `progression.plan.queuedAugmentations` alone.
+  // That is a 60 s driver's digest, while `factions` merges a purchase
   // into `ownedAugs` the instant `purchaseAugmentation` returns — so every
   // augmentation bought during the end-loaded sweep, the one minute of the cycle
   // an operator is actually watching, read `installed` with a green dot and
@@ -344,9 +340,8 @@ function allMultText(row: AugRow): string {
     .join(", ");
 }
 
-/** Sellers, compactly. This column used to be the reason `gives` had no room:
- * it wrapped a comma list of up to thirty-one full faction names (NeuroFlux is
- * sold by nearly everyone), inside a card that is not that wide. What the
+/** Sellers, compactly. A comma list may contain nearly every faction and does
+ * not fit this card. What the
  * reader needs at a glance is who we would buy from and how many alternatives
  * exist; the list itself belongs in the inspector. */
 export function sellerCell(row: AugRow): string {

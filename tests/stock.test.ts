@@ -377,10 +377,8 @@ describe("price history", () => {
 
 describe("stepStock", () => {
   test("it produces a plan on the FIRST pass, with no money granted", () => {
-    // The deadlock this replaces: the claim was derived from what executed last
-    // pass, the execution from the grant, and the grant from the claim. With
-    // no grant the old solver could never emit an action, so the claim
-    // never existed and no trade was ever placed. A plan must exist regardless.
+    // A plan must exist before its claim and grant; deriving it from the grant
+    // would create a cycle with no initial claim.
     const { decision } = run(
       view({ symbols: [symbol({ forecast: 0.68, volatility: 0.0045 })] }),
       MIN_HOLD_TICKS + 2,
@@ -471,8 +469,8 @@ describe("stepStock", () => {
   });
 
   test("it never emits a short without SF8.2", () => {
-    // The old solver took only the top-|edge| symbol and broke. One bearish
-    // symbol therefore blocked every long ranked below it, forever.
+    // An unavailable bearish candidate must not block actionable longs ranked
+    // below it.
     const bearish = symbol({ sym: "NTLK", ask: 3000, bid: 2940, forecast: 0.2, volatility: 0.03 });
     const bullish = symbol({ sym: "ECP", forecast: 0.7, volatility: 0.0045 });
     const { decision } = run(
@@ -622,8 +620,7 @@ describe("the unlock ladder", () => {
 
   test("it buys the $25b 4S API and never the $1b 4S data", () => {
     // getForecast checks has4SDataTixApi, and purchase4SMarketDataTixApi does
-    // NOT require has4SData first — so the $1b buys a script exactly nothing.
-    // The previous version's only unlock purchase was that one.
+    // NOT require has4SData first, so the $1b UI unlock adds no script capability.
     const symbols = STOCK_SYMBOLS.slice(0, 8).map((sym) =>
       symbol({ sym, ask: 20_000, bid: 19_960, maxShares: 1e9 }),
     );
@@ -722,13 +719,8 @@ describe("fundedActions", () => {
 });
 
 describe("when to liquidate — the signal, not the solver", () => {
-  // THE BUG: `liquidate` was `progression.plan.phase === "ending"`. That phase is an
-  // economic test — cash above half of what the run earned, with something queued —
-  // not a claim that an install is close. On a real BN1 run with $72t banked and a
-  // Daedalus route ~525h out it latched on the first tick and never cleared: 9811
-  // progression records, every one "ending", and the market sat flat for the whole
-  // run refusing FSIG at a 0.673 forecast with a 3.4-tick break-even. The phase
-  // ANNOUNCES that conversion is coming; it is not the moment to convert.
+  // The `ending` phase is an economic signal, not evidence that an install is
+  // close. It announces conversion; separate barriers decide liquidation.
   function ctxWith(plan: unknown) {
     const state = initState();
     state.topics.stock = {
@@ -756,8 +748,8 @@ describe("when to liquidate — the signal, not the solver", () => {
   const ending = { phase: "ending", installWanted: true, liquidationWanted: true };
 
   test("the ENDING PHASE ALONE does not liquidate", () => {
-    // The regression, stated directly: factions still has reputation to earn, so
-    // there is time to trade however long the phase has been latched.
+    // Factions still has reputation to earn, so there is time to trade however
+    // long the phase has been latched.
     const view = buildView(ctxWith({
       ...ending,
       installBlockers: ["factions"],

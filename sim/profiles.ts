@@ -146,8 +146,7 @@ const CYBERSEC_CADENCE_WORLD: NonNullable<SimProfile["world"]> = {
   ...CYBERSEC_INSTALL_WORLD,
   // This is a cadence/transaction fixture, not a reputation-throughput
   // benchmark. Keep its second cross-prestige package short enough that the
-  // test does not encode the old policy of forcing a tiny install at Tian Di
-  // Hui instead of continuing into a worthwhile runner.
+  // test measures cadence rather than package-selection policy.
   person: {
     ...CYBERSEC_INSTALL_WORLD.person,
     exp: { hacking: calculateExp(1_000) },
@@ -558,8 +557,7 @@ export const PROFILES: readonly SimProfile[] = [
       "Faction progress in BN4, with hacking as the only income and skill source. Joining CyberSec needs a backdoor on CSEC.",
     // BN4 is load-bearing, not a detail. In BN1 deriveCapabilities reports
     // `factions: "no"`, so every faction probe AND the driver are gated off
-    // and the goal is unreachable however long the run lasts — which is what
-    // the previous version of this profile silently did.
+    // and the goal is unreachable however long the run lasts.
     bitnode: 4,
     features: only("hacking", "factions", "career", "progression"),
     goals: ["faction:CyberSec"],
@@ -618,14 +616,8 @@ export const PROFILES: readonly SimProfile[] = [
     // trap: time-to-N-installs rewards resetting as fast as possible whatever
     // the reset converts, and the run ends AT the install whose augmentations it
     // is supposed to be measuring — so nothing those augmentations buy is ever
-    // observed. Install count is an OUTPUT of maximising value per unit time,
-    // never the target.
-    //
-    // Measured on this fixture at a fixed 125m horizon: the cadence that scored
-    // 33% "worse" on time-to-2-installs held 12 distinct augmentations and
-    // $6.9e16 against 8 and $2.6e16 — same wall clock, same two installs. The
-    // old goal ranked those two runs the wrong way round.
-    //
+    // observed. Install count is an output of maximising value per unit time,
+    // not the primary target.
     // `augs:` counts DISTINCT names and includes queued purchases, so repeated
     // NeuroFlux levels cannot inflate it and a run holding a bought-but-not-yet-
     // installed package is not punished for being mid-cycle. `installs:2` stays

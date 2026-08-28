@@ -17,8 +17,7 @@ import { SERIES_LIMIT, appendRecords, emptyState, project } from "../ui/app/proj
  * install id — so an install boundary is a different file and cannot appear in
  * one stream. What does appear is a controller HANDOFF, which restarts
  * `market.tick` (a module-level counter) and leaves the rebuilt topic without a
- * ledger for a tick, while the ledger itself is parked in the page realm and
- * survives. Both of those used to close out a phantom "earlier install".
+ * ledger for a tick, while the ledger itself is parked in the page realm and survives.
  *
  * A RATE NEEDS A DENOMINATOR IT CAN SEE. The measured $/sec clock is armed only
  * by observing the ledger at zero; a viewer that attached after the first trade

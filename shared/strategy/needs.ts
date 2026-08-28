@@ -143,9 +143,8 @@ export function isSatisfied(need: Pick<Need, "kind" | "target" | "have">): boole
   return DIRECTION[need.kind] === "atLeast" ? need.have >= need.target : need.have <= need.target;
 }
 
-/** How close we are, in [0, 1]. Sortable, so "nearly there" outranks "barely
- * started" when weights tie — the same idea as the predecessor scripts'
- * `progress` ratio on each requirement (src/_lib/factions.ts:55). */
+/** How close we are, in [0, 1], so nearly complete needs sort ahead when
+ * weights tie. */
 export function needProgress(need: Pick<Need, "kind" | "target" | "have">): number {
   if (isSatisfied(need)) return 1;
   const { target, have } = need;

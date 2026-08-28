@@ -204,11 +204,8 @@ describe("the skill curve is bit-identical to the vendored one", () => {
 });
 
 describe("the transcribed engine constants match the vendored ones", () => {
-  /** These are game facts every weaken-sizing site has to agree with EXACTLY.
-   * They used to be bare 0.002/0.004 literals scattered across bounds, jit,
-   * targeting, prediction and dispatch; a single wrong copy under-covers a
-   * weaken and the farm drifts off min security a fraction at a time. Now they
-   * have one home and this pins that home to the engine. */
+  /** These are game facts every weaken-sizing site has to agree with exactly;
+   * this pins the shared constants to the engine. */
   test("hack and grow fortify amounts", () => {
     expect(HACK_FORTIFY).toBe(ServerConstants.ServerFortifyAmount);
     // processSingleServerGrowth fortifies by 2 * ServerFortifyAmount * cycles.

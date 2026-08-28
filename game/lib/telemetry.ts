@@ -41,10 +41,8 @@ export interface RecordBuffer {
 /** Byte-bounded FIFO of pre-serialized records.
  *
  * Eviction drops the oldest debug records first, then the oldest of anything —
- * the same policy the object buffer had, but amortized: one O(n) pass frees a
- * quarter of the budget instead of a findIndex + splice(0,1) shift per push,
- * which at the old 5,000-record cap made every push O(n) for as long as the
- * hub stayed down. */
+ * amortized: one O(n) pass frees a quarter of the budget instead of shifting
+ * the remaining records on every push while the hub is unavailable. */
 export function makeRecordBuffer(maxBytes = MAX_BUFFER_BYTES): RecordBuffer {
   let entries: { line: string; debug: boolean }[] = [];
   let bytes = 0;

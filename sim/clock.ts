@@ -146,11 +146,9 @@ export class Clock {
           };
         })()
       : undefined;
-    // Virtual hours pass in wall-seconds, so the allocation churn of a busy
-    // late-game fleet outruns the collector's own pacing: RSS ratcheted to
-    // 50+ GB with a ~0.5 GB live heap and the OS killed whole seed processes
-    // with no result written. A forced full collection once per virtual
-    // 10 minutes keeps the footprint bounded; Bun.gc is absent outside bun.
+    // Virtual time can create allocations faster than the host collector's
+    // ordinary pacing. Periodic full collection bounds simulator memory;
+    // Bun.gc is absent outside Bun.
     const gc = (globalThis as { Bun?: { gc?: (force: boolean) => void } }).Bun?.gc;
     let nextGcAt = 600_000;
     // Wall floor too: the virtual trigger's wall frequency scales with sim
@@ -190,9 +188,8 @@ export class Clock {
       if (next.time === this.#now) {
         this.#sameInstant++;
         if (this.#sameInstant > SAME_INSTANT_EVENT_BOUND) {
-          // A stalled clock previously burned the host silently until the OS
-          // killed the process. Naming the callback's source is usually
-          // enough to find the zero-delay loop that scheduled it.
+          // Name the callback source so a zero-delay scheduling loop is
+          // diagnosable when the same-instant bound trips.
           throw new Error(
             `virtual clock stalled: ${this.#sameInstant} consecutive events at t=${this.#now}ms; `
             + `next callback: ${String(next.fn).slice(0, 300)}`,

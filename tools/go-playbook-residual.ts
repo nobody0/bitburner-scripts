@@ -142,8 +142,7 @@ function parseState(line: string): CertificateState | undefined {
   return { phase, board, passes, credit, history, action, identity };
 }
 
-/** Skip the `#` header block dynamically: v4 has six comment lines, v6 has
- * seven, and the old fixed slice(7) consumed a v6 data row as garbage. */
+/** Skip the variable-length `#` header block. */
 function certificateRows(text: string): string[] {
   const lines = text.split("\n");
   let index = 0;
@@ -514,9 +513,7 @@ for (const spec of specs) {
     // Line-safe stripping. A certified line is a *chain*: its guarantee holds
     // only while every one of its decisions is reproduced. Dropping an entry
     // because a sampled rollout still won (the outcome mode below) breaks that
-    // chain — measured 2026-08-17, Illuminati certified roots: the unpruned
-    // playbook wins 192/192 while an outcome-pruned build wins 127/192,
-    // holding a line for 1.8 instead of 20.8 certified turns per game.
+    // chain.
     //
     // So an entry is dropped only when the deployed production decision
     // selects the certified action *exactly*, at both proven dispatch ticks.

@@ -167,10 +167,8 @@ canvas.microchart { height: 88px; }
    140px chart is more axis than curve. */
 .chartgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; }
 /* Keys a prose readout, or a legend dot, to the curve it describes. A mini or
-   microchart has no room for a built-in legend. `kN` names `--series-N`, so a
-   class and the stroke it describes cannot drift apart — a `.k2` pinned to
-   `--series-5` is how the old launched/landed key came to name the wrong curve.
-   ui/app/tabs/hacking.ts derives the class from the stroke for that reason. */
+   microchart has no room for a built-in legend. `kN` names `--series-N`, and
+   ui/app/tabs/hacking.ts derives the class from the stroke to keep them aligned. */
 .k1 { color: var(--series-1); }
 .k2 { color: var(--series-2); }
 .k3 { color: var(--series-3); }
@@ -547,9 +545,8 @@ canvas.microchart { height: 88px; }
 .netmap .ram.blocked { fill: var(--critical); }
 
 /* "Believed, not confirmed". The net rewires itself every few seconds, so a
-   value we hold and a value we trust must not look the same. Fired by every
-   PERISHABLE fact having expired — identity facts never expire, and requiring
-   those to be stale too kept this fade off for every host on the wire. */
+   value we hold and a value we trust must not look the same. Apply when every
+   perishable fact has expired; identity facts do not expire. */
 .netmap .node.stale { opacity: 0.55; }
 /* Search highlights rather than removes: the shape of the net is the thing you
    came to look at, and filtering it down to seven boxes destroys it. */
@@ -566,8 +563,7 @@ canvas.microchart { height: 88px; }
 .netkey .sw.auth-session { border-color: var(--good); border-width: 2px; }
 .netkey .sw.auth-authenticated { border-color: var(--bb-primary-dark); }
 .netkey .sw.auth-no-connection { border-style: dashed; }
-/* The node draws stasis as a left bar, so the key does too — it used to fill a
-   whole swatch in a colour the box never takes. */
+/* Match the node's stasis indicator with a left bar. */
 .netkey .sw.stasis { border-left: 3px solid var(--series-5); }
 .netkey .sw.stale { opacity: 0.55; }
 .netkey .sw.ram-used { background: var(--good); }

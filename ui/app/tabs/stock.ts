@@ -51,8 +51,8 @@ export const stockTab: Tab = {
 
     // --- Capital: what went in, what came out ------------------------------
     //
-    // Three different questions, and the tab used to answer only the first:
-    // how much capital is deployed (cost basis), what the book is worth right
+    // Keep three distinct questions visible: how much capital is deployed
+    // (cost basis), what the book is worth right
     // now (mark-to-market), and what the market has actually CONTRIBUTED —
     // realized net plus the open book. The last is the one a run is judged on,
     // and it needs `tradeCashFlow`, which the driver self-measures around each
@@ -177,9 +177,8 @@ export const stockTab: Tab = {
       html`${dot(has ? "good" : "wait", why)}${label}`;
     const marketTiles = tiles([
       {
-        // The ladder, not two loose bits: the driver climbs WSE -> TIX -> 4S and
-        // which rung it is on is the whole shape of what it can do. `hasWseAccount`
-        // had no reader at all before this.
+        // The driver climbs WSE -> TIX -> 4S; the current rung determines the
+        // available market operations.
         label: "access",
         value: raw(
           [
@@ -370,9 +369,8 @@ export const stockTab: Tab = {
           // digest carries only the top 8 by return on capital, and a position
           // already at `maxShares` sorts LAST there (no room left to size, so its
           // return on capital is -Infinity) — which is exactly the symbol the farm
-          // would be driving. So this column used to print the muted dash for a
-          // symbol the Manipulation card on the same screen listed as drivable.
-          // That card is emitted per farmable HOST and is therefore proof of
+          // would be driving. The manipulation card is emitted per farmable
+          // host and is therefore proof of
           // manipulability, which is why an active intent leads here; and the dash
           // is UNKNOWN, not "no", for the ~25 rows the digest never mentioned.
           id: "farm",
@@ -389,8 +387,8 @@ export const stockTab: Tab = {
         {
           id: "spread",
           label: "spread",
-          // The cost the previous version could not see at all: a round trip
-          // crosses this twice, which on a wide symbol dwarfs the $200k fee.
+          // A round trip crosses the spread on both legs; on wide symbols this
+          // can dominate the fixed commission.
           sort: (p) => (p.ask > 0 ? (p.ask - p.bid) / p.ask : 0),
           cell: (p) => (p.ask > 0 ? fmtPct((p.ask - p.bid) / p.ask, 2) : `<span class="muted">–</span>`),
         },
@@ -436,7 +434,7 @@ export const stockTab: Tab = {
           // push both cases down in either direction. `Number.MAX_VALUE` sorts
           // unsent and never-clears worst, which reads as worst-first when
           // descending, and it also removes the `Infinity - Infinity` = NaN
-          // comparison the unsent rows used to produce.
+          // comparison an unsent row would otherwise produce.
           sort: (p) => {
             const be = ranked.get(p.sym)?.breakEvenTicks;
             return be === undefined || be < 0 ? Number.MAX_VALUE : be;

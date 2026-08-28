@@ -23,17 +23,6 @@ import { lane } from "../../tests/support/lanes.ts";
  * actually trading — so a day-long run cannot die on a fidelity gap an
  * eighth of the way in.
  *
- * HISTORY: this lane pinned two findings, both since repaired by calculation.
- * First the whole $250m node grant was spent by the unmeasured RAM-investment
- * fallback before the market could trade (the bn8-manipulation lane's finding
- * chain). Then the market was PROBE-BLIND for its first ~3.5 virtual minutes:
- * the probe runner's single per-pass slot was held forever by an unplaceable
- * 4.6 GB head (earliest-deadline-first re-selected it every pass), so even the
- * 0.2 GB stock account probe never ran until the farm happened to free RAM at
- * ~200 s — by which time progression's route marginals had made RAM claims the
- * only priced bidders and the grant was gone in ten seconds. The runner now
- * falls through to the next due probe that can actually place.
- *
  * BN8 bring-up realities this smoke deliberately does NOT assert, and the
  * full leg must watch for:
  *  - Daedalus wants a $100b bankroll as CASH while the strategy keeps capital
@@ -97,11 +86,8 @@ lane({ feature: "progression", bn: 8 }).describe("BN8 full-route validity smoke"
     // unmeasured money rate is now a node-aware prior — hacked money scaled by
     // the node's own `ScriptHackMoney x ScriptHackMoneyGain` (zero in BN8)
     // plus the accessible market's closed-form blind rate on the bankroll —
-    // so the money marginal is enormous from the first pass and the auction
-    // defends the grant before any income is measured. (It previously priced
-    // money at the flat 250k/s hacking fallback, RAM claims were the only
-    // meaningful bidders, and this window ended at $11k; measured at the fix:
-    // ~$220m of the $250m grant still working, zero RAM spend.)
+    // so the money marginal is large from the first pass and the auction can
+    // defend the grant before any income is measured.
     expect(result.stock.wealth).toBeGreaterThan(100e6);
     console.info(
       "[bn8-full] smoke wealth=" + result.stock.wealth.toExponential(3)

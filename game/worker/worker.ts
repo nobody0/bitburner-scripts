@@ -15,8 +15,7 @@ import { MINIMUM_WORKER_PRECISION_MS } from "../../shared/strategy/timing.ts";
  * - "serve": a POOLED worker with fixed kind and threads that loops over jobs
  *   from the realm mailbox, parked between jobs on a `worker_wake` resolver
  *   raced against an idle timeout. One process serves many batch ops, which
- *   collapses exec churn — the browser JavaScript-engine cost of a fresh
- *   WorkerScript + ns object + RAM recalc per op, ~5/sec at depth, forever.
+ *   avoids recreating WorkerScript state for every operation.
  * - "share": loop over fixed 10-second share slices until the cooperative
  *   stop mailbox wins the race, then report workerExit.
  *
@@ -143,7 +142,7 @@ export async function main(ns: NS): Promise<void> {
 
   // The strength an op RAN at, which is what the game awarded experience and
   // applied fortify on. Falls back to the spawned count when no strength was
-  // requested, so an unpopulated descriptor reports exactly what it used to.
+  // requested, preserving the descriptor's default thread count.
   const strengthOf = (job: { threads?: number }): number => job.threads ?? info.threads;
 
   if (info.mode !== "serve") {

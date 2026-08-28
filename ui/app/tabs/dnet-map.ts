@@ -358,10 +358,8 @@ function orientChain(chain: Chain, anchorOf: (hostname: string) => number): numb
 /** Seat one depth's chains into columns, leaving HOLES where the evidence
  * implies them.
  *
- * This is the whole fix. The previous version sorted by barycentre and then
- * assigned `slot = array index`, which packed every row flush against column 0 —
- * so a two-host row whose parents sat at columns 6 and 7 landed at 0 and 1, and
- * no two rows ever lined up. Ordering was never the bug.
+ * Preserve evidence-implied holes rather than assigning slots from array
+ * indices; barycentre sorting alone does not align parent and child rows.
  *
  * The right-margin reservation (`hi`) is what makes a single greedy pass
  * complete whenever the chains fit at all. Plain first-fit is not: anchored
@@ -754,9 +752,7 @@ export function factLife(
  * Only the facts a mutation can invalidate get a vote. Identity fields cannot
  * change while the host lives, so a host holding only those has nothing to
  * disbelieve and is not faded — the same answer as a host holding no facts at
- * all. This used to be `every` over ALL facts including identity, which no host
- * on the wire could satisfy, so the fade was unreachable and every box on the
- * map read confirmed. */
+ * all. Only perishable groups participate in the `every` check. */
 export function isStale(host: DarknetKnownHost, _now: number, _expiry: ExpiryOpts): boolean {
   const perishable = Object.keys(host.facts)
     .map((key) => fieldGroup(key))
@@ -898,8 +894,8 @@ function nodeMarkup(entry: Placed, options: RenderOptions): string {
     // handler resolves `closest()` on SVG elements and SVGElement carries
     // `.dataset`, so no listener is needed and main.ts needs no change.
     //
-    // And no ARIA role on the group. It used to carry `role="button"`, which
-    // promised a keyboard affordance the map does not have: main.ts delegates
+    // Do not give the group `role="button"`, because the map has no keyboard
+    // activation: main.ts delegates
     // click and nothing else, and there is no tabindex, so the role advertised
     // something no key could reach. The accessible route to selection is the
     // real button in the servers table's host column; the SVG stays a picture

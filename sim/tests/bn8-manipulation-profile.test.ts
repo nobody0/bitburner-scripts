@@ -15,50 +15,11 @@ import { lane } from "../../tests/support/lanes.ts";
  * (`DarknetMoneyMultiplier: 0`), so the treatment/control wealth difference is
  * exactly the interplay under tuning.
  *
- * Each arm x seed is its OWN lane case, so the runner gives every runGame a
- * fresh process — the simulator's one-run-per-process contract
- * (spec/simulator.md). Sequential in-process runs measurably diverge (a
- * treatment that ends at $482m first-in-process ends at $248m sixth), so a
- * multi-run case would assert numbers no single-run harness reproduces.
- *
- * HISTORY: this lane originally pinned a capital-starvation finding — the
- * treatment converted its whole $250m bankroll into purchased servers that can
- * never pay in BN8 and placed ZERO trades in two hours. A chain of calculated
- * (never node-special-cased) fixes retired it: RAM investments must carry
- * EVIDENCE of value before claiming money (`isEvidencedInvestment`);
- * progression marginals publish the operating rate their derivative was taken
- * at (`atRatePerSec`), so a node's FIRST income source is priceable before it
- * has income history; the market posts a working-capital RESERVE claim sized
- * over its whole bankroll (cash + book) alongside any entry claim; trades
- * advance the player-money topic inside their own stub so sale proceeds are
- * never a stale-topic windfall; and money purchases are priced from the
- * capital-INDEPENDENT farm score, because manipulation income exists only
- * while the bankroll it would spend stays deployed.
- *
- * A second finding chain followed — after profitable trading, an experience-
- * valued RAM rung still converted the grown bankroll ($74k terminal against
- * the control's $404m) — and was likewise retired by calculation: steps are
- * priced against the lambda their grant would DISPLACE (a fully-covered band
- * quoted zero scarcity); rung values use the exact hyperbolic saving g/(1+g)
- * of the gated time instead of the tangent line (a +294% "gain" priced as
- * 2.94 nodes of saved time); the exp gain is credited only over the farm's
- * demand-capped productive GB, as the money channel always was; the
- * cumulative-earnings tracker is monotone so a realized trading loss no
- * longer resets the route's measured money rate to the 250k/s fallback (which
- * had inverted the money/exp marginal ratio 10x); and route marginals take
- * the LARGER of the install and node slopes so the $100b Daedalus gate is
- * never masked. A third layer joined after the full-day benchmark: the
- * working-capital reserve now STANDS during progression-ordered liquidations
- * (conversion is for the install, whose claims outrank it) and its value
- * curve rises hyperbolically toward the market's computed viability floor
- * (blindViableBankroll), so the last dollars a market-only economy can trade
- * with must be out-bid by the whole enterprise's worth. Measured after all
- * three chains (2h, fresh process per run, seeds 1/2/3): treatment
- * $482m/$119m/$537m against controls $404m/$682m/$557m — every seed keeps a
- * live, trading economy where the finding pinned pocket change; seed 2 still
- * concedes one $318m rung. Holding the full grant on every seed, and the
- * uplift question — treatment BEATING control — are the manipulation tuning
- * targets this lane measures. */
+ * Each arm and seed is its own lane case, giving every runGame a fresh process
+ * as required by the simulator's one-run-per-process contract
+ * (spec/simulator.md). The lane verifies that evidence-priced investments and
+ * the market working-capital reserve preserve a viable trading bankroll, then
+ * measures whether manipulation improves on the control. */
 
 interface PairRun {
   result: GameRunResult;

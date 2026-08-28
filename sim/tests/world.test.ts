@@ -140,11 +140,8 @@ describe("playerRecord", () => {
   });
 
   test("is a SNAPSHOT — nested objects are copied, never aliased", () => {
-    // The controller stores this in its game-state store and DECIDES from it.
-    // The previous implementation spread `this.person`, so `skills`, `exp` and
-    // `mults` all aliased the live objects: a "snapshot" taken ten minutes ago
-    // would silently report the current skill vector, and any test comparing
-    // the two would pass for entirely the wrong reason.
+    // The controller stores this in its game-state store and decides from it;
+    // nested person objects must not alias the live simulation state.
     const world = makeWorld();
     const before = world.playerRecord();
     const skillsBefore = before.skills.hacking;

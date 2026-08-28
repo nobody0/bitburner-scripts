@@ -367,10 +367,9 @@ class GoNeuralWorkerClient implements GoNeuralRuntime {
   }
 }
 
-/** The page realm survives start.js restarts. Keep the worker—and therefore
- * its WebGPU device, weights, prepared positions, and pushed results—alive
- * when the same embedded build restarts. A new build deliberately replaces it
- * because its V9 artifact or protocol may have changed. */
+/** Reuse the worker within one controller lifetime. main.js disposes
+ * controller-owned globals on every launch, so no worker state crosses a
+ * manual, reset, or post-sync restart. */
 export function goNeuralWorkerRuntime(): GoNeuralRuntime {
   const current = gameGlobal.goNeuralWorker;
   if (current?.buildId === __BUILD_ID__) return current.runtime;

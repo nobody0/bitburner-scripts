@@ -16,15 +16,15 @@ import { LOCAL_PROBES } from "./local.ts";
  *  - LOCAL   — derived from the sweep snapshot (player, servers). No ns call
  *              at all, so it always runs. Karma, skills, joined factions and
  *              fleet totals live here, so those panels are never empty.
- *  - DIRECT  — synchronous reads on start.js's own `ns`, every one of them
+ *  - DIRECT  — synchronous reads on main.js's own `ns`, every one of them
  *              re-verified 0 GB by the runner before it calls them.
  *  - PRICED  — everything with a price. The body awaits `ctx.nsp(path, ...)`,
  *              which runs the member on a resident script sized for it
- *              (../ns-proxy.ts), so nothing here is billed to start.js.
+ *              (../ns-proxy.ts), so nothing here is billed to main.js.
  *
  * A priced body names the member as a STRING PATH and never as a property.
  * Bitburner charges by member NAME across the whole bundle regardless of the
- * receiver, so `stubNs["gang"]["getGangInformation"]` billed start.js exactly
+ * receiver, so `stubNs["gang"]["getGangInformation"]` billed main.js exactly
  * as a dotted call would have; only the string escapes the static parser. The
  * path is typed (`AutoPath`), so a wrong one is a compile error rather than a
  * probe that silently never runs — which is why probes no longer carry a
@@ -45,7 +45,7 @@ export interface ProbeContext {
   nsp: NsProxy;
   /** `ns.enums`, the one ns PROPERTY a probe needs and the one thing the proxy
    *  cannot serve (it calls functions). It is 0 GB, so the runner reads it off
-   *  start.js's own ns and hands it down. `FactionName` is what lets the
+   *  main.js process's own ns and hands it down. `FactionName` is what lets the
    *  planner reason about factions it has not been invited to yet. */
   enums: NS["enums"];
 }
@@ -75,15 +75,9 @@ interface ProbeBase {
    *  value in the table (`probeCadenceMs`), so a feature that needs to be read
    *  every 4 s declares 4 s and gets it.
    *
-   *  This used to be a lie. Acquisition only ran inside the 30 s fleet sweep, so
-   *  30 s was the floor for every probe however small its `everyMs` — the local
-   *  tier has always asked for 5 s and always got 30. Harmless while every
-   *  subject changed on a minute scale, and actively wrong for one with a clock
-   *  of its own: under-sampling a 6 s subject does not give a coarser signal, it
-   *  gives a corrupted one, because a sample spanning several of its ticks
-   *  reports their compounded effect as a single step. A probe declaring a fast
-   *  cadence is making a claim about its SUBJECT, and it should be cheap enough
-   *  to honour that claim. */
+   *  Acquisition runs on this derived cadence rather than inheriting the 30 s
+   *  fleet sweep. Under-sampling a ticking subject compounds several changes
+   *  into one observation, so fast declarations must also remain cheap. */
   everyMs: number;
   /** Skipped unless capabilities report this feature as "yes". Omit for
    *  probes that are themselves the source of capability information. */
@@ -119,16 +113,9 @@ export interface DirectProbe extends ProbeBase {
 /** A probe with a price: its body reads through `ctx.nsp` and may await as
  * many distinct members as the feature needs.
  *
- * This used to come in two shapes. Expensive probes were hand-split into
- * `steps`, one dodge stub each, accumulating into a shared bag that `finish`
- * had to be able to read half-filled — because a stub's bill was the SUM of
- * every distinct member its closure named, and the game had to place that sum
- * as one CONTIGUOUS block (the augmentation sweep summed to 33.5 GB against a
- * dodge budget pinned near 2.4 GB by the home reserve). The resident is billed
- * the same way, but it spends its budget over its own lifetime and respawns
- * larger when it fills, so the peak a probe must fit into is ONE member — and
- * the split, the accumulator and the partial-result contract had nothing left
- * to buy. What neither shape can fix is one indivisible expensive call: a
+ * The resident spends its RAM budget over its lifetime and respawns larger
+ * when it fills, so a probe need only fit one member at a time and exposes no
+ * partial-step contract. One indivisible expensive call remains a hard floor: a
  * `SingularityFn3` at SF4 level 1 is 80 GB, and that simply raises the floor
  * the resident's placer must satisfy before the call runs. */
 export interface PricedProbe extends ProbeBase {

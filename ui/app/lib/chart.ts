@@ -279,13 +279,13 @@ const wired = new WeakSet<HTMLCanvasElement>();
 
 /** Wire crosshair + tooltip once; the chart itself is redrawn on every frame.
  *
- * COALESCED through requestAnimationFrame. The handler used to redraw on every
- * mousemove, and a redraw is not cheap: `drawSeries` reassigns
+ * Coalesce pointer updates through requestAnimationFrame. A redraw is not
+ * cheap: `drawSeries` reassigns
  * `canvas.width`/`height`, which reallocates the bitmap, then re-strokes every
  * point of every series — the allocation chart carries three series of up to
  * SERIES_LIMIT points each, so ~6,000 path ops, on the same main thread that is
- * already repainting panels twice a second. Pointer motion produces one of those
- * per event per chart crossed. Now several events collapse into one frame.
+ * already repainting panels twice a second. Several pointer events therefore
+ * collapse into one frame.
  *
  * Two details the coalescing makes load-bearing: `mouseleave` has to CANCEL a
  * pending frame, or a queued crosshair repaints itself after the tooltip is
@@ -350,11 +350,9 @@ export function attachChartHover(canvas: HTMLCanvasElement, tooltip: HTMLElement
     }
     tooltip.style.display = "block";
     tooltip.textContent = `${fmtTime(at - redrawn.t0)} — ${readings.join(" · ")}`;
-    // MEASURED, not assumed — and after the text is set, because `offsetWidth`
-    // on a `display: none` element is zero. The old clamp pinned `left` at
-    // `w - 140`, and 140 was never the tooltip's width: a three-series reading
-    // ("hack 40% · grow 35% · weaken 25%") is over 300px of `nowrap` text, so its
-    // right end landed outside the card — which CLIPS, because `overflow-x: auto`
+    // Measure after setting the text because a hidden element has zero width;
+    // clamp against the actual nowrap tooltip rather than an assumed width. A
+    // wide reading can otherwise land outside the card, which clips because `overflow-x: auto`
     // on `section.card` makes the vertical axis compute to `auto` as well and the
     // card a scroll container in both. Flipping the tip to the left of the
     // crosshair when it will not fit on the right keeps it whole.

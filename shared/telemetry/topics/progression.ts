@@ -55,10 +55,9 @@ export interface Progression {
   plan?: ProgressionPlan;
 }
 
-/* `arbitration` and `ramArena` used to live on `Progression` above. They were
- * moved out because a state record is whole-topic last-write-wins, so touching
- * either one republished ALL of it: measured on a live run, `progression` was
- * 50% of a 2.58 GB log, sent every 200 ms, while the 13.8 KB of
+/* `arbitration` and `ramArena` are separate topics because a state record is
+ * whole-topic last-write-wins. Keeping high-frequency fields separate avoids
+ * repeatedly publishing the larger progression payload. The
  * plan/needs/multipliers/moneySources it dragged along changed on 12 of 1259
  * consecutive pairs. Splitting them lets each publish at the rate it actually
  * moves — and lets the hub collapse the slow one into spans. */

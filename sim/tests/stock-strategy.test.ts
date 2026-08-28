@@ -25,12 +25,7 @@ import { SimWorld } from "../world.ts";
  * mechanics hold. This one asks the only question that finally matters: does the
  * strategy make money, and does it beat the alternatives?
  *
- * The baselines are deliberately the ones this replaces. `naive` is the rule the
- * predecessor scripts used (`bitburner-2023/src/main.ts:761`) and the shape the
- * previous solver had: buy anything forecast above a threshold, sell when it
- * turns, with no model of the spread, the commission, or the regime cycle.
- * `hold` is buy-and-hold, which is what "the market goes up on average" would
- * predict. */
+ * The comparison baselines are a naive forecast threshold and buy-and-hold. */
 
 const CYCLES_PER_TICK = 30;
 
@@ -115,9 +110,8 @@ function apply(market: StockMarketSystem, actions: readonly StockAction[]): void
   }
 }
 
-/** The predecessor's rule, and the previous solver's shape: rank by forecast, buy
- * the best above 0.6, exit below 0.5. Blind to the spread, to the commission, and
- * to the regime cycle.
+/** Naive baseline: rank by forecast, buy the best above 0.6, exit below 0.5.
+ * It does not model spread, commission, or regime cycle.
  *
  * Both strategies offer their best investment at full ambition. The shared
  * arbiter owns allocation; this isolated market harness funds the claim fully. */
@@ -247,9 +241,7 @@ describe("the solver against the real market", () => {
   });
 
   test("it beats the naive forecast>0.6 rule without more churn", () => {
-    // The rule the predecessor used and the previous solver's shape. It is not
-    // stupid — a 0.6 forecast IS an edge — it just pays the spread and the
-    // commission often enough to give the edge back.
+    // A 0.6 forecast is an edge, but this baseline ignores spread and commission.
     const solver = SEEDS.map((seed) => tradeRun({ seed, ticks: 400, money: START, strategy: "solver" }));
     const naive = SEEDS.map((seed) => tradeRun({ seed, ticks: 400, money: START, strategy: "naive" }));
     expect(median(solver.map((r) => r.net))).toBeGreaterThan(median(naive.map((r) => r.net)));

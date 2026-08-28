@@ -235,10 +235,8 @@ function sweep(): void {
 
 /** Above this, a stored run is served compacted rather than whole.
  *
- * The viewer used to fetch the entire JSONL, split it and JSON.parse every
- * line. Real runs reach 126 MB, which is minutes of blocked main thread for a
- * panel that only ever shows the last-write-wins state plus a short event
- * feed. Small runs still load whole, because only they can be scrubbed. */
+ * Large runs are compacted because the panel needs only last-write-wins state
+ * and a bounded event feed; small runs remain whole so they can be scrubbed. */
 const COMPACT_OVER_BYTES = 8_000_000;
 /** Discrete records kept by a compaction, newest-first-wins. */
 const COMPACT_TAIL = 2_000;
@@ -385,13 +383,8 @@ const SIM_ARG = /^[\w.,:+~-]+$/;
 
 /** Move a stored run out of the retention sweep's reach.
  *
- * Not a bare renameSync: a RunStore may still hold this path. Closed stores stay
- * in `runs` for the whole retention window, so pinning the install you are
- * playing — exactly what an operator does to preserve an A/B artifact — left the
- * store writing its sidecar beside a vacant `runs/<name>.jsonl`, and on the
- * emitter's next hello `attach()` recreated that file empty while `recordCount`,
- * `firstT` and the span table carried over. The catalog then advertised a second
- * artifact claiming the whole run's records for a file holding only the tail. */
+ * A RunStore may still own the path, so pinning must update the active store and
+ * its sidecar together rather than merely renaming the JSONL file. */
 function pinRun(name: string): Response {
   if (!name || name.startsWith("pinned/")) {
     return Response.json({ error: "nothing to pin" }, { status: 400 });
@@ -407,9 +400,8 @@ function pinRun(name: string): Response {
   try {
     renameSync(from, to);
   } catch (error) {
-    // An explicit JSON error: the route's .catch used to report an EPERM here as
-    // "bad JSON", and Bun.serve's own 500 is an HTML page the viewer parses as
-    // JSON before it looks at res.ok.
+    // Return an explicit JSON error because the viewer parses the body before
+    // inspecting `res.ok`.
     console.error(`failed to pin ${base}:`, error);
     return Response.json({ error: `could not pin ${base}: ${String(error)}` }, { status: 500 });
   }
@@ -582,15 +574,9 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 /** The hello an /ingest frame carries, or undefined if it cannot be trusted.
  *
- * A throw out of the Bun websocket callback is uncaught and exits the hub,
- * taking every OTHER live run's buffered tail and held spans with it — so one
- * emitter's malformed frame must cost that frame and nothing more. Three shapes
- * each killed the hub before this guard: a JSON primitive (`"hello" in
- * message`), `{"v":1}` (`message.records[0]`), and `{"v":1,"hello":{}}`
- * (`safeName(undefined)` in the store's constructor, whose `undefined-undefined`
- * file name is a bad artifact even when it does not throw). What is checked is
- * what the hub dereferences or bakes into that name: this is not a schema
- * validator, and the wire TYPE is not evidence about what a socket sent. */
+ * Malformed frames must be rejected before the websocket callback dereferences
+ * them or constructs an artifact name. This checks only those consumed fields;
+ * it is not a full schema validator. */
 function validHello(value: unknown): HelloBody | undefined {
   if (!isObject(value)) return;
   if (typeof value["run"] !== "string" || value["run"] === "") return;
@@ -800,17 +786,10 @@ const server = Bun.serve<SocketData, never>({
 sweep();
 setInterval(sweep, SWEEP_EVERY_MS);
 
-/** Ctrl-C is how this hub is stopped, and it was the one case where the span
- * guarantee did not hold: every state key sitting mid-span holds its last
- * observation in memory only (RunStore's `#flushSpans`), so a topic that held
- * one value for four hours became indistinguishable from one sampled once —
- * the exact ambiguity the collapse exists to avoid — plus whatever whole lines
- * were still queued in each writer. Registering a signal handler suppresses the
- * default termination, so this has to exit itself.
- *
- * The crash paths are narrower than they were (RunStore reports a broken writer,
- * the RFA session and the /ingest handler no longer let a stranger's frame throw)
- * but a kill -9 still resumes from a throttled sidecar and so undercounts. */
+/** Flush in-memory spans and queued writer data on Ctrl-C. Registering a signal
+ * handler suppresses default termination, so this handler must exit explicitly.
+ * An uncatchable termination can resume only from the throttled sidecar and may
+ * therefore undercount the final interval. */
 let stopping = false;
 function stop(signal: string): void {
   // A second signal is an operator who wants out now, not a request to wait.

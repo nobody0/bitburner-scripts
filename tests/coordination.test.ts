@@ -82,9 +82,7 @@ describe("the coordination pass", () => {
   });
 
   test("the digest reports slot hold time relative to `now`, bucketed to 10s", () => {
-    // Bucketing is deliberate: a per-pass-precise heldMs made the digest
-    // differ every 200ms tick, so the change-filtered store wrote ~5 records
-    // per second for as long as anyone held the slot.
+    // Bucketing keeps the digest stable between meaningful hold-time changes.
     const board = postNeeds([]);
     const result = coordinate({
       now: 65_000,

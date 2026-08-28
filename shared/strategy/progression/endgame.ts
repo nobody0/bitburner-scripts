@@ -62,23 +62,13 @@ export const DAEDALUS_FINAL_BATCH_FRACTION = 1 / 3;
 export const DAEDALUS_LATE_BATCH_PROGRESS_FRACTION = 1 / 2;
 /** Before consolidation, accept a much smaller partial tranche.
  *
- * MEASURED on `bn1-full`. At one half of the late fraction (1/4) this demanded
- * `ceil(30 * 1/4)` = eight distinct funded augmentations before the FIRST
- * install was permitted. A cold BN1 start has one faction joined at that point
- * — CyberSec, which offers five augmentations in total — so the gate could not
- * open from the factions the planner had reached: seed 1 reached four hours
- * with zero installs, zero augmentations, and a route estimate of 1,138 hours
- * because the un-multiplied hacking curve plateaued and the regrow fit
- * extrapolated the plateau.
- *
  * The demand scales with what REMAINS, so it is strictest at the start of the
  * gate and loosest at the end — the opposite of the reset cost it exists to
  * protect against, which is smallest on a small early fleet and largest later.
  * Consolidation (`DAEDALUS_FINAL_BATCH_FRACTION`) already guards the expensive
  * half, so before it the tranche only has to reject a reset that buys a single
- * augmentation. It stays a fraction of the live requirement rather than a flat
- * two so a larger gate still asks for a proportionally larger opening batch:
- * two on BN1's thirty slots, three on thirty-five. */
+ * augmentation. It stays a fraction of the live requirement so larger gates
+ * still ask for proportionally larger opening batches. */
 export const DAEDALUS_EARLY_BATCH_PROGRESS_FRACTION = 1 / 15;
 /** In the closing quarter, another partial reset only creates another cold
  * bootstrap before the same discrete gate. Finish the remaining unique slots

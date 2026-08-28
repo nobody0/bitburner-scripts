@@ -47,8 +47,7 @@ import type { Tab } from "./index.ts";
  * shared modules the controller uses, which is why `expiryMs` and `modelEntry`
  * are imported rather than having their answers shipped per host per tick.
  *
- * The second job used to be "why have we not attacked this", and it is not any
- * more. `shared/strategy/dnet/solvers/` implements nineteen solvers and the five
+ * `shared/strategy/dnet/solvers/` implements nineteen solvers and the five
  * dictionary models are walked by `planAttempt`, so twenty-three of the
  * twenty-four are openable — and `models.ts:describeModel` DERIVES `status` from
  * `solverFor()` and deletes the `blocked` note the moment a solver exists, which
@@ -58,8 +57,8 @@ import type { Tab } from "./index.ts";
  * SOLVE PROGRESS — what is running, how far through its budget, which phase, and
  * what the last response code was. For the labyrinth, which is a maze walked by
  * a process rather than a password, and for any model id the game invents that
- * we have not transcribed, the old job survives unchanged: hand over the raw
- * material rather than hide a blank behind a shrug. */
+ * we have not transcribed, hand over the raw material rather than hiding an
+ * unexplained blank. */
 
 /** How many rows the server table shows before saying it truncated. The MAP
  * never truncates; a table is where a limit belongs. */
@@ -82,9 +81,8 @@ const TABLE_LIMIT = 60;
  * The stale mark is a MULTIPLE of that period rather than three ticks: at 5s a
  * three-tick threshold is 15s, and the digest record shares the 1 Hz publish
  * with every other topic and rides one serially-awaited feature pass, so a busy
- * frame or a slow fold jitters past 15s on a perfectly healthy run. Six periods
- * is half a minute of complete silence — no longer jitter, and still an order of
- * magnitude sooner than the 90s this used to wait. */
+ * frame or a slow fold jitters past 15 s on a healthy run. Six periods is half
+ * a minute of complete silence and therefore stale. */
 const DIGEST_PUBLISH_MS = 5_000;
 const DIGEST_STALE_MS = 6 * DIGEST_PUBLISH_MS;
 
@@ -204,9 +202,8 @@ function reclaimRow(host: DarknetKnownHost, charisma: number | undefined): strin
 
 /** Whether we can open this model, decided ONCE.
  *
- * The detail card and the password surface used to write this decision
- * separately, with different wording, so the same host could be described two
- * ways on one screen. It is a pure function of the model id — `describeModel`
+ * The detail card and password surface share this pure model-id decision so a
+ * host cannot receive contradictory descriptions. `describeModel`
  * derives `status` from the solver registry — so it belongs in one place and is
  * looked up rather than shipped per host per tick.
  *
@@ -282,13 +279,10 @@ function factRows(host: DarknetKnownHost, now: number, expiry: ExpiryOpts): [Mar
  * and would assert a selection nobody made, next to a Decision card that
  * refuses to highlight a ranked row for that same reason. Now that the ring is
  * DERIVED, its default has to be stable. */
-/** A "select this host" button, worded once.
+/** A consistently worded and accessible "select this host" button.
  *
- * Four places offer one — the neighbour strip, the lost-reachable table and both
- * host tables — and before this they disagreed twice over: two of them painted
- * the selection with `.sel` and two never marked it at all, so clicking a host
- * in one table left the same host looking unselected in another. And `.sel` is a
- * background colour, which is the channel a screen reader cannot see.
+ * The neighbour strip, lost-reachable table, and both host tables share this
+ * helper so selection state is exposed visually and through `aria-pressed`.
  *
  * `aria-current`, not the `aria-pressed` that `filters()` emits: these are not
  * toggles. Pressing one does not turn anything on, it moves a single selection —
@@ -643,7 +637,7 @@ export const dnetTab: Tab = {
     // The three probe-only readings. They arrive from the PRICED PROBE and the
     // driver tick does not carry them, so a run whose first tick lands before
     // its first probe has a `knowledge` and none of these — which is exactly
-    // the shape the panel used to throw on.
+    // a valid partially populated shape that the panel must accept.
     const linked = d.stasisLinked;
     const instability = d.instability;
 
@@ -863,8 +857,8 @@ export const dnetTab: Tab = {
 
     // --- the password surface, in two halves --------------------------------
     //
-    // It used to be one table whose last column was "why untouched". With
-    // nineteen solvers written and the five dictionary models walked by
+    // Separate supported models from raw-material inspection. With nineteen
+    // solvers and five dictionary models handled by
     // `planAttempt`, that column is now a column of "implemented" — it answers a
     // question nobody is asking any more. What an operator wants for those
     // twenty-three is HOW FAR: which are running, how much of the budget is
@@ -1241,9 +1235,7 @@ export const dnetTab: Tab = {
     const labSolved = labHost !== undefined
       && seenLabs.some((h) => h.hostname === labHost && h.credentialKnown === true);
     // Why we are not walking, straight from the planner that declined. These
-    // used to be reachable only by hunting through the Deliberate card's
-    // refusal table, which meant the answer to "why has the maze not started"
-    // lived in a different card from the maze.
+    // also shown beside the maze so its start refusal is locally explainable.
     const labRefusals = (d.hold?.examples ?? []).filter((entry) => entry.host === labHost);
     const walkers = lab?.walkers ?? [];
     // Empty for a grid that does not match its own dimensions — a shape change
@@ -1253,9 +1245,7 @@ export const dnetTab: Tab = {
     const maze = lab === undefined ? "" : labMaze(lab, labPriorFor(lab));
     // And it does not QUOTE numbers off that grid either. `labExplored` reads
     // the same string at the same stride and treats every out-of-range cell as
-    // unknown, so a grid the renderer refused used to print a confident
-    // "mapped 0%" and "0 of N wall slots resolved" beside a deliberately blank
-    // maze. The maze's own emptiness IS the shape test; comparing the lengths
+    // unknown. The maze's own emptiness is the shape test; comparing the lengths
     // again here would be a second copy of it, free to drift from the first.
     const explored = lab !== undefined && maze !== "" ? labExplored(lab) : undefined;
     const etaMs = lab ? labEtaMs(lab) : undefined;

@@ -51,11 +51,8 @@ describe("layout puts the net on the game's grid", () => {
   });
 
   test("a host sits UNDER the parent it hangs off, not at the left margin", () => {
-    // THE HEADLINE TEST of the placement rewrite, and it used to assert the
-    // opposite of its own comment: an only child of `p3` landed at column 0,
-    // because the old layout sorted by barycentre and then assigned
-    // `slot = array index`, packing every row flush against the left margin.
-    // Ordering was never the bug. Packing was.
+    // An only child inherits its parent's horizontal neighborhood instead of
+    // being packed against the left margin.
     const parents = Array.from({ length: 4 }, (_, i) => host({ hostname: `p${i}`, depth: 0 }));
     const layout = layoutNet([
       ...parents,
@@ -247,8 +244,7 @@ describe("layout puts the net on the game's grid", () => {
   test("odd grid rows are staggered; the pinned rows never are", () => {
     // Not decoration: without it a dense column of vertical edges collapses into
     // an unreadable ladder. Upstream's condition is
-    // `y >= 0 && y < getNetDepth() && y % 2`, and the middle clause — which we
-    // used to drop — is there to exempt the LABYRINTH, which sits at
+    // `y >= 0 && y < getNetDepth() && y % 2`; the middle clause exempts the LABYRINTH, which sits at
     // getNetDepth() + 0.5 rather than on the grid. Every odd grid row, bottom
     // one included, is staggered.
     const layout = layoutNet([
@@ -374,8 +370,7 @@ describe("layout puts the net on the game's grid", () => {
   });
 
   test("no box is ever clipped by the viewBox, stagger included", () => {
-    // MAP_W used to ignore the half-box odd-row stagger, so column 7 of every
-    // odd row hung past the edge and was silently cut off.
+    // MAP_W includes the half-box odd-row stagger so the last column remains visible.
     const hosts = Array.from({ length: 8 }, (_, i) => host({ hostname: `s${i}`, depth: 1 }));
     const layout = layoutNet(hosts, { netDepth: 4 });
     for (const entry of layout.placed) expect(entry.x + BOX_W).toBeLessThanOrEqual(MAP_W);
@@ -678,10 +673,8 @@ describe("the key describes the map, and not something near it", () => {
     host({ hostname: "dn-locked", depth: 0, authState: "auth-required" }),
     host({ hostname: "dn-unreached", depth: 1, authState: "no-connection" }),
     host({ hostname: "dn-pinned", depth: 2, stasisLinked: true }),
-    // A host the publisher can actually emit: `describeHost` sends the identity
-    // fields with every report, so the old `facts: { depth: 1 }` fixture was a
-    // shape no digest produces — and it was the only thing keeping this test
-    // green while the fade was broken for every real host.
+    // Use a publisher-realistic host: `describeHost` includes identity fields
+    // with every report.
     host({
       hostname: "dn-stale",
       depth: 2,

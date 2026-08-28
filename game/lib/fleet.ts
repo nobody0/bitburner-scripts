@@ -59,9 +59,8 @@ export async function sweepFleet(
   const driver = hackingState();
 
   // 2) Openers, then rooting. `canRoot` is pure, so the decision is taken here
-  //    against the snapshot. (An opener-count gate used to wrap the rooting; it
-  //    was functionally dead — every real effect was already conditional on
-  //    `rootable`.)
+  //    against the snapshot; every rooting effect remains conditional on the
+  //    resulting `rootable` set.
   const openers = await listPortOpeners(call);
   const rootable = Object.values(servers)
     .filter((s: Server) => !s.hasAdminRights && canRoot(s, openers))

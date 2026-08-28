@@ -219,10 +219,8 @@ function netscriptDelay(host: SimNsHost, process: SimProcess, ms: number, functi
     process.delayReject = reject;
   });
   // A prestige kill sweep can reject this while the awaiting script is itself
-  // mid-teardown and never observes the rejection — bun then treats it as an
-  // unhandled rejection and takes the WHOLE seed process down (measured on
-  // bn1-full: a seed died silently at 15.2h, its result never written). The
-  // no-op handler marks the rejection observed; real awaiters still see it.
+  // mid-teardown and never observes the rejection. The no-op handler marks the
+  // rejection observed; real awaiters still see it.
   void promise.catch(() => {});
   return promise;
 }
@@ -512,7 +510,7 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
      * the awaited promise unresolved, so the caller HANGS rather than stalls
      * (see spec/ns-proxy.md). Only the fields the engine guarantees and our
      * code reads are modelled.
-     * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L1738-L1745 */
+     * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L691-L695 */
     self: () => ({
       pid: process.pid,
       filename: process.filename,

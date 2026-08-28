@@ -6,10 +6,7 @@ import "../game/lib/probes/index.ts";
 import { fleetFrom } from "../game/lib/probes/local.ts";
 import { stepEndgame, type EndgameView } from "../shared/strategy/progression/endgame.ts";
 
-/** Regressions from the 2026-08-18 wedged BN12 run: the port-opener inference
- * counted home's always-open five ports as an owned toolkit, and the static
- * world-daemon skill formula ran one recursion level low — together freezing
- * rooting, the fleet, and the endgame forecast for the whole node. */
+/** Pins port-opener inference and recursive world-daemon skill forecasting. */
 
 function server(hostname: string, over: Partial<Server> = {}): Server {
   return {

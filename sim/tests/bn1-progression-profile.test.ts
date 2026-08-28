@@ -25,9 +25,8 @@ lane({ feature: "progression", bn: 1 }).describe("BN1 multi-install progression 
     // This fixture intentionally starts mid-cycle with a queue and reputation
     // already banked. Its immediate first prestige is useful for lifecycle
     // coverage, but it is censored acquisition evidence: none of that work was
-    // observed from a clean reset. Ten virtual minutes are enough to catch the
-    // old failure ("20 remaining augmentations in 8 seconds") without forcing
-    // a strategically bad second install merely to satisfy a test counter.
+    // observed from a clean reset. Ten virtual minutes cover the lifecycle
+    // transition without forcing a strategically bad second install.
     const result = await runGame({
       goal: parseGoals(["installs:2"]),
       seed: 1,

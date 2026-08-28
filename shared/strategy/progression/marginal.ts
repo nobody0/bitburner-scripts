@@ -326,17 +326,12 @@ export function progressionMarginals(
     // slower sibling (EtaPart.hidden). The infinitesimal perturbation cannot
     // see through a parallel maximum, but the decisions priced off these
     // worths (augmentation multipliers, work-slot bids) buy FINITE rate
-    // changes that do flip which branch binds. Measured: with the money gate
-    // masking the invite hacking climb, worth(hacking) collapsed 612k -> 7.6k
-    // BN-seconds exactly while the run chose its augmentations, and the
-    // multiplier stack that would have cut two 7-14h climbs was never bought.
+    // changes that can flip which branch binds.
     // The floor covers exactly what the perturbation is blind to: hidden
     // AND-parallel legs (covered by a slower sibling's window, so a rate
     // change moves nothing) — plus, as before, the all-parts fallback when
-    // both perturbations report no movement at all. Flooring on VISIBLE legs
-    // too double-weighted long unmeasured parts the perturbation already
-    // prices: measured on a 6h screen, worth(hacking) drowned every other
-    // channel and total income fell 160x.
+    // both perturbations report no movement at all. Flooring VISIBLE legs too
+    // would double-weight long unmeasured parts the perturbation already prices.
     const hiddenNodeSec = baselineRoute
       ? resourceSeconds(baselineRoute.parts.filter((part) => part.hidden === true), resource)
       : 0;

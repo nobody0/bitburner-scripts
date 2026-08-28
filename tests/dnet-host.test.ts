@@ -226,8 +226,7 @@ describe("host immunity freezes its lifetime, not its neighbours", () => {
     const hosts = mapOf(report("darkweb", 0, { depth: -1, isStationary: true }));
     const host = hosts.get("darkweb")!;
     expect(isImmune(host)).toBe(true);
-    // Upstream raises rather than move darkweb; showing this expiring in a
-    // minute was the bug that made the guard worth writing.
+    // Upstream raises rather than moving darkweb, so its position does not expire.
     const wayLater = 100 * 60_000;
     expect(groupStaleness(host, "position", wayLater, { immune: true })!.stale).toBe(false);
     expect(fresh<number>(host, "depth", wayLater)).toBe(-1);
@@ -355,8 +354,7 @@ describe("a storm wipes what it can reach, the moment we believe it is over", ()
 
 describe("the fields the spreading agents added", () => {
   test("unclassified fields do not exist: every reportable field has a group", () => {
-    // The old model defaulted unknown fact names to the shortest expiry. A flat
-    // record cannot carry an unclassified field at all — a new field must be
+    // A flat record cannot carry an unclassified field: every new field must be
     // placed in a group at its declaration site — so the check becomes: the
     // fold only moves fields the groups name.
     expect(fieldGroup("usedRam")).toBeUndefined();

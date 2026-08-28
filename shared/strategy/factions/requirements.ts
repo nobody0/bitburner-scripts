@@ -25,20 +25,8 @@ import {
  * whole cross-feature contract; the driver turns it straight into `Need`
  * records for the board.
  *
- * The predecessor scripts got four of these cases wrong in ways that silently
- * made whole branches of the game unreachable, and each is a named test here:
- *
- *  - their `not` case returns `false` whether the inner call succeeded or not,
- *    because an EMPTY ARRAY is truthy in JS — so every `notEmployedBy` faction
- *    (the entire criminal ladder) was permanently unreachable;
- *  - `someCondition` returns `false` unconditionally after its success loop, so
- *    a satisfiable OR reports as impossible;
- *  - `numAugmentations` treats "not yet" as unachievable rather than emitting a
- *    goal, so Daedalus can never be planned toward;
- *  - `hacknetRAM`/`Cores`/`Levels` and `bladeburnerRank` are `return false`
- *    TODOs, so Netburners and Bladeburners are unreachable. Infiltration is
- *    deliberately reported as a manual-only blocker until the resulting
- *    Shadows of Anarchy invitation is observed.
+ * Each supported requirement returns either no blockers or explicit blockers.
+ * Infiltration is reported as manual-only until its invitation is observed.
  *
  * Upstream requirement predicates and serialized shapes (pinned v3.0.1):
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionJoinCondition.ts#L45-L381 */
@@ -93,11 +81,8 @@ export interface RequirementView {
   bladeburnerRank: number;
   numInfiltrations: number;
   /** Inputs for pricing company blockers (`employment`, `companyRep`,
-   * `jobTitle`) with the real work-line model instead of the nominal
-   * per-unit rates. The nominal rates priced a 400k-rep megacorp gate at
-   * ~40,000s, which pushed every corporate faction past the planning horizon
-   * and starved career of the whole apply→work→invite chain. Optional so the
-   * evaluator stays usable from contexts without a player snapshot. */
+   * `jobTitle`) with the work-line model instead of nominal per-unit rates.
+   * Optional so the evaluator remains usable without a player snapshot. */
   companyWork?: {
     person: CompanyPerson;
     ctx: CompanyWorkContext;
@@ -207,8 +192,7 @@ export function negate(requirement: PlayerRequirement): PlayerRequirement {
   }
 }
 
-/** Blockers for one requirement. An EMPTY array means satisfied — which is the
- * distinction the predecessor scripts got wrong, since `[]` is truthy. */
+/** Blockers for one requirement. An empty array means satisfied. */
 export function evaluate(requirement: PlayerRequirement, view: RequirementView): Blocker[] {
   switch (requirement.type) {
     case "money":

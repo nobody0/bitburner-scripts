@@ -32,7 +32,7 @@ export const TRAINING_BACKDOOR_COST_MULTIPLIER = 0.9;
 
 /** Ranking fallback when a skill wait cannot be measured: seconds per missing
  * hacking level, matching `NOMINAL_SEC_PER_UNIT.skill` in
- * factions/requirements.ts so the estimate degrades to the old coarse one. */
+ * factions/requirements.ts so both fallbacks use the same scale. */
 export const NOMINAL_SEC_PER_SKILL = 30;
 
 export interface BackdoorCostInput {

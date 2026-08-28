@@ -22,8 +22,7 @@ const code = driver.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, ""
 
 describe("the darknet home driver's own actions", () => {
   test("neither the seed nor the backdoor rents a host any more", () => {
-    // Both used to be broker-placed workers pinned to `home`. If either comes
-    // back, so does the silent-0 failure mode above.
+    // Neither operation should reintroduce broker placement or home pinning.
     expect(code).not.toContain("featureTask");
     expect(code).not.toContain("pinHost");
   });

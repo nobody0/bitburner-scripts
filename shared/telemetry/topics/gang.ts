@@ -1,5 +1,6 @@
 /** Gang feature — BN2's theme. Problem: assign each member to a task and
  * schedule ascensions/equipment so respect, money and territory grow without
+/** Gang feature state. Upstream gain fields are per game cycle. */
  * the wanted-level penalty eating the gains. A multi-armed assignment problem
  * over a slowly-changing roster. */
 
@@ -14,7 +15,6 @@ export interface GangMemberDigest {
   ascMults: { hack: number; str: number; def: number; dex: number; agi: number; cha: number };
   upgrades: number;
   augmentations: number;
-  /** Multiplier gain if ascended right now, per stat. */
   ascensionResult?: { respect: number; hack: number; str: number; def: number; dex: number; agi: number; cha: number };
 }
 

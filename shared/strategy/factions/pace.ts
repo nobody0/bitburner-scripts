@@ -3,14 +3,12 @@ import type { WorkType } from "./rep.ts";
 
 /** Converting a gap to seconds when the rate is ACCELERATING.
  *
- * Every faction ETA used to divide a gap by a spot rate: `repGap / repPerSec`,
- * `shortfall / incomePerSec`. That is right for one short package and wrong for
- * a multi-package budget, because rates in Bitburner do not hold still within a
+ * A spot-rate division such as `repGap / repPerSec` is suitable for one short
+ * package but not a multi-package budget, because rates in Bitburner do not hold still within a
  * cycle — skills, rooted hosts, RAM and income unlock one another, so the second
  * hour of a cycle is not priced like the first. A spot-rate divide makes a
- * far-off faction look permanently unreachable when it would in fact be cheap by
- * the time we got there, which is exactly the judgement a joint portfolio has to
- * make.
+ * far-off faction look unreachable even when the accelerating rate makes it cheap
+ * by arrival, which is the judgement a joint portfolio has to make.
  *
  * `progression/regrowth.ts` already fits cumulative cycle progress to `y = a·t^p`
  * with a bounded exponent and anchors sparse fresh-cycle samples to the previous

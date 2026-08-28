@@ -42,10 +42,8 @@ describe("script launch process identity", () => {
   });
 
   test("launches overlap: a slow child never holds up another", async () => {
-    // The reason this file exists. Descriptors used to share one realm slot,
-    // so a launch had to hold a FIFO until its child had BOOTED and read it —
-    // and a child cannot boot inside its parent's turn. Every exec in the
-    // automation queued behind one engine cycle each, which is what made a
+    // Descriptors are keyed by launch id, so a slow child cannot serialize a
+    // later independent launch.
     // darknet vantage open its frontier one host at a time.
     const acknowledge: (() => void)[] = [];
     const captured: number[] = [];

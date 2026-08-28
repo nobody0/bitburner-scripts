@@ -1,10 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { seriesBounds, type ChartSeries } from "../ui/app/lib/chart.ts";
 
-/** The chart's y-domain, which is the whole of what can be asserted without a
- * canvas. It became load-bearing when the stock tab needed a realised-P/L
- * curve: zero used to be a hard floor, so a losing run — the case most worth
- * seeing — drew into the bottom padding and clipped. */
+/** The chart's y-domain, including negative values needed by realized P/L. */
 
 function series(...values: number[]): ChartSeries[] {
   return [{ pts: values.map((v, i) => [i, v] as [number, number]), color: "--series-1" }];

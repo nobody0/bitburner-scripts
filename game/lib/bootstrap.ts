@@ -56,8 +56,7 @@ export async function bootstrapResidentHost(): Promise<string | undefined> {
       // unreserved until the first sweep, the dispatcher packs all of it in
       // the meantime, and the reserve then lands against a host whose `used`
       // is already full. A reserve blocks new allocations; it does not evict
-      // running HGW workers, so the resident is exiled to whatever is left
-      // (measured: back to home, permanently).
+      // running HGW workers, so the resident may be exiled to another host.
       hackingState().deployed.add(host);
 
       // Order matters: point the placer FIRST, then kill the residents. The

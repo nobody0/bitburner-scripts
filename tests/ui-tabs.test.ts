@@ -302,7 +302,7 @@ describe("tab rendering", () => {
       plan: {
         actions: [],
         ranked: [{ sym: "ECP", side: "long", forecast: 0.6, volatility: 0.0045, exact: true, manipulable: true, breakEvenTicks: 4.2, expectedProfit: 5e5 }],
-        // No entry, only a reserve: the case that used to render as an idle tab.
+        // No entry, only a reserve: the reserve still makes the tab active.
         reserve: { amount: 2e8, ratePerSec: 5e4 },
         unlock: { type: "buy4SApi", cost: 25e9, investmentCost: 30.2e9, gainPerSec: 1e6, paybackSec: 25000, netOverHorizon: 1e9 },
         horizons: { positionSec: 258, unlockSec: 4320 },
@@ -535,9 +535,7 @@ describe("tab rendering", () => {
     expect(rendered).toContain("not-enough-ram");
     expect(rendered).toContain("1.00GB free, needs 2.60GB");
 
-    // Solve progress, not "why untouched". Nineteen solvers exist and the five
-    // dictionary models are walked, so the old column answered a question
-    // nobody is asking; what an operator wants is how far each host got.
+    // Show solve progress across solvers and dictionary models.
     expect(rendered).toContain("solve progress, every host");
     expect(rendered).not.toContain("why untouched");
     // The last response code, WITH its age — a code alone does not say whether
@@ -568,9 +566,8 @@ describe("tab rendering", () => {
     // ...and the exit, which on this rung is known before the first move.
     expect(rendered).toContain("19,11");
 
-    // Solver progress: spent against a budget DERIVED from the published
-    // password facts, plus the phase. A multi-hundred-attempt solve used to be
-    // indistinguishable from an idle host.
+    // Solver progress is spent attempts against a budget derived from the
+    // published password facts, plus the phase.
     expect(rendered).toContain("narrowing");
     expect(rendered).toMatch(/12\/\d+/);
 
@@ -618,8 +615,7 @@ describe("tab rendering", () => {
     expect(rendered).toContain("Deliberate");
     expect(rendered).toContain("no-slot");
     expect(rendered).toContain("all 2 stasis links are spent");
-    // The backdoor plan used to be ADVICE — no ns.dnet member installs one — and
-    // said so. It is now carried out, from HOME: `singularity.installBackdoor`
+    // The backdoor plan is carried out from HOME: `singularity.installBackdoor`
     // acts on the terminal's current server, so the one process with a terminal
     // is the one that can spend the allowance. The panel says where it happens
     // and what refuses it, because the refusal is still the usual answer.
@@ -703,9 +699,7 @@ describe("tab rendering", () => {
     // 1. Nothing has ever seen a lab: no card at all, not an empty one.
     expect(at({ maxDepth: 1, knowledge, charisma: 120 })).not.toContain(">Labyrinth<");
 
-    // 2. A lab we can see and cannot walk. The reason used to be reachable only
-    // by hunting the Deliberate card's refusal table, which put the answer to
-    // "why has the maze not started" in a different card from the maze.
+    // 2. A visible lab that cannot be walked shows its refusal locally.
     const gated = at({
       maxDepth: 1, charisma: 120, netDepth: 7,
       knowledge: { ...knowledge, hosts: [...knowledge.hosts, labHost] },
@@ -1009,7 +1003,7 @@ describe("tab rendering", () => {
     expect(html).toContain("did not match this build's parser");
     // The verbatim reward string reaches the recent-solves card.
     expect(html).toContain("Gained $1.000m");
-    // The old hardcoded claim is gone.
+    // Do not claim registry completeness without parser evidence.
     expect(html).not.toContain("v3 registry complete");
   });
 
@@ -1025,8 +1019,7 @@ describe("stream projection", () => {
       { id: "r", src: "sim", live: false, t0: 0 },
     );
     expect(viaMirror.moneySeries).toEqual([[0, 5]]);
-    // Regression: the old viewer charted only `getPlayer`, so a run that
-    // published the typed `player` topic drew an empty chart.
+    // The typed `player` topic is also a valid money-series source.
     const viaTopic = project(
       [{ ...base, kind: "state", key: "player", data: { money: 7 } } as LogRecord],
       Infinity,
@@ -1036,9 +1029,7 @@ describe("stream projection", () => {
   });
 
   test("totals prefer the farm rollup, fall back to hack.done, else report absence", () => {
-    // Regression: totals used to be blanked on `src === "game"` rather than on
-    // the absence of a totals source, so sim runs without per-op events showed
-    // a confident 0.
+    // Totals depend on the presence of a totals source, not the run source.
     const none = project([{ ...base, kind: "event", name: "start.boot" } as LogRecord], Infinity, {
       id: "r",
       src: "game",
@@ -1080,10 +1071,7 @@ describe("stream projection", () => {
   });
 
   test("a game run's replay range is its own timeline, not 0..now", () => {
-    // Regression: the scrub slider used min=0 while game records carry
-    // Date.now() timestamps, so the whole run occupied its final pixel and
-    // every drag produced a cutoff decades before t0 — an empty page and a
-    // hugely negative "elapsed". The slider must span [t0, tLast].
+    // Game timestamps are epoch-based, so the slider spans [t0, tLast].
     const t0 = 1_786_117_518_978;
     const records = [
       { ...base, src: "game" as const, t: t0, kind: "state", key: "getPlayer", data: { money: 1 } },
@@ -1208,7 +1196,7 @@ describe("incremental projection", () => {
     // just to slice the tail is how a viewer tab reaches a gigabyte.
     const state = project(stream(EVENT_RING * 2), Infinity, { id: "r", src: "sim", live: true, t0: 0 });
     expect(state.events.length).toBe(EVENT_RING);
-    // The ring keeps the NEWEST records — an old tail would be useless.
+    // The ring retains the newest records.
     expect(state.events[state.events.length - 1]!.t).toBe(EVENT_RING * 2 - 1);
   });
 
@@ -1396,9 +1384,7 @@ describe("panel view state", () => {
 
 describe("career request grouping", () => {
   test("identical asks from many factions collapse to one row", () => {
-    // A late-game save posts one request per (faction, requirement) pair: the
-    // panel used to show eleven consecutive rows that differed only in who was
-    // asking, which is noise around a single piece of work.
+    // Collapse one request per (faction, requirement) pair into the shared work item.
     const serving = ["ECorp", "MegaCorp", "NWO", "Blade Industries"].map((company) => ({
       by: "factions",
       kind: "companyRep",
@@ -1456,9 +1442,7 @@ describe("career request grouping", () => {
   });
 
   test("a group is only done when its shown milestone is", () => {
-    // The meter turns green off `progress >= 1`. Under the old independent
-    // maxima, one satisfied requirement turned the whole group green while
-    // harder ones were still open.
+    // The meter turns green only when the displayed group milestone is complete.
     const groups = groupRequests({
       serving: [
         { by: "a", kind: "skill", subject: "agility", target: 300, have: 300, weight: 1, urgency: "wanted" as const, progress: 1 },
@@ -1634,8 +1618,7 @@ describe("filter badges count the rows their filter shows", () => {
     setView("factions.mode", "open");
     const html = TABS["factions"].render(state);
     // Two rows are reachable-and-not-joined: NiteSec (invited) and Tetrads.
-    // The badge used to exclude invited factions while the filter included
-    // them, so it read "1" above a two-row table.
+    // The badge and filter must count the same set.
     // Matched on the row marker rather than the bare name: every faction also
     // appears in the augmentation table's "from" column.
     const row = (name: string) => new RegExp(`●</span>${name}`);
@@ -1829,9 +1812,8 @@ describe("the Batches card is per-batch", () => {
     // A THIRD rollup, because the in-order share is now differenced over a
     // window rather than read off the rollup as a lifetime mean: the first
     // rollup has no baseline and the second yields one point, so a curve needs
-    // three. That is the whole point of the change — a cumulative ratio anchored
-    // near 1.0 cannot say whether landing order is getting worse, and this test
-    // used to pass on exactly one lifetime average.
+    // three. A cumulative ratio anchored near 1.0 cannot show whether landing
+    // order is getting worse.
     const state = appendRecords(populated(), [
       farm(5_000, {
         launched: { hack: 30, grow: 30, weaken: 30 },

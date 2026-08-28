@@ -149,10 +149,8 @@ export interface GoCheatState {
  * opponents) and 19x19 (the world daemon); 7/9/13 are listed defensively so
  * an experimental game cannot crash on an unevaluable budget.
  *
- * Measured 2026-08-22 (go:gpu --arena --games 128 --opponent secret): 19x19
- * greedy cheating wins 95.3% vs 85.9% without cheats, +35% node power per
- * turn, planning latency unchanged. Changes land here as one-line edits
- * recorded with the arena run that justified them. */
+ * Policy changes belong here as one-line edits and must be justified by a
+ * recorded arena run. */
 export const GO_CHEAT_LIMITS_BY_SIZE: Readonly<Record<number, {
   candidateLimit: number;
   doubleMoveLimit: number;

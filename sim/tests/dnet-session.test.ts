@@ -766,10 +766,8 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
     });
 
     test("a stasis link is now a reading rather than a constant", () => {
-      // This test used to assert `[]` and say so honestly: while nothing could
-      // create a link, empty was literally true rather than a fabrication. Now
-      // that `setStasisLink` is modelled, empty has to be earned — so the
-      // assertion is that it CHANGES, which the old one could never have caught.
+      // Since `setStasisLink` is modeled, assert that the reading changes rather
+      // than treating an always-empty value as evidence.
       const h = harness();
       expect(h.ns.dnet.getStasisLinkedServers()).toEqual([]);
 

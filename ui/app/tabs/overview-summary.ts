@@ -33,13 +33,8 @@ function nowTiles(state: ProjectedState): string {
   const slot = arbitration?.slot;
   const currentWork = state.topics.career?.currentWork;
 
-  // Every tile answers from its OWN topic, and an absent topic reads as absent.
-  // These four are the first thing on the default tab and they used to make
-  // "nothing has been measured" indistinguishable from "the automation chose to
-  // do nothing" — the arbiter legitimately writes nothing for a whole
-  // hacking-only run (game/lib/controller.ts), the career probe needs SF4, and
-  // every topic is dropped on prestige, so a confident "idle" here read as a
-  // broken controller.
+  // Every tile answers from its own topic. An absent topic means unmeasured,
+  // while an explicit idle value means the automation chose to do nothing.
   const route: Markup = progression === undefined
     ? hint(NONE, "no progression topic yet")
     // A BitNode id is not a RouteId (shared/strategy/progression/endgame.ts), so

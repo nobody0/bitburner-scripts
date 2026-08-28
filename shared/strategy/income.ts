@@ -20,15 +20,6 @@ import { MARGINAL_RESOURCES, type MarginalResource, type MeasuredMarginal, type 
  * seconds off the route. They ADD, because work that pays in two currencies is
  * worth both.
  *
- * THE SPANS THIS REPLACES. Priority used to be `repFraction * 60 + moneyFraction
- * * 80`, with the excess deliberately ranking money above reputation. That is a
- * policy baked into a constant, and it is wrong in both directions depending on
- * the node: mid-run with a farm earning four orders of magnitude more than crime,
- * money is worth literally zero seconds off the route while reputation is the
- * only binding part of it; early — or in a node where the fleet cannot run — work
- * money is genuinely the best thing the slot can do. Both answers now fall out of
- * the same measurement instead of a hardcoded ordering.
- *
  * Estimates, not measurements. A feature announcing a rate it merely expects is far
  * more useful than no announcement at all, because the comparison only has to get
  * the ORDER right; being wrong by a factor of two changes a fraction, not a winner.

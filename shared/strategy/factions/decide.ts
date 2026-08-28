@@ -585,10 +585,8 @@ function decideFactions(
   // Membership is a structural improvement in certainty. A speculative
   // package whose faction is still locked must not hold the latch after a
   // joined/invited package becomes the fresh winner: its ETA is executable
-  // now, while the old ETA still depends on another feature's coarse blocker
-  // model. Measured failure before this rule: each newly joined early faction
-  // sat unused behind a five-minute stall window for an unjoined combat/city
-  // faction, consuming most of an install cycle without earning reputation.
+  // now, while the speculative ETA still depends on another feature's coarse
+  // blocker model.
   const freshStanding = fresh.intent
     ? view.factions.find((standing) => standing.name === fresh.intent!.faction)
     : undefined;
@@ -603,8 +601,8 @@ function decideFactions(
   }
   // Once the selected faction-acquisition route exposes its terminal
   // augmentation, it is no longer an ordinary value/sec bidder. Do not let a
-  // previously latched optional package delay the route-ending reputation
-  // grind merely because that package is still making progress. This remains
+  // latched optional package delay the route-ending reputation grind merely
+  // because that package is still making progress. This remains
   // route-generic: routeAware selection is what decides whether The Red Pill
   // is terminal, and routes that do not use it never produce this fresh intent.
   if (
@@ -616,9 +614,7 @@ function decideFactions(
   }
   // Stall escape for the latch: zero reputation progress for INTENT_STALL_MS
   // while the frontier prefers a DIFFERENT package means the latched intent
-  // is not merely slow, it is unservable — measured: an employment-gated
-  // package latched at t=0 held the whole feature idle for two hours while a
-  // one-blocker faction sat ignored. Re-selecting the same package resets
+  // is unservable. Re-selecting the same package resets
   // nothing, so a legitimately slow grind is never dropped.
   let intentKey = memory.intentKey;
   let intentRepSeen = memory.intentRepSeen;
@@ -771,8 +767,7 @@ function decideFactions(
   // buying mid-run both pulls money out of compounding investments and pays
   // the escalation on items a later package would have wanted cheap. ALL
   // purchases happen in the final-sweep drain (below), dearest-first, once
-  // the objective work is done and the whole bankroll is known. The old
-  // buy-as-soon-as-rep-and-money-allow path lived here.
+  // the objective work is done and the whole bankroll is known.
   // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L109-L141
   // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/AugmentationHelpers.ts#L24-L38
 
@@ -826,10 +821,8 @@ function decideFactions(
   // Progression owns the install CADENCE. When its marginal-value rule says
   // the reset now beats pushing further, this feature must CONCLUDE — stop
   // working toward the objective and run the final sweep with whatever
-  // reputation is banked. Without this the install waits on "factions has not
-  // finished its sweep" while factions keeps pushing a multi-hour objective
-  // it was never told to abandon (measured: 0 installs in 30 minutes on the
-  // cadence fixture while progression wanted one from minute 2).
+  // reputation is banked. Otherwise the install and the unfinished optional
+  // objective wait on each other.
   const extraPushBudgetSec = Math.max(0, view.installCycleSec ?? 0) * EXTRA_AUG_PUSH_FRACTION;
   const activePackageInFlight = Boolean(
     view.installRequested
@@ -1113,12 +1106,6 @@ function decideFactions(
   // advances the route's count leg at `package size / package ETA`. That is a
   // property of the PACKAGE, identical for all three work types, so it is added
   // here rather than in `workProduces` — it cannot change which type wins.
-  //
-  // MEASURED on a cold `bn1-full` start: without it `career` outbid faction work
-  // roughly 120:1 on money alone and held `Player.currentWork` on 89% of passes.
-  // That is self-defeating — the money gate it bids for is reached through the
-  // multipliers only an install grants, and only reputation unlocks the
-  // augmentations an install activates.
   const packageIntent = objective.intent?.faction === target.faction ? objective.intent : undefined;
   const packageAugsPerSec = packageIntent && packageIntent.augmentations.length > 0
     ? packageIntent.augmentations.length / Math.max(1, packageIntent.etaSec)
@@ -1196,9 +1183,8 @@ function decideFactions(
   }
 
   if (!view.holdsWorkSlot) {
-    // The player can only do ONE thing. Saying so explicitly matters: the
-    // panel previously showed the intended work as if it were running, which
-    // read as a contradiction against the game's own display.
+    // The player can hold only one work slot. Report idle when this feature
+    // does not own it rather than presenting intended work as active.
     // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Player/PlayerObjectWorkMethods.ts#L5-L22
     const action: FactionAction = { type: "idle", reason: "slot" };
     return {
@@ -1277,8 +1263,7 @@ function untilRep(faction: string, target: number, have: number, ratePerSec: num
  * ask the SAME question of the published digest. That matters: the fare is
  * claimed one pass before the decision that spends it, and a claim derived from
  * the previously-published action cannot anticipate an action the planner has
- * not taken yet. On a live BN12 run the two never coincided — 85 executions
- * recorded "waiting for $200,000 travel grant" while $57.7m sat unclaimed. */
+ * not taken yet. */
 export function soleTravelBlocker<T extends { faction: string; kind: string; subject?: string; negated?: boolean }>(
   blockers: readonly T[],
 ): T | undefined {
@@ -1347,7 +1332,7 @@ function plannedBudget(view: FactionsView): number {
  *
   * AN EMPTY QUEUE NEEDS A DIFFERENT HANDSHAKE. This function cannot wait on an
   * inactive liquidation: outside the final drain it falls through to an affordable
-  * item, avoiding the old factions/stock deadlock. At the final drain boundary,
+  * item. At the final drain boundary,
   * `stepFactions` may instead publish `liquidationNeeded` when the book covers the
   * dearest planned item. Progression then starts liquidation without pretending an
   * empty queue is installable, and this function can safely hold once settlement is
@@ -1402,10 +1387,8 @@ function nextPurchase(
       // Reputation shortfalls the book cannot close fall through instead — and
       // that check must be EXPLICIT: an item that is both rep-short and
       // money-short with no donation path is a rep problem money cannot cure,
-      // and holding for its settlement deadlocked the whole sweep behind a
-      // faction joined at reputation 1 (measured: the drain sat idle for a
-      // full run while a funded NeuroFlux waited behind CashRoot's 12,500-rep
-      // wall). A DONATION-CLOSABLE gap is a money problem, though: skipping
+      // and holding for its settlement would block the whole sweep. A
+      // DONATION-CLOSABLE gap is a money problem, though: skipping
       // it buys something cheaper first and pays 1.9x escalation on the dear
       // item the settlement would have funded.
       const settleable = sellers.some(

@@ -140,9 +140,7 @@ describe("install artifact store", () => {
       }
     });
 
-    /** Ctrl-C is how the hub is actually stopped, and it used to be the one case
-     * where the guarantee did not hold: `#flushSpans()` was reachable only from
-     * detach(), so every key sitting mid-span lost its closing record. */
+    /** close() flushes held span ends just as detach() does. */
     test("close() keeps the span's end when the hub is stopped, not just when the emitter leaves", async () => {
       const dir = mkdtempSync(path.join(tmpdir(), "bb-store-"));
       try {

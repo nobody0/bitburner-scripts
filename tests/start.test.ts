@@ -9,7 +9,7 @@ import { parseSyncControl, syncControl } from "../shared/deployment.ts";
  * wiring, the simulator already runs the real thing end to end
  * (`sim/tests/scenario-bootstrap.test.ts` boots it cold), and
  * `tests/ram-budget.test.ts` pins the properties that actually bite in game --
- * the 3.6 GB static budget, --perf equivalence, and that the controller can
+ * the wrapper/controller RAM budgets, --perf equivalence, and that the controller can
  * never reach the save. An ns mock here would prove less than any of those.
  *
  * What IS worth pinning is the pure logic inside it, because each piece is a

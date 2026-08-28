@@ -394,10 +394,7 @@ describe("lumpy step pricing", () => {
   test("the callback's next rung is priced against the updated pool", () => {
     // The first rung's value clears its DISPLACEMENT price: granting its $40
     // pushes the curve's fill from 100 down to 60, whose clearing lambda is 4,
-    // and 200/40 = 5 beats that. (It used to be 40 — value-per-dollar 1 —
-    // granted only because a fully-covered band quoted lambda 0; that
-    // allocation destroyed value, 460 against the curve-only 500, and steps
-    // are now priced against what they displace.)
+    // and 200/40 = 5 beats that. Steps are priced against what they displace.
     const first = claim({
       by: "hacking",
       id: "first",

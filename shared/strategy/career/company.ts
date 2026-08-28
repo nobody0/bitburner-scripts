@@ -3,13 +3,9 @@ import { MAX_SKILL_LEVEL } from "./crimes.ts";
 
 /** Company work-line model.
  *
- * The live scripts previously knew nothing about positions: applications
- * guessed fields in a fixed order, promotion chased whatever title string
- * matched, and a 400k-companyRep faction gate was priced at a flat nominal
- * rate. This module prices company work the way the game computes it —
- * per-position reputation and salary rates from the pinned v3.0.1 formula —
- * and walks real promotion ladders, so "work for NWO" can be compared against
- * every other use of the work slot on equal footing.
+ * Prices company work from per-position reputation and salary rates in the
+ * pinned v3.0.1 formula and walks actual promotion ladders, so company work can
+ * be compared with every other use of the work slot on equal terms.
  *
  * Formula source: `bitburner-src v3.0.1 src/Work/CompanyWork.ts` /
  * `src/Company/CompanyPosition.ts` (mirrored by `sim/features/companies.ts`,
@@ -239,8 +235,7 @@ export function promotionAwareEtaSec(
     if (statGated) break;
     const gate = requiredReputationAt(position, ctx);
     // A rep target inside this rung's gate is reached before the promotion:
-    // never grind toward gates beyond the target (the measured failure summed
-    // time to CTO's 3.2M gate for a 400k target).
+    // never grind toward gates beyond the target.
     if (titleTarget === undefined && target.repTarget !== undefined && gate >= target.repTarget) break;
     if (rep < gate) {
       if (!held) return undefined; // cannot even enter the track

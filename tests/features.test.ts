@@ -292,10 +292,8 @@ describe("probe table", () => {
   });
 
   test("no probe's declared cadence is silently coarsened by the caller", () => {
-    // The invariant this replaces a bug with. Acquisition used to run only inside
-    // the 30 s fleet sweep, which made 30 s the floor for the whole table however
-    // small a probe's `everyMs` — the local tier asked for 5 s and got 30 s for
-    // the life of the project, and the market's 4 s probe saw one price tick in
+    // Acquisition cadence must honor each probe's declared `everyMs` without a
+    // coarser caller-imposed floor.
     // five and measured volatility 3.5x too high off the aliased samples.
     //
     // So the controller derives its interval FROM the table instead of choosing
@@ -591,10 +589,8 @@ describe("feature modules", () => {
   });
 
   test("a node reset clears every feature-published topic, not just module state", () => {
-    // THE BUG THIS PINS: the controller used to keep a per-field delete
-    // blacklist, and the factions topic survived a node reset — so the new
-    // node's first endgame route decision read the old run's Red Pill out of
-    // stale ownedAugs and priced the route ~80x too short. Each module now
+    // A node reset clears every module-published topic so no prior-node state
+    // enters the new node's first decisions. Each module
     // clears its own published topics via reset(state).
     const state = freshState();
     state.topics.factions = { joined: ["Daedalus"], ownedAugs: ["The Red Pill"] };

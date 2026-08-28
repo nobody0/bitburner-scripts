@@ -10,13 +10,8 @@ import type { Tab } from "./index.ts";
 /** Career tab: stats, karma and work. Karma is here because it is the gate
  * other features wait on — BN2's gang needs -54,000 of it.
  *
- * The panel is organised around what the feature is DOING, not around the
- * shape of its data structures. The old layout put "selected: idle" in one
- * card, the work it was actually running in another, and the twenty-five
- * requests behind the decision in a third — so explaining an idle selection
- * meant reading three tables and joining them by eye. Now: what we are doing
- * means showing the action and its scores, then what is asking for it, then
- * what else was considered. */
+ * The panel is organised around what the feature is doing: the action and its
+ * scores, the requests it serves, and the alternatives considered. */
 
 const GANG_KARMA = -54_000;
 
@@ -336,11 +331,8 @@ export const careerTab: Tab = {
         );
       }
       if (plan.lastResult) {
-        // `lastResult` is module-level in the driver and cleared only on reset,
-        // and `execute` is skipped entirely for an idle decision or a
-        // backed-off action key — so an hour-old failure keeps rendering here.
-        // Undated it reads as the current state, which is exactly the line an
-        // operator checks when career looks stuck behind the execute backoff.
+        // `lastResult` persists across idle and backed-off decisions, so show
+        // its timestamp to distinguish retained history from current state.
         nowParts.push(
           `<div class="row"><span class="muted">last</span> ` +
             `<span class="${plan.lastResult.ok ? "good" : "bad"}">${esc(plan.lastResult.action)}: ${esc(
@@ -423,9 +415,7 @@ export const careerTab: Tab = {
     // the wire there has been no decision at all — the driver requires
     // Singularity, so `plan` is absent for a whole pre-SF4 BitNode while the
     // local probe keeps filling this topic — and even with a plan the `stop` and
-    // empty-ranking branches report `incomeFallback: false` with nothing being
-    // served. This line used to assert "income fallback is active" in both
-    // states, two cards below one saying no decision had been made yet.
+    // empty-ranking branches report `incomeFallback: false` with nothing being served.
     const noRequests = !plan
       ? waiting("the first career decision")
       : note(plan.incomeFallback ? "no open career requests — earning instead (see Now)" : "no open career requests");

@@ -150,11 +150,9 @@ export function workRepPerSec(
 /** Experience per SECOND awarded by each faction work type, before the
  * player's own `*_exp` multipliers, the node multiplier and the focus penalty.
  *
- * THIS IS THE HALF THE PLANNER USED TO IGNORE. Field and security work pay
- * combat experience while earning reputation, so a posted combat gate can be
- * served by the same second that advances a faction — but the chooser picked on
- * reputation alone and the claim announced reputation alone, so career won the
- * slot with crime and the reputation was simply never earned. `chooseWorkType`
+ * Field and security work pay combat experience while earning reputation, so a
+ * posted combat gate can be served by the same second that advances a faction.
+ * `chooseWorkType`
  * in `./decide.ts` prices all three types with these rates; `bestWorkType`
  * below stays reputation-only because its callers are asking a reputation ETA
  * question, not choosing what to run.

@@ -1,22 +1,16 @@
-/** Fleet RAM allocator — the slab-heap design from an earlier rewrite
- * (`nobody0/bitburner`, no longer checked out; see README's citation note) with
- * its known defects fixed. Neither predecessor branch on disk has a heap:
- * `@2023`'s `cluster.ts` re-reads ns.getServerUsedRam every pass and reconciles
- * by killing non-HGW workers, and `@master` carries only a per-client
- * `reservedRamForCurrentBatch` scalar with linear client scans
- * (imports/batchPlanner.ts:348-414). That is why this file cites the rewrite
- * rather than either of them.
+/** Fleet RAM allocator using the slab-heap design attributed to
+ * `nobody0/bitburner` (see README's citation note).
  *
  * Pure data structure: the sim and the game driver each own an instance; all
  * mutation flows through #update (O(1) rebucket, single choke point).
  *
- * Inherited keepers: 21 power-of-two slabs bucketed by clz32 (no Math.log),
+ * Twenty-one power-of-two slabs are bucketed by clz32 (no Math.log), with
  * home pinned last as a fallback, three policies (contiguous best-fit for
  * hack, home-first for grow's core bonus, ascending-slab spread for weaken /
  * prep so fragments get eaten first), two-phase-commit spread.
  *
- * Fixes over the rewrite: allocations return Reservation handles with
- * idempotent release() (rollback on exec failure — its leak); failures are
+ * Allocations return Reservation handles with idempotent release() for exec
+ * rollback; failures are
  * typed values, never silent; per-host broker arena reservations are explicit
  * reserved GB (not fake ramUsed); batch-atomic multi-request allocation
  * (all ops of an HWGW batch or none). */

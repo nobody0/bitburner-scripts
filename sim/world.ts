@@ -721,8 +721,7 @@ export class SimWorld {
         HackingSpeedMultiplier: currentNodeMults.HackingSpeedMultiplier,
         // Scales SKILL derived from experience, so it belongs to every forward
         // projection of the hacking level (prep-time discount, exp valuation,
-        // landing-time hack percentage). 0.35 in BN4 and 0.25 in BN9 — while it
-        // was missing, those projections ran about threefold hot.
+        // landing-time hack percentage). It is 0.35 in BN4 and 0.25 in BN9.
         HackingLevelMultiplier: currentNodeMults.HackingLevelMultiplier,
         HackExpGain: currentNodeMults.HackExpGain,
         ScriptHackMoney: currentNodeMults.ScriptHackMoney,
@@ -906,13 +905,8 @@ export class SimWorld {
     return true;
   }
 
-  /** Advance the 1 Hz rollup from a timebase OTHER than an HGW landing.
-   *
-   * `land()` is the only other caller, which used to be the only one — and that
-   * silently made the earnings ledger invisible to any run without a farm. A
-   * hacknet-only or market-only run credited `moneyEarned` correctly and never
-   * published it, so an `earn:` goal could not be reached however much the run
-   * made. The engine calls this so every subsystem on the 200 ms timebase is
+  /** Advance the 1 Hz rollup from a timebase other than an HGW landing.
+   * The engine calls this so every subsystem on the 200 ms timebase is
    * covered, not just the ones that happen to land ops. */
   pulse(): void {
     this.#maybeRollup();

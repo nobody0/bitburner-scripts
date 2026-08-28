@@ -27,9 +27,8 @@ import type { WorkerGlobalThis } from "./worker-shared.ts";
  *
  * `ns.sleep` is actively dangerous in any script with a second async arm: it
  * holds the Netscript concurrency lock (`netscriptDelay` sets
- * `ws.env.runningFn`), and the engine KILLS a script whose other arm makes any
- * ns call while it is pending — the bug that killed every darknet controller at
- * its first mutation event. `ns.asleep` is lock-free but is itself just a bare
+ * `ws.env.runningFn`), and the engine kills a script whose other arm makes any
+ * ns call while it is pending. `ns.asleep` is lock-free but is itself a bare
  * `setTimeout` upstream (NetscriptFunctions.ts:259-265), so it buys nothing a
  * realm timer does not, while still LOOKING like an ns call that might hold
  * the lock.

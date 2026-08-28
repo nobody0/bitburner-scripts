@@ -360,8 +360,7 @@ lane({ feature: "world", bn: 1 }).describe("running game/ in the synthetic world
   });
 
   test("...but fleet placement funds it anyway, so features actually unlock", async () => {
-    // The Phase 0.4 payoff, and the reason this test is the inverse of what it
-    // used to assert. The stub ships to every rooted host alongside the
+    // The stub ships to every rooted host alongside the
     // worker, so a 1.5 GB gate batch lands on a client instead of competing
     // with the dispatcher for a home reserve that can never hold it. Before
     // fleet dodging, `capabilities` was NEVER emitted on an 8 GB home and no

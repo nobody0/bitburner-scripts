@@ -91,11 +91,8 @@ export interface BatchAggregateReport {
   /** Batches EVICTED without ever settling, and the work they took with them.
    *
    * Where op loss actually shows up. A batch settles only once its last op
-   * arrives, so a settled batch has `landed === ops` by construction — which is
-   * why the old "settled with fewer landings" counter could never fire, and why
-   * `launched` against `landed` per kind was two copies of one curve. A batch
-   * that loses an op never settles and is evicted instead; that eviction is now
-   * counted here.
+   * arrives, so a settled batch has `landed === ops` by construction. A batch
+   * that loses an op never settles and is evicted instead.
    *
    * `abandonedOps - abandonedLanded` is the ops paid for that never arrived.
    *

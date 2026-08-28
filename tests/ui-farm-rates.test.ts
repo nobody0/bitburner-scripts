@@ -86,10 +86,8 @@ describe("farm series projection", () => {
   });
 
   test("windows a sparse counter rather than differencing adjacent rollups", () => {
-    // A settled farm completes one batch per weakenTime. Sampled at 1 Hz, most
-    // seconds contain no completion at all, so an adjacent-sample rate is a
-    // flat zero with an occasional spike — which is what a live run drew, and
-    // it reads as a stalled farm rather than as a sampling artefact.
+    // A settled farm completes one batch per weakenTime. At 1 Hz, adjacent
+    // samples would alternate between zero and spikes, so use a windowed rate.
     const records = [];
     for (let second = 0; second <= 40; second++) {
       records.push(

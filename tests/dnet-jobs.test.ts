@@ -13,9 +13,7 @@ import { KIND_CALLS, ORDER_PRICES } from "../game/dnet/shared.ts";
  * where that behaviour lives. */
 describe("the darknet job table", () => {
   test("every kind is priced and has a call surface, and vice versa", () => {
-    // A kind exists only if it has a row, a price and a declared surface. The
-    // three used to be separate hand-written lists that had to be edited
-    // together; this is what stops one being forgotten.
+    // A kind exists only if it has a row, a price, and a declared surface.
     for (const kind of TASK_KINDS) {
       expect(ORDER_PRICES[kind], `${kind} has no price`).toBeGreaterThan(0);
       expect(KIND_CALLS[kind], `${kind} has no declared surface`).toBeDefined();

@@ -1,10 +1,8 @@
 /** `authentication.ts`'s failure switch, `darknetAuthUtils.ts` and
  * `packetSniffing.ts`'s `capturePackets` — what a WRONG password answers.
  *
- * This is the oracle every iterative solver reads, and it is the half the
- * simulator used to be thinnest on: five of upstream's fifteen arms were
- * implemented and the rest fell through to the static hint. A solver written
- * against that would have looked correct here and found nothing in the game.
+ * This is the oracle every iterative solver reads. All upstream failure arms
+ * are modeled so solver behavior transfers to the game.
  *
  * Nothing in this file returns randomness of its own except `capturePackets`,
  * which is genuinely random upstream; the caller hands it a stream.

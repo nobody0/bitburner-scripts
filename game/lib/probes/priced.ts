@@ -26,16 +26,16 @@ import { bladeburnerApiActionType } from "../bladeburner.ts";
 /** The priced probe table — one entry per (feature, cost tier).
  *
  * Every body reads through `ctx.nsp`, which runs the member on a resident
- * script of its own, so nothing here is charged to start.js. The member is
+ * script of its own, so nothing here is charged to main.js. The member is
  * named as a STRING PATH and never as a property: Bitburner charges by member
  * NAME across the whole bundle regardless of the receiver, so a property
- * access — dotted or bracketed, on `ns` or on anything else — bills start.js.
+ * access — dotted or bracketed, on `ns` or on anything else — bills main.js.
  *
  * There is no `methods` table any more, and nothing declares a price. The
  * resident prices each member when the body first calls it, memoises it, and
  * respawns into a larger allocation when its budget fills; the call IS the
- * price, so the two cannot drift. A probe that used to be split into steps to
- * keep its peak allocation placeable is now plain sequential code.
+ * price, so the two cannot drift. Sequential calls remain placeable because
+ * the resident can resize between first calls.
  *
  * Features are still split into `core` / detail tiers, but for CADENCE rather
  * than for cost: the facts a driver acts on every 30 s and the ones a panel
@@ -179,10 +179,9 @@ const NEUROFLUX_GOVERNOR = "NeuroFlux Governor";
 
 /** Standing at every joined faction, plus pending invitations and enemies.
  *
- * Five singularity getters at 5 GB each once SF4's 16/4/1 multiplier is
- * applied — ~25 GB, which used to have to be split into one stub per method.
- * The resident pays for them one at a time and recycles itself when its budget
- * fills, so they are simply sequential reads now. */
+ * Five singularity getters cost 5 GB each once SF4's 16/4/1 multiplier is
+ * applied. The resident pays for them one at a time and recycles when its
+ * budget fills, so they remain sequential reads. */
 const factionStandings: PricedProbe = {
   id: "factions.standings",
   kind: "priced",
@@ -686,9 +685,8 @@ const stockAccount: PricedProbe = {
  * (4 s while burning stored cycles), and sampling slower than the tick makes the
  * tick structure unobservable — no up-tick count, so no forecast without 4S; no
  * per-tick magnitude, so no measured volatility; and no way to see the 45%-flip
- * cycle boundary that ends every regime. The old 30 s cadence saw one tick in
- * five and could recover none of it; the 4 s cadence that replaced it matched
- * `msPerStockUpdateMin` exactly and could still miss catch-up ticks (see SEC_3).
+ * cycle boundary that ends every regime. Sampling at the 4 s minimum can still
+ * miss catch-up ticks (see SEC_3), so the probe runs every 3 s.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/StockMarket.ts#L218-L258
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/data/Constants.ts#L3-L8
  *
@@ -937,11 +935,9 @@ const corpCore: PricedProbe = {
   },
 };
 
-/** One division's digest. Every getter feeding it is CorporationInfo-priced
- * (10 GB apiece) and they are chained only by data — corporation -> division
- * names -> per-division cities -> per-(division, city) office/warehouse — which
- * is why this used to be five stubs passing a bag along. The resident charges
- * the same 50 GB, but as five separate first-calls it can respawn between. */
+/** One division's digest. Its five 10 GB CorporationInfo getters are chained
+ * only by data. The resident charges them as separate first calls and may
+ * respawn between them. */
 interface CorpDivision {
   name: string;
   industry: string;

@@ -5,19 +5,14 @@ import type { ProjectedState } from "../project.ts";
 
 /** The clock a panel must read, and the words for an age taken off it.
  *
- * Nothing in a panel may reach for `Date.now()` directly. Three separate
- * reasons, and each of them produced a wrong reading before this file existed:
+ * Nothing in a panel may reach for `Date.now()` directly:
  *
- *  - A REPLAY is not now. `p.lastAugReset` from a run recorded yesterday
- *    against a wall clock reads "18h since the last install" on a run that
- *    lasted twenty minutes, and every forecast in it renders as long expired.
+ *  - A replay must use its recorded time base, not the current wall clock.
  *  - A SIMULATED run does not use wall time at all. Records carry VIRTUAL
  *    timestamps (`sim/realm/timers.ts` installs the clock under the real
  *    controller), so subtracting them from `Date.now()` is subtracting two
  *    different units.
- *  - A frozen topic must not look fresh. An age measured against the newest
- *    record the viewer holds keeps growing while a subsystem stops reporting,
- *    which is exactly the signal "this value is old" needs.
+ *  - A frozen topic must age against the newest record the viewer holds.
  *
  * So the clock is the run's own newest observation, and wall time is consulted
  * only for a live GAME run — where the records are `Date.now()`-stamped anyway

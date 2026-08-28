@@ -661,12 +661,8 @@ const sleeves: FeatureDriver = {
     const completed = [...pendingSleeveCompletions()];
     if (decision.assignments.length === 0 && completed.length === 0) return;
 
-    // Plain sequential setters. These used to be grouped by task type and
-    // split across one dodge per group, because a stub had to be allocated for
-    // the SUM of its calls and a six-type batch demanded 4x(6+1) + 2.1 =
-    // 30.1 GB of contiguous RAM on one host. The resident prices each call for
-    // itself and recycles when it must, so the peak is one sleeve call and the
-    // grouping bought nothing.
+    // Keep setters sequential. The resident prices each call independently and
+    // recycles when needed, so grouping by task would only reorder assignments.
     //
     // The setters are independent writes on distinct sleeve indices; the
     // getTask pass is a read-back that arms completions — sleeves.core performs
@@ -746,8 +742,7 @@ export function goFactionFavor(ctx: DriverContext): GoRewardView["factionFavor"]
   // persists through installs, so its value is ALSO the reachable ladder
   // work over the remaining node (favorValue model) — including the
   // donation-gate crossing. Without the node-scoped term, an imminent
-  // install priced every favor event at zero and Go idled on a finished
-  // board (screenshot 2026-08-18).
+  // install would price every favor event at zero.
   const intent = ctx.state.topics.factions?.plan?.objective?.intent;
   // READ, do not recompute. Deriving this here meant rebuilding the whole
   // augmentation catalogue and re-walking every joined faction's rep ladder
@@ -825,58 +820,13 @@ let goPredictionParent: string | undefined;
  * the first actionable Black-turn observation. */
 let goTurnReadyAt: number | undefined;
 
-/** Certified playbook lines in live play.
+/** Certified playbook policy for live 5x5 games.
  *
- * The playbook is consulted for every 5x5 opponent it covers: a certified hit
- * is a proven move and a miss costs one table lookup, so mid-game consultation
- * is free upside (measured: never below the neural baseline, +3 games for
- * Tetrads).
- *
- * `maxWaitPhases` is separate and expensive. A certified line is only entered
- * from a phase-aligned game start, so the controller must defer the game until
- * the route's entry phase, playing no Go at all meanwhile. That is worth doing
- * only where the certified line beats ordinary neural play by enough to pay
- * for the wait. Per-opponent results from one 3,072-game combined arena
- * (2026-08-18, `go:combined:arena --games 3072 --unrouted-baseline`, 512 games
- * each), certified-root routing versus the neural baseline on ordinary phases:
- *
- * | Opponent | routed line | neural, unrouted |
- * |---|---:|---:|
- * | Illuminati | 505/512 | 364/512 |
- * | Tetrads | 512/512 | 487/512 |
- * | Daedalus | 512/512 | 490/512 |
- * | The Black Hand | 512/512 | 507/512 |
- * | Netburners | 512/512 | 511/512 |
- * | Slum Snakes | 512/512 | 511/512 |
- *
- * So Illuminati justifies a long wait, Daedalus and Tetrads a short one, and
- * the remaining three justify none — their certified lines win no games the
- * network does not already win.
- *
- * Cheat-unlocked games always consult the playbook now, with the certified
- * move overriding an engine cheat by default: the 2026-08-22 combined arena
- * (512 games/arm, installed merged playbook, random timing) measured
- * playbook-with-off-line-cheats at 500/512 for Illuminati against 466/512
- * (91.0%) for the pure neural+cheat play cheat games used to fall back to.
- *
- * `cheatSeedFromTurn` additionally allows the engine, from that Black turn
- * on, to play a double-move cheat whose first stone is the certified move —
- * deliberately leaving the line (fully neural afterwards). Same runs:
- *
- * | Opponent | combined (no cheat) | off-line cheats | seeded from 0 |
- * |---|---:|---:|---:|
- * | Illuminati | 504/512, 31.1 pw/turn | 500/512, 32.9 | 468/512, 29.2 |
- * | Daedalus | 512/512, 5.90 | 504/512, 5.93 | 511/512, 7.34 |
- * | Tetrads | 512/512, 5.82 | 508/512, 6.21 | 512/512, 7.69 |
- *
- * Seeding always pays for Daedalus/Tetrads (+24%/+32% node power per turn at
- * no win cost) and hurts Illuminati, whose neural baseline is too weak to
- * leave the certified line early. Delaying Illuminati's seeding was benched
- * too (same corpus, `--cheat-late`): from turn 4 still loses (477/512), and
- * from turn 8 (499/512, 32.98 pw/turn) is statistically identical to never
- * seeding (500/512, 32.89) — the line is spent by then — so Illuminati keeps
- * no threshold. Set one only where an arena run justifies it, recording the
- * run here. */
+ * `maxWaitPhases` bounds how long a new game may wait for a phase-aligned
+ * certified entry. `cheatSeedFromTurn` allows a later double-move cheat to use
+ * the certified stone before leaving the line; absent means the certified move
+ * always overrides the engine cheat. Per-opponent choices are explicit and
+ * covered by the Go scheduling and driver suites. */
 const GO_PLAYBOOK_OPPONENTS: Readonly<Record<string, {
   maxWaitPhases: number;
   /** Black turn index from which an on-line cheat may be seeded from the
@@ -921,9 +871,8 @@ type GoPlaybookMoveOrPass = { type: "move"; x: number; y: number } | { type: "pa
  * wins: by construction it beat the force-retained certified move
  * head-to-head in the same value batch, and it deliberately leaves the
  * certified line. On an unseeded evaluation the certified action overrides
- * everything — including an engine cheat, which would derail the line with
- * nothing banked (measured 2026-08-22: 91.0% for cheat-first Illuminati
- * against 97.7% certified-first). `seeded` therefore means the evaluation was
+ * everything — including an engine cheat, which can derail the line with
+ * nothing banked. `seeded` therefore means the evaluation was
  * ASKED to seed AND the engine did not report the benchmark dropped
  * (decision.preferredFirstMoveRetained !== false): a cheat from an evaluation
  * whose certified benchmark never competed must not displace the certified
@@ -1363,10 +1312,8 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
     // window, otherwise the preferred candidate itself. A hold starts nothing
     // this pass but the engine still plans toward the preferred target.
     const preferred = schedule.kind === "hold" ? schedule.preferred : schedule.game;
-    // Decided BEFORE the plan is published, so a refusal to start is visible
-    // instead of a silent early return: a quiet Go used to look identical
-    // whether it had judged the next game not worth the dodge or had failed
-    // outright, which is miserable to debug from a screenshot.
+    // Decide before publishing so a deliberate RAM refusal is distinguishable
+    // from an execution failure in the published plan.
     const ramPie = ctx.state.topics.farm?.ramPie;
     const usableGb = ramPie ? ramPie.farm + ramPie.prep + ramPie.share + ramPie.free + ramPie.reserve : 0;
     const freeGb = ramPie?.free ?? 0;
@@ -2836,24 +2783,10 @@ function affordableValueProduct(ctx: NeedContext): number {
   return product;
 }
 
-/** The published plan, but only if THIS bundle can read it.
- *
- * The plan outlives the code that wrote it: module state dies with the old bundle
- * while the topic lives in the realm store, which is the whole point of
- * `previousChoice` below. The corollary is that a plan written before a field
- * existed will be missing it, and the type — which describes what we write, not
- * what we may find — says nothing about that.
- *
- * THE BUG this exists to prevent: `plan.forecasts.node` was read unguarded, so
- * after a rebuild that added `forecasts` the refresh threw
- * `Cannot read properties of undefined (reading 'node')` on every pass. It threw
- * BEFORE publishing, so it could never replace the plan that was breaking it —
- * permanently wedged, reporting "waiting for the progression planner" while every
- * other feature ran normally. A stale plan has to be discarded, not trusted.
- *
- * Checked by the fields later code dereferences rather than by a version number:
- * there is no schema version to bump, and this cannot drift out of date silently
- * the way a hand-maintained one would. */
+/** Return the published plan only when this bundle can read its required shape.
+ * Realm topics can outlive the bundle that wrote them, so TypeScript's current
+ * write type does not prove that every stored field exists. Checking the fields
+ * later code dereferences avoids a separate schema-version list. */
 function readablePlan(state: GameState): ProgressionPlan | undefined {
   const plan = state.topics.progression?.plan;
   if (!plan?.forecasts?.node || !plan.forecasts.install) return undefined;
@@ -3294,10 +3227,8 @@ function progressionRefresh(ctx: NeedContext): void {
   // reset-sensitive progress — banked gate money, a live hacking or charisma
   // climb — which the flat overhead term cannot see. The exchange is priced
   // in the same BN-seconds the package score uses: the install activates
-  // `resetValueMult`, the reset re-earns `erasedSec`. Without it a run stood
-  // at the invite gate for twelve hours installing ~190s packages that each
-  // erased a ~1,600s re-climb. Route-mandatory installs and an already-open
-  // transaction are untouched.
+  // `resetValueMult`, and the reset re-earns `erasedSec`. Route-mandatory
+  // installs and an already-open transaction are untouched.
   const erasedSec = optionalInstallErasedSec(selectedEta?.needs ?? selectedStatus?.needs, view, rates, choice?.route);
   if (marginalInstall === true && !routeRequiresInstall && !pastPointOfNoReturn && resetValueMult < erasedSec) {
     marginalInstall = false;
@@ -3332,9 +3263,8 @@ function progressionRefresh(ctx: NeedContext): void {
     ...(purchasable !== undefined ? { purchasableAugmentation: purchasable } : {}),
     graftInProgress: ctx.state.topics.career?.currentWork?.type === "GRAFTING",
     money: player.money,
-    // Distortion-corrected (see earnedSinceInstall): the raw ledger plunges by
-    // an open position's whole cost, which held this figure at ~0 in a
-    // market-driven run and silently disarmed phaseOf's cash-ratio install arm.
+    // Distortion-corrected (see earnedSinceInstall): opening a position must
+    // not erase earned cash for phaseOf's cash-ratio install arm.
     earnedThisRun: earnedSinceInstall(ctx.state) ?? ctx.state.topics.farm?.totals?.moneyEarned ?? 0,
     factions: standings,
     favorToDonate: factions?.favorToDonate ?? 150,
@@ -3716,14 +3646,9 @@ export const gangModule: FeatureModule = {
 export const corpModule: FeatureModule = {
   driver: corp,
   reset: resetWithTopic("corp"),
-  // NO money claim while corporation actions are unimplemented (the driver's
-  // own contract: the stage machine plans but never executes). The old $150b
-  // `corp:seed` reserve at priority 85 was doubly wrong: the corp feature only
-  // unlocks once a corporation ALREADY exists (`hasCorporation` gates it), so
-  // the claim could never fund the founding it named — and being a standing
-  // reserve it permanently starved every investment band below 85 the moment
-  // the bankroll crossed $150b. Re-post it (at `corp:seed`) the day execute()
-  // spends money.
+  // Corporation actions are not implemented, and the feature only unlocks
+  // after a corporation exists. Publish no money claim until execute() can
+  // spend a grant on a concrete action.
   claims: () => [],
 };
 

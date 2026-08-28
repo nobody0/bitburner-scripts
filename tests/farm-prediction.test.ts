@@ -3,11 +3,9 @@ import { announcedRates } from "../game/lib/income.ts";
 import { depthCapGb, farmExperienceRate, farmIncomeRate } from "../shared/strategy/economics.ts";
 import type { GameState } from "../game/lib/state.ts";
 
-/** THE BUG THIS PINS, measured on a live BN12 install: with 5,342 hacks
- * launched and 0 landed, the farm's realized EMAs read `$0/s` and `0 exp/s`,
- * so `career` won the work slot for an Algorithms course as "the best hacking
- * experience producer" — against a farm nineteen minutes from being ten times
- * better at it. The committed solution already knew; nobody announced it. */
+/** Before the first landing, the farm's realized EMAs are zero even though
+ * launched work has a predictable future rate. Scheduling must use that
+ * prediction rather than treating the farm as absent. */
 
 function state(topics: Record<string, unknown>): GameState {
   return {

@@ -281,11 +281,8 @@ export async function playCombinedContinuation(
         // which is a property of the environment plus our own prompt dispatch,
         // not of who chose the move — and it is part of an entry's lookup key,
         // so zeroing it makes every later entry of the line unmatchable even
-        // when the network reproduces the certified move exactly. That is what
-        // stripping reproduced entries would otherwise cost (measured
-        // 2026-08-17 on Illuminati certified roots: 183/192 instead of
-        // 192/192, with 93% of strippable entries sitting inside a credit
-        // window). A genuine divergence produces a board and history no
+        // when the network reproduces the certified move exactly. A genuine
+        // divergence produces a board and history no
         // certified entry on this line carries, so a preserved credit cannot
         // match the wrong entry; it only keeps the right one reachable.
         offCertificate = true;

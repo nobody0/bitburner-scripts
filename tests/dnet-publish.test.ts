@@ -230,10 +230,8 @@ describe("the map's layout inputs are unambiguous", () => {
   });
 
   test("the frontier is what is adjacent to something we HOLD, not what has its own map", () => {
-    // THE BUG this replaced: `authState` used to ask whether the host had its
-    // own fresh `neighbours` fact. That fact only exists once an agent is
-    // standing on the host, which only happens after it is cracked — so every
-    // host we could crack right now reported "(no connection)" and the panel
+    // Frontier reachability comes from an adjacent held host; the target's own
+    // `neighbours` fact is not available until an agent stands there.
     // called the entire work queue unreachable. Upstream's rule looks OUTWARD:
     // `hasAdminRights || serversOnNetwork.some((n) => n.hasAdminRights)`.
     //

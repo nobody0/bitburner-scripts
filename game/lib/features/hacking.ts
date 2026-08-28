@@ -138,10 +138,8 @@ export function resetHackingState(): void {
  * that starts eating the tick budget is visible before it starts missing
  * slots. */
 let pumpMaxMs = 0;
-/** The same cost as a SHARE of wall time, which is the reading peak duration
- * cannot give: a live run held `pumpMaxMs` at a plausible ~92 ms while running
- * ~11 pumps a second, i.e. the planner owned the whole thread and nothing in
- * the panel said so. Summed here, divided at the drain. */
+/** The same cost as a SHARE of wall time, which peak duration cannot express.
+ * Summed here, divided at the drain. */
 let pumpMsSum = 0;
 let pumpCount = 0;
 /** `performance.now()` when the current occupancy window opened. */
@@ -198,11 +196,8 @@ function chargeValue(game: GameState): ChargePricingInput | undefined {
 
 function shareValue(game: GameState, caps: DriverContext["caps"]): ShareValue | undefined {
   // Share buys faction-rep rate, and every point of faction rep (and the
-  // favor it becomes) is erased when the node ends by destroy. Near that
-  // ending the surplus RAM's alternative uses (farm ops, residents, Go) are the
-  // only ones that still exist — measured failure: 99.9% of a 9.13PB fleet
-  // soaked into share for an objective nobody was even working, starving the
-  // exp climb that WAS the node's critical path.
+  // favor it becomes) is erased when the node ends by destroy. Near that ending,
+  // only uses that advance the remaining destroy route retain value.
   if (game.topics.progression?.plan?.endingByDestroy === true) return undefined;
   const marginals = game.topics.progression?.plan?.marginals;
   if (!marginals) return undefined;
@@ -214,9 +209,8 @@ function shareValue(game: GameState, caps: DriverContext["caps"]): ShareValue | 
   // Share may consume the residual free tail whenever the ACTIVE work already
   // earns faction rep: the bonus multiplies a rate being produced anyway, and
   // share workers stop on demand. This is deliberately a statement about the
-  // present, not a forecast — the work planners keep pricing rep with the
-  // MEASURED live sharePower, and seeing it rise once share runs is exactly
-  // how "rep is cheap right now" reaches them.
+  // present, not a forecast: work planners price reputation with the current
+  // measured sharePower.
   const currentWorkEarnsRep = currentWork?.type === "FACTION"
     && (currentWork.workType === "hacking" || currentWork.workType === "field" || currentWork.workType === "security");
   let reputationSecondsPerBonus = 0;
@@ -697,12 +691,9 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
   });
 }
 
-/** Per-host retry backoff for failed backdoor attempts. The predecessor was a
- * permanent one-attempt latch, and a transient failure (a connect chain broken
- * by a concurrent terminal user, a resident recycled mid-flight) silently cost
- * the whole faction join for the rest of the BitNode. Exponential 30s -> 10min:
- * cheap enough to recover from a transient, slow enough that a structurally
- * impossible host does not retry the walk every pass. Cleared on reset. */
+/** Per-host exponential retry backoff for failed backdoor attempts: 30 s to
+ * 10 min. This recovers from transient terminal/resident races without retrying
+ * a structurally impossible walk every pass. Cleared on reset. */
 const backdoorBackoff = new Map<string, { attempts: number; nextAt: number }>();
 const BACKDOOR_BACKOFF_BASE_MS = 30_000;
 const BACKDOOR_BACKOFF_CAP_MS = 600_000;
@@ -910,11 +901,9 @@ function investmentRank(investment: RamInvestment): number {
  * What is NOT admissible is the case both are zero: the formulas already
  * multiplied in everything that scales income (`ScriptHackMoneyGain`, the
  * manipulation value of held positions), so a zero there is a measurement of
- * worthlessness, not an absence of one. The unmeasured `hard`/Infinity claim
- * used to fire anyway and, in a node whose farm pays nothing, converted the
- * entire bankroll into servers that could never repay it — starving the one
- * feature (the market) that could have measured a positive return with the
- * same dollars. When the market later holds a manipulable position, the farm
+ * worthlessness, not an absence of one. An unpriced hard claim must not spend
+ * on a farm whose calculated return is zero. When the market later holds a
+ * manipulable position, the farm
  * score's `stockIncome` term turns this same gate back on BY CALCULATION. */
 function isEvidencedInvestment(investment: RamInvestment): boolean {
   return investment.valuePerDollar.state === "measured"
@@ -974,13 +963,9 @@ function ramInvestment(ctx: RamInvestmentContext, now = Date.now()): RamInvestme
     // cheapest-per-GB one.
     //
     // Below the softcap knee cloud cost is linear (`ram * 55000`), so every
-    // size has identical $/GB and the cheapest-per-GB tiebreak always returns
-    // the biggest rung — 64 GB at $3.3m. During bootstrap that is unaffordable
-    // forever: nothing is bought, so income never grows, so it stays
-    // unaffordable. That is the same self-reinforcing deadlock
-    // `capInfrastructureByObservedFleet` caused earlier in this workstream.
-    // Measured on bn1-speedrun seed 1: 4 servers bought all run, fleet 348 GB
-    // against 9,052 GB working, and total earnings $15.3m against $1b.
+    // size has identical $/GB and a cheapest-per-GB tie-break selects the
+    // largest, potentially unaffordable rung. Prefer the largest rung within
+    // current cash so bootstrap income can compound.
     //
     // `roundedRamPurchase` already answers "largest rung within this budget";
     // the marginal quote remains the fallback so an unaffordable-but-superior
@@ -1017,12 +1002,7 @@ function ramInvestment(ctx: RamInvestmentContext, now = Date.now()): RamInvestme
     //
     // Valuation is continuous (the supply curve prices every GB), but the
     // purchase is one indivisible rung. Claiming `valuableGb * costPerGb`
-    // asks for a number nothing will ever spend: the water-filled grant is a
-    // per-pass slice of the pool, it does not accumulate, and execution then
-    // attempts a rung the slice never covers. Measured on bn1-speedrun seed 1:
-    // only 40 purchases were ever ATTEMPTED across the whole run (4 succeeded,
-    // 36 failed "insufficient money"), the fleet crawled to 348 GB against
-    // 9,052 GB working, and $1b was never reached.
+    // requests a per-pass slice that may never cover the executable rung.
     //
     // Aligning claim == grant == execution on the rung cost is what lets the
     // reserve accumulate to something buyable. The curve still decides WHETHER
@@ -1036,9 +1016,7 @@ function ramInvestment(ctx: RamInvestmentContext, now = Date.now()): RamInvestme
   // function publishes a single claim, so the comparison cannot happen in the
   // arbiter — an unaffordable winner hides every affordable alternative from
   // it. Price the wait with the same DCF primitive the arbiter applies to step
-  // claims. Measured on bn1-speedrun seed 3: without this, all income was
-  // parked from 2.9h to 7.5h saving toward one $318m home rung while $110k
-  // cloud rungs stood ready, and $1b was never reached in 8h.
+  // claims, so an unaffordable candidate cannot hide a productive affordable one.
   const evidenced = candidates.filter(isEvidencedInvestment);
   const money = ctx.state.topics.player?.money ?? 0;
   const income = bestIncomePerSec(ctx.state);
@@ -1259,9 +1237,8 @@ export type ServerAccessAction = {
 
 /** Dear openers only buy for targets within this many multiples of current
  * skill: near enough that the blocking-priority spend is actually imminent.
- * Cheap openers stay unbounded — buying BruteSSH the moment CSEC's need
- * exists is what keeps the window open before the bankroll is spent on
- * fleet (measured: gating it cost factions-join ~5%). */
+ * Cheap openers stay unbounded so early route needs can buy them before other
+ * investments consume the bankroll. */
 const OPENER_SKILL_ANTICIPATION = 4;
 /** An opener at or below this price is "cheap": always bought ahead. Above
  * it, the skill-proximity bound applies — a $250m SQLInject for a 505-skill
@@ -1479,8 +1456,7 @@ export function serverAccessPlan(
   // this on its own: at the endgame nothing bids for money, the waterline
   // vanishes, and its no-model fallback (forgone slot money < buy cost) reads
   // a $250m SQLInject as precious next to a "free" write that the slot never
-  // actually schedules. Measured on bn1-full seed 2: the plan sat in write
-  // limbo for the final 37 minutes, one root away from destroying the node.
+  // actually schedules.
   const routeBlockingRoot = terminalRootNeed(ctx.board, primary.host);
   if (!program || routeBlockingRoot || !writeInsteadOfBuy(ctx, program)) return { primary };
   const concurrentBackdoor = candidates.find((entry) => entry.entry.action === "backdoor")?.entry;
@@ -1615,12 +1591,9 @@ function shouldWriteProgram(game: GameState, program: ProgramOption): boolean {
 /** What the player-work slot would do over a `writeSec` window if it were not
  * writing this program — the write's real opportunity cost.
  *
- * READ FROM THE AUCTION, not from career's own menu. The predecessor priced the
- * write against `career.plan.ranked[0]`, so the only alternatives it could see
- * were career's: reputation work — the thing that actually loses twenty minutes
- * to a write — was invisible, and so was any other feature bidding for the same
- * slot. `arbitration.slotValues` is every bid and what it is worth, which is
- * exactly the question being asked here.
+ * Read this from the auction rather than career's menu: the opportunity cost
+ * includes every feature bidding for the slot. `arbitration.slotValues` is the
+ * complete bid set and its current worth.
  *
  * The scaling is the part that is easy to get wrong. A bid's `valueSec` is the
  * BN-seconds a SUSTAINED rate is worth over the rest of the route; occupying the
@@ -2009,15 +1982,8 @@ export const hacking: FeatureDriver = {
     // The claim is CONTINUOUS — it asks for `valuableGb * costPerGb`, the
     // whole value of the headroom — while execution buys ONE indivisible rung
     // at `option.cost`. Those are different numbers, and the water-filled
-    // grant is bounded by the pool, so acting on the claim without checking
-    // the grant means attempting a purchase nobody authorised. The old
-    // `stepInfrastructure(options, horizon, availableMoney)` filtered on
-    // affordability; that filter was lost when the supply curve replaced it.
-    //
-    // Measured on bn1-speedrun seed 1: EVERY buy decision had granted < cost
-    // (4,615 of 4,615), producing 28,859 "purchase refused" results against
-    // 46 successes. The fleet crawled 92 -> 284 GB where the working run
-    // reached 9,052 GB, and the run never reached $100m.
+    // grant is bounded by the pool, so execution must verify that the grant
+    // covers the indivisible purchase.
     //
     // Skipping is not a denial: money keeps accruing, the grant grows with
     // it, and the rung is bought on the pass it becomes affordable. That is
@@ -2064,12 +2030,8 @@ export const hackingModule: FeatureModule = {
       const program = programForPortNeed(ctx.state, pending.server.numOpenPortsRequired ?? 0);
       if (program) {
         const purchaseCost = portOpenerPurchaseCost(ctx.state, pending.server.numOpenPortsRequired ?? 0);
-        // A route-TERMINAL root need escalates the purchase above the
-        // faction reserve bands. Measured on bn1-full seed 2: the node's
-        // LAST step (root w0r1d_d43m0n) needed a $280m opener while $120e12
-        // sat in the bank, and the fixed band-65 claim was granted $0 for the
-        // final 37 minutes of the horizon because aug-fund (90) and donate
-        // (70) reserves drained the pool above it every pass.
+        // A route-TERMINAL root need escalates the purchase above faction
+        // reserve bands because the node cannot finish without that opener.
         const routeBlocking = terminalRootNeed(ctx.board, pending.host);
         claims.push(
           {
@@ -2157,15 +2119,9 @@ export const hackingModule: FeatureModule = {
           mode: "spend",
           // A RUNG IS INDIVISIBLE, even though its value is continuous.
           //
-          // The supply curve prices every GB smoothly, which made
-          // `shape: "continuous"` look right — but a continuous claim accepts
-          // PARTIAL grants, and a partial grant toward a $3.5m server buys
-          // nothing. Measured on bn1-speedrun seed 1 while continuous: the
-          // grant covered the rung cost in 1% of decisions (38 of 4,469), only
-          // 471 purchases were attempted all run, and the fleet reached 348 GB
-          // against 9,052 GB working.
-          //
-          // So valuation stays continuous and ALLOCATION becomes a step: the
+          // The supply curve prices every GB smoothly, but a partial grant
+          // toward a server rung buys nothing. Valuation stays continuous and
+          // ALLOCATION becomes a step: the
           // reserve accumulates until one exact rung is affordable, then buys
           // it. `pricing: "economic"` keeps it ranked against lambda rather
           // than jumping the hard-priority lattice.

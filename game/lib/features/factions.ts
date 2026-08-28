@@ -80,9 +80,7 @@ let lastResult: FactionPlan["lastResult"];
 let chainWake = false;
 /** The work-completion notice this driver last reacted to. The notice is a
  * SHARED single slot (work-completion.ts) that career may take several passes
- * to consume — without the latch, factions re-runs its full planner every
- * 200ms pass of that window, for every crime completion, forever (measured:
- * the factions-join profile spent most of its CPU in stepFactions at 5 Hz). */
+ * to consume. The latch prevents repeated full planning for the same notice. */
 let seenCompletion: unknown;
 /** A faction package is ready to work but lost Player.currentWork to a
  * completable task. Wake exactly at that task's completion so ordinary
@@ -165,8 +163,8 @@ function requirementView(state: GameState, companyWork?: RequirementView["compan
 
   // Price backdoor blockers with the real formulas (hackTime/4 at the acting
   // skill, measured exp rate for the wait) instead of the interpreter's
-  // nominal constants. Optional by construction: without a player snapshot
-  // the interpreter degrades to the old coarse estimate.
+  // nominal constants. Without a player snapshot, the interpreter uses its
+  // coarse fallback estimate.
   const viewNodeMults = effectiveBitNodeMultipliers(
     progression?.bitNode,
     progression?.sourceFiles["12"] ?? 0,
@@ -751,9 +749,8 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
       const offer = (ctx.state.topics.factions?.offers ?? []).find((entry) => entry.name === action.augmentation);
       const catalogAug = view.catalog.get(action.augmentation);
       const estimated = catalogAug ? augCost(catalogAug, view.priceContext).moneyCost : 0;
-      // Max of the probed offer and the locally escalated estimate: an offer
-      // from a never-probed faction used to fall back to 0, silently waiving
-      // the funding gate entirely.
+      // Use the larger of the probed offer and locally escalated estimate so an
+      // unprobed faction cannot waive the funding gate.
       const fundNeeded = Math.max(offer?.price ?? 0, estimated);
       if (fundNeeded > 0 && moneyGrantFor(ctx, "aug-fund") < fundNeeded) {
         // Claims are collected from the previously published plan. After one
@@ -1146,12 +1143,8 @@ function needs(ctx: NeedContext): Need[] {
       urgency: isChainHead || (remaining.get(blocker.faction) ?? 0) <= 1 ? "blocking" : "wanted",
     });
   }
-  // Near-complete NON-OBJECTIVE gates: a faction sitting ONE reachable,
-  // other-owned blocker away from an invite is worth asking for even when it
-  // is not the objective. The measured failure: CyberSec was one cheap CSEC
-  // backdoor from an invite for an entire two-hour run while the objective
-  // was deadlocked on an unservable employment requirement — and the board
-  // never heard about the backdoor because only objective blockers post.
+  // Near-complete non-objective gates remain worth posting when exactly one
+  // reachable, other-owned blocker separates them from an invitation.
   // Urgency "wanted", never "blocking": these must not preempt real work.
   const gates = ctx.state.topics.factions?.gates ?? {};
   const posted = new Set(plan.blockers.map((blocker) => `${blocker.kind}\0${blocker.subject ?? ""}`));
@@ -1258,11 +1251,10 @@ function needs(ctx: NeedContext): Need[] {
     });
   }
   // Positional needs are EXCLUSIVE — one body, one city — and a met gate
-  // needs the body to STAND STILL until its invite fires. Several city needs
-  // at once sent a run teleport-flapping (every arrival satisfied one need
-  // and the next city instantly demanded travel; no invite ever landed).
-  // Post at most ONE city need, and none while any unjoined gate stands
-  // fully met — that invite is exactly what standing still buys.
+  // needs the body to remain in place until its invite fires.
+  // Post at most ONE city need — the most valuable — and none at all while
+  // any unjoined gate stands fully met, because that invite is exactly what
+  // standing still buys.
   const inviteImminent = Object.values(gates).some(
     (gate) => !gate.joined && !gate.invited && gate.missing.length === 0,
   );
@@ -1323,24 +1315,10 @@ function nextWorkFaction(state: GameState): string | undefined {
   }
   if (best) return best.name;
 
-  // "Is there faction work worth doing" is a DURABLE fact, and the bug was deriving
-  // it from a momentary one.
-  //
-  // The gap above is the current breakpoint's, and reaching a breakpoint closes it.
-  // That made this return `undefined` for one pass — not because the answer had
-  // changed, but because the planner had not yet named the next target. Dropping a
-  // claim is how an incumbent RELEASES the slot (arbiter rule 3), so the feature
-  // forgot what it wanted between breakpoints and handed the slot away every time.
-  // Measured on a live BN12 run: 91 s of reputation per 650 s cycle, turning a 14 h
-  // Daedalus grind into ~100 h.
-  //
-  // So answer the durable question directly — is there reputation still worth
-  // earning at a faction we have joined — rather than inferring it from whichever
-  // breakpoint happens to be current. This is the weaker question the doc above
-  // describes, and asking it HERE cannot undo the breakpoint decision: it names no
-  // target and changes no plan. WHAT to work on stays entirely the planner's call;
-  // this only reports that the answer is not "nothing". Re-issuing the SAME claim id
-  // is what preserves incumbency, so the intent's faction is preferred.
+  // Answer the durable question—whether joined-faction reputation is still
+  // useful—rather than inferring it from the current breakpoint, which can be
+  // momentarily complete before the planner names the next target. This names
+  // no plan target; reissuing the same claim id only preserves incumbency.
   //
   // When there is genuinely nothing left, it still returns `undefined` and the slot
   // is released — otherwise factions would sit on it doing nothing and `career`
@@ -1417,16 +1395,9 @@ function claims(ctx: ClaimContext): Claim[] {
     (offer) => offer.name === objectiveAug && graftOffer?.affordableRep !== true,
   );
 
-  // Fund whatever the PLAN says it will buy next, not whichever objective
-  // augmentation happens to come first by value.
-  //
-  // THE BUG this replaces: the claim was derived from `plan.objective`, so by the
-  // time the last-chance drain ran — objective complete, nothing left to work
-  // toward — there was no objective augmentation, no claim, and no grant. The
-  // purchase tests the GRANTED budget, so the drain bought nothing and every
-  // install silently discarded the cash on hand. Once the install barrier began
-  // blocking on "an augmentation is still purchasable" that became a hard
-  // deadlock: progression waited for a purchase factions was never funded to make.
+  // Fund the plan's next purchase rather than deriving the claim from its
+  // objective. The final drain may have no objective left, but its purchase
+  // still requires a grant before progression can install.
   //
   // `plan.nextBuy.price` is our own escalated price; the probed offer is the
   // game's. Reserve the larger of the two — a reserve that is short by a rounding
@@ -1551,14 +1522,9 @@ function claims(ctx: ClaimContext): Claim[] {
   // remembering one. Reputation is exactly predictable, so there is no reason
   // to bid a memory.
   //
-  // The predecessor fell back to the measured EWMA, and the passes that fallback
-  // existed for are precisely the passes on which the EWMA is zero or unset: a
-  // faction just joined has never been worked. `{ reputation: 0 }` prices as
-  // UNPRICED and loses the slot to any crime holding cash — the exact outcome
-  // the fallback was written to prevent. It also announced reputation alone,
-  // dropping the combat and charisma experience field and security work pay
-  // alongside it, so a posted combat gate went to crime while the reputation
-  // that same second could have earned did not happen.
+  // A newly joined faction has no measured EWMA, so predict the complete work
+  // output instead of publishing an unpriced zero-reputation bid. Include the
+  // experience and security-work pay earned alongside reputation.
   const workProduces = plan.workRate !== undefined && plan.workRate.faction === wanted
     ? plan.workRate.produces
     : predictedWorkProduces(ctx, wanted);

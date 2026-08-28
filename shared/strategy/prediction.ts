@@ -27,15 +27,10 @@ import { THREAD_GROW_UPSCALE } from "./jit.ts";
  * dispatcher can (a) skip a hack that would land above min security and
  * (b) resize the grow for the money that will ACTUALLY be there.
  *
- * The legacy scripts kept a cached timeline of the same fold
- * (bitburner-2023 src/_lib/simulation.ts) and inverted its cache invalidation
- * in three places, leaving the guards blind. There is deliberately NO cache of
- * the FOLD here — that is what kills the whole invalidation bug class.
+ * There is deliberately no cache of the fold; callers provide the current
+ * in-flight ledger.
  *
- * The ledger itself is no longer small, though: a late-game pipeline tracks
- * tens of thousands of ops on one target, and a profile of the running game
- * showed re-filtering and re-sorting that list on every launch dominating the
- * dispatcher. Callers that already hold it in landing order say so with
+ * Callers that already hold the ledger in landing order say so with
  * `presorted` and pay for the fold alone.
  *
  * Skill is held constant across the fold (percent/effects at completion use

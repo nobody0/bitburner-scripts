@@ -115,8 +115,7 @@ describe("an augmentation's state is a word, not a shade of dot", () => {
     expect(by(QUEUED)?.state).toBe("queued");
     expect(by(PLANNED)?.state).toBe("planned");
     // With no live offer there is nothing to say `rep short` or `locked` WITH:
-    // the bundled table knows neither this node's sellers nor the reputation
-    // gate, and it used to answer both from its own static columns.
+    // the bundled table knows neither this node's sellers nor its scaled reputation gate.
     expect(rows.some((row) => row.state === "unknown")).toBe(true);
     expect(rows.some((row) => row.state === "locked")).toBe(false);
   });
@@ -127,7 +126,7 @@ describe("an augmentation's state is a word, not a shade of dot", () => {
     expect(html).toContain(`class="augstate installed"`);
     expect(html).toContain(`class="augstate queued"`);
     expect(html).toContain(`class="augstate planned"`);
-    // `score` is published by strategy and used to be rendered nowhere.
+    // Render the strategy-published score.
     expect(html).toContain("42.50");
     setView("augs.mode", "available");
   });
@@ -234,8 +233,7 @@ describe("the bundled catalogue is not presented as a measurement", () => {
   test("an augmentation with no live offer is unknown, not rep short", () => {
     const rows = augRows(factionsState({ offers: [] }));
     const bitwire = rows.find((row) => row.name === "BitWire")!;
-    // CyberSec (joined) sells it in the bundled table, which used to be enough
-    // to print "rep short" against an unscaled base reputation.
+    // A bundled seller is not evidence of a live, scaled reputation offer.
     expect(bitwire.priced).toBe("bundled");
     expect(bitwire.state).toBe("unknown");
     expect(rows.some((row) => row.state === "short")).toBe(false);
@@ -264,8 +262,7 @@ describe("the bundled catalogue is not presented as a measurement", () => {
     setView("augs.mode", "all");
     setView("augs.selected", "BitWire");
     const html = TABS["factions"].render(factionsState({ offers: [] }));
-    // A tile value is a TEXT slot: the chip used to arrive escaped, so the
-    // operator read `&lt;span class=…` where the word should have been.
+    // A tile value is an HTML slot so the state chip remains markup.
     expect(html).toContain(`<div class="v"><span class="augstate`);
     expect(html).toContain("the bundled v3.0.1 table");
     setView("augs.selected", "");

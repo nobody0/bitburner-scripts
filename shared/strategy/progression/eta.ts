@@ -92,10 +92,8 @@ export interface RouteRates {
   hackingExp?: number;
   /** Measured hacking experience per second. The skill curve is exactly
    * level = mult * (32*ln(exp + 534.6) - 200), so with an exp rate the time to
-   * any level is computable in closed form — extrapolating the LEVEL rate
-   * instead systematically underprices high targets (measured: the regrow leg
-   * priced 2.6h at 3.5h into a run whose real regrow took 13.8h, collapsing
-   * the hacking channel's worth exactly when augmentations were chosen). */
+   * any level is computable in closed form. Extrapolating the level rate would
+   * underprice high targets because the skill curve is nonlinear. */
   hackingExpPerSec?: number;
   /** Effective live hacking skill multiplier (player mult x node mult). */
   hackingSkillMult?: number;

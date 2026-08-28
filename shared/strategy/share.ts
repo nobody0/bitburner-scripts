@@ -64,12 +64,8 @@ function channelMarginal(seconds: number, total: number | undefined, perGb: numb
  * fraction of the gated time: `g / (1 + g)`, never more than ALL of it.
  *
  * `secondsPerRelativeRate` is a derivative; multiplying it by a large relative
- * gain extrapolates the tangent line past the curve it belongs to. Measured on
- * bn8-manipulation seed 1: a 512 GB home rung claimed a +294% exp-rate gain,
- * the linear form priced it at 2.94x the whole hacking-gated node time —
- * saving 2.94 nodes of time on one clock — and that impossible number outbid
- * the working capital of the node's only income. The exact form says tripling
- * a rate saves 74.6% of the gated time, which loses that auction, and it is
+ * gain extrapolates the tangent line past the curve it belongs to. The exact
+ * form bounds the saving below the entire gated interval and is
  * IDENTICAL to the derivative in the small-g limit where every true marginal
  * decision lives. */
 export function relativeGainSaving(g: number): number {
@@ -159,19 +155,15 @@ export function shareCutover(
   // An ABSENT hacking marginal is not a zero hacking marginal.
   //
   // `hackMarginalValue` only counts money/exp seconds the forecast flagged
-  // `critical`. On a reputation-bound run neither is flagged, so it returns 0
-  // — and treating that as "hacking earns nothing" sent the crossing to
-  // Infinity and handed share the entire fleet. Measured on bn1-progression
-  // seed 1 against a true share-off control (launchShare stubbed out):
-  // hacking income $15.36q -> $12.23q (-20%) for the SAME augmentation count.
-  // Share bought nothing and cost a fifth of the farm.
+  // `critical`. On a reputation-bound run neither may be flagged, so zero does
+  // not establish that hacking has no value.
   //
   // So an unmeasured marginal must be conservative: no crossing, no share.
   // The genuine "hacking really does earn nothing" case (BN8, where hacked
   // money is zeroed) has to arrive as a POSITIVE statement — a measured
   // income rate of zero while the farm is actually running — rather than as
   // an absent critical-path label. Until the value model can tell those two
-  // apart, share stays off rather than shipping a measured regression.
+  // apart, share stays off conservatively.
   let crossing = 0;
   if (k > 0 && c > 0 && hack !== undefined) {
     if (hack === 0) crossing = fleet;
@@ -190,18 +182,9 @@ export function shareCutover(
       crossing = low;
     }
   }
-  // ONLY the marginal crossing decides the split.
-  //
-  // A previous version also took `fleet - depthCapGb` as a lower bound, on the
-  // theory that RAM past the current target's pipeline depth has zero hack
-  // marginal and is therefore free. Measured on bn1-progression seed 1, that
-  // was false and expensive: share claimed 130 TB, hacking income fell from
-  // $18.05q to $12.23q (-32%), and the augmentation count was 10 either way —
-  // so the RAM was bought at a third of the farm's income and returned
-  // nothing. RAM above one target's depth cap is not idle; it is the farm's
-  // growth headroom (prep for the next target, and the bigger targets skill
-  // growth unlocks), which `depthCapGb` does not describe because it is scoped
-  // to the CURRENT target only.
+  // Only the marginal crossing decides the split. RAM above the current
+  // target's depth cap is still farm growth and future-prep headroom, so it is
+  // not a free lower bound for share.
   //
   // The crossing needs no such help: if hacking's measured marginal really is
   // zero, share takes the fleet. That is the BN8 case, handled by the same

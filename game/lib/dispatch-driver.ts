@@ -79,12 +79,9 @@ export function drainCompletions(state: DriverState, target?: string): Completio
 /** Build the planner's view: static fields from the last probed scan, live
  * security/money for the hot targets, live used RAM from our own ledger.
  *
- * The two live getters go through the PROXY, and that is why this function is
- * async even though it is on the batcher's hot path. The old rule ("never
- * dodge inside a timing-critical window") was about the DODGER's cost: every
- * dodged call exec'd a throwaway stub, tens of milliseconds. A proxy call on a
- * warm resident is an in-realm function call behind a microtask, so the rule
- * does not carry over and start.js gets its 0.2 GB back.
+ * The two live getters go through the proxy, so this hot-path function is
+ * asynchronous. A warm resident serves them as in-realm calls behind a
+ * microtask, without spawning a throwaway dodge stub.
  *
  * The one residual risk: a proxied call can force a resident RESPAWN — a real
  * process spawn — when the resident's budget is full. Both members here are

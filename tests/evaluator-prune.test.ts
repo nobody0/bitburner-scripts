@@ -160,13 +160,12 @@ function runTimeline(scenario: Scenario, prune: boolean): {
 }
 
 describe("depth-capped incumbent: the prep pick is rate-based, not score-based", () => {
-  // The regression three independent review passes converged on: with a fleet
-  // far beyond the incumbent's pipeline depth cap, a candidate whose per-GB
+  // With a fleet far beyond the incumbent's pipeline depth cap, a candidate whose per-GB
   // SCORE is below the incumbent's can still win the prep pick on RATE
   // (economics.ts: rate = score·min(fleetGb, depthCap)). A prune thresholded
-  // on raw score removes exactly that candidate; the fix thresholds on the
-  // incumbent's effective per-GB rate. This scenario is built so the old
-  // threshold WOULD have pruned the winner (preconditions asserted, so the
+  // on raw score removes exactly that candidate; threshold on the incumbent's
+  // effective per-GB rate. Preconditions ensure the score threshold would
+  // prune the winner, so the
   // test fails loudly if tuning drifts instead of silently covering nothing).
   test("a lower-score deeper-pipeline upgrade survives the prune and wins prep", async () => {
     const { makeHackContext } = await import("../shared/formulas.ts");
@@ -192,7 +191,7 @@ describe("depth-capped incumbent: the prep pick is rate-based, not score-based",
     // as 1/BATCH_INTERVAL_S, and a literal quietly stops being "far beyond"
     // when the landing grid tightens.
     const fleetGb = Math.max(depthCapGb(candSolution), depthCapGb(curSolution) * 2);
-    // Preconditions that make this a regression test at all:
+    // Preconditions that make the pruning distinction observable:
     expect(candSolution.score).toBeLessThan(curSolution.score); // score says keep farming smallfast...
     expect(scoreUpperBound(ctx, bigslow)).toBeLessThan(curSolution.score); // ...and the OLD threshold would prune bigslow...
     expect(farmIncomeRate(candSolution, fleetGb)).toBeGreaterThan(farmIncomeRate(curSolution, fleetGb) * 1.5); // ...but its RATE wins.

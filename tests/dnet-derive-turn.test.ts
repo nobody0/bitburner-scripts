@@ -700,13 +700,12 @@ describe("the derive scheduler settles", () => {
    * Be honest about what this file can and cannot show. The loop is an
    * emergent timing property of a live net, and it does not form in this
    * harness: after the first pass there is nothing left to describe, so no
-   * further fact is generated and the chain ends on its own whether or not the
-   * scheduler is correct. Attempts to force it here passed against the BROKEN
-   * scheduler too, which makes them worse than no test at all.
+   * further fact is generated and the chain ends on its own regardless of the
+   * scheduler implementation.
    *
    * So this pins only the property that is genuinely observable here — a quiet
    * net settles and stays settled. The chain bound itself is verified on the
-   * `bn15-full` sim repro and by the in-game derive counter. */
+   * `bn15-full` simulation and by the in-game derive counter. */
   test("a quiet net settles and stays settled", async () => {
     const handle = await bootController();
     let describes = 0;

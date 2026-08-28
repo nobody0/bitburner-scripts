@@ -59,8 +59,7 @@ lane({ feature: "dnet", bn: 1 }).describe("buying darknet access", () => {
       },
     });
 
-    // Nothing may report itself unmodelled. Before this model existed the
-    // purchase threw `subsystem darknet population` on every pass.
+    // A modeled purchase must not report any unmodeled subsystem.
     expect(result.unmodeled).toEqual({});
     expect(result.crashes).toEqual([]);
     // In BN1 with no SF15 the controller cannot seed darkweb until the program
@@ -78,10 +77,7 @@ lane({ feature: "dnet", bn: 1 }).describe("buying darknet access", () => {
   }, 120_000);
 
   test("the controller plants a resident on darkweb and the net gets MAPPED", async () => {
-    // The end-to-end claim, and the one the whole change exists to make good on.
-    // Before this, the Darknet panel showed `darkweb` and nothing else no matter
-    // how long a run went, because home's own probe can only ever see one hop
-    // and nothing ever stood anywhere else.
+    // A resident must extend discovery beyond home's one-hop probe.
     let knownHosts = 0;
     let adjacency = 0;
     let seedOutcome = "";
@@ -493,8 +489,7 @@ describe("cache files, which are what the purchase is actually worth", () => {
   });
 
   test("a missing cache THROWS, exactly as upstream does", () => {
-    // This test used to assert the opposite, and the assertion was wrong rather
-    // than the engine: `openCache` raises through `helpers.errorMessage` on both
+    // `openCache` raises through `helpers.errorMessage` on both
     // its bad-path and not-found branches (`NetscriptFunctions/Darknet.ts:292-303`).
     // The distinction is not pedantic. A throw KILLS THE CALLING SCRIPT, so a
     // job that opened a cache off a listing that had gone stale under it would

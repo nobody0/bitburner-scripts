@@ -11,15 +11,12 @@ import { INSTALL_OVERHEAD_SEC } from "./eta.ts";
  * strategy: its decision is "given what each feature can deliver per hour
  * under this node's multipliers, when is a reset worth it".
  *
- * The run-phase machine is taken from the predecessor scripts
- * (src/main.ts:1417-1573), which is the most concrete prior art available for
- * a decision most scripts fudge:
+ * The run-phase machine retains the predecessor's three-state shape:
  *
  *   start -> finishUp -> ending
  *
- * with promotion on the affordable augmentation set's VALUE PRODUCT, then on
- * cash exceeding half of what the run earned. It is a starting shape refined
- * by an install-timing rule, not a copied implementation. */
+ * with promotion refined by the current install-timing rule.
+ * Reference: `bitburner-2023/src/main.ts:1417-1573` at commit 43e8585. */
 
 export type RunPhase = "start" | "finishUp" | "ending";
 
@@ -392,11 +389,8 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
   // empty queue until the sweep has actually converted it.
   // A favor crossing IS activation value in itself — banking it is the whole
   // point of the reset (bankedFavorActivationValue already prices it), and the
-  // donate-path route step depends on it. Without this, a run whose queue was
-  // empty at the crossing deadlocked: no install wanted -> no final sweep ->
-  // nothing queued -> no install wanted. Measured on bn1-full seed 2: the
-  // route stood 13.5 minutes from completing the node for the last 8 hours of
-  // the horizon while the favor-banking install was never armed.
+  // donate-path route step depends on it. Otherwise the empty queue and final
+  // sweep wait on each other.
   const somethingToActivate =
     view.queued.length > 0 || view.resetRealizable === true || crossings.length > 0;
   const routeInstallWanted = view.routeRequiresInstall && somethingToActivate;
@@ -464,8 +458,7 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
 
 // --- BitNode ordering analysis ---------------------------------------------
 
-/** The predecessor scripts' explicit ordering, retained as the analytical
- * baseline against which candidate orders are measured. */
+/** Analytical baseline from `bitburner-2023/src/main.ts` at commit 43e8585. */
 export const BASELINE_ORDER: [number, number][] = [
   [4, 3], [1, 3], [5, 1], [2, 3], [5, 3], [12, 3], [8, 3], [10, 3],
   [9, 3], [13, 3], [7, 1], [6, 3], [7, 3], [11, 3], [3, 3],
@@ -495,9 +488,7 @@ export function bankedFavorActivationValue(input: {
   favorToDonate: number;
   /** BN-seconds a relative reputation-rate increase saves. Favor IS a
    *  reputation rate multiplier, so this is what converts the term into the
-   *  same seconds the multiplier value beside it is quoted in — without it the
-   *  favor half of the accrued value is a rounding error next to the other
-   *  half, and on a live BN12 run favor was 97% of it. */
+   *  same seconds the multiplier value beside it is quoted in. */
   reputationWorthSec?: number;
 }): number {
   const joined = new Set(input.standings.map((standing) => standing.name));

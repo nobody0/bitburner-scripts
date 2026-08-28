@@ -145,10 +145,8 @@ function fidelityRows(state: ProjectedState): Markup[][] {
     for (const [key, gap] of state.simGapDetails) counts.set(key, { ...gap });
   }
   return [...counts.values()]
-    // Ranked by count only where the counts are real. In the fallback every
-    // entry is a first-hit digest, so kind then name is the only ordering that
-    // means anything — before this it was Map insertion order wearing a
-    // ranking's clothes.
+    // Rank by count only where counts are authoritative. First-hit fallback
+    // entries use deterministic kind/name ordering instead.
     .sort((a, b) =>
       authoritative ? (b.count ?? 0) - (a.count ?? 0) : a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name),
     )
@@ -279,9 +277,8 @@ export const overviewTab: Tab = {
           },
           { label: "stopped", value: state.simResult.stoppedBecause ?? "unknown" },
         ])
-      // `state.live` is the only thing that separates "not yet" from "never".
-      // Asserting "still running" over a stored file — a run killed or thrown
-      // before it wrote a result — was the bug.
+      // `state.live` is the only evidence separating "not yet" from "never";
+      // a stored run without a result must not be described as still running.
       : state.live
         ? note("simulation is still running; final validity is not available yet")
         : note(

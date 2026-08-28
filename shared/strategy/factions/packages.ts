@@ -135,11 +135,7 @@ function favorCanActivateBeforeGoal(view: FactionsView): boolean {
 /** A faction whose shelf carries the route's terminal purchase keeps its
  * donation-unlock favor path alive regardless of the count-phase gate above:
  * crossing favorToDonate there converts the terminal reputation requirement
- * into money, which late in the node is the fastest remaining path by orders
- * of magnitude. Measured on bn1-full seed 2: with the gate applied, no
- * candidate ever targeted Daedalus's 462k unlock rep, the run ground to 459k
- * — 147 seconds short of the crossing — and stalled 13 minutes from
- * completing the node for the final 8 hours of the horizon. */
+ * into money, so the favor path must remain eligible. */
 export function favorServesRouteTerminal(standing: FactionStanding, offersRedPill: boolean, view: FactionsView): boolean {
   return (view.route === "daedalus" || view.route === "gang")
     && !view.owned.has("The Red Pill")

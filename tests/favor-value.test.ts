@@ -128,10 +128,8 @@ describe("factionFavorPointValues", () => {
     expect(values.get("Sector-12")!.remainingWorkSec).toBe(0);
   });
 });
-/** Favor value is a FACTIONS fact. Go used to derive it itself, rebuilding the
- * whole augmentation catalogue and re-walking every joined faction's rep
- * ladder on each five-second tick. The factions driver publishes it as a
- * by-product of the view it already builds; Go reads it. */
+/** Favor value is a factions fact, published as a by-product of the factions
+ * view and consumed by Go. */
 describe("published favor point values", () => {
   const catalog = new Map([["NeuroCore", aug("NeuroCore", ["Netburners"], { baseRepRequirement: 12_500 })]]);
 

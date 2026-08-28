@@ -8,9 +8,7 @@
  * one exact opponent forecast allowed on 19x19.
  */
 // Intentionally empty until a daemon-specific correction passes held-out
-// arena validation. The trainer considers ordinary, sacrifice, and forced-
-// defense candidates; its first qualifying training correction regressed the
-// disjoint corpus and was therefore pruned rather than shipped.
+// arena validation across ordinary, sacrifice, and forced-defense candidates.
 const ENTRIES = [] as const satisfies readonly (readonly [string, number])[];
 
 const POLICY = new Map<string, number>(ENTRIES);

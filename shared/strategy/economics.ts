@@ -3,10 +3,8 @@ import { prepTimeSeconds, type PrepPlan } from "./targeting.ts";
 
 /** Prep opportunity-cost economics — pure.
  *
- * "If I need to prep a target for 3 hours, that is 3 hours of lost income."
- * The legacy scripts compared `(T − weakenTime)·newRate` against `T·curRate`
- * over a fixed 15-minute window (bitburner-2023 src/main.ts:518-521); this is
- * that model generalized to (a) the real prep time on the share of the fleet
+ * This compares income after prep with income during the same interval on the
+ * current target, generalized to (a) the real prep time on the share of the fleet
  * prep actually gets, and (b) the farm's DEPTH CAP — RAM beyond what the
  * pipeline can absorb earns nothing, so handing it to prep is free.
  *
@@ -14,7 +12,7 @@ import { prepTimeSeconds, type PrepPlan } from "./targeting.ts";
  * observed income/sec/dollar quote prices how much an earlier dollar can earn
  * before a later target comes online. Keeping that quote outside this module
  * avoids duplicating purchase policy while still accounting for reinvestment.
- */
+ * Reference: `bitburner-2023/src/main.ts:518-521` at commit 43e8585. */
 
 /** What the rate model needs from a CycleSolution. */
 export interface FarmRateModel {

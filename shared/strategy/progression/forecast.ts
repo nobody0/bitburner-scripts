@@ -268,10 +268,7 @@ export function installForecast(now: number, view: InstallForecastView, basis: s
   // An honest lower bound beats a missing answer: `installHorizonSec` maps an
   // unknown install forecast to a one-hour amortization window, which prices
   // every install-mortal purchase (cloud RAM, Go boards, stock positions) as
-  // if a reset could land any minute. Measured on bn1-speedrun seed 3: with no
-  // install even possible, cloud rungs were devalued ~280x against home RAM,
-  // the fleet froze saving toward one $318m home rung, and $1b was never
-  // reached in 8h where hacking alone took 76 minutes. When the route says an
+  // if a reset could land any minute. When the route says an
   // install cannot happen before X, X is the forecast — still marked by its
   // parts' own `measured` flags, never silently invented.
   const packageBound = view.routePackageSec
