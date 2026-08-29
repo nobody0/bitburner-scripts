@@ -708,6 +708,9 @@ const dnet: FeatureDriver = {
           blockedRam: fresh<number>(host, "blockedRam", now, expiry) ?? 0,
           requiredCharisma: fresh<number>(host, "requiredCharisma", now, expiry) ?? 0,
           stasisLinked: expiry.stasisLinked?.has(host.hostname) === true,
+          // Every host still in the fold is one the last report saw present: an
+          // absent host is DELETED from knowledge rather than marked down.
+          isOnline: true,
           ...(neighbours ? { neighbours } : {}),
         };
       }),

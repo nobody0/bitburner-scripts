@@ -56,4 +56,18 @@ describe("Clock", () => {
     });
     clock.run();
   });
+
+  test("rejects a non-finite deadline instead of pinning virtual time at NaN", () => {
+    // NaN loses every comparison, so it slipped past the past-check, sorted
+    // arbitrarily in the heap and then set `now` to NaN permanently — taking
+    // Date.now, the horizon check and the stall tripwire with it while the run
+    // still reported a result.
+    const clock = new Clock();
+    expect(() => clock.at(Number.NaN, () => {})).toThrow("non-finite");
+    expect(() => clock.in(Number.NaN, () => {})).toThrow("non-finite");
+    expect(() => clock.at(Number.POSITIVE_INFINITY, () => {})).toThrow("non-finite");
+    clock.at(10, () => {});
+    clock.run();
+    expect(clock.now()).toBe(10);
+  });
 });

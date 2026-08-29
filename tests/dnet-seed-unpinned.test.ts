@@ -7,7 +7,7 @@ import { readFile } from "node:fs/promises";
  * `ns.exec` evaluates its direct-connection requirement BEFORE the darkweb
  * early-out, so a launcher that is not home — the one host holding the TOR
  * edge — `scp`s happily and then gets a silent 0 back from `exec`. The driver
- * issues the seed out of `start.js` on home, so the requirement is satisfied
+ * issues the seed out of `main.js` on home, so the requirement is satisfied
  * by construction.
  *
  * This file is a SOURCE test because the property is a property of the source:
@@ -28,7 +28,7 @@ describe("the darknet home driver's own actions", () => {
   });
 
   test("the seed execs from home's own ns and proxies only what the bundle does not own", () => {
-    // `exec` is the one member start.js has already paid for statically
+    // `exec` is the one member main.js has already paid for statically
     // (1.3 GB, see game/lib/ns-proxy-shared.ts), and `ctx.ns` on the home
     // driver IS that script's ns — so this both costs nothing and is the one
     // `ns` in the realm that can reach `darkweb`. It is also SYNCHRONOUS,

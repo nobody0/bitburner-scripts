@@ -77,6 +77,37 @@ describe("career parity with Bitburner v3.0.1", () => {
     expect(files.has("BruteSSH.exe")).toBe(true);
   });
 
+  test("unfocused crime keeps its full payout and gates intelligence on SF5", async () => {
+    // Two upstream details the sim used to miss. CrimeWork.commit calls
+    // `scaleWorkStats(this.earnings(), focusBonus, false)` — `scaleMoney` is
+    // FALSE, so the unfocused 0.8 applies to exp and karma but never to money.
+    // And intelligence goes through `Player.gainIntelligenceExp`, which drops
+    // the gain entirely outside BN5/SF5 rather than writing the exp record.
+    const run = (bitnode: number, sourceFiles: Record<string, number>) => {
+      const world = new SimWorld({ seed: 1, bitnode, playerState: { sourceFiles } });
+      const crimes = new CrimeSystem(world, world.player, () => 0); // always succeed
+      const crime = crimes.get("Heist")!;
+      const before = world.player.money;
+      crimes.start(crime.type, false); // UNFOCUSED
+      crimes.processWork(crime.timeMs / 200);
+      return { world, crime, gained: world.player.money - before };
+    };
+
+    const bn1 = run(1, {});
+    const crimeMoney = bn1.crime.money * currentNodeMults.CrimeMoney;
+    expect(bn1.gained).toBeCloseTo(crimeMoney, 6);
+    // No SF5: the exp record must not move at all, and neither must the skill.
+    expect(bn1.world.person.exp.intelligence).toBe(0);
+    expect(bn1.world.person.skills.intelligence).toBe(0);
+
+    // With SF5 owned the gain lands, raises the skill, and banks persistently
+    // so an install cannot silently discard it.
+    const bn5 = run(1, { "5": 1 });
+    expect(bn5.world.person.exp.intelligence).toBeGreaterThan(0);
+    expect(bn5.world.person.skills.intelligence).toBeGreaterThan(0);
+    expect(bn5.world.player.persistentIntelligenceExp).toBe(bn5.world.person.exp.intelligence);
+  });
+
   test("a failed player crime banks quarter experience and karma on the exact completion cycle", async () => {
     const world = new SimWorld({ seed: 1 });
     const crimes = new CrimeSystem(world, world.player, () => 1); // always fail
@@ -108,7 +139,9 @@ describe("career parity with Bitburner v3.0.1", () => {
     education.processWork(5);
 
     expect(world.player.money).toBe(beforeMoney - 2_400);
-    expect(world.person.exp.strength).toBe(beforeExp + 10 * currentNodeMults.ClassGymExpGain);
+    // No ClassGymExpGain: v3.0.1 declares the multiplier but never applies it
+    // to class/gym earnings (src/Work/Formulas.ts:108-121 has no consumer).
+    expect(world.person.exp.strength).toBe(beforeExp + 10);
     expect(world.player.currentWork).toMatchObject({ kind: "class", subject: "strength" });
   });
 

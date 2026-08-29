@@ -223,6 +223,19 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       0,
     );
 
+  /** `getFactionAugmentationsFiltered` (FactionHelpers.tsx:172-206): which
+   * augmentations a faction actually offers right now.
+   *
+   * Shared by the listing AND the purchase, because upstream gates both and the
+   * sim used to filter only the listing — so a BN15 run could still buy The Red
+   * Pill from Daedalus and finish the node by a route the game forbids. BN15's
+   * whole design is that it comes out of the darknet labyrinth instead. */
+  const offersAugmentation = (faction: string, augName: string): boolean => {
+    const aug = AUGMENTATION_TABLE[augName];
+    if (!aug?.factions.includes(faction)) return false;
+    return !(deps.bitNode === 15 && faction === "Daedalus" && augName === "The Red Pill");
+  };
+
   const priceOf = (name: string): { moneyCost: number; repCost: number } => {
     const aug = AUGMENTATION_TABLE[name];
     if (!aug) return { moneyCost: Infinity, repCost: Infinity };
@@ -496,10 +509,7 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
     getAugmentationsFromFaction: (rawName: unknown): string[] => {
       const name = factionName(rawName);
       return Object.values(AUGMENTATION_TABLE)
-        .filter((aug) => aug.factions.includes(name))
-        // Upstream removes The Red Pill from Daedalus in BN15.
-        // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L204-L208
-        .filter((aug) => !(deps.bitNode === 15 && name === "Daedalus" && aug.name === "The Red Pill"))
+        .filter((aug) => offersAugmentation(name, aug.name))
         .map((aug) => aug.name);
     },
 
@@ -526,7 +536,7 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       const faction = factions.get(factionKey);
       const aug = AUGMENTATION_TABLE[augName]!;
       if (!faction?.joined) return false;
-      if (!aug.factions.includes(factionKey)) return false;
+      if (!offersAugmentation(factionKey, augName)) return false;
       if (player.hasAugmentation(augName) && augName !== "NeuroFlux Governor") return false;
       // Prerequisites must be owned or queued.
       if (aug.prereqs.some((prereq) => !player.hasAugmentation(prereq))) return false;

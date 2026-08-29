@@ -15,7 +15,7 @@ import { assignIndependent } from "../shared/strategy/assignment.ts";
 import { BLACKOP_CONFIDENCE, STAMINA_FLOOR, stepBladeburner } from "../shared/strategy/bladeburner/decide.ts";
 import { reachableFrom, stepDarknet, unlockValue } from "../shared/strategy/dnet/decide.ts";
 import { darknetRoute } from "../game/lib/features/dnet.ts";
-import { emptyKnowledge, foldKnowledgeReports } from "../shared/strategy/dnet/host.ts";
+import { discoverReports, emptyKnowledge, foldKnowledgeReports } from "../shared/strategy/dnet/host.ts";
 import { msPerHostEvent } from "../shared/strategy/dnet/rates.ts";
 import { ASCEND_THRESHOLD, stepGang } from "../shared/strategy/gang/decide.ts";
 import {
@@ -791,15 +791,18 @@ describe("darknet", () => {
     // darknet servers outright, so from home it sees `darkweb` and stops. The
     // graph has to come from the controller's folded adjacency.
     const now = 10_000_000;
-    const knowledge = foldKnowledgeReports(
-      emptyKnowledge("15:0"),
+    // Seeded through `discoverReports`, because only the probe/details/dns path
+    // may CREATE host entries — an ordinary fold updates what is already known.
+    const knowledge = emptyKnowledge("15:0");
+    discoverReports(
+      knowledge.hosts,
       [
         { hostname: "darkweb", at: now, present: true, neighbours: ["dn-0"], depth: -1 },
-        { hostname: "dn-0", at: now, present: true, neighbours: ["darkweb", "dn-1"], depth: 0 },
-        { hostname: "dn-1", at: now, present: true, neighbours: ["dn-0"], depth: 1 },
+        { hostname: "dn-0", at: now, present: true, identity: "dn-0:ip", neighbours: ["darkweb", "dn-1"], depth: 0 },
+        { hostname: "dn-1", at: now, present: true, identity: "dn-1:ip", neighbours: ["dn-0"], depth: 1 },
       ],
       now,
-    ).knowledge;
+    );
     expect(darknetRoute(knowledge, "dn-1", now, {})).toEqual(["darkweb", "dn-0", "dn-1"]);
     // Every route starts at darkweb, which is the one darknet host home is
     // adjacent to — it holds the TOR edge.
@@ -816,10 +819,11 @@ describe("darknet", () => {
     const now = 10_000_000;
     const edges = [
       { hostname: "darkweb", at: now, present: true, neighbours: ["dn-0"], depth: -1 },
-      { hostname: "dn-0", at: now, present: true, neighbours: ["darkweb", "dn-1"], depth: 0 },
-      { hostname: "dn-1", at: now, present: true, neighbours: ["dn-0"], depth: 1 },
+      { hostname: "dn-0", at: now, present: true, identity: "dn-0:ip", neighbours: ["darkweb", "dn-1"], depth: 0 },
+      { hostname: "dn-1", at: now, present: true, identity: "dn-1:ip", neighbours: ["dn-0"], depth: 1 },
     ];
-    const knowledge = foldKnowledgeReports(emptyKnowledge("15:0"), edges, now).knowledge;
+    const knowledge = emptyKnowledge("15:0");
+    discoverReports(knowledge.hosts, edges, now);
     // Age alone changes nothing: the last known route is still the best answer.
     const later = now + msPerHostEvent("disconnected") * 100;
     expect(darknetRoute(knowledge, "dn-1", later, {})).toEqual(["darkweb", "dn-0", "dn-1"]);

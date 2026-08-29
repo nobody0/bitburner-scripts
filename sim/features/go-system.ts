@@ -16,6 +16,7 @@ import { Go, Player as GoPlayer, sleepLog } from "../vendor/bitburner/src/Go/Ora
 import { currentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import {
   GO_REWARD_RULES,
+  sampledWinProbability,
   goDifficultyMultiplier,
   goEffectMultiplier,
   goFavorRepCap,
@@ -354,14 +355,14 @@ export class GoSystem {
   async #completeAggregateGame(): Promise<Play> {
     const opponent = this.#state.ai as RewardOpponent;
     const profile = GO_REWARD_RULES[opponent];
-    const sizeShift = this.#requestedSize <= 5
-      ? 0
-      : this.#requestedSize <= 7
-        ? 0.04
-        : this.#requestedSize <= 9
-          ? 0.07
-          : 0.1;
-    const winProbability = Math.min(1, profile.priorWinProbability + sizeShift);
+    // No board-size bonus. The old `sizeShift` added up to +0.1 for larger
+    // boards, which no arena has ever measured — every ordinary opponent is
+    // played at 5x5 (sim/go-arena.ts) — and spec/go-ai.md:140-149 says larger
+    // boards are OUT of the weights' training distribution, so a positive shift
+    // made the bot strongest exactly where it is weakest. It also keyed off the
+    // REQUESTED size here and the OBSERVED size in the planner, so the two
+    // disagreed about the World Daemon, which requests 5 and gets 19.
+    const winProbability = sampledWinProbability(profile);
     const playable = simpleBoardFromBoard(this.#state.board)
       .reduce((sum, column) => sum + [...column].filter((cell) => cell !== "#").length, 0);
     const scoreFraction = Math.min(

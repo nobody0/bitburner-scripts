@@ -41,9 +41,15 @@ export class StanekSystem extends BaseGift {
     this.#world.onMultipliersReset.push(() => this.applyMultipliersAfterReset());
   }
 
-  hasGift(includeQueued = false): boolean {
+  /** Upstream spells this `Player.hasAugmentation(StaneksGift1, ignoreQueued)`,
+   *  and the two callers disagree ON PURPOSE: the ns gate passes true, so the
+   *  whole API needs the gift INSTALLED (NetscriptFunctions/Stanek.ts:18), while
+   *  `process()` takes the default and therefore ticks for a merely queued
+   *  Genesis (StaneksGift.ts:51). Spelling the flag the other way round made the
+   *  API too permissive and the tick too strict at the same time. */
+  hasGift(ignoreQueued = false): boolean {
     return this.#player.augmentations.has(GENESIS)
-      || (includeQueued && this.#player.queuedAugmentations.has(GENESIS));
+      || (!ignoreQueued && this.#player.queuedAugmentations.has(GENESIS));
   }
 
   // v3.0.1 StaneksGift.ts:22-31 baseSize()/width()/height().

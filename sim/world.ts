@@ -20,7 +20,7 @@ import {
   type SimServer,
 } from "./core/effects.ts";
 import { mockPerson, mockServer } from "./core/mocks.ts";
-import { playerRecord, SimPlayer, type SimPlayerOptions } from "./core/player.ts";
+import { NEW_GAME_MONEY, playerRecord, SimPlayer, type SimPlayerOptions } from "./core/player.ts";
 import { mulberry32 } from "./core/rng.ts";
 import { unmodeled } from "./realm/unmodeled.ts";
 import { getRandomBonus as getCircadianBonus } from "./vendor/bitburner/src/Augmentation/CircadianBonus.ts";
@@ -219,7 +219,7 @@ export class SimWorld {
     this.#augmentationStats["Unstable Circadian Modulator"] ??= { ...getCircadianBonus().bonuses };
     this.person = mockPerson();
     this.player = new SimPlayer({
-      money: opts.startingMoney ?? 1_000,
+      money: opts.startingMoney ?? NEW_GAME_MONEY,
       ...(opts.playerState ?? {}),
     });
     if (opts.person) {
@@ -389,12 +389,14 @@ export class SimWorld {
     this.player.factionRumors = [];
     this.player.focus = true;
 
-    let startingMoney = 1_000;
+    // PlayerObjectGeneralMethods.ts:102 — `1000 + CONSTANTS.Donations`, not a
+    // bare 1000. The same base is what NeuroFlux's 1.01000262 encodes.
+    let startingMoney = NEW_GAME_MONEY;
     for (const name of this.player.augmentations.keys()) startingMoney += AUGMENTATION_TABLE[name]?.startingMoney ?? 0;
     this.player.money = this.bitnode === 8 ? 250e6 : startingMoney;
     // BN8 overwrites the final balance only after these gainMoney calls; their
     // money-source attribution still exists even though that cash is replaced.
-    if (startingMoney > 1_000) this.recordMoney("other", startingMoney - 1_000);
+    if (startingMoney > NEW_GAME_MONEY) this.recordMoney("other", startingMoney - NEW_GAME_MONEY);
 
     const currentHome = this.servers.get("home");
     const homeRam = currentHome?.maxRam ?? this.#prestigeServers.get("home")?.maxRam ?? 8;

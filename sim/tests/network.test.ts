@@ -7,6 +7,7 @@ import {
   VANILLA_NETWORK_SEED,
 } from "../network.ts";
 import { mulberry32 } from "../core/rng.ts";
+import { staticsFromRolls } from "../../shared/strategy/bounds.ts";
 import { findProfile } from "../profiles.ts";
 import { SERVER_METADATA, type Range } from "../vendor/bitburner/src/Server/data/ServerMetadata.ts";
 import { runGame } from "../game-run.ts";
@@ -93,8 +94,22 @@ describe("seeded vanilla network", () => {
       expect(server.numOpenPortsRequired).toBe(metadata.ports);
       expect(inRange(server.moneyAvailable, metadata.money)).toBe(true);
       expect(inRange(server.requiredHackingSkill, metadata.skill)).toBe(true);
-      if (metadata.sec?.[0] === 0 && !metadata.randomized.sec) expect(server.hackDifficulty).toBe(1);
-      else expect(inRange(server.hackDifficulty, metadata.sec)).toBe(true);
+      // The spec carries the RAW roll; a metadata sec of 0 means "upstream never
+      // set hackDifficulty", and the constructor's unmultiplied 1 is applied by
+      // staticsFromRolls — so that is where the invariant is asserted.
+      const derived = staticsFromRolls(server.hostname, {
+        money: server.moneyAvailable,
+        sec: server.hackDifficulty,
+        skill: server.requiredHackingSkill,
+        growth: server.serverGrowth,
+      });
+      if (metadata.sec?.[0] === 0 && !metadata.randomized.sec) {
+        expect(server.hackDifficulty).toBe(0);
+        expect(derived.baseDifficulty).toBe(1);
+        expect(derived.minDifficulty).toBe(1);
+      } else {
+        expect(inRange(server.hackDifficulty, metadata.sec)).toBe(true);
+      }
       if (metadata.growth?.[0] === 0 && !metadata.randomized.growth) expect(server.serverGrowth).toBe(1);
       else expect(inRange(server.serverGrowth, metadata.growth)).toBe(true);
       if (metadata.ramExp) expect(inRange(Math.log2(server.maxRam), metadata.ramExp)).toBe(true);

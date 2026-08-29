@@ -7,6 +7,9 @@ export interface DarknetServer {
   depth: number;
   requiredCharisma: number;
   stasisLinked: boolean;
+  /** Whether the host is currently up. An offline host is a hole in the graph
+   *  unless a stasis link is holding it open — see `reachableFrom`. */
+  isOnline: boolean;
   /** Neighbours, for the reachability search. */
   neighbours?: string[];
 }
@@ -40,6 +43,10 @@ export function reachableFrom(servers: readonly DarknetServer[], linked: Readonl
     if (seen.has(name)) continue;
     const server = byName.get(name);
     if (!server) continue;
+    // An offline host is a hole in the graph: it cannot be reached and cannot
+    // be traversed THROUGH. A stasis link is the one thing that keeps it
+    // standing, which is what makes a link worth spending — see `unlockValue`.
+    if (!server.isOnline && !linked.has(name)) continue;
     seen.add(name);
     for (const neighbour of server.neighbours ?? []) stack.push(neighbour);
   }

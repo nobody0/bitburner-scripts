@@ -14,7 +14,7 @@ import { DEFAULT_NETWORK } from "./network.ts";
 import { SimWorld, type SimOptions } from "./world.ts";
 import {
   AGGREGATE_GO_MODEL,
-  SIM_FEATURE_COVERAGE,
+  resolveFeatureCoverage,
   SIMULATOR_MODEL_VERSION,
   SIMULATOR_VENDOR_COMMIT,
   type RunValidity,
@@ -173,7 +173,7 @@ export function runSim(options: RunOptions): RunResult {
           }))
           .sort((a, b) => a.hostname.localeCompare(b.hostname)),
       }),
-      coverage: SIM_FEATURE_COVERAGE,
+      ...resolveFeatureCoverage({ scenario: "synthetic-early-game" }),
       simulatorModel: SIMULATOR_MODEL_VERSION,
       vendorCommit: SIMULATOR_VENDOR_COMMIT,
     },

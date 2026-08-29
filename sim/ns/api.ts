@@ -12,8 +12,9 @@ import type { ContractSystem } from "../features/contracts.ts";
 import { getBitNodeMultipliers as vendoredBitNodeMultipliers } from "../vendor/bitburner/src/BitNode/BitNodeMults.ts";
 import { currentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import { StockMarketConstants as STOCK_CONSTANTS } from "../vendor/bitburner/src/StockMarket/data/Constants.ts";
-import { getDarknetVolatilityMult } from "../vendor/bitburner/src/StockMarket/MarketAdapter.ts";
+import { getDarknetVolatilityMult, StockMarket, StockMarketPromise } from "../vendor/bitburner/src/StockMarket/MarketAdapter.ts";
 import { PositionType } from "../vendor/bitburner/src/StockMarket/Enums.ts";
+import { MILLI_PER_CYCLE } from "../engine.ts";
 import {
   getBuyTransactionCost,
   getSellTransactionGain,
@@ -207,6 +208,9 @@ function namespace(impl: Record<string, unknown>, path: string, host: SimNsHost,
 /** Suspend this process on the virtual clock, exactly as netscriptDelay does:
  * the timer is cancellable, and a kill rejects the await with ScriptDeath. */
 function netscriptDelay(host: SimNsHost, process: SimProcess, ms: number, functionName: string): Promise<void> {
+  // Upstream coerces through `helpers.number`, which throws `'time' is NaN`
+  // before setTimeout is ever reached (NetscriptHelpers.tsx:144-153).
+  if (typeof ms !== "number" || !Number.isFinite(ms)) throw new Error(`${functionName}: 'time' is NaN`);
   const promise = new Promise<void>((resolve, reject) => {
     process.runningFn = functionName;
     process.delay = host.clock.in(Math.max(0, ms), () => {
@@ -466,6 +470,12 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       const options = typeof threadOrOptions === "object" ? threadOrOptions : undefined;
       const threads = (typeof threadOrOptions === "number" ? threadOrOptions : options?.threads) ?? 1;
       const delayMs = options?.spawnDelay ?? 10_000;
+      // Validated BEFORE the caller is killed, matching upstream's spawnOptions
+      // (NetscriptHelpers.tsx:265-269) — otherwise a bad delay kills the script
+      // and then throws, leaving nothing alive to catch it.
+      if (typeof delayMs !== "number" || !Number.isFinite(delayMs) || delayMs < 0) {
+        throw new Error(`spawn: 'spawnDelay' must be a non-negative finite number`);
+      }
       const hostname = process.host;
       const launchSpawned = (): void => {
         if (!filesOn(host, hostname).has(script)) return;
@@ -671,7 +681,32 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       return true;
     },
   }, "bladeburner", host, process);
-  impl["corporation"] = namespace({ hasCorporation: () => world.gates.hasCorporation }, "corporation", host, process);
+  /** Upstream `Player.activeSourceFileLvl`: a BitNodeOptions override REPLACES
+   *  the owned level when the key is present, including at level 0. Reading
+   *  `ownedSF` alone would hand a script a rung the run disabled. */
+  const activeSF = (n: number): number => {
+    const overrides = host.reset.bitNodeOptions?.sourceFileOverrides;
+    if (overrides?.has(n)) return overrides.get(n) ?? 0;
+    return host.reset.ownedSF.get(n) ?? 0;
+  };
+  /** Upstream `canAccessBitNodeFeature` (src/BitNode/BitNodeUtils.ts:17). */
+  const canAccessBitNodeFeature = (n: number): boolean => host.ramCtx.bitNode === n || activeSF(n) > 0;
+  // The corporation ENGINE is unmodeled, but `canCreateCorporation` is a pure
+  // predicate over player state that the unlock ladder reads before anything
+  // corporate exists. Answering it costs nothing, and refusing it invalidated
+  // EVERY controller run that probed the gate. Result strings are upstream's
+  // CreatingCorporationCheckResultEnum.
+  // Source: src/Corporation/helpers.ts:30-44, src/NetscriptFunctions/Corporation.ts:621
+  impl["corporation"] = namespace({
+    hasCorporation: () => world.gates.hasCorporation,
+    canCreateCorporation: (selfFund: unknown) => {
+      if (!canAccessBitNodeFeature(3) || host.reset.bitNodeOptions?.disableCorporation) return "NoSf3OrDisabled";
+      if (world.gates.hasCorporation) return "CorporationExists";
+      if (host.ramCtx.bitNode !== 3 && !selfFund) return "UseSeedMoneyOutsideBN3";
+      if (currentNodeMults.CorporationSoftcap < 0.15) return "DisabledBySoftCap";
+      return "Success";
+    },
+  }, "corporation", host, process);
   // The market, when a run wires one. Every getter reads the vendored `Stock`
   // objects directly, so a price, a spread or a forecast the strategy sees is
   // the same value the vendored price engine just wrote.
@@ -694,14 +729,6 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       const found = stock.stock(symbol);
       if (!found) throw new Error(`${fn}: invalid stock symbol ${symbol}`);
       return found;
-    };
-    /** Upstream `Player.activeSourceFileLvl`: a BitNodeOptions override REPLACES
-     *  the owned level when the key is present, including at level 0. Reading
-     *  `ownedSF` alone would hand a script a rung the run disabled. */
-    const activeSF = (n: number): number => {
-      const overrides = host.reset.bitNodeOptions?.sourceFileOverrides;
-      if (overrides?.has(n)) return overrides.get(n) ?? 0;
-      return host.reset.ownedSF.get(n) ?? 0;
     };
     const requireShorts = (fn: string): void => {
       if (host.ramCtx.bitNode !== 8 && activeSF(8) <= 1) {
@@ -798,6 +825,21 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
           requireTix("getOrders");
           requireOrders("getOrders");
           return {};
+        },
+        // The vendored price engine already resolves StockMarketPromise on every
+        // tick (StockPrices.ts:157-160); only the member that hands a script the
+        // promise was missing, so the idiomatic `await ns.stock.nextUpdate()`
+        // tick loop threw where the game would have waited.
+        nextUpdate: () => {
+          requireTix("nextUpdate");
+          if (!StockMarketPromise.promise) {
+            StockMarketPromise.promise = new Promise<number>((res) => (StockMarketPromise.resolve = res));
+          }
+          return StockMarketPromise.promise;
+        },
+        getBonusTime: () => {
+          requireTix("getBonusTime");
+          return StockMarket.storedCycles * MILLI_PER_CYCLE;
         },
         placeOrder: () => unmodeled("ns", "stock.placeOrder", "limit/stop orders have no simulation model"),
         cancelOrder: () => unmodeled("ns", "stock.cancelOrder", "limit/stop orders have no simulation model"),
@@ -1057,16 +1099,20 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
         upgradeRam: (index: number, n = 1) => hacknet.upgradeRam(index, n),
         upgradeCore: (index: number, n = 1) => hacknet.upgradeCore(index, n),
         upgradeCache: (index: number, n = 1) => hacknet.upgradeCache(index, n),
-        getLevelUpgradeCost: (index: number) => hacknet.levelCost(index),
-        getRamUpgradeCost: (index: number) => hacknet.ramCost(index),
-        getCoreUpgradeCost: (index: number) => hacknet.coreCost(index),
-        getCacheUpgradeCost: (index: number) => hacknet.cacheCost(index),
+        // `n` is upstream's multi-level count: dropping it priced a 10-level
+        // upgrade as one level and let a script "afford" what the world refuses.
+        getLevelUpgradeCost: (index: number, n = 1) => hacknet.levelCost(index, n),
+        getRamUpgradeCost: (index: number, n = 1) => hacknet.ramCost(index, n),
+        getCoreUpgradeCost: (index: number, n = 1) => hacknet.coreCost(index, n),
+        getCacheUpgradeCost: (index: number, n = 1) => hacknet.cacheCost(index, n),
         numHashes: () => hacknet.hashes,
         hashCapacity: () => hacknet.hashCapacity(),
         hashCost: (name: string, count = 1) => hacknet.hashCost(name, count),
         spendHashes: (name: string, target = "", count = 1) => hacknet.spendHashes(name, target, count),
         getHashUpgrades: () => hacknet.hashUpgrades(),
         getHashUpgradeLevel: (name: string) => hacknet.hashLevels[name] ?? 0,
+        getStudyMult: () => hacknet.studyMult(),
+        getTrainingMult: () => hacknet.trainingMult(),
       },
       "hacknet",
       host,

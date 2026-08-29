@@ -57,21 +57,19 @@ function view(overrides: Partial<RequirementView> = {}): RequirementView {
   };
 }
 
-describe("requirement interpreter — regressions from the predecessor scripts", () => {
-  test("an empty blocker list means SATISFIED (theirs returned false, because [] is truthy)", () => {
-    // src/_lib/factions.ts:182-186 — the `not` case returns false whether the
-    // inner call succeeded or not, because an empty array is truthy in JS. The
-    // consequence was that every `notEmployedBy` faction — the entire criminal
-    // ladder — was permanently unreachable.
+describe("requirement interpreter", () => {
+  test("an empty blocker list means SATISFIED", () => {
+    // Predecessor reference: bitburner-2023@43e8585, src/_lib/factions.ts
+    // lines 182-186. Its `not` branch tests an array as a boolean.
     const requirement: PlayerRequirement = { type: "not", condition: { type: "employedBy", company: "ECorp" as never } };
     expect(evaluate(requirement, view())).toEqual([]);
     expect(evaluate(requirement, view({ jobs: { ECorp: "Software" } }))).toHaveLength(1);
     expect(evaluate(requirement, view({ jobs: { ECorp: "Software" } }))[0]!.kind).toBe("quitCompany");
   });
 
-  test("a satisfiable OR is satisfiable (theirs returned false unconditionally)", () => {
-    // src/_lib/factions.ts:187-197 — `someCondition` falls through to
-    // `return false` after its success loop.
+  test("a satisfiable OR is satisfiable", () => {
+    // Same predecessor, lines 187-197: `someCondition` returns false after
+    // its success loop.
     const requirement: PlayerRequirement = {
       type: "someCondition",
       conditions: [
@@ -778,12 +776,8 @@ describe("work type selection weighs everything the work produces", () => {
   });
 });
 
-describe("work type selection — found in the real game", () => {
-  // THE BUG: `workTypes` was never populated by any probe, and the view
-  // defaulted missing data to "offers all three". The driver then issued
-  // `workForFaction(Tetrads, "hacking")` — Tetrads offers field and security
-  // only — so the call failed every 30s forever and reputation never accrued,
-  // while the panel cheerfully reported "next work Tetrads (hacking)".
+describe("work type selection", () => {
+  // Missing probe data must not imply that a faction supports every work type.
   const wanted = aug("PCMatrix", { factions: ["Tetrads"], baseRepRequirement: 1e5, mults: { hacking: 1.5 } });
   const catalog = new Map([["PCMatrix", wanted]]);
 

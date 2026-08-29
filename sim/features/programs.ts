@@ -53,7 +53,7 @@ export class ProgramSystem {
     if (!work || work.kind !== "createProgram") return;
     const program = PORT_OPENER_PROGRAMS.find((entry) => entry.name === work.subject);
     if (!program) return;
-    const focusBonus = work.focused || this.#player.hasAugmentation("Neuroreceptor Management Implant") ? 1 : 0.8;
+    const focusBonus = work.focused || this.#player.hasAugmentation("Neuroreceptor Management Implant", true) ? 1 : 0.8;
     const hacking = this.#world.person.skills.hacking;
     const intelligence = this.#world.person.skills.intelligence;
     const intelligenceBonus = 1 + (3 * Math.pow(intelligence, 0.8)) / 600;

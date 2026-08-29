@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { GO_REWARD_RULES } from "../../shared/strategy/go/rewards.ts";
+import { GO_REWARD_RULES, sampledWinProbability } from "../../shared/strategy/go/rewards.ts";
 import type { GoView } from "../../shared/strategy/go/rules.ts";
 import { mulberry32 } from "../core/rng.ts";
 import { FactionSystem } from "../features/factions.ts";
@@ -18,6 +18,28 @@ const activeView: GoView = {
 };
 
 describe("aggregate Go simulation lane", () => {
+  test("a zero-loss corpus does not become an unlosable opponent", () => {
+    // Five opponents were measured at 512/512. Sampled against the raw 1.0,
+    // `Math.random() < p` is always true and they can never lose a simulated
+    // game — so win streaks only ever grow, the streak multiplier pins at its
+    // cap, and the controller's loss/streak-break handling never runs on any
+    // route. The rule-of-three bound keeps the observation honest without
+    // inventing a loss rate nobody measured.
+    for (const [name, rules] of Object.entries(GO_REWARD_RULES)) {
+      const sampled = sampledWinProbability(rules);
+      expect(sampled, `${name} must stay losable`).toBeLessThan(1);
+      expect(sampled, `${name} must not be pessimised below its measurement`).toBeLessThanOrEqual(
+        rules.priorWinProbability,
+      );
+    }
+    // A prior that already observed losses is left exactly as measured.
+    expect(sampledWinProbability(GO_REWARD_RULES["????????????"])).toBe(
+      GO_REWARD_RULES["????????????"].priorWinProbability,
+    );
+    // 512/512 becomes 1 - 3/512.
+    expect(sampledWinProbability(GO_REWARD_RULES.Netburners)).toBeCloseTo(1 - 3 / 512, 12);
+  });
+
   test("uses no WebGPU while retaining exact immediate transitions and a legal trigger", async () => {
     const runtime = new AggregateGoNeuralRuntime();
     const installed = await runtime.install(activeView);

@@ -220,6 +220,11 @@ export class ContractSystem {
       * currentNodeMults.CodingContractMoney * adjustedScaling;
     this.#opts.player.money += gain;
     this.#opts.world.recordMoney("codingcontract", gain);
+    // `moneyEarned` is the field the farm rollup publishes and an `earn:` goal
+    // reduces over, so a contract-funded run scored as earning nothing without
+    // this — the one income source in the world that was invisible to its own
+    // goals.
+    this.#opts.world.moneyEarned += gain;
     return `Gained $${gain}`;
   }
 }

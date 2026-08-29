@@ -23,6 +23,10 @@ export const GO_REWARD_RULES: Readonly<Record<GoRewardOpponent, {
    * exists from every phase and every wait fits the cap; for the rest it is
    * the network's own rate with mid-game playbook lookups. */
   priorWinProbability: number;
+  /** How many games the prior was measured over. Kept beside the rate because a
+   *  rate alone cannot say whether a 1.0 means "never loses" or "we ran 512
+   *  games and none of them was a loss" — see `sampledWinProbability`. */
+  priorGames: number;
   /** The same measurement with the playbook disabled. Not used for value: it
    * exists so a regression in the network alone stays visible behind a
    * playbook that would otherwise mask it. */
@@ -45,19 +49,19 @@ export const GO_REWARD_RULES: Readonly<Record<GoRewardOpponent, {
   // intersections. They are conservative for a stronger policy, and refitting
   // them needs per-game scores and durations the combined arena does not yet
   // record.
-  Netburners: { bonusPower: 1.3, komi: 1.5, priorWinProbability: 1.0, neuralBaselineWinProbability: 0.998047, scoreFraction: 0.673573, aiSecondsPerPlayableNode: 0.200815 },
-  "Slum Snakes": { bonusPower: 1.2, komi: 3.5, priorWinProbability: 1.0, neuralBaselineWinProbability: 0.998047, scoreFraction: 0.688179, aiSecondsPerPlayableNode: 0.296807 },
-  "The Black Hand": { bonusPower: 0.9, komi: 3.5, priorWinProbability: 0.990234, neuralBaselineWinProbability: 0.990234, scoreFraction: 0.649796, aiSecondsPerPlayableNode: 0.394022 },
-  Tetrads: { bonusPower: 0.7, komi: 5.5, priorWinProbability: 1.0, neuralBaselineWinProbability: 0.951172, scoreFraction: 0.582201, aiSecondsPerPlayableNode: 0.507405 },
-  Daedalus: { bonusPower: 1.1, komi: 5.5, priorWinProbability: 1.0, neuralBaselineWinProbability: 0.957031, scoreFraction: 0.598166, aiSecondsPerPlayableNode: 0.407065 },
-  Illuminati: { bonusPower: 0.7, komi: 7.5, priorWinProbability: 0.986328, neuralBaselineWinProbability: 0.710938, scoreFraction: 0.389946, aiSecondsPerPlayableNode: 0.588043 },
+  Netburners: { bonusPower: 1.3, komi: 1.5, priorWinProbability: 1.0, priorGames: 512, neuralBaselineWinProbability: 0.998047, scoreFraction: 0.673573, aiSecondsPerPlayableNode: 0.200815 },
+  "Slum Snakes": { bonusPower: 1.2, komi: 3.5, priorWinProbability: 1.0, priorGames: 512, neuralBaselineWinProbability: 0.998047, scoreFraction: 0.688179, aiSecondsPerPlayableNode: 0.296807 },
+  "The Black Hand": { bonusPower: 0.9, komi: 3.5, priorWinProbability: 0.990234, priorGames: 512, neuralBaselineWinProbability: 0.990234, scoreFraction: 0.649796, aiSecondsPerPlayableNode: 0.394022 },
+  Tetrads: { bonusPower: 0.7, komi: 5.5, priorWinProbability: 1.0, priorGames: 512, neuralBaselineWinProbability: 0.951172, scoreFraction: 0.582201, aiSecondsPerPlayableNode: 0.507405 },
+  Daedalus: { bonusPower: 1.1, komi: 5.5, priorWinProbability: 1.0, priorGames: 512, neuralBaselineWinProbability: 0.957031, scoreFraction: 0.598166, aiSecondsPerPlayableNode: 0.407065 },
+  Illuminati: { bonusPower: 0.7, komi: 7.5, priorWinProbability: 0.986328, priorGames: 512, neuralBaselineWinProbability: 0.710938, scoreFraction: 0.389946, aiSecondsPerPlayableNode: 0.588043 },
   // The daemon win prior pools the promoted checkpoint's two independent
   // 128-game gates (12 + 21 wins). Score and duration come from the much more
   // expensive four-game deployed TypeScript arena sample.
   // The daemon has no playbook, so both numbers are the same measurement:
   // 264/304 pooled over the strip-derivative install arena and two seed-wait
   // control arms, 2026-08-17/18.
-  "????????????": { bonusPower: 2, komi: 9.5, priorWinProbability: 0.868421, neuralBaselineWinProbability: 0.868421, scoreFraction: 0.408, aiSecondsPerPlayableNode: 0.596 },
+  "????????????": { bonusPower: 2, komi: 9.5, priorWinProbability: 0.868421, priorGames: 304, neuralBaselineWinProbability: 0.868421, scoreFraction: 0.408, aiSecondsPerPlayableNode: 0.596 },
 };
 
 export interface GoEtaDemand {
@@ -246,11 +250,18 @@ function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
 }
 
-function simulatedWinProbability(size: number, prior: number): number {
-  // Fixed komi becomes less important as area grows. These deltas are offline
-  // simulator policy, never adapted from the live save's W/L record.
-  const sizeShift = size <= 5 ? 0 : size <= 7 ? 0.04 : size <= 9 ? 0.07 : 0.1;
-  return clamp01(prior + sizeShift);
+/** The probability a simulated game should actually be SAMPLED against.
+ *
+ * `priorWinProbability` is an observation, and five of the seven opponents
+ * observed zero losses. Sampling `Math.random() < 1` can never be false, so
+ * those opponents could not lose a simulated game at all: win streaks grew
+ * monotonically, the streak multiplier pinned at its cap, and the controller's
+ * loss and streak-break handling never ran in any full-route run. The rule of
+ * three puts the 95% bound on an unobserved failure rate at `3/n`, which is the
+ * most a finite corpus can support — spec/go-ai.md:186 says a reported 100%
+ * must stay a statement about the corpus rather than a proof over all games. */
+export function sampledWinProbability(rules: { priorWinProbability: number; priorGames: number }): number {
+  return Math.min(rules.priorWinProbability, 1 - 3 / rules.priorGames);
 }
 
 function expectedPerformance(
@@ -438,7 +449,7 @@ export function rankGoGames(view: GoRewardView): GoGameCandidate[] {
         ? rules.neuralBaselineWinProbability
         : rules.priorWinProbability;
       const variants: { aligned: boolean; waitSec: number; entryPlaytime?: number; winProbability: number }[] = [
-        { aligned: false, waitSec: 0, winProbability: simulatedWinProbability(boardSize, unroutedPrior) },
+        { aligned: false, waitSec: 0, winProbability: clamp01(unroutedPrior) },
       ];
       if (entry !== undefined) {
         variants.push({

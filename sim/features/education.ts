@@ -1,7 +1,7 @@
 import { trainingOption, type TrainingOption } from "../../shared/strategy/career/training.ts";
-import { currentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import type { SimPlayer } from "../core/player.ts";
 import type { SimWorld } from "../world.ts";
+import { hashUpgradeMult } from "./hacknet.ts";
 
 /** The class/gym slice exercised by the career planner.
  *
@@ -55,16 +55,17 @@ export class EducationSystem {
 
     const mults = this.world.person.mults as unknown as Record<string, number>;
     const exp = this.world.person.exp as unknown as Record<string, number>;
-    // Upstream applies ClassGymExpGain to class/gym earnings via
-    // `applyWorkStatsExpMult` inside `calculateClassEarnings`. Dropping it made
-    // BN4/BN13 training run 2x too fast and disagree with the controller's own
-    // forecaster, which does apply it (game/lib/features/career.ts). There is
-    // deliberately NO focus penalty here: unlike company/faction work,
+    // ClassGymExpGain is deliberately NOT applied. The multiplier exists in
+    // BitNodeMultipliers and the BN4/BN12/BN13 definitions, but v3.0.1 has no
+    // consumer for it: `calculateClassEarnings` (src/Work/Formulas.ts:108-121)
+    // applies only the location's expMult/gameCPS, the hash multiplier and
+    // `person.mults`. Applying it here ran BN4/BN13 training at half the game's
+    // rate — and because the controller's forecaster made the same assumption,
+    // the two agreed with each other and disagreed with the game.
+    // There is also NO focus penalty: unlike company/faction work,
     // `ClassWork.process` never calls `focusBonus()` (pinned by
     // sim/tests/career-parity.test.ts).
-    const gained = course.expPerSec * (cycles / 5)
-      * (mults[`${course.skill}_exp`] ?? 1)
-      * currentNodeMults.ClassGymExpGain;
+    const gained = course.expPerSec * (cycles / 5) * (mults[`${course.skill}_exp`] ?? 1);
     const cost = course.costPerSec * (cycles / 5);
     exp[course.skill] = (exp[course.skill] ?? 0) + gained;
     this.world.gainIntelligenceExp((course.intelligenceExpPerSec ?? 0) * (cycles / 5));
@@ -80,7 +81,7 @@ export class EducationSystem {
 
   private effective(course: TrainingOption): TrainingOption {
     const gym = course.kind === "gym";
-    const expMult = 1 + 0.2 * this.hashLevel(gym ? "Improve Gym Training" : "Improve Studying");
+    const expMult = hashUpgradeMult(this.hashLevel(gym ? "Improve Gym Training" : "Improve Studying"));
     const server = this.world.servers.get(gym ? "powerhouse-fitness" : "rothman-uni");
     return {
       ...course,

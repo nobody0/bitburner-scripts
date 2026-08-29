@@ -168,10 +168,9 @@ describe("the set solver against exhaustive enumeration", () => {
     }
   });
 
-  test("never scores below the best SINGLE package — the property that made replacing the old selector safe", () => {
-    // The predecessor could only ever return one faction's package. Whatever it
-    // would have chosen is a one-element set here, so the set solver that lost
-    // to it would be strictly worse than the thing it replaced.
+  test("never scores below the best SINGLE package", () => {
+    // Every single package is a feasible one-element set, so the set solver
+    // must score at least as well as the best of them.
     const names = ["A", "B", "C"];
     const catalog = new Map<string, AugInfo>([
       ["a1", aug("a1", { factions: ["A"], baseRepRequirement: 200, mults: { hacking: 1.2 } })],

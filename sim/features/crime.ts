@@ -100,17 +100,33 @@ export class CrimeSystem {
     const success = this.#rng() <= this.successChance(crime);
     const exp = person.exp as unknown as Record<string, number>;
     const mults = person.mults as unknown as Record<string, number>;
+    // Intelligence is deliberately NOT written here. Upstream routes it through
+    // `Player.gainIntelligenceExp` (CrimeWork.ts:73), which gates on BN5/SF5,
+    // recomputes the skill and banks the persistent total — none of which
+    // happens when the raw exp record is written directly. `addExp` therefore
+    // covers the six ordinary skills and `#gainIntelligence` covers the seventh.
     const addExp = (scale: number): void => {
       for (const [skill, amount] of Object.entries(crime.exp)) {
-        if (amount <= 0 || (skill === "intelligence" && !success)) continue;
-        const mult = skill === "intelligence" ? 1 : mults[`${skill}_exp`] ?? 1;
-        exp[skill] = (exp[skill] ?? 0) + amount * mult * currentNodeMults.CrimeExpGain * focusBonus * scale;
+        if (amount <= 0 || skill === "intelligence") continue;
+        exp[skill] = (exp[skill] ?? 0)
+          + amount * (mults[`${skill}_exp`] ?? 1) * currentNodeMults.CrimeExpGain * focusBonus * scale;
       }
+    };
+    // intExp carries no per-skill multiplier but IS scaled by CrimeExpGain and
+    // the focus penalty (calculateCrimeWorkStats -> scaleWorkStats), and is
+    // granted on success only.
+    const gainIntelligence = (): void => {
+      const amount = (crime.exp as Record<string, number>)["intelligence"] ?? 0;
+      if (amount <= 0) return;
+      this.#world.gainIntelligenceExp(amount * currentNodeMults.CrimeExpGain * focusBonus);
     };
 
     if (success) {
       const moneyMult = ((person.mults as unknown as Record<string, number>)["crime_money"] ?? 1) * currentNodeMults.CrimeMoney;
-      const money = crime.money * moneyMult * focusBonus;
+      // Money is NOT scaled by the focus penalty: upstream passes
+      // `scaleMoney = false` to scaleWorkStats (CrimeWork.ts:67), so only exp,
+      // reputation and karma take the unfocused 0.8.
+      const money = crime.money * moneyMult;
       this.#player.money += money;
       this.#world.moneyEarned += money;
       this.#world.recordMoney("crime", money);
@@ -118,6 +134,7 @@ export class CrimeSystem {
       this.#player.karma -= crime.karma * focusBonus;
       this.#player.numPeopleKilled += crime.kills;
       addExp(1);
+      gainIntelligence();
       this.#world.emit({
         kind: "event",
         name: "crime.done",

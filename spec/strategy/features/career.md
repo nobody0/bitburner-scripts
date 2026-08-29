@@ -133,9 +133,11 @@ and karma long-lived.
 | `CrimeMoney` | BN2 **3** · BN3 0.25 · BN4 0.2 · BN5 0.5 · BN6/7 0.75 · BN8 **0** · BN9/10 0.5 · BN11 **3** · BN13 0.4 · BN14 0.75 |
 | `CompanyWorkMoney` | BN3 0.25 · BN4 **0.1** · BN6/7 0.5 · BN8 **0** · BN10 0.5 · BN11 0.5 · BN13 0.4 |
 | BN14 only | `CrimeSuccessRate` **0.4** · `CompanyWorkRepGain` **0.2** — no other node changes either |
-| `CrimeExpGain`, `CompanyWorkExpGain`, `ClassGymExpGain` | BN4 0.5 · BN13 0.5 |
+| `CrimeExpGain`, `CompanyWorkExpGain`, `ClassGymExpGain` | BN4 0.5 · BN13 0.5 — but see the note below |
 | combat · `CharismaLevelMultiplier` | combat BN9 0.45 · BN10 0.4 · BN13 0.7 · BN14 0.5 · BN15 0.7; charisma BN9 0.45 · BN10 0.4 · BN15 **1.1**, the only stat buff anywhere |
 | `InfiltrationMoney` · `InfiltrationRep` | money BN2 3 · BN5 1.5 · BN6/7 0.75 · BN8 0 · BN10 0.5 · BN11 **2.5** · BN14 0.75; rep BN5 1.5 · BN11 **2.5** |
+
+> `ClassGymExpGain` is declared by these nodes but **inert in v3.0.1**: `calculateClassEarnings` (`src/Work/Formulas.ts:108-121`) never reads it, so university and gym run at full rate.
 
 [BN12](../bitnodes/bn12.md) scales all of these with node level. [BN11](../bitnodes/bn11.md) is the theme
 node: crime ×3 and infiltration ×2.5 against a 1% farm, so career carries the run; [BN2](../bitnodes/bn02.md)

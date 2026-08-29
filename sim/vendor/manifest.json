@@ -561,7 +561,7 @@
     {
       "path": "src/Server/data/servers.ts#SERVER_METADATA",
       "output": "src/Server/data/ServerMetadata.ts",
-      "sha256": "88b6b188494f0c4d4ce22e4760b3c0ce93e86fb08a80fbdc59bb04188cb485f1"
+      "sha256": "f0ab97ea32f467451e27d02ec4e95ce8ccbf7e935e79d47b7d89908f4be12f74"
     },
     {
       "path": "src/Crime/Crime.ts+src/Crime/Crimes.ts#CRIME_TABLE",

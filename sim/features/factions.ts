@@ -14,6 +14,7 @@ import {
 } from "../vendor/bitburner/src/PersonObjects/formulas/Reputation.ts";
 import { currentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import { CONSTANTS } from "../vendor/bitburner/src/Constants.ts";
+import { isBackdoorInstalledInCompanyServer } from "./companies.ts";
 import type { ShareSystem } from "./share.ts";
 
 /** The faction subsystem.
@@ -107,7 +108,7 @@ export class FactionSystem {
   }
 
   requirements(name: string): PlayerRequirement[] {
-    return this.#effectiveInviteReqs((FACTION_TABLE[name]?.inviteReqs ?? []) as PlayerRequirement[]);
+    return this.#effectiveInviteReqs((FACTION_TABLE[name]?.inviteReqs ?? []) as PlayerRequirement[], name);
   }
 
   /** `getFactionInviteRequirements` parity: the live game serializes company
@@ -119,26 +120,34 @@ export class FactionSystem {
    * sim/features/requirements.ts compares the serialized number as-is).
    * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionJoinCondition.ts
    * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Company/utils.ts */
-  #effectiveInviteReqs(requirements: readonly PlayerRequirement[]): PlayerRequirement[] {
-    return requirements.map((requirement) => this.#effectiveReq(requirement));
+  #effectiveInviteReqs(requirements: readonly PlayerRequirement[], faction: string): PlayerRequirement[] {
+    return requirements.map((requirement) => this.#effectiveReq(requirement, faction));
   }
 
-  #effectiveReq(requirement: PlayerRequirement): PlayerRequirement {
+  #effectiveReq(requirement: PlayerRequirement, faction: string): PlayerRequirement {
     switch (requirement.type) {
+      // Daedalus's gate is a `delayedCondition` upstream (FactionInfo.tsx:142)
+      // re-read from `currentNodeMults.DaedalusAugsRequirement` on every
+      // evaluation — 30 by default, but 35 in BN6/BN7, 20 in BN15 and a formula
+      // in BN12. `tools/vendor.ts` can only resolve it ONCE, under BN1 mults, so
+      // the vendored 30 is the base and the live value belongs here. Illuminati
+      // and The Covenant carry literal aug counts and must not be touched.
+      case "numAugmentations":
+        return faction === "Daedalus"
+          ? { ...requirement, numAugmentations: currentNodeMults.DaedalusAugsRequirement }
+          : requirement;
       case "companyReputation": {
-        const backdoored = [...this.#world.servers.values()].some(
-          (server) => server.organizationName === requirement.company && server.backdoorInstalled,
-        );
+        const backdoored = isBackdoorInstalledInCompanyServer(this.#world, requirement.company);
         return backdoored
           ? { ...requirement, reputation: requirement.reputation * CONSTANTS.CompanyRequiredReputationMultiplier }
           : requirement;
       }
       case "not":
-        return { type: "not", condition: this.#effectiveReq(requirement.condition) };
+        return { type: "not", condition: this.#effectiveReq(requirement.condition, faction) };
       case "someCondition":
-        return { type: "someCondition", conditions: requirement.conditions.map((entry) => this.#effectiveReq(entry)) };
+        return { type: "someCondition", conditions: requirement.conditions.map((entry) => this.#effectiveReq(entry, faction)) };
       case "everyCondition":
-        return { type: "everyCondition", conditions: requirement.conditions.map((entry) => this.#effectiveReq(entry)) };
+        return { type: "everyCondition", conditions: requirement.conditions.map((entry) => this.#effectiveReq(entry, faction)) };
       default:
         return requirement;
     }
@@ -189,7 +198,7 @@ export class FactionSystem {
       // "join" Bladeburners by satisfying an empty requirement list.
       if (!info || info.special) continue;
       if (info.inviteReqs.length === 0) continue;
-      if (!satisfies(this.#effectiveInviteReqs(info.inviteReqs as PlayerRequirement[]))) continue;
+      if (!satisfies(this.#effectiveInviteReqs(info.inviteReqs as PlayerRequirement[], faction.name))) continue;
       faction.invited = true;
       if (!this.#player.factionInvitations.includes(faction.name)) {
         this.#player.factionInvitations.push(faction.name);
@@ -250,7 +259,7 @@ export class FactionSystem {
     if (!faction || !faction.joined) return;
 
     const type = (work.workType ?? "hacking") as SimWorkType;
-    const focusPenalty = work.focused || this.#player.hasAugmentation("Neuroreceptor Management Implant") ? 1 : 0.8;
+    const focusPenalty = work.focused || this.#player.hasAugmentation("Neuroreceptor Management Implant", true) ? 1 : 0.8;
     faction.rep += this.workRepGain(type, faction.favor) * focusPenalty * cycles;
     work.cyclesWorked += cycles;
 
@@ -267,7 +276,7 @@ export class FactionSystem {
         factionWorkExpGain: currentNodeMults.FactionWorkExpGain,
         shareBonus: 1,
         sf15Level: 0,
-        hasFocusAug: this.#player.hasAugmentation("Neuroreceptor Management Implant"),
+        hasFocusAug: this.#player.hasAugmentation("Neuroreceptor Management Implant", true),
       },
       work.focused === true,
     );
@@ -283,6 +292,14 @@ export class FactionSystem {
   donate(name: string, amount: number, favorToDonate: number): number {
     const faction = this.factions.get(name);
     if (!faction || !faction.joined) return 0;
+    // Two refusals upstream makes that the sim was missing (Singularity.ts:934-941).
+    // They matter because the planner's donation filter gates only on
+    // joined + favor, so a faction that banks favor from gift charging but
+    // offers no work — Church of the Machine God — read as a valid donation
+    // target here and is rejected outright by the game.
+    if (this.#player.gangFaction === name) return 0;
+    const work = this.offersWork(name);
+    if (!work.hacking && !work.field && !work.security) return 0;
     if (faction.favor < favorToDonate) return 0;
     if (!(amount > 0) || this.#player.money < amount) return 0;
     const gained = repFromDonation(amount, this.#world.person as never);

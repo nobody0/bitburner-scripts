@@ -167,7 +167,7 @@ describe("ns proxy", () => {
     const proxy = createNsProxy({ label: "nsp", budgetGb: 8, place: world.place });
 
     // No resident is spawned for it, and it is not priced against the budget:
-    // start.js already paid exec's 1.3 GB, and home holds the TOR edge.
+    // main.js already paid exec's 1.3 GB, and home holds the TOR edge.
     const pid = await loose(proxy)("exec", "lib/ns-resident.js", "home", {}) as number;
     expect(pid).toBeGreaterThan(0);
     expect(world.residents.filter((r) => r.host !== "home")).toHaveLength(0);

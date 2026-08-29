@@ -46,7 +46,7 @@ import { scenarioFingerprint } from "./scenario.ts";
 import {
   AGGREGATE_GO_MODEL,
   CONTROLLER_AUTOMATION_SOURCE_FILES,
-  SIM_FEATURE_COVERAGE,
+  resolveFeatureCoverage,
   SIMULATOR_MODEL_VERSION,
   SIMULATOR_VENDOR_COMMIT,
   scenarioClass,
@@ -60,6 +60,7 @@ import type { GameState } from "../game/lib/state.ts";
 import { START_SCRIPT_GB } from "../game/lib/ram.ts";
 import { gameGlobal } from "../game/lib/globals.ts";
 import { setGoNeuralRuntimeForTest } from "../game/lib/features/remaining.ts";
+import { GO_REWARD_RULES } from "../shared/strategy/go/rewards.ts";
 
 /** Run the REAL game/ controller against the synthetic world.
  *
@@ -886,7 +887,9 @@ async function runGameInstalled(
       if (!world.servers.has(hostname)) continue;
       host.network.set(hostname, neighbours.filter((neighbour) => world.servers.has(neighbour)));
     }
-    if (world.player.hasAugmentation("The Red Pill")) {
+    // Installed only, matching src/Prestige.ts:175 — a queued Red Pill does not
+    // open the Cave edge until it is actually installed.
+    if (world.player.hasAugmentation("The Red Pill", true)) {
       const cave = host.network.get("The-Cave");
       const daemon = host.network.get("w0r1d_d43m0n");
       if (cave && daemon) {
@@ -966,6 +969,12 @@ async function runGameInstalled(
     seed,
     scenario,
     goFidelity,
+    // The aggregate Go model samples its outcome straight out of
+    // GO_REWARD_RULES, so a refit changes every route result. The table lives in
+    // shared/, outside SIMULATOR_MODEL_VERSION's "handwritten simulator
+    // semantics" contract, so without this two runs either side of a refit
+    // hashed identically and compared as the same scenario.
+    goRewardRules: GO_REWARD_RULES,
     controllerAutomationSourceFiles: CONTROLLER_AUTOMATION_SOURCE_FILES,
     bitnode,
     sourceFileLevel,
@@ -1048,7 +1057,22 @@ async function runGameInstalled(
       ...(options.experiment !== undefined ? { experiment: options.experiment } : {}),
       scenario,
       scenarioFingerprint: scenarioId,
-      coverage: SIM_FEATURE_COVERAGE,
+      ...resolveFeatureCoverage({
+        scenario,
+        goFidelity,
+        ...(save !== undefined
+          ? {
+              savedState: {
+                go: false,
+                gang: false,
+                corp: false,
+                bladeburner: false,
+                sleeves: false,
+                stanek: false,
+              },
+            }
+          : {}),
+      }),
       simulatorModel: SIMULATOR_MODEL_VERSION,
       vendorCommit: SIMULATOR_VENDOR_COMMIT,
       goFidelity,

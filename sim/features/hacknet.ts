@@ -48,6 +48,13 @@ export interface HacknetSeed {
   hashLevels: Record<string, number>;
 }
 
+/** `HashManager.getMult` for the two exp upgrades: `1 + value * level / 100`
+ * with the table's `value: 20` (src/Hacknet/HashManager.ts:34-58). Shared so the
+ * study/gym rate and the ns getter cannot drift apart. */
+export function hashUpgradeMult(level: number): number {
+  return 1 + 0.2 * level;
+}
+
 export class HacknetSystem {
   readonly nodes: SimHacknetNode[] = [];
   #world: SimWorld;
@@ -99,30 +106,30 @@ export class HacknetSystem {
     return calculateNodeCost(this.nodes.length + 1, this.#mult("hacknet_node_purchase_cost"));
   }
 
-  levelCost(index: number): number {
+  levelCost(index: number, n = 1): number {
     const node = this.nodes[index];
     return node
       ? this.hashMode
-        ? calculateServerLevelUpgradeCost(node.level, 1, this.#mult("hacknet_node_level_cost"))
-        : calculateLevelUpgradeCost(node.level, 1, this.#mult("hacknet_node_level_cost"))
+        ? calculateServerLevelUpgradeCost(node.level, n, this.#mult("hacknet_node_level_cost"))
+        : calculateLevelUpgradeCost(node.level, n, this.#mult("hacknet_node_level_cost"))
       : Infinity;
   }
 
-  ramCost(index: number): number {
+  ramCost(index: number, n = 1): number {
     const node = this.nodes[index];
     return node
       ? this.hashMode
-        ? calculateServerRamUpgradeCost(node.ram, 1, this.#mult("hacknet_node_ram_cost"))
-        : calculateRamUpgradeCost(node.ram, 1, this.#mult("hacknet_node_ram_cost"))
+        ? calculateServerRamUpgradeCost(node.ram, n, this.#mult("hacknet_node_ram_cost"))
+        : calculateRamUpgradeCost(node.ram, n, this.#mult("hacknet_node_ram_cost"))
       : Infinity;
   }
 
-  coreCost(index: number): number {
+  coreCost(index: number, n = 1): number {
     const node = this.nodes[index];
     return node
       ? this.hashMode
-        ? calculateServerCoreUpgradeCost(node.cores, 1, this.#mult("hacknet_node_core_cost"))
-        : calculateCoreUpgradeCost(node.cores, 1, this.#mult("hacknet_node_core_cost"))
+        ? calculateServerCoreUpgradeCost(node.cores, n, this.#mult("hacknet_node_core_cost"))
+        : calculateCoreUpgradeCost(node.cores, n, this.#mult("hacknet_node_core_cost"))
       : Infinity;
   }
 
@@ -157,11 +164,10 @@ export class HacknetSystem {
   upgradeLevel(index: number, n = 1): boolean {
     const node = this.nodes[index];
     if (!node) return false;
-    const cost = this.hashMode
-      ? calculateServerLevelUpgradeCost(node.level, n, this.#mult("hacknet_node_level_cost"))
-      : calculateLevelUpgradeCost(node.level, n, this.#mult("hacknet_node_level_cost"));
+    const cost = this.levelCost(index, n);
     if (!Number.isFinite(cost) || this.#player.money < cost) return false;
     this.#player.money -= cost;
+    this.#world.recordMoney("hacknet_expenses", -cost);
     node.level = Math.min(this.hashMode ? HacknetServerConstants.MaxLevel : HacknetNodeConstants.MaxLevel, node.level + n);
     return true;
   }
@@ -169,11 +175,10 @@ export class HacknetSystem {
   upgradeRam(index: number, n = 1): boolean {
     const node = this.nodes[index];
     if (!node) return false;
-    const cost = this.hashMode
-      ? calculateServerRamUpgradeCost(node.ram, n, this.#mult("hacknet_node_ram_cost"))
-      : calculateRamUpgradeCost(node.ram, n, this.#mult("hacknet_node_ram_cost"));
+    const cost = this.ramCost(index, n);
     if (!Number.isFinite(cost) || this.#player.money < cost) return false;
     this.#player.money -= cost;
+    this.#world.recordMoney("hacknet_expenses", -cost);
     // RAM DOUBLES per upgrade; adding would make every cost projection wrong.
     node.ram = Math.min(this.hashMode ? HacknetServerConstants.MaxRam : HacknetNodeConstants.MaxRam, node.ram * Math.pow(2, n));
     if (this.hashMode && node.hostname) {
@@ -186,11 +191,10 @@ export class HacknetSystem {
   upgradeCore(index: number, n = 1): boolean {
     const node = this.nodes[index];
     if (!node) return false;
-    const cost = this.hashMode
-      ? calculateServerCoreUpgradeCost(node.cores, n, this.#mult("hacknet_node_core_cost"))
-      : calculateCoreUpgradeCost(node.cores, n, this.#mult("hacknet_node_core_cost"));
+    const cost = this.coreCost(index, n);
     if (!Number.isFinite(cost) || this.#player.money < cost) return false;
     this.#player.money -= cost;
+    this.#world.recordMoney("hacknet_expenses", -cost);
     node.cores = Math.min(this.hashMode ? HacknetServerConstants.MaxCores : HacknetNodeConstants.MaxCores, node.cores + n);
     if (this.hashMode && node.hostname) {
       const server = this.#world.servers.get(node.hostname);
@@ -202,7 +206,7 @@ export class HacknetSystem {
   upgradeCache(index: number, n = 1): boolean {
     const node = this.nodes[index];
     if (!this.hashMode || !node) return false;
-    const cost = calculateCacheUpgradeCost(node.cache ?? 1, n);
+    const cost = this.cacheCost(index, n);
     if (!Number.isFinite(cost) || this.#player.money < cost) return false;
     this.#player.money -= cost;
     this.#world.recordMoney("hacknet_expenses", -cost);
@@ -238,9 +242,9 @@ export class HacknetSystem {
     }
   }
 
-  cacheCost(index: number): number {
+  cacheCost(index: number, n = 1): number {
     const node = this.nodes[index];
-    return this.hashMode && node ? calculateCacheUpgradeCost(node.cache ?? 1, 1) : Infinity;
+    return this.hashMode && node ? calculateCacheUpgradeCost(node.cache ?? 1, n) : Infinity;
   }
 
   hashCapacity(): number {
@@ -265,7 +269,18 @@ export class HacknetSystem {
     if (!this.hashMode || count < 0) return false;
     const cost = this.hashCost(name, count);
     if (!Number.isFinite(cost) || this.hashes < cost) return false;
-    if (!["Sell for Money", "Reduce Minimum Security", "Increase Maximum Money"].includes(name)) {
+    // "Improve Studying" and "Improve Gym Training" need no branch below: their
+    // whole effect is the level counter this method already increments, which
+    // sim/features/education.ts reads as `1 + 0.2 * level` — the same shape as
+    // HashManager.getMult. Leaving them out of the allowlist made the two
+    // upgrades whose effects ARE modelled the only ones nobody could buy.
+    if (![
+      "Sell for Money",
+      "Reduce Minimum Security",
+      "Increase Maximum Money",
+      "Improve Studying",
+      "Improve Gym Training",
+    ].includes(name)) {
       return unmodeled("subsystem", `hacknet.${name}`, "hash-upgrade effect is not modelled yet");
     }
     const server = target ? this.#world.servers.get(target) : undefined;
@@ -289,6 +304,16 @@ export class HacknetSystem {
       this.#world.mirrorServer(server!);
     }
     return true;
+  }
+
+  /** HashManager.getStudyMult/getTrainingMult, which are a plain 1 outside
+   *  hacknet-server mode (NetscriptFunctions/Hacknet.ts:232-243). */
+  studyMult(): number {
+    return this.hashMode ? hashUpgradeMult(this.hashLevels["Improve Studying"] ?? 0) : 1;
+  }
+
+  trainingMult(): number {
+    return this.hashMode ? hashUpgradeMult(this.hashLevels["Improve Gym Training"] ?? 0) : 1;
   }
 
   totalProduction(): number {

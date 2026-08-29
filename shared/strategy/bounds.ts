@@ -109,7 +109,15 @@ export function staticsFromRolls(
   rolls: { money: number; sec: number; skill: number; growth: number },
   mults: ServerGenMults = {},
 ): TargetStatics {
-  const realDifficulty = rolls.sec * (mults.ServerStartingSecurity ?? 1);
+  // Upstream only sets `hackDifficulty` on the params when the metadata value
+  // is TRUTHY (ServerHelpers.ts:367 `if (metadata.hackDifficulty)`), so a
+  // metadata sec of 0 leaves it undefined and the Server constructor falls back
+  // to a literal 1 with NO multiplier applied (Server.ts:79-81). Multiplying a
+  // substituted 1 instead would inflate the seven `sec: 0` hosts — CSEC,
+  // avmnite-02h, I.I.I.I, run4theh111z, ., The-Cave and w0r1d_d43m0n — in every
+  // BitNode whose ServerStartingSecurity is not 1, stretching every
+  // faction-unlock backdoor and the endgame backdoor along with them.
+  const realDifficulty = rolls.sec ? rolls.sec * (mults.ServerStartingSecurity ?? 1) : 1;
   return {
     hostname,
     moneyMax: 25 * rolls.money * (mults.ServerMaxMoney ?? 1),

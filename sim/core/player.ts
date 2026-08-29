@@ -1,4 +1,5 @@
 import type { Person, Player } from "@ns";
+import { CONSTANTS } from "../vendor/bitburner/src/Constants.ts";
 
 /** The non-`Person` half of the player.
  *
@@ -70,6 +71,11 @@ export interface SimPlayerOptions {
   focus?: boolean;
 }
 
+/** A new game's balance, and every post-install balance before augmentation
+ * grants are added: `1000 + CONSTANTS.Donations` (PlayerObject.ts:56,
+ * PlayerObjectGeneralMethods.ts:102), not a bare 1000. */
+export const NEW_GAME_MONEY = 1_000 + CONSTANTS.Donations;
+
 export class SimPlayer {
   money: number;
   /** Negative and DECREASING. Every faction/gang karma requirement is an upper
@@ -105,7 +111,7 @@ export class SimPlayer {
   focus = true;
 
   constructor(options: SimPlayerOptions = {}) {
-    this.money = options.money ?? 1_000;
+    this.money = options.money ?? NEW_GAME_MONEY;
     this.karma = options.karma ?? 0;
     this.entropy = options.entropy ?? 0;
     this.exploits = [...(options.exploits ?? [])];
@@ -176,8 +182,12 @@ export class SimPlayer {
     return this.ownedAugmentations(includeQueued).length;
   }
 
-  hasAugmentation(name: string, includeQueued = true): boolean {
-    return this.augmentations.has(name) || (includeQueued && this.queuedAugmentations.has(name));
+  /** Upstream `Person.hasAugmentation(augName, ignoreQueued = false)`
+   *  (src/PersonObjects/Person.ts:233). The flag means IGNORE queued, not
+   *  include them — the signature is kept identical because the inverted spelling
+   *  silently flipped every call site that passed `true`. */
+  hasAugmentation(name: string, ignoreQueued = false): boolean {
+    return this.augmentations.has(name) || (!ignoreQueued && this.queuedAugmentations.has(name));
   }
 }
 

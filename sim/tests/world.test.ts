@@ -202,8 +202,10 @@ describe("SimPlayer augmentation accounting", () => {
 
     expect(world.player.augmentationCount(true)).toBe(4);
     expect(world.player.augmentationCount(false)).toBe(1);
-    expect(world.player.hasAugmentation("NeuroFlux Governor", true)).toBe(true);
-    expect(world.player.hasAugmentation("NeuroFlux Governor", false)).toBe(false);
+    // `ignoreQueued` matches upstream: the default counts a queued copy, and
+    // passing true asks about installed augmentations only.
+    expect(world.player.hasAugmentation("NeuroFlux Governor")).toBe(true);
+    expect(world.player.hasAugmentation("NeuroFlux Governor", true)).toBe(false);
   });
 
   test("an augmentation both installed and queued remains duplicated in the API", () => {

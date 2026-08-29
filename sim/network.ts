@@ -75,16 +75,19 @@ function rolledValue(
   return metadata.randomized[field] ? randomInt(rng, range) : range[0];
 }
 
-function truthyMetadataValue(
+/** Upstream copies `serverGrowth` onto the params only when the metadata value
+ * is truthy (ServerHelpers.ts:370), so a 0 falls back to the constructor's 1.
+ * `sec` looks the same upstream but must NOT use this: its fallback happens
+ * after the ServerStartingSecurity multiplier rather than before, which is why
+ * it is resolved in staticsFromRolls instead. */
+function growthValue(
   rng: () => number,
   metadata: VendoredServer,
-  field: keyof VendoredServer["randomized"],
   range: Range | undefined,
-  fallback: number,
 ): number {
-  if (!range) return fallback;
-  if (metadata.randomized[field]) return randomInt(rng, range);
-  return range[0] ? range[0] : fallback;
+  if (!range) return 1;
+  if (metadata.randomized.growth) return randomInt(rng, range);
+  return range[0] ? range[0] : 1;
 }
 
 /** Build the standard v3.0.1 foreign-server population using the same roll
@@ -124,10 +127,10 @@ export function generateVanillaNetworkFromRng(rng: () => number, homeIp = ""): G
     ips.add(ip);
 
     const ramExponent = rolledValue(rng, metadata, "ramExp", metadata.ramExp, -Infinity);
-    const hackDifficulty = truthyMetadataValue(rng, metadata, "sec", metadata.sec, 1);
+    const hackDifficulty = rolledValue(rng, metadata, "sec", metadata.sec, 0);
     const moneyAvailable = rolledValue(rng, metadata, "money", metadata.money, 0);
     const requiredHackingSkill = rolledValue(rng, metadata, "skill", metadata.skill, 1);
-    const serverGrowth = truthyMetadataValue(rng, metadata, "growth", metadata.growth, 1);
+    const serverGrowth = growthValue(rng, metadata, metadata.growth);
     const server: ServerSpec = {
       hostname: metadata.host,
       ip,

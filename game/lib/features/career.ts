@@ -136,7 +136,6 @@ function buildCareerView(
     progression?.multipliers,
   ) ?? {};
   const skills = { ...(player.skills ?? {}) } as unknown as Record<string, number>;
-  const classExp = nodeMults["ClassGymExpGain"] ?? 1;
   // ClassWork applies the location multiplier, the matching Hacknet hash
   // multiplier, and a 10% cost discount when the location's server is
   // backdoored. These are the exact Rothman/Powerhouse base rates after that
@@ -154,8 +153,7 @@ function buildCareerView(
         skill: option.skill,
         expPerSec: option.expPerSec
           * (option.kind === "gym" ? gymMult : studyMult)
-          * (mults[`${option.skill}_exp`] ?? 1)
-          * classExp,
+          * (mults[`${option.skill}_exp`] ?? 1),
         costPerSec: option.costPerSec * (option.kind === "gym" ? powerhouseCostMult : rothmanCostMult),
         location: option.location,
       }))

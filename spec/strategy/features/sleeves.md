@@ -139,8 +139,10 @@ Values from `sim/vendor/bitburner/src/BitNode/BitNodeMults.ts`:
 | `CrimeMoney` | BN2 3 · BN3 0.25 · BN4 0.2 · BN5 0.5 · BN6 0.75 · BN7 0.75 · [BN8](../bitnodes/bn08.md) **0** · BN9 0.5 · BN10 0.5 · BN11 3 · BN13 0.4 · BN14 0.75 |
 | `CompanyWorkMoney` | BN3 0.25 · BN4 0.1 · BN6 0.5 · BN7 0.5 · BN8 **0** · BN10 0.5 · BN11 0.5 · BN13 0.4 |
 | `FactionWorkRepGain` · `CompanyWorkRepGain` | BN2 0.5 / — · BN4 0.75 / — · BN13 0.6 / — · BN14 0.2 / 0.2 |
-| `CrimeExpGain`, `ClassGymExpGain` | BN4 0.5 · BN13 0.5 |
+| `CrimeExpGain`, `ClassGymExpGain` | BN4 0.5 · BN13 0.5 — but see `ClassGymExpGain` below |
 | `AugmentationRepCost` — the sleeve-aug rep gate, standard branch | BN3 3 · [BN10](../bitnodes/bn10.md) 2 |
+
+> `ClassGymExpGain` is declared by these nodes but **inert in v3.0.1**: `calculateClassEarnings` (`src/Work/Formulas.ts:108-121`) never reads it, so university and gym run at full rate.
 
 ## Source map
 

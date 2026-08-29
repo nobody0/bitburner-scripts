@@ -1,6 +1,7 @@
 import type { SimPlayer } from "../core/player.ts";
 import type { SimWorld } from "../world.ts";
 import { COMPANY_TABLE, type VendoredCompany, type VendoredCompanyPosition } from "../vendor/bitburner/src/Company/CompanyTable.ts";
+import { SERVER_METADATA } from "../vendor/bitburner/src/Server/data/ServerMetadata.ts";
 import { CONSTANTS } from "../vendor/bitburner/src/Constants.ts";
 import { currentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import { addRepToFavor } from "../vendor/bitburner/src/Faction/formulas/favor.ts";
@@ -9,6 +10,19 @@ import { influenceStockThroughCompanyWork } from "../vendor/bitburner/src/StockM
 export interface SimCompanyStanding {
   rep: number;
   favor: number;
+}
+
+/** `isBackdoorInstalledInCompanyServer` (Server/ServerHelpers.ts:278-285): find
+ * the ONE server whose `specialName` is this company, then ask whether it is
+ * backdoored. Matching on `organizationName` instead would be wrong for Fulcrum,
+ * where `fulcrumtech` and `fulcrumassets` share an organizationName but only the
+ * former is Fulcrum Technologies' company server — so backdooring `fulcrumassets`
+ * (which Fulcrum Secret Technologies' own invite requires) would hand out the
+ * 0.75x company-rep discount the game does not give. */
+export function isBackdoorInstalledInCompanyServer(world: SimWorld, companyName: string): boolean {
+  const metadata = Object.values(SERVER_METADATA).find((entry) => entry.specialName === companyName);
+  if (!metadata) return false;
+  return world.servers.get(metadata.host)?.backdoorInstalled === true;
 }
 
 /** Exact v3.0.1 company application and work slice.
@@ -132,7 +146,7 @@ export class CompanySystem {
     const standing = this.standings.get(company.name)!;
     const person = this.#world.person;
     const mults = person.mults as unknown as Record<string, number>;
-    const focus = position.isPartTime || work.focused || this.#player.hasAugmentation("Neuroreceptor Management Implant") ? 1 : 0.8;
+    const focus = position.isPartTime || work.focused || this.#player.hasAugmentation("Neuroreceptor Management Implant", true) ? 1 : 0.8;
     const favorMult = 1 + standing.favor / 100;
     const sf11Mult = (this.#player.sourceFiles["11"] ?? 0) > 0 ? favorMult : 1;
     const sf15Mult = (this.#player.sourceFiles["15"] ?? 0) > 1
@@ -201,9 +215,7 @@ export class CompanySystem {
   }
 
   private effectiveRequiredReputation(companyName: string, base: number): number {
-    const backdoored = [...this.#world.servers.values()].some(
-      (server) => server.organizationName === companyName && server.backdoorInstalled,
-    );
+    const backdoored = isBackdoorInstalledInCompanyServer(this.#world, companyName);
     return base * (backdoored ? CONSTANTS.CompanyRequiredReputationMultiplier : 1);
   }
 }

@@ -94,6 +94,13 @@ export class Clock {
   /** Returns a cancellation handle. Ids start at 1: the game's
    * `if (ws.delay) clearTimeout(ws.delay)` treats a 0 handle as absent. */
   at(time: number, fn: () => void): number {
+    // NaN fails EVERY comparison, so an unguarded NaN deadline slips past the
+    // past-check, sorts arbitrarily in the heap and then pins `#now` at NaN for
+    // the rest of the run — taking Date.now, the horizon check and the stall
+    // tripwire with it, while the run still reports a result. Infinity is the
+    // same story with a different ending, so both are refused here rather than
+    // at each caller.
+    if (!Number.isFinite(time)) throw new Error(`cannot schedule at a non-finite time (${time})`);
     if (time < this.#now) throw new Error(`cannot schedule in the past (${time} < ${this.#now})`);
     const seq = this.#nextId++;
     this.#heap.push({ time, seq, fn });

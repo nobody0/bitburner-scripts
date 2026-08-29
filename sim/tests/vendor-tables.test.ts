@@ -59,6 +59,10 @@ describe("faction table", () => {
     // Daedalus's augmentation requirement is `delayedCondition(() =>
     // haveAugmentations(currentNodeMults.DaedalusAugsRequirement))`. If the
     // extractor had failed to call it, this would be missing entirely.
+    // 30 is the BN1 value and therefore the BASE: the extractor can only
+    // resolve the closure once, so FactionSystem re-reads the live multiplier
+    // per node (35 in BN6/7, 20 in BN15, a formula in BN12) the same way it
+    // re-applies the company-rep backdoor discount.
     expect(FACTION_TABLE["Daedalus"]!.inviteReqs).toContainEqual({ type: "numAugmentations", numAugmentations: 30 });
   });
 
