@@ -1,3 +1,4 @@
+import { stamp } from "../lib/clock.ts";
 import { card, definitions, dot, hint, NONE, outcome, table, tiles, waiting, waitingPanel } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtPct } from "../lib/format.ts";
 import { html } from "../lib/html.ts";
@@ -57,7 +58,9 @@ export const corpTab: Tab = {
         (d.offices ?? []).map((o) => {
           const w = d.warehouses?.find((entry) => entry.city === o.city);
           const jobs = Object.entries(o.jobs);
-          const sales = w?.materials.filter((material) =>
+          // `materials` is newer than the warehouse digest itself, so a stored
+          // run recorded before it carries warehouses without the field.
+          const sales = w?.materials?.filter((material) =>
             material.desiredSellAmount === "MAX" && material.desiredSellPrice === "MP"
           ).map((material) => material.name).join(", ");
           return [
@@ -97,7 +100,13 @@ export const corpTab: Tab = {
               "",
             )
           : "") +
-        (plan.lastResults ?? []).map(outcome).join("")
+        // Results are sticky: the module-level buffer is only cleared when a
+        // NEW observation is acted on, so an unstamped line reads as fresh
+        // long after it was issued.
+        (plan.lastResults ?? []).map((entry) => outcome({
+          ok: entry.ok,
+          detail: html`${entry.detail} · ${stamp(state, entry.at)}`,
+        })).join("")
       : waiting("the first corporation decision");
 
     return `<div class="col wide">${card("Corporation", summary + divisions)}${card("Decision", decision)}${detail}</div>` +

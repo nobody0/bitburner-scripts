@@ -101,7 +101,16 @@ const driver: FeatureDriver = {
     if (!view) return;
     const decision = stepCorp(view);
     let issued = false;
-    const observation = JSON.stringify(view);
+    // Key the once-per-observation guard on what the ACTIONS change, never on
+    // funds/revenue/expenses/moneyGranted: those move every corporation cycle,
+    // so a whole-view key differs on every 30 s pass and re-issues a batch the
+    // 2-minute divisions probe has not confirmed yet — re-running expandCity
+    // or purchaseWarehouse throws upstream and aborts the rest of the batch.
+    const observation = JSON.stringify({
+      hasCorporation: view.hasCorporation,
+      unlocks: view.unlocks,
+      divisions: view.divisions,
+    });
     if (decision.actions.length > 0 && lastActedObservation !== observation) {
       lastResults = [];
       for (const action of decision.actions) {

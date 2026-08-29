@@ -41,6 +41,40 @@ describe("tab rendering", () => {
     expect(html).toContain("$15/s");
   });
 
+  // The viewer serves stored runs from `runs/`, so a tab must survive a record
+  // written before a topic field existed rather than taking `render()` — and
+  // with it the whole dashboard — down with a TypeError.
+  test("Gang and Corporation survive a record that predates their newest fields", () => {
+    const state = emptyState();
+    state.topics.gang = {
+      faction: "Slum Snakes", isHacking: false,
+      respect: 100, respectGainRate: 2, wantedLevel: 1, wantedLevelGainRate: 0.5,
+      wantedPenalty: 0.99, moneyGainRate: 3, territory: 0.1,
+      territoryWarfareEngaged: false,
+      respectForNextRecruit: 125, recruitsAvailable: 0,
+      members: [], tasks: [], gangSoftcap: 1,
+      // The pre-rewrite plan shape: no `phase`, `actions` or `assignments`.
+      plan: { assignment: { total: 1, approximated: false, choices: [] } },
+    } as unknown as StateMap["gang"];
+    state.topics.corp = {
+      name: "Automation", funds: 1, revenue: 0, expenses: 0, public: false,
+      valuation: 1, sharePrice: 1, totalShares: 1, numShares: 1, issuedShares: 0,
+      dividendRate: 0, dividendEarnings: 0, state: "START",
+      unlocks: { officeApi: true, warehouseApi: true, smartSupply: false },
+      divisions: [{
+        name: "Agriculture", industry: "Agriculture", awareness: 0, popularity: 0,
+        productionMult: 1, researchPoints: 0, lastCycleRevenue: 0, lastCycleExpenses: 0,
+        numAdVerts: 0, cities: ["Sector-12"], products: [], maxProducts: 0,
+        offices: [{ city: "Sector-12", size: 3, numEmployees: 0, avgEnergy: 100, avgMorale: 100, jobs: {} }],
+        // A warehouse recorded before `materials` existed.
+        warehouses: [{ city: "Sector-12", level: 1, size: 100, sizeUsed: 0, smartSupplyEnabled: false }],
+      }],
+    } as unknown as StateMap["corp"];
+    expect(() => TABS.gang.render(state)).not.toThrow();
+    expect(() => TABS.corp.render(state)).not.toThrow();
+    expect(TABS.gang.render(state)).toContain("predates");
+  });
+
   test("Hacking server table shows and explains host CPU cores", () => {
     const state = emptyState();
     state.servers.set("iron-gym", {
@@ -262,7 +296,34 @@ describe("tab rendering", () => {
         wantedLevelGain: 0.01, moneyGain: 100,
         skills: { hack: 1, str: 10, def: 10, dex: 10, agi: 10, cha: 1 },
       }],
+      plan: {
+        phase: "ascend", reason: "a has a 1.50x policy gain",
+        actions: [{ type: "ascend", member: "a", task: "Train Combat" }],
+        assignments: [],
+        lastResults: [{ action: "ascend", ok: true, detail: "a -> Train Combat", at: 1 }],
+      },
     } as StateMap["gang"];
+    state.topics.corp = {
+      name: "Automation", funds: 60e9, revenue: 2e6, expenses: 1e6, public: false,
+      valuation: 1e12, sharePrice: 1, totalShares: 1e9, numShares: 9e8, issuedShares: 0,
+      dividendRate: 0, dividendEarnings: 0, state: "START",
+      unlocks: { officeApi: true, warehouseApi: true, smartSupply: true },
+      divisions: [{
+        name: "Agriculture", industry: "Agriculture", awareness: 0, popularity: 0,
+        productionMult: 1, researchPoints: 0, lastCycleRevenue: 2e6, lastCycleExpenses: 1e6,
+        numAdVerts: 0, cities: ["Sector-12"], products: [], maxProducts: 0,
+        offices: [{ city: "Sector-12", size: 3, numEmployees: 3, avgEnergy: 100, avgMorale: 100, jobs: { Operations: 1, Engineer: 1, Business: 1 } }],
+        warehouses: [{
+          city: "Sector-12", level: 1, size: 100, sizeUsed: 10, smartSupplyEnabled: true,
+          materials: [{ name: "Plants", desiredSellAmount: "MAX", desiredSellPrice: "MP" }],
+        }],
+      }],
+      plan: {
+        stage: "city-setup", status: "acting", detail: "reconcile 1 Agriculture setup action(s)",
+        actions: [{ type: "expandCity", division: "Agriculture", city: "Aevum" }],
+        lastResults: [{ action: "expandCity", ok: true, detail: "Agriculture/Aevum issued; awaiting probe", at: 1 }],
+      },
+    } as StateMap["corp"];
     state.topics.bladeburner = {
       rank: 100, skillPoints: 5, stamina: [50, 100], city: "Sector-12", chaos: 0,
       current: { type: "Contract", name: "Tracking", elapsedMs: 1000 }, skills: {},

@@ -43,10 +43,11 @@ const BASE_FEATURE_COVERAGE: Readonly<Record<FeatureId, FeatureCoverage>> = {
   factions: "full",
   career: "partial",
   // Node/server economics, hash production and capacity are exact. Of the
-  // eleven hash upgrades, six have modeled effects; the other five (both
-  // Corporation exchanges, both Bladeburner exchanges, Company Favor) throw
-  // rather than pretending to spend, so a run that wants one is refused and
-  // not quietly mispriced.
+  // eleven hash upgrades (Hacknet/Enums.ts HashUpgradeEnum), five have modeled
+  // effects; the other six (Sell for Corporation Funds, Exchange for
+  // Corporation Research, both Bladeburner exchanges, Generate Coding
+  // Contract, Company Favor) throw rather than pretending to spend, so a run
+  // that wants one is refused and not quietly mispriced.
   hacknet: "partial",
   // Full for the shipped controller lifecycle: fresh market generation,
   // prices/cycles, positions, unlocks, prestige, and hack/grow influence.

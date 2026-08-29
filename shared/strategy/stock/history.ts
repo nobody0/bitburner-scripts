@@ -259,32 +259,69 @@ function recoverCorpusRoll(moved: readonly { sample: PriceSample; step: number }
   });
   if (constrained.length < 2) return undefined;
 
-  const count = (range: readonly [number, number]): number =>
-    Math.max(0, Math.round((range[1] - range[0]) / STOCK_VOLATILITY_STEP));
   const tolerance = 1e-8;
-  const candidates = new Map<string, { v: number; fits: number }>();
-  for (const reference of constrained) {
-    for (let i = 0; i <= count(reference.range); i++) {
-      const referenceVolatility = reference.range[0] + i * STOCK_VOLATILITY_STEP;
-      const v = reference.amplitude / referenceVolatility;
+  // Flat arrays and hoisted grid counts: this runs once per observed tick over
+  // every symbol's grid crossed with every symbol's constraint, so property
+  // loads inside the inner loop are the whole cost.
+  const size = constrained.length;
+  const amplitudes = new Float64Array(size);
+  const lows = new Float64Array(size);
+  const counts = new Int32Array(size);
+  for (let i = 0; i < size; i++) {
+    const entry = constrained[i]!;
+    amplitudes[i] = entry.amplitude;
+    lows[i] = entry.range[0];
+    counts[i] = Math.max(0, Math.round((entry.range[1] - entry.range[0]) / STOCK_VOLATILITY_STEP));
+  }
+
+  // Narrowest grid first. The candidate SET is the same whatever the order, so
+  // this cannot change the answer — it just reaches the winning `v` early, and
+  // the bound below then abandons the rest of the enumeration on its first or
+  // second mismatch instead of walking all 33 constraints.
+  const order = Array.from({ length: size }, (_, i) => i).sort((a, b) => counts[a]! - counts[b]!);
+
+  const seen = new Set<string>();
+  let bestV = 0;
+  let bestFits = -1;
+  let tied = false;
+  for (const ref of order) {
+    for (let i = 0; i <= counts[ref]!; i++) {
+      const referenceVolatility = lows[ref]! + i * STOCK_VOLATILITY_STEP;
+      const v = amplitudes[ref]! / referenceVolatility;
       if (!(v > 0) || v > 1 + tolerance) continue;
-      const key = v.toPrecision(12);
-      if (candidates.has(key)) continue;
       let fits = 0;
-      for (const candidate of constrained) {
-        const implied = candidate.amplitude / v;
-        const index = Math.round((implied - candidate.range[0]) / STOCK_VOLATILITY_STEP);
-        if (index < 0 || index > count(candidate.range)) continue;
-        const gridValue = candidate.range[0] + index * STOCK_VOLATILITY_STEP;
+      for (let j = 0; j < size; j++) {
+        // Abandon a candidate the moment every remaining symbol fitting could
+        // still not reach the best count seen. Equal-count candidates must run
+        // to completion because a tie is what makes the basket ambiguous.
+        if (fits + (size - j) < bestFits) {
+          fits = -1;
+          break;
+        }
+        const implied = amplitudes[j]! / v;
+        const index = Math.round((implied - lows[j]!) / STOCK_VOLATILITY_STEP);
+        if (index < 0 || index > counts[j]!) continue;
+        const gridValue = lows[j]! + index * STOCK_VOLATILITY_STEP;
         if (Math.abs(implied - gridValue) <= tolerance * Math.max(STOCK_VOLATILITY_STEP, gridValue)) fits++;
       }
-      candidates.set(key, { v: Math.min(1, v), fits });
+      // Deduplicate only what survives. `bestFits` never falls, so a repeat of
+      // an abandoned candidate is abandoned again — and paying for the key of
+      // every grid point of every symbol is the enumeration's dominant cost.
+      if (fits < 0) continue;
+      const key = v.toPrecision(12);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (fits > bestFits) {
+        bestFits = fits;
+        bestV = v;
+        tied = false;
+      } else if (fits === bestFits) {
+        tied = true;
+      }
     }
   }
-  const ordered = [...candidates.values()].sort((a, b) => b.fits - a.fits);
-  const best = ordered[0];
-  if (!best || best.fits < Math.ceil(constrained.length / 2)) return undefined;
-  return ordered[1]?.fits === best.fits ? undefined : best.v;
+  if (bestFits < Math.ceil(size / 2)) return undefined;
+  return tied ? undefined : Math.min(1, bestV);
 }
 
 function metadataVolatility(sym: string): number {

@@ -1,5 +1,5 @@
 import { stamp } from "../lib/clock.ts";
-import { card, dataTable, outcome, table, tiles, waiting, waitingPanel } from "../lib/dom.ts";
+import { card, dataTable, NONE, note, outcome, table, tiles, waiting, waitingPanel } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtPct } from "../lib/format.ts";
 import { html } from "../lib/html.ts";
 import { ASCEND_THRESHOLD } from "../../../shared/strategy/gang/decide.ts";
@@ -43,8 +43,12 @@ export const gangTab: Tab = {
     ], { defaultSort: { key: "respect", dir: -1 }, empty: "no members recruited" });
 
     const plan = gang.plan;
+    // `phase`/`assignments` are newer than the topic itself; a stored run
+    // recorded before them carries the old `assignment` scoring shape.
     const decision = !plan
       ? waiting("the first gang decision")
+      : !plan.assignments || !plan.actions
+      ? note("this replay predates structured gang assignments")
       : tiles([
           { label: "phase", value: plan.phase },
           { label: "changes", value: String(plan.actions.length), sub: plan.reason },
@@ -57,6 +61,19 @@ export const gangTab: Tab = {
           ]),
           { empty: "no members", left: [0, 1] },
         )
+        // Recruit/ascend/warfare branches return no assignments at all, so
+        // without this the "changes" count names nothing.
+        + (plan.actions.some((action) => action.type !== "assign")
+          ? table(
+              ["action", "target", "task"],
+              plan.actions.filter((action) => action.type !== "assign").map((action) => [
+                esc(action.type),
+                esc("member" in action ? action.member : "name" in action ? action.name : NONE),
+                esc("task" in action ? action.task : NONE),
+              ]),
+              { empty: "", left: [0, 1, 2] },
+            )
+          : "")
         + (plan.lastResults ?? []).map((entry) => outcome({
           ok: entry.ok,
           detail: html`${entry.detail} · ${stamp(state, entry.at)}`,

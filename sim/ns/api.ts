@@ -209,11 +209,15 @@ function namespace(impl: Record<string, unknown>, path: string, host: SimNsHost,
  * the timer is cancellable, and a kill rejects the await with ScriptDeath. */
 function netscriptDelay(host: SimNsHost, process: SimProcess, ms: number, functionName: string): Promise<void> {
   // Upstream coerces through `helpers.number`, which throws `'time' is NaN`
-  // before setTimeout is ever reached (NetscriptHelpers.tsx:144-153).
-  if (typeof ms !== "number" || !Number.isFinite(ms)) throw new Error(`${functionName}: 'time' is NaN`);
+  // before setTimeout is ever reached — and ONLY on NaN
+  // (NetscriptHelpers.tsx:144-153). Infinity passes that check and reaches
+  // `window.setTimeout`, whose WebIDL `long` conversion maps a non-finite
+  // delay to +0, so the game continues immediately rather than hanging.
+  if (typeof ms !== "number" || Number.isNaN(ms)) throw new Error(`${functionName}: 'time' is NaN`);
+  const delay = Number.isFinite(ms) ? Math.max(0, ms) : 0;
   const promise = new Promise<void>((resolve, reject) => {
     process.runningFn = functionName;
-    process.delay = host.clock.in(Math.max(0, ms), () => {
+    process.delay = host.clock.in(delay, () => {
       process.delay = undefined;
       process.delayReject = undefined;
       process.runningFn = undefined;
@@ -347,9 +351,13 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
 
     // --- scheduling -----------------------------------------------------
     sleep: (ms = 0): Promise<boolean> => netscriptDelay(host, process, ms, "sleep").then(() => true),
-    // asleep is NOT cancellable and does not block concurrent ns calls.
-    asleep: (ms = 0): Promise<boolean> =>
-      new Promise<boolean>((resolve) => void host.clock.in(Math.max(0, ms), () => resolve(true))),
+    // asleep is NOT cancellable and does not block concurrent ns calls. Same
+    // coercion as sleep: NaN throws, a non-finite delay is a 0 ms timer.
+    asleep: (ms = 0): Promise<boolean> => {
+      if (typeof ms !== "number" || Number.isNaN(ms)) throw new Error("asleep: 'time' is NaN");
+      const delay = Number.isFinite(ms) ? Math.max(0, ms) : 0;
+      return new Promise<boolean>((resolve) => void host.clock.in(delay, () => resolve(true)));
+    },
     atExit: (callback: () => void, id = "default") => void process.atExit.set(id, callback),
 
     ramOverride: (ram?: number): number => {
@@ -472,10 +480,13 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       const delayMs = options?.spawnDelay ?? 10_000;
       // Validated BEFORE the caller is killed, matching upstream's spawnOptions
       // (NetscriptHelpers.tsx:265-269) — otherwise a bad delay kills the script
-      // and then throws, leaving nothing alive to catch it.
-      if (typeof delayMs !== "number" || !Number.isFinite(delayMs) || delayMs < 0) {
-        throw new Error(`spawn: 'spawnDelay' must be a non-negative finite number`);
+      // and then throws, leaving nothing alive to catch it. Upstream refuses
+      // only NaN and a negative delay; Infinity passes `helpers.number` and
+      // reaches setTimeout, which maps a non-finite delay to 0 ms.
+      if (typeof delayMs !== "number" || Number.isNaN(delayMs) || delayMs < 0) {
+        throw new Error(`spawn: 'spawnDelay' must be a non-negative number`);
       }
+      const spawnDelayMs = Number.isFinite(delayMs) ? delayMs : 0;
       const hostname = process.host;
       const launchSpawned = (): void => {
         if (!filesOn(host, hostname).has(script)) return;
@@ -491,8 +502,8 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       };
       // Kill the caller FIRST, so its allocation is free for the target.
       host.processes.kill(process.pid);
-      if (delayMs === 0) launchSpawned();
-      else host.clock.in(delayMs, launchSpawned);
+      if (spawnDelayMs === 0) launchSpawned();
+      else host.clock.in(spawnDelayMs, launchSpawned);
       // Upstream throws ScriptDeath so the caller's remaining code never runs.
       throw new ScriptDeath(process.pid);
     },
