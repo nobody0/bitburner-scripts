@@ -2,7 +2,11 @@
  * disabled nodes remain visible in-place so enabling one cannot silently
  * change the intended order. BN12 is the infinite fallback after the enabled
  * finite milestones. Historical context lives in
- * spec/strategy/speedrun-benchmark.md. */
+ * spec/strategy/speedrun-benchmark.md.
+ *
+ * The route starts fresh in BN4: Singularity is node-native there, so nothing
+ * is injected. The first completed BitNode is 4.1 inside the 4.3 milestone,
+ * and BN1 levels 1-3 are all earned at the 1.3 entry. */
 
 export interface BitNodeMilestone {
   node: number;
@@ -10,7 +14,6 @@ export interface BitNodeMilestone {
 }
 
 export const BITNODE_SPEEDRUN_PLAN: readonly BitNodeMilestone[] = [
-  { node: 1, level: 1 },
   { node: 4, level: 3 },
   { node: 1, level: 3 },
   { node: 15, level: 3 },
@@ -38,7 +41,24 @@ export const DISABLED_BITNODES: ReadonlySet<number> = new Set([
 
 export const BITNODE_FALLBACK = 12;
 
-/** Operator hold at the irreversible boundary. While true, progression still
+/** Operator hold at the irreversible boundary. While held, progression still
  * finishes and publishes the route plus next destination, but never arms or
- * dispatches destroyW0r1dD43m0n. Set false to resume automatic completion. */
-export const STALL_BITNODE_COMPLETION = true;
+ * dispatches destroyW0r1dD43m0n.
+ *
+ * Held by default: in the live game the boundary is one-way and the operator
+ * decides when to cross it. A simulated route leg is the exception — its goal
+ * IS the destruction, so `bn:<n>` is unreachable by construction while the
+ * hold stands. The simulator lifts it per run and restores it afterwards
+ * (`GameRunOptions.allowBitNodeCompletion`); nothing else should. */
+let stallBitNodeCompletion = true;
+
+export function isBitNodeCompletionStalled(): boolean {
+  return stallBitNodeCompletion;
+}
+
+/** Returns the previous value so a caller can restore it. */
+export function setBitNodeCompletionStall(stalled: boolean): boolean {
+  const previous = stallBitNodeCompletion;
+  stallBitNodeCompletion = stalled;
+  return previous;
+}

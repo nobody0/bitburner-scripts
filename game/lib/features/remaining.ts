@@ -66,7 +66,7 @@ import {
   routeCountVerdict,
 } from "../../../shared/strategy/progression/activation.ts";
 import { bankedFavorActivationValue, chooseNextBitNode, dwellInstallVerdict, INSTALL_VERDICT_OVERHEAD_SEC, installCadencePushRate, installCadenceRemainingSec, installVerdict, stepProgression } from "../../../shared/strategy/progression/decide.ts";
-import { STALL_BITNODE_COMPLETION } from "../../../shared/strategy/progression/bitnode-order.ts";
+import { isBitNodeCompletionStalled } from "../../../shared/strategy/progression/bitnode-order.ts";
 import {
   DAEDALUS_COMBAT,
   DAEDALUS_HACKING,
@@ -2986,7 +2986,7 @@ function progressionRefresh(ctx: NeedContext): void {
             faction: view.gangCreateFaction,
           }
         : undefined;
-  if (!selectedEta?.complete || STALL_BITNODE_COMPLETION) {
+  if (!selectedEta?.complete || isBitNodeCompletionStalled()) {
     progressionMemory.nodeCompletionArmedAt = undefined;
   }
   // "About to install" and "about to destroy the BitNode" are DIFFERENT
@@ -3070,13 +3070,13 @@ function progressionRefresh(ctx: NeedContext): void {
               automatic: canAutomateNodeCompletion,
               nextBitNode: nextBitNode.bitNode,
               targetLevel: nextBitNode.targetLevel,
-              ...(STALL_BITNODE_COMPLETION ? { stalled: true } : {}),
+              ...(isBitNodeCompletionStalled() ? { stalled: true } : {}),
               ...(progressionMemory.nodeCompletionArmedAt !== undefined
                 ? { armedAt: progressionMemory.nodeCompletionArmedAt }
                 : {}),
               execute:
                 canAutomateNodeCompletion
-                && !STALL_BITNODE_COMPLETION
+                && !isBitNodeCompletionStalled()
                 && progressionMemory.nodeCompletionArmedAt !== undefined,
             },
           }
@@ -3125,7 +3125,7 @@ const progression: FeatureDriver = {
     || takeInstallSignal(),
   async tick(ctx: DriverContext) {
     const plan = readablePlan(ctx.state);
-    if (plan?.completion?.ready && plan.completion.automatic && !STALL_BITNODE_COMPLETION) {
+    if (plan?.completion?.ready && plan.completion.automatic && !isBitNodeCompletionStalled()) {
       if (progressionMemory.nodeCompletionArmedAt === undefined) {
         progressionMemory.nodeCompletionArmedAt = Date.now();
         merge(ctx.state, "progression", {
@@ -3484,7 +3484,7 @@ export const progressionModule: FeatureModule = {
     // The terminal destroy asks the arbiter for nothing — no money, no work
     // slot — so once it is armed progression stops bidding rather than holding
     // the install brakes on a run that is about to end.
-    if (plan?.completion?.execute && !STALL_BITNODE_COMPLETION) return [];
+    if (plan?.completion?.execute && !isBitNodeCompletionStalled()) return [];
     // A pending route action is additive: it does NOT excuse the bankroll
     // reservations below. An unfunded createGang/joinBladeburner can stay
     // pending for many arbitration passes, and leaving the install brakes off

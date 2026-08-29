@@ -3,9 +3,11 @@ import { selectDue, FEATURE_DRIVERS } from "../game/lib/features/index.ts";
 import { applyOverrides, only } from "../shared/features/profile.ts";
 import { deriveCapabilities } from "../shared/features/unlock.ts";
 import { PROFILES, findProfile } from "../sim/profiles.ts";
+import { intelligenceExp } from "../sim/save-mint.ts";
 import { initialContext, reduceRecord } from "../shared/goals/evaluate.ts";
 import { parseGoals } from "../shared/goals/presets.ts";
 import type { LogRecord } from "../shared/telemetry/schema.ts";
+import { deriveRouteLegs, routeLegProfileId, SPEEDRUN_ROUTE_ID } from "../shared/strategy/progression/route-legs.ts";
 
 /** The feature-override seam. It exists so a simulation can ask a narrow
  * question ("hacking alone, for an hour"), and it is applied in exactly one
@@ -70,21 +72,77 @@ describe("simulation profiles", () => {
     }
   });
 
-  test("only the genuine fresh cold-start benchmarks are promotable route evidence", () => {
+  test("the route legs are the only promotable route evidence", () => {
+    // Running an entire BitNode IS the speedrun, so there is no separate
+    // "full-node benchmark" class: every bitnode-route profile is a generated
+    // leg of the one route. Specialized fixtures stay feature-scenarios.
     const routeProfiles = PROFILES.filter((profile) => profile.experiment === "bitnode-route");
-    expect(routeProfiles.map((profile) => profile.id)).toEqual(["bn1-full", "bn8-full", "bn15-full"]);
+    expect(routeProfiles.map((profile) => profile.id)).toEqual([
+      "leg-bn4.1", "leg-bn4.2", "leg-bn4.3",
+      "leg-bn1.1", "leg-bn1.2", "leg-bn1.3",
+      "leg-bn15.1", "leg-bn15.2", "leg-bn15.3",
+      "leg-bn14.1", "leg-bn5.1",
+      "leg-bn14.2", "leg-bn14.3", "leg-bn5.2", "leg-bn5.3",
+      "leg-bn8.1", "leg-bn8.2", "leg-bn8.3",
+    ]);
     for (const profile of routeProfiles) {
-      // A fresh route entrance grants nothing: no earned Source Files means
-      // the leg really is the cold start its route id claims. The declared
-      // entrance BitNode is enforced against the leg by assertValidExperiment.
+      // The declared entrance BitNode is enforced against the leg by
+      // assertValidExperiment, and every leg belongs to the one route.
       expect(profile.route?.bitNode).toBe(profile.bitnode!);
-      expect(profile.world?.playerState?.sourceFiles).toBeUndefined();
+      expect(profile.route?.route).toBe(SPEEDRUN_ROUTE_ID);
+      if (!profile.chainedLeg) {
+        // A fresh route entrance grants nothing: no earned Source Files means
+        // the leg really is the cold start its route id claims.
+        expect(profile.world?.playerState?.sourceFiles).toBeUndefined();
+      }
     }
-    expect(findProfile("bn1-full").route).toEqual({ route: "all-source-files-3", leg: "bn1-first", index: 0, bitNode: 1 });
-    expect(findProfile("bn8-full").route).toEqual({ route: "bn8-first", leg: "bn8-fresh", index: 0, bitNode: 8 });
-    expect(findProfile("bn15-full").route).toEqual({ route: "bn15-first", leg: "bn15-fresh", index: 0, bitNode: 15 });
     expect(findProfile("jit-lategame").experiment).toBe("feature-scenario");
     expect(findProfile("bn1-full-sf12-30").experiment).toBe("feature-scenario");
+  });
+
+  test("chained legs carry exactly the entrance the route derivation implies", () => {
+    const legsByName = new Map(deriveRouteLegs().map((leg) => [leg.leg, leg]));
+    // The route's first leg is one completion of BN4 with an empty derived
+    // entrance — the only genuine fresh cold start, so it must not claim a
+    // chained identity. Every other covered leg is chained, including the
+    // mid-milestone re-entries bn4.2 and bn4.3.
+    expect(findProfile("leg-bn4.1").chainedLeg).toBeUndefined();
+    expect(findProfile("leg-bn4.1").route).toEqual({
+      route: SPEEDRUN_ROUTE_ID, leg: "bn4.1", index: 0, bitNode: 4,
+    });
+    expect(findProfile("leg-bn4.2").chainedLeg).toBeDefined();
+    for (const profile of PROFILES.filter((entry) => entry.chainedLeg)) {
+      const leg = profile.chainedLeg!;
+      const derived = legsByName.get(leg.leg)!;
+      // Grants and identity are written from one RouteLeg; the derivation-side
+      // fields (everything except the ledger-fed intelligence chain) must
+      // match a fresh derivation exactly.
+      expect(leg.index).toBe(derived.index);
+      expect(leg.node).toBe(derived.node);
+      expect(leg.level).toBe(derived.level);
+      expect(leg.entranceSourceFiles).toEqual(derived.entranceSourceFiles);
+      expect(profile.route).toEqual({
+        route: SPEEDRUN_ROUTE_ID, leg: leg.leg, index: leg.index, bitNode: leg.node,
+      });
+      expect(profile.id).toBe(routeLegProfileId(leg));
+      expect(profile.world?.playerState?.sourceFiles).toEqual({ ...leg.entranceSourceFiles });
+      // A mid-milestone re-entry must also raise its own node's multipliers:
+      // sourceFileLevel is the node's earned partial level, or absent when
+      // the leg is the node's first completion.
+      const ownLevel = leg.entranceSourceFiles[String(leg.node)] ?? 0;
+      expect(profile.world?.sourceFileLevel).toBe(ownLevel > 0 ? ownLevel : undefined);
+      expect(leg.level).toBe(ownLevel + 1);
+      if (leg.entranceIntelligence > 0) {
+        expect(profile.world?.person?.skills?.intelligence).toBe(leg.entranceIntelligence);
+        expect(profile.world?.person?.exp?.intelligence).toBe(intelligenceExp(leg.entranceIntelligence));
+        // Installs keep intelligence only with owned SF5 (sim/world.ts) — a
+        // derivation handing out intelligence without it would silently lose
+        // the entrance state at the first install.
+        expect(leg.entranceSourceFiles["5"] ?? 0).toBeGreaterThan(0);
+      } else {
+        expect(profile.world?.person).toBeUndefined();
+      }
+    }
   });
 
   test("profile ids are unique and unknown ids are rejected", () => {
@@ -94,7 +152,7 @@ describe("simulation profiles", () => {
   });
 
   test("full BN1 and cross-city cadence runs include the career gate owner", () => {
-    const full = findProfile("bn1-full");
+    const full = findProfile("leg-bn1.1");
     expect(full.features?.career).toBeUndefined();
     expect(full.features?.hacknet).toBeUndefined();
     expect(full.features?.stock).toBeUndefined();
@@ -105,7 +163,7 @@ describe("simulation profiles", () => {
   });
 
   test("SF12.30 calibration changes only persistent SF12 state", () => {
-    const clean = findProfile("bn1-full");
+    const clean = findProfile("leg-bn1.1");
     const boosted = findProfile("bn1-full-sf12-30");
     expect(boosted.bitnode).toBe(clean.bitnode);
     expect(boosted.features).toEqual(clean.features);

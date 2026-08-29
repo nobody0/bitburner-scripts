@@ -147,8 +147,10 @@ describe("seeded vanilla network", () => {
     }
   });
 
-  test("bn1-full uses this population rather than a synthetic farm", () => {
-    const profile = findProfile("bn1-full");
+  test("the route's first leg uses this population rather than a synthetic farm", () => {
+    // `leg-bn4.1` is the route's genuine cold start: fresh BN4, nothing
+    // granted, because Singularity is node-native there.
+    const profile = findProfile("leg-bn4.1");
     const world = profile.world!;
     expect(world.network).toEqual(VANILLA_NETWORK.network);
     expect(world.topology).toEqual(VANILLA_NETWORK.topology);
@@ -161,5 +163,14 @@ describe("seeded vanilla network", () => {
     expect(world.playerState?.sourceFiles).toBeUndefined();
     expect(isSeededVanillaNetwork(world.network, world.topology)).toBe(true);
     expect(isSeededVanillaNetwork(world.network?.slice(1), world.topology)).toBe(false);
+  });
+
+  test("a later leg keeps the same population while carrying earned state", () => {
+    // The entrance grows down the route; the world it is measured on must
+    // not, or leg timings stop being comparable with each other.
+    const profile = findProfile("leg-bn1.1");
+    expect(profile.world?.network).toEqual(VANILLA_NETWORK.network);
+    expect(profile.world?.topology).toEqual(VANILLA_NETWORK.topology);
+    expect(profile.world?.playerState?.sourceFiles).toEqual({ "4": 3 });
   });
 });

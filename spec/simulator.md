@@ -15,13 +15,18 @@ Two drivers, both driven from `sim/run.ts`:
 ## Two performance experiment classes
 
 - `bitnode-route` runs are the only promotable speedrun evidence. Each is one
-  BitNode leg with a stable route/leg id and an entrance of either a declared
-  fresh save of the leg's own BitNode (fresh BN1 for `bn1-full`, fresh BN8 for
-  `bn8-full`'s market-first route) or a registered save checkpoint. Session
-  manifests carry the save's exact-byte
+  BitNode completion with a stable route/leg id and an entrance of either a
+  declared fresh save of the leg's own BitNode (`leg-bn4.1`, the route's first
+  leg, is the only one), a chained entrance — a fresh save of
+  the leg's node plus the Source-Files and intelligence the route's earlier
+  completions earned, derived by `shared/strategy/progression/route-legs.ts`
+  and never hand-written (`spec/strategy/route-legs.md`) — or a registered
+  save checkpoint, which for a leg is minted from that same derivation.
+  Session manifests carry the save's exact-byte
   SHA-256, scenario fingerprint and terminal validity/result. The entrance's
   BitNode must equal the leg's declared BitNode. A route session is promotable
-  only when it reached the goal with `valid` fidelity.
+  only when it reached the goal with `valid` fidelity — and a promotable one
+  mints the next leg's checkpoint.
 - `feature-scenario` runs are synthetic ideal, stress, recovery or mixed-feature
   pressure experiments. They may use arbitrary focused worlds, but comparison
   policy refuses to compare them with route legs and promotion rejects them.
@@ -162,8 +167,9 @@ benchmarks, and the normal telemetry path when inspecting detailed decisions.
 
 ## Known gaps
 
-- `bn1-full` is the first promotable route leg and its save fixture is genuinely
-  fresh BN1. The controller harness explicitly grants active and owned SF4.3
+- `leg-bn4.1` is the route's first promotable leg and its fixture is genuinely
+  fresh BN4, where Singularity is node-native. The controller harness still
+  grants active and owned SF4.3
   to every run so an unattended speedrun can cross interactions that would
   otherwise require manual Singularity input. This declared allowance is
   included in `sim.meta`, scenario fingerprints and the simulator model
@@ -196,8 +202,8 @@ benchmarks, and the normal telemetry path when inspecting detailed decisions.
   suites. Coding contracts have a controller-facing runtime backed by the
   vendored problem definitions. A save-seeded Go probe fails loudly because the
   decoder cannot reconstruct the live board and history from the current seed.
-- Unprofiled runs use the small deterministic early-game fixture. `bn1-full`
-  instead generates the complete vanilla v3.0.1 foreign-server population and
+- Unprofiled runs use the small deterministic early-game fixture. The route
+  legs instead generate the complete vanilla v3.0.1 foreign-server population and
   topology from a fixed dedicated seed; `jit-lategame` is an explicitly
   synthetic high-RAM lifecycle fixture.
   Save-seeded runs use the real saved topology and live state. Scenario classes
@@ -215,7 +221,7 @@ benchmarks, and the normal telemetry path when inspecting detailed decisions.
   time compression; a real game under this clock would grant the
   TimeCompression exploit. Exploits are not modelled.
 - Port opener purchase/use and real port requirements are modelled. The small
-  fixture only includes the early faction gates; `bn1-full` carries the vanilla
+  fixture only includes the early faction gates; the route legs carry the vanilla
   requirement of every generated server, while saves retain live open ports.
 - Intelligence is 0 in the default fixture, matching a fresh character.
 

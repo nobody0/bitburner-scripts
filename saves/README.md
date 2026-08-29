@@ -1,6 +1,9 @@
 # saves/
 
-Snapshots of real Bitburner saves, and the registry that names them.
+Snapshots of Bitburner saves, and the registry that names them. Two kinds:
+**captured** saves exported from a real game by hand, and **minted** ones the
+simulator writes from a derived route-leg entrance (see *Minted checkpoints*
+below).
 
 A snapshot is what a simulation run starts from: "the beginning of BN5", "just
 before the first augmentation install". Runs seeded from the same snapshot are
@@ -28,6 +31,26 @@ is a (small) mutation of the live game, not a pure read.
 The content hash, not only the friendly id, is embedded in route lineage. Do
 not overwrite a registered blob in place; register a new checkpoint id so
 downstream route results remain explainable.
+
+## Minted checkpoints
+
+A speedrun leg's entrance is derived from the route order, so the checkpoint
+that starts it is written rather than captured:
+
+    bun run tools/mint-leg-save.ts bn4.1     # the route's first entrance
+    bun run saves                            # minted entries look like any other
+
+A leg run that reaches its goal mints the next leg's checkpoint by itself
+(`spec/strategy/route-legs.md`). Minted entries carry `"minted": true`, and
+**`save:restore` refuses them**: they satisfy the simulator's decoder, but
+this repository cannot verify the complete key set the real game requires —
+upstream `SaveObject.ts` is not vendored — and restoring overwrites a live
+save with no backup. Use them with `--save` in the simulator instead.
+
+Note that seeding any run from a save is a reduced surface: prestige, Go and
+Stanek are switched off and the run is labelled `save-snapshot`. Checkpoints
+are for custody and lineage; the leg benchmarks run from their synthetic
+entrances.
 
 ## Restoring one into the game
 

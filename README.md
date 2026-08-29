@@ -153,9 +153,9 @@ proxied ns call sites and stay within the same 3.2 GB controller allocation.
 ```
 bun run sim -- --goal earn:1e9 --seeds 1..10 --horizon 48h            # HWGW engine (default)
 bun run sim -- --goal earn:1e9 --seeds 1..10 --horizon 48h --baseline # naive planner
-bun run sim -- --profile bn1-full --horizon 72h --compact --perf      # full fixed-seed BN1, bounded benchmark
-bun run sim -- --profile bn1-full --save <checkpoint> --route <order> # alternate checkpoint/order
-bun run sim -- --profile bn1-full --fresh                             # explicitly use fresh BN1
+bun run sim -- --profile leg-bn1.1 --horizon 72h --compact --perf     # full fixed-seed BN1, bounded benchmark
+bun run sim -- --profile leg-bn1.1 --save <checkpoint> --route <order> # alternate checkpoint/order
+bun run sim -- --profile leg-bn1.1 --fresh                            # ignore a profile's default save
 bun run sim:compare runs/<baseline>.session.json runs/<candidate>.session.json
 ```
 
@@ -163,7 +163,7 @@ Why is a run slow? `--horizon` bounds virtual time; `--wall-budget` bounds the
 wait, and `--cost` reports throughput in virtual hours per wall minute:
 
 ```
-bun run sim -- --profile bn1-full --seed 1 --compact --perf --wall-budget 2m --cost
+bun run sim -- --profile leg-bn1.1 --seed 1 --compact --perf --wall-budget 2m --cost
 bun run sim:profile --cpu-prof --wall-budget 2m   # the same run under Bun's sampler
 bun run sim:profile --matrix                      # throughput per configuration
 ```
@@ -174,20 +174,26 @@ run for hours. It never reaches its goal, so it can never be promoted. See
 `spec/simulator.md`.
 
 Profiles are explicitly either `bitnode-route` or `feature-scenario`. Route
-sessions carry their entrance identity in the manifest: fresh BN1, or a
-registered save id plus the SHA-256 of its exact bytes. Replacing bytes behind
-an existing save id is rejected, so downstream route evidence becomes stale
-instead of silently inheriting a different checkpoint. `--save` switches the
-entrance checkpoint; `--route` gives an alternate completion order its own
-lineage. The selected checkpoint must still be in the BitNode declared by that
-route leg. Synthetic pressure/calibration profiles cannot be promoted into the
-speedrun route.
+sessions carry their entrance identity in the manifest: a fresh save of the
+leg's node, a chained entrance holding the Source-Files and intelligence the
+route's earlier milestones earned (derived, never hand-written — see
+`spec/strategy/route-legs.md`), or a registered save id plus the SHA-256 of
+its exact bytes. Replacing bytes behind an existing save id is rejected, so
+downstream route evidence becomes stale instead of silently inheriting a
+different checkpoint. `--save` switches the entrance checkpoint; `--route`
+gives an alternate completion order its own lineage. The selected checkpoint
+must still be in the BitNode declared by that route leg. Synthetic
+pressure/calibration profiles cannot be promoted into the speedrun route.
 
 Controller simulations apply one declared speedrun allowance: active and owned
-SF4.3 is added to every entrance so the otherwise-manual Singularity boundary
-can be automated. The save/checkpoint bytes remain unchanged, and the allowance
-is recorded in `sim.meta`, scenario fingerprints, and the simulator model
-version. It does not grant SF14 or any Go reward advantage.
+SF4.3 is added to every entrance so any controller run has the Singularity
+surface regardless of node. On the BN4-first route it is redundant for the
+first leg (Singularity is BN4-native — the reason the route starts there) and
+subsumed for every later leg (chained entrances carry the SF4.3 earned at leg
+0); it remains a uniform recorded policy. The save/checkpoint bytes remain
+unchanged, and the allowance is recorded in `sim.meta`, scenario fingerprints,
+and the simulator model version. It does not grant SF14 or any Go reward
+advantage.
 
 Full-route CLI runs also use a declared aggregate Go lane: opponent choice,
 RAM admission, virtual duration, seeded W/L, streak/favor rewards and Node

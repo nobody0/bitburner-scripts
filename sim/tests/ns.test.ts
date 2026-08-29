@@ -10,6 +10,7 @@ import { Clock } from "../clock.ts";
 import { installVirtualTime } from "../realm/timers.ts";
 import { calculateExp } from "../vendor/bitburner/src/PersonObjects/formulas/skill.ts";
 import { lane } from "../../tests/support/lanes.ts";
+import { isBitNodeCompletionStalled } from "../../shared/strategy/progression/bitnode-order.ts";
 
 /** The synthetic ns exists to run game/ for real. These pin the mechanics that
  * make that possible, and the end-to-end proof that it does. */
@@ -302,33 +303,42 @@ lane({ feature: "world", bn: 1 }).describe("running game/ in the synthetic world
     expect(result.scenario).toBe("synthetic-early-game");
   });
 
+  /** A player standing at the irreversible boundary: Red Pill installed, the
+   * daemon's skill gate already met, every opener but SQLInject owned. The
+   * only thing between this world and a completed BitNode is the operator
+   * hold, which makes it the narrowest possible test of that hold — held, and
+   * lifted, from identical state. */
+  const atTheDaemonBoundary = {
+    goal: parseGoals(["bn:1"]),
+    seed: 1,
+    horizonMs: 120_000,
+    bitnode: 1,
+    homeRam: 1_024,
+    startingMoney: 1e9,
+    features: only("hacking", "progression"),
+    network: [
+      { hostname: "The-Cave", hackDifficulty: 100, moneyAvailable: 0, requiredHackingSkill: 925, serverGrowth: 0, numOpenPortsRequired: 5, maxRam: 0 },
+      { hostname: "w0r1d_d43m0n", hackDifficulty: 100, moneyAvailable: 0, requiredHackingSkill: 3_000, serverGrowth: 0, numOpenPortsRequired: 5, maxRam: 0 },
+    ],
+    topology: {
+      home: ["The-Cave"],
+      "The-Cave": ["home", "w0r1d_d43m0n"],
+      w0r1d_d43m0n: ["The-Cave"],
+    },
+    person: { skills: { hacking: 3_000 }, exp: { hacking: calculateExp(3_000) } },
+    playerState: {
+      augmentations: [{ name: "The Red Pill", level: 1 }],
+      sourceFiles: { "4": 3 },
+    },
+    homeFiles: ["BruteSSH.exe", "FTPCrack.exe", "relaySMTP.exe", "HTTPWorm.exe"],
+  };
+
   test("an installed Red Pill acquires the final opener, roots the daemon, and respects the operator hold", async () => {
     const events: { name?: string; data?: Record<string, unknown> }[] = [];
     let daemonRooted = false;
     let completion: { ready?: boolean; automatic?: boolean; stalled?: boolean; execute?: boolean } | undefined;
     const result = await runGame({
-      goal: parseGoals(["bn:1"]),
-      seed: 1,
-      horizonMs: 120_000,
-      bitnode: 1,
-      homeRam: 1_024,
-      startingMoney: 1e9,
-      features: only("hacking", "progression"),
-      network: [
-        { hostname: "The-Cave", hackDifficulty: 100, moneyAvailable: 0, requiredHackingSkill: 925, serverGrowth: 0, numOpenPortsRequired: 5, maxRam: 0 },
-        { hostname: "w0r1d_d43m0n", hackDifficulty: 100, moneyAvailable: 0, requiredHackingSkill: 3_000, serverGrowth: 0, numOpenPortsRequired: 5, maxRam: 0 },
-      ],
-      topology: {
-        home: ["The-Cave"],
-        "The-Cave": ["home", "w0r1d_d43m0n"],
-        w0r1d_d43m0n: ["The-Cave"],
-      },
-      person: { skills: { hacking: 3_000 }, exp: { hacking: calculateExp(3_000) } },
-      playerState: {
-        augmentations: [{ name: "The Red Pill", level: 1 }],
-        sourceFiles: { "4": 3 },
-      },
-      homeFiles: ["BruteSSH.exe", "FTPCrack.exe", "relaySMTP.exe", "HTTPWorm.exe"],
+      ...atTheDaemonBoundary,
       onRecord: (line) => {
         const record = JSON.parse(line) as {
           kind: string;
@@ -357,6 +367,36 @@ lane({ feature: "world", bn: 1 }).describe("running game/ in the synthetic world
     expect(daemonRooted).toBe(true);
     expect(completion).toEqual(expect.objectContaining({ ready: true, automatic: true, stalled: true, execute: false }));
     expect(events.some((event) => event.name === "bitnode.reset")).toBe(false);
+  });
+
+  test("lifting the hold lets the same run destroy the daemon and complete the node", async () => {
+    // The companion to the case above: identical world, one option changed.
+    // A route leg's goal IS the destruction, so this is the mechanism every
+    // `bn:<n>` benchmark depends on.
+    const events: { name?: string; data?: Record<string, unknown> }[] = [];
+    const result = await runGame({
+      ...atTheDaemonBoundary,
+      allowBitNodeCompletion: true,
+      onRecord: (line) => {
+        const record = JSON.parse(line) as { kind: string; name?: string; data?: Record<string, unknown> };
+        if (record.kind === "event") events.push(record);
+      },
+    });
+
+    expect(result.reached).toBe(true);
+    expect(result.stoppedBecause).toBe("goal");
+    expect(result.validity).toBe("valid");
+    expect(result.crashes).toEqual([]);
+    expect(events).toContainEqual(expect.objectContaining({
+      name: "bitnode.reset",
+      data: expect.objectContaining({ from: 1 }),
+    }));
+  });
+
+  test("the lifted hold does not leak into the next run", async () => {
+    // The hold is module state. If a lifted run failed to restore it, every
+    // later run in the process would silently arm the irreversible boundary.
+    expect(isBitNodeCompletionStalled()).toBe(true);
   });
 
   test("...but fleet placement funds it anyway, so features actually unlock", async () => {

@@ -61,6 +61,7 @@ import { START_SCRIPT_GB } from "../game/lib/ram.ts";
 import { gameGlobal } from "../game/lib/globals.ts";
 import { setGoNeuralRuntimeForTest } from "../game/lib/features/remaining.ts";
 import { GO_REWARD_RULES } from "../shared/strategy/go/rewards.ts";
+import { setBitNodeCompletionStall } from "../shared/strategy/progression/bitnode-order.ts";
 
 /** Run the REAL game/ controller against the synthetic world.
  *
@@ -149,6 +150,11 @@ export interface GameRunOptions {
    * only way to profile a window of a simulation that would otherwise run for
    * hours. A budgeted run never reaches its goal, so it cannot be promoted. */
   wallBudgetMs?: number;
+  /** Lift the operator hold on destroyW0r1dD43m0n for this run. A route leg's
+   * goal IS the node's destruction, so `bn:<n>` is unreachable while the hold
+   * stands. The previous value is restored when the run ends — the hold is
+   * module state, and a leak would silently arm every later run. */
+  allowBitNodeCompletion?: boolean;
   /** Measure host cost (sim/cost.ts) and attach the report to the result. */
   cost?: boolean;
   /** Real milliseconds between cost samples. */
@@ -1004,6 +1010,10 @@ async function runGameInstalled(
         bladeburnerRank: options.bladeburnerRank,
         homeFiles: options.homeFiles,
         gates: options.gates,
+        // Lifting the operator hold changes what the controller may do, so it
+        // is a scenario input. `canonical` drops undefined, so held runs keep
+        // the fingerprints they always had.
+        allowBitNodeCompletion: options.allowBitNodeCompletion,
       },
     },
     resetAgeMs: {
@@ -1116,6 +1126,7 @@ async function runGameInstalled(
     ...(options.wallBudgetMs !== undefined ? { wallBudgetMs: options.wallBudgetMs } : {}),
     ...(meter ? { meter } : {}),
   });
+  const priorCompletionStall = setBitNodeCompletionStall(!options.allowBitNodeCompletion);
   try {
     globalThis.WebSocket = SimTelemetrySocket as unknown as typeof WebSocket;
     launch(host, controller);
@@ -1132,6 +1143,7 @@ async function runGameInstalled(
     host.processes.killAll(false);
     engine.stop();
     globalThis.WebSocket = originalWebSocket;
+    setBitNodeCompletionStall(priorCompletionStall);
   }
 
   const costReport = meter?.finish();

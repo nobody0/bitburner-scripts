@@ -236,7 +236,12 @@ export class SimWorld {
     // Synthetic worlds may describe durable ownership without redundantly
     // spelling out the derived multiplier bag. Real saves provide their live
     // bag and must be accepted verbatim until the next prestige.
-    if (!opts.person?.mults) this.rebuildMultipliers();
+    //
+    // An EMPTY bag counts as absent, not as "every multiplier is 1": a minted
+    // route-leg checkpoint has no captured bag to write, and taking `{}`
+    // literally would drop the Source-File multipliers the leg's entrance
+    // earned until its first install rebuilt them.
+    if (!opts.person?.mults || Object.keys(opts.person.mults).length === 0) this.rebuildMultipliers();
     this.#verbose = opts.verbose ?? false;
     this.gates = {
       inGang: false,

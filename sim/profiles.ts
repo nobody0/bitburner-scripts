@@ -4,6 +4,14 @@ import { AUGMENTATION_TABLE } from "./vendor/bitburner/src/Augmentation/Augmenta
 import { calculateExp } from "./vendor/bitburner/src/PersonObjects/formulas/skill.ts";
 import { VANILLA_NETWORK } from "./network.ts";
 import type { ExperimentClass, RouteLegIdentity } from "../shared/experiment.ts";
+import {
+  deriveRouteLegs,
+  routeLegProfileId,
+  SPEEDRUN_ROUTE_ID,
+  type RouteLeg,
+} from "../shared/strategy/progression/route-legs.ts";
+import ROUTE_LEG_LEDGER from "./tests/baselines/route-legs.json" with { type: "json" };
+import { entranceMoney, intelligenceExp } from "./save-mint.ts";
 
 /** Named simulation runs.
  *
@@ -27,13 +35,19 @@ export interface SimProfile {
    * with `--save`, so alternate checkpoints and completion orders need no code
    * changes. */
   route?: RouteLegIdentity;
+  /** Present on a generated route leg whose derived entrance is non-empty —
+   * every leg but the route's first. The single source both the world grants
+   * and the `chained` entrance identity are written from, so the two cannot
+   * diverge. */
+  chainedLeg?: RouteLeg;
   /** Absent = every feature the save unlocks. */
   features?: FeatureOverrides;
   goals: string[];
   /** Duration string for --horizon. */
   horizon: string;
   seeds: number[];
-  /** Registered save id (saves/index.json). Absent = fresh BN1 fixture. */
+  /** Registered save id (saves/index.json). Absent = the profile's own
+   * synthetic world, or the default early-game fixture when it has none. */
   save?: string;
   homeRam?: number;
   /** BitNode to run in.
@@ -51,7 +65,7 @@ export interface SimProfile {
    * unlocks, or the upstream BitNodeOption that forbids the 4S purchases —
    * which is what makes the stock capability ladder three otherwise-identical
    * worlds. */
-  world?: Pick<GameRunOptions, "network" | "topology" | "homeIp" | "augmentationStats" | "person" | "playerState" | "factions" | "companies" | "bladeburnerRank" | "homeFiles" | "gates" | "disable4SData">;
+  world?: Pick<GameRunOptions, "network" | "topology" | "homeIp" | "augmentationStats" | "person" | "playerState" | "factions" | "companies" | "bladeburnerRank" | "homeFiles" | "gates" | "disable4SData" | "sourceFileLevel">;
 }
 
 export const FACTION_DONATION_TARGET = "Synaptic Enhancement Implant";
@@ -233,7 +247,7 @@ const BN1_PROGRESSION_WORLD: NonNullable<SimProfile["world"]> = {
 
 /** Late-game JIT fixture retaining the final package, Daedalus, Red Pill
  * install, and post-install world-daemon regrow phases. This is deliberately
- * separate from bn1-full, whose contract is a cold 8 GB bootstrap. */
+ * separate from the BN1 route legs, whose contract is a cold 8 GB bootstrap. */
 const BN1_LATE_INSTALLED = [
   ...Object.values(AUGMENTATION_TABLE)
     .filter((aug) => !aug.isSpecial && (aug.mults.hacking ?? 1) > 1)
@@ -375,6 +389,135 @@ const STOCK_LADDER = {
   startingMoney: 1e9,
 } satisfies Partial<SimProfile>;
 
+/** Feature surfaces for the nodes the simulator can bench as speedrun legs.
+ * A node absent here has unmodeled node-defining systems
+ * (`resolveFeatureCoverage`: gang, corp, bladeburner, sleeves, …) and gets no leg
+ * profile until they exist. Each surface is the full mechanically playable
+ * surface of its node — running the entire BitNode IS the speedrun, so a leg
+ * must not solve a smaller game than the real route faces. */
+const ROUTE_LEG_SURFACES: Readonly<Record<number, FeatureOverrides>> = {
+  // The full mechanically playable surface of an ordinary node. `only` does
+  // not force any capability on; it merely excludes the node-specific systems
+  // the simulator does not model. Career must be live because city, karma,
+  // kills and combat gates are genuine competing faction paths — disabling it
+  // makes the optimiser solve a smaller game and invalidates route timing.
+  // Hacknet, the market and coding contracts are universal income and must
+  // compete with hacking and career in a full-node benchmark.
+  1: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side"),
+  // BN4: factions are genuinely live — the node's theme is Singularity, not a
+  // feature nerf — so the ordinary surface applies unchanged.
+  4: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side"),
+  // BN5: intelligence is node-native; this leg's measured exit seeds the
+  // entire downstream intelligence chain.
+  5: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side"),
+  // BN8: the same surface minus `side`. The zeroed income multipliers are the
+  // node's OWN statement about hacknet, crime and company money, and the
+  // arbiter refusing to fund them is part of what this leg measures. `dnet`
+  // stays excluded — its session, authentication and password models are
+  // still explicit simulator gaps (spec/dnet.md) and one unmodeled call would
+  // invalidate the leg; the bn8-manipulation pair carries that interplay.
+  8: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock"),
+  // BN14: the node's theme IS go, and go coverage is full.
+  14: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side"),
+  // BN15: plus `dnet`, which here is not optional income but the route
+  // itself — the node grants full darknet access and the labyrinth ladder
+  // ends in the pill. Career carries one extra job: company work is the
+  // node's charisma engine, and every lab stage gates on charisma.
+  15: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side", "dnet"),
+};
+
+/** Which legs get a bench. A leg is covered when the simulator models its
+ * NODE (`ROUTE_LEG_SURFACES`) — owning an unmodeled node's Source-File is
+ * fine, since `applySourceFile` is just multipliers; only PLAYING that node
+ * is unmodeled. So the BN8 legs are covered even though the route reaches
+ * them holding SF2.3, and BN2 itself is not.
+ *
+ * That is a separate question from the intelligence CHAIN, which does break
+ * at the first uncovered leg: legs after a gap keep an estimated entrance
+ * intelligence until their predecessor can be measured. */
+const COVERED_ROUTE_LEGS: ReadonlySet<string> = new Set(
+  deriveRouteLegs().filter((leg) => leg.node in ROUTE_LEG_SURFACES).map((leg) => leg.leg),
+);
+
+/** Measured leg exits from the chain ledger. A leg present here hands its
+ * observed goal-exit intelligence to the next leg's entrance; absent legs fall
+ * back to the derivation's estimate. */
+const MEASURED_EXIT_INTELLIGENCE: Readonly<Record<string, number>> = Object.fromEntries(
+  Object.entries(ROUTE_LEG_LEDGER.legs as Record<string, { exit?: { intelligenceAtGoal?: number } }>)
+    .flatMap(([leg, entry]) =>
+      entry.exit?.intelligenceAtGoal !== undefined ? [[leg, entry.exit.intelligenceAtGoal] as const] : []
+    ),
+);
+
+/** The speedrun route's benchmarks (route `all-sf3-bn4-first`): one profile
+ * per covered COMPLETION, with entrance Source-Files and intelligence derived
+ * from the route order plus the chain ledger — never hand-written. Running an
+ * entire BitNode IS the speedrun, so these are the full-node benchmarks; only
+ * feature-scenarios sit beside them.
+ *
+ * Each bench measures exactly its leg: enter the node holding the derived
+ * state (including the node's own partial Source-File mid-milestone, where
+ * `sourceFileLevel` also escalates the node's own multipliers) and reach the
+ * destruction that earns this leg's level, which is the run's first. Only the
+ * route's very first leg has an empty entrance; the rest are `chained`. */
+function routeLegProfiles(): SimProfile[] {
+  return deriveRouteLegs(undefined, MEASURED_EXIT_INTELLIGENCE)
+    .filter((leg) => COVERED_ROUTE_LEGS.has(leg.leg))
+    .map((leg) => {
+      const grants = Object.keys(leg.entranceSourceFiles).length > 0;
+      const intelligence = leg.entranceIntelligence;
+      // Mid-milestone legs re-enter their own node: the earned partial level
+      // must ALSO raise the node's own multipliers via sourceFileLevel
+      // (getBitNodeMultipliers(bitnode, sourceFileLevel + 1)).
+      const ownLevel = leg.entranceSourceFiles[String(leg.node)] ?? 0;
+      const entrance = grants
+        ? {
+            chainedLeg: leg,
+            world: {
+              ...VANILLA_FULL_WORLD,
+              ...(ownLevel > 0 ? { sourceFileLevel: ownLevel } : {}),
+              playerState: { sourceFiles: { ...leg.entranceSourceFiles } },
+              // Synthetic skill and experience must describe the same
+              // reachable state; persistent exp derives from person exp.
+              // Every intelligence-carrying leg owns SF5, so installs keep it.
+              ...(intelligence > 0
+                ? {
+                    person: {
+                      skills: { intelligence },
+                      exp: { intelligence: intelligenceExp(intelligence) },
+                    },
+                  }
+                : {}),
+            },
+          }
+        : { world: VANILLA_FULL_WORLD };
+      return {
+        id: routeLegProfileId(leg),
+        experiment: "bitnode-route" as const,
+        route: { route: SPEEDRUN_ROUTE_ID, leg: leg.leg, index: leg.index, bitNode: leg.node },
+        description: grants
+          ? `Speedrun leg ${leg.index} (milestone ${leg.milestone}): enter BN${leg.node} holding the route's ` +
+            `earned state (SF ${Object.entries(leg.entranceSourceFiles).map(([sf, lvl]) => `${sf}.${lvl}`).join(", ")}` +
+            `${intelligence > 0 ? `, int ${intelligence} (${leg.intelligenceSource})` : ""}) ` +
+            `and complete the destruction that earns SF${leg.node}.${leg.level}.`
+          : `Speedrun leg ${leg.index} (milestone ${leg.milestone}): genuinely fresh BN${leg.node} start — ` +
+            `Singularity is node-native, so the declared SF4.3 allowance is redundant here by construction — ` +
+            `to the destruction that earns SF${leg.node}.${leg.level}.`,
+        bitnode: leg.node,
+        features: ROUTE_LEG_SURFACES[leg.node],
+        goals: [`bn:${leg.node}`, "installs:2"],
+        homeRam: 8,
+        // The same entrance money the minted checkpoint for this leg carries,
+        // so a leg measured from its synthetic entrance and one restored from
+        // its checkpoint start with the same bankroll.
+        ...(entranceMoney(leg.node) !== 1_000 ? { startingMoney: entranceMoney(leg.node) } : {}),
+        ...entrance,
+        horizon: "24h",
+        seeds: [1, 2, 3],
+      };
+    });
+}
+
 export const PROFILES: readonly SimProfile[] = [
   {
     id: "bn1-speedrun",
@@ -400,91 +543,20 @@ export const PROFILES: readonly SimProfile[] = [
     seeds: [1, 2, 3],
   },
   {
-    id: "bn1-full",
-    experiment: "bitnode-route",
-    route: { route: "all-source-files-3", leg: "bn1-first", index: 0, bitNode: 1 },
-    description:
-      "Complete BN1 cold start on the fixed vanilla network: bootstrap from 8 GB through strategy-chosen installs and the actual w0r1d_d43m0n transition, with the declared SF4.3 automation allowance.",
-    bitnode: 1,
-    // Full-route benchmark: career must be live because city, karma, kills and
-    // combat gates are genuine competing faction paths. Disabling it makes
-    // the optimiser solve a smaller game and invalidates route timing.
-    // Full mechanically playable BN1 surface for this save. `only` does not
-    // force any capability on; it merely excludes the currently unmodelled
-    // node-specific systems. Hacknet, the market and coding contracts are
-    // universal income and must compete with hacking/career in a full-node
-    // benchmark.
-    features: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side"),
-    goals: ["bn:1", "installs:2"],
-    homeRam: 8,
-    world: VANILLA_FULL_WORLD,
-    horizon: "24h",
-    seeds: [1, 2, 3],
-  },
-  {
     id: "bn1-full-sf12-30",
     experiment: "feature-scenario",
     description:
       "Full BN1 calibration run with the exact free NeuroFlux level and multipliers granted by SF12.30.",
     bitnode: 1,
-    // Identical to `bn1-full` by construction — the only difference this
-    // calibration run may carry is persistent SF12 state, and tests/profile.test.ts
-    // holds the two feature sets equal.
+    // Identical to the `leg-bn1.1` route leg by construction — the only
+    // difference this calibration run may carry is persistent SF12 state, and
+    // tests/profile.test.ts holds the two feature sets equal.
     features: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side"),
     goals: ["bn:1", "installs:2"],
     homeRam: 8,
     world: BN1_FULL_SF12_30_WORLD,
     horizon: "24h",
     seeds: [1],
-  },
-  {
-    id: "bn8-full",
-    experiment: "bitnode-route",
-    route: { route: "bn8-first", leg: "bn8-fresh", index: 0, bitNode: 8 },
-    description:
-      "Complete BN8 cold start on the fixed vanilla network: hacked money, crime, company and hacknet all pay zero, " +
-      "WSE+TIX are node-granted, and the Daedalus bankroll must be traded into existence across strategy-chosen installs " +
-      "to the actual w0r1d_d43m0n transition, with the declared SF4.3 automation allowance.",
-    bitnode: 8,
-    // The same full mechanically playable surface as bn1-full: the zeroed
-    // income multipliers are the node's OWN statement about hacknet, crime and
-    // company money, and the arbiter refusing to fund them is part of what
-    // this leg measures. `dnet` stays excluded like bn1-full — its session,
-    // authentication and password models are still explicit simulator gaps
-    // (spec/dnet.md), and one unmodeled call would invalidate the whole leg;
-    // the bn8-manipulation pair carries the darknet interplay instead.
-    features: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock"),
-    goals: ["bn:8", "installs:2"],
-    homeRam: 8,
-    // BN8's starting money (Prestige.ts: BitNode8StartingMoney) — the node
-    // grants it because the market is the only income and $200k round trips
-    // need a real bankroll.
-    startingMoney: 250e6,
-    world: VANILLA_FULL_WORLD,
-    horizon: "24h",
-    seeds: [1, 2, 3],
-  },
-  {
-    id: "bn15-full",
-    experiment: "bitnode-route",
-    route: { route: "bn15-first", leg: "bn15-fresh", index: 0, bitNode: 15 },
-    description:
-      "Complete BN15 cold start on the fixed vanilla network: the labyrinth is the only Red Pill route (Daedalus never " +
-      "finds it here), so the run must climb the charisma ladder and walk the darknet labs while building the hacking " +
-      "multipliers the post-pill w0r1d_d43m0n regrow needs, with the declared SF4.3 automation allowance.",
-    bitnode: 15,
-    // The full playable surface of the node, like bn1-full — plus `dnet`,
-    // which in BN15 is not optional income but the route itself: the node
-    // grants full darknet access and the labyrinth ladder ends in the pill.
-    // Career stays on for the same reason it does in bn1-full and one more:
-    // company work is the node's charisma engine, and every lab stage gates
-    // on charisma.
-    features: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side", "dnet"),
-    goals: ["bn:15", "installs:2"],
-    homeRam: 8,
-    world: VANILLA_FULL_WORLD,
-    horizon: "24h",
-    seeds: [1, 2, 3],
   },
   {
     id: "jit-lategame",
@@ -721,7 +793,8 @@ export const PROFILES: readonly SimProfile[] = [
       playerState: { sourceFiles: { "8": 2 } },
     },
   },
-] as const;
+  ...routeLegProfiles(),
+];
 
 export function findProfile(id: string): SimProfile {
   const profile = PROFILES.find((entry) => entry.id === id);

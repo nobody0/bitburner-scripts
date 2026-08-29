@@ -10,7 +10,7 @@ import { findProfile } from "../sim/profiles.ts";
  * ordinary coding contracts and the aggregate Go runtime, is shared. */
 const requested = process.argv.slice(2).map(Number).filter(Number.isFinite);
 const seeds = requested.length > 0 ? requested : [1, 2, 3];
-const profile = findProfile("bn1-full");
+const profile = findProfile("leg-bn1.1");
 const baseFeatures = ["hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side"] as const;
 const calibrationHorizonMs = 12 * 60_000;
 

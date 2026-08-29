@@ -7,8 +7,8 @@ import { runGame } from "../game-run.ts";
 import { findProfile } from "../profiles.ts";
 import { lane } from "../../tests/support/lanes.ts";
 
-/** Validity smoke for the bn8-full route leg: the full controller surface on a
- * fresh BN8 vanilla world, where every income multiplier except the market's
+/** Validity smoke for the `leg-bn8.1` route leg: the full controller surface
+ * on a BN8 vanilla world, where every income multiplier except the market's
  * is zero. `bun run long bn8` / `bun run long progression`.
  *
  * ONE runGame, one case: the simulator's contract is one run per process
@@ -16,7 +16,7 @@ import { lane } from "../../tests/support/lanes.ts";
  * driver memory), and a second in-process run measurably diverges. All the
  * smoke's claims are therefore asserted against a single run.
  *
- * The complete leg (24h horizon, `bun run sim/run.ts --profile bn8-full
+ * The complete leg (24h horizon, `bun run sim/run.ts --profile leg-bn8.1
  * --compact --perf`) is a benchmark, not a test; this case only proves the
  * scenario is SIMULATABLE — no unmodeled calls, no script crashes, the
  * node-granted WSE+TIX visible from the first account probe, and the market
@@ -41,7 +41,7 @@ lane({ feature: "progression", bn: 8 }).describe("BN8 full-route validity smoke"
   });
 
   test("the full BN8 surface runs fidelity-clean, with node-granted market access and live trading", async () => {
-    const profile = findProfile("bn8-full");
+    const profile = findProfile("leg-bn8.1");
     let firstAccount: { hasWseAccount?: boolean; hasTixApiAccess?: boolean } | undefined;
     const result = await runGame({
       goal: parseGoals([...profile.goals]),
@@ -90,7 +90,7 @@ lane({ feature: "progression", bn: 8 }).describe("BN8 full-route validity smoke"
     // defend the grant before any income is measured.
     expect(result.stock.wealth).toBeGreaterThan(100e6);
     console.info(
-      "[bn8-full] smoke wealth=" + result.stock.wealth.toExponential(3)
+      "[leg-bn8.1] smoke wealth=" + result.stock.wealth.toExponential(3)
       + " trades=" + String(result.stock.tradesMade),
     );
   }, 600_000);

@@ -31,6 +31,11 @@ export interface SaveEntry {
   /** SHA-256 of the registered file's exact bytes. Optional only for legacy
    * index entries; every newly registered checkpoint records it. */
   sha256?: string;
+  /** Written by the simulator from a derived route-leg entrance rather than
+   * exported from a real game. Such a blob satisfies the simulator's decoder,
+   * but the repo cannot verify the full key set the live game requires (no
+   * vendored SaveObject.ts), so save-restore refuses it. */
+  minted?: true;
   notes?: string;
 }
 
@@ -123,7 +128,13 @@ export function saveFileSha256(entry: SaveEntry): string {
 
 /** Register an exported save under an id. The blob is decoded once up front so
  * a corrupt file fails here rather than at the start of a simulation. */
-export function registerSave(id: string, file: string, label?: string, notes?: string): SaveEntry {
+export function registerSave(
+  id: string,
+  file: string,
+  label?: string,
+  details: { notes?: string; minted?: true } = {},
+): SaveEntry {
+  const { notes, minted } = details;
   const snapshot = readSnapshot(file);
   const source = path.isAbsolute(file) ? file : path.join(SAVES_DIR, file);
   const index = readIndex();
@@ -135,6 +146,7 @@ export function registerSave(id: string, file: string, label?: string, notes?: s
     capturedAt: Date.now(),
     playtimeSinceLastBitnode: snapshot.player.playtimeSinceLastBitnode,
     sha256: createHash("sha256").update(readFileSync(source)).digest("hex"),
+    ...(minted ? { minted } : {}),
     ...(notes !== undefined ? { notes } : {}),
   };
   const existing = index.saves.findIndex((save) => save.id === id);

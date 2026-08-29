@@ -25,6 +25,18 @@ async function main(): Promise<void> {
   }
 
   const entry = findSave(id);
+  if (entry.minted) {
+    // Restoring OVERWRITES the live save with no backup, and a minted blob
+    // carries only the keys the simulator reads. Until the upstream save key
+    // set is vendored and verified, the risk of handing the real game a
+    // partial save is not worth taking.
+    console.error(`"${id}" is a minted checkpoint: written by the simulator from a derived route`);
+    console.error("entrance, verified only against the simulator's own decoder. Restoring it could");
+    console.error("overwrite your game with a save the real client cannot fully load.");
+    console.error("Use it with the simulator instead:");
+    console.error(`  bun run sim -- --profile <leg> --save ${id}`);
+    process.exit(1);
+  }
   // Decoded here purely to fail early: a corrupt blob should not reach the game.
   const snapshot = readSnapshot(entry.file);
   const fileBytes = new Uint8Array(readFileSync(path.join(SAVES_DIR, entry.file)));

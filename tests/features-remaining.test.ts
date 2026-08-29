@@ -1421,6 +1421,9 @@ describe("progression", () => {
   });
 
   test("next-BitNode selection credits completion and skips disabled nodes", () => {
+    // A fresh BN4 start stays in BN4 until 4.3 is earned — the route begins
+    // there because Singularity is node-native, nothing injected.
+    expect(chooseNextBitNode(4, {})).toMatchObject({ bitNode: 4, targetLevel: 3 });
     expect(chooseNextBitNode(1, {})).toMatchObject({ bitNode: 4, targetLevel: 3 });
     expect(chooseNextBitNode(4, { "1": 1, "4": 2 })).toMatchObject({ bitNode: 1, targetLevel: 3 });
     expect(chooseNextBitNode(5, {

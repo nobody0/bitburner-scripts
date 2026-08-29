@@ -35,7 +35,7 @@ const valueAfter = (name: string, fallback: string): string => {
 };
 const has = (name: string): boolean => args.includes(name);
 
-const profile = valueAfter("--profile", "bn1-full");
+const profile = valueAfter("--profile", "leg-bn1.1");
 const seed = valueAfter("--seed", "1");
 const budget = valueAfter("--wall-budget", "2m");
 const outDir = valueAfter("--out-dir", "runs/profiles");
@@ -259,7 +259,7 @@ if (has("--help")) {
       "  --cpu-prof            one bounded run under Bun's sampling profiler",
       "  --heap-prof           with --cpu-prof, also write a heap snapshot",
       "  --interval <us>       sampling interval, default 1000us",
-      "  --profile <id>        sim profile, default bn1-full",
+      "  --profile <id>        sim profile, default leg-bn1.1",
       "  --seed <n>            default 1",
       "  --wall-budget <dur>   real time per case, default 2m",
       "  --save <id>           with --cpu-prof, start from a registered checkpoint",

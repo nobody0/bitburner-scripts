@@ -21,7 +21,8 @@ import {
   type ScenarioClass,
 } from "./fidelity.ts";
 import { scenarioFingerprint } from "./scenario.ts";
-import { SimArtifactSession } from "./artifacts.ts";
+import { assertPromotableSession, SimArtifactSession } from "./artifacts.ts";
+import { deriveRouteLegs } from "../shared/strategy/progression/route-legs.ts";
 import { formatReport } from "./cost.ts";
 import {
 
@@ -298,6 +299,74 @@ export function formatDuration(ms: number): string {
   return `${(s / 3600).toFixed(2)}h`;
 }
 
+/** Mint the checkpoint that starts the NEXT leg, from a leg run that actually
+ * finished its own.
+ *
+ * The next entrance comes from the ROUTE, not from the completing run's own
+ * forecast of where to go next: the harness grants SF4.3 to every controller
+ * run, so a leg inside BN4 believes it has already earned the node and points
+ * at BN1. The route says otherwise, and the route is what is being measured.
+ * Only the intelligence is taken from the run — it is the one part of an
+ * entrance the order cannot predict.
+ *
+ * Gated by `assertPromotableSession`, which is the repository's existing
+ * statement of what may become route state: a reached goal at `valid`
+ * fidelity, with an experiment identity and a fingerprint. */
+async function mintNextLegCheckpoint(
+  profile: { route?: { leg: string } },
+  artifacts: SimArtifactSession,
+  exitIntelligence: number,
+): Promise<void> {
+  try {
+    assertPromotableSession(artifacts.manifest());
+  } catch (error) {
+    // Not promotable is the ordinary case — a horizon stop, or a fidelity
+    // gap. Say why once, and mint nothing.
+    console.log(`  no checkpoint minted: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+
+  const legs = deriveRouteLegs();
+  const index = legs.findIndex((leg) => leg.leg === profile.route?.leg);
+  const next = index >= 0 ? legs[index + 1] : undefined;
+  if (!next) {
+    console.log("  no checkpoint minted: this is the route's final leg");
+    return;
+  }
+
+  // Intelligence survives a node transition only with owned SF5 (sim/world.ts
+  // zeroes it otherwise), so carrying a measured exit into a leg that has not
+  // earned SF5 yet would describe a state the game cannot reach.
+  const keepsIntelligence = next.node === 5 || (next.entranceSourceFiles["5"] ?? 0) > 0;
+  const entrance = keepsIntelligence
+    ? { ...next, entranceIntelligence: exitIntelligence, intelligenceSource: "measured" as const }
+    // Not a measurement and not an estimate: without SF5 the game zeroes
+    // intelligence at the transition, so 0 is the only reachable entrance.
+    : { ...next, entranceIntelligence: 0, intelligenceSource: "estimated" as const };
+  const { mintLegSave } = await import("../tools/mint-leg-save.ts");
+  try {
+    const minted = mintLegSave(entrance, {
+      note: keepsIntelligence
+        ? `minted from a completed ${profile.route?.leg} run: entrance intelligence ` +
+          `${exitIntelligence} measured at that leg's goal`
+        : `minted from a completed ${profile.route?.leg} run: intelligence 0, because this leg ` +
+          `does not own SF5 and the node transition zeroes it`,
+    });
+    // NOT pushed onto `artifacts.files`: that list becomes the session
+    // manifest's `artifacts`, which sim/compare.ts resolves against the
+    // manifest's own directory and parses as a record stream.
+    console.log(
+      `  minted next checkpoint: ${minted.entry.id} -> ${minted.file} ` +
+      `(entrance intelligence ${entrance.entranceIntelligence})`,
+    );
+  } catch (error) {
+    // A registered blob's bytes are embedded in route lineage, so this never
+    // overwrites one on its own.
+    console.log(`  checkpoint not registered: ${error instanceof Error ? error.message : String(error)}`);
+    console.log(`  to replace it deliberately: bun run tools/mint-leg-save.ts ${next.leg} --force`);
+  }
+}
+
 /** CLI.
  *
  * Two drivers. `--driver game` (the default) runs the REAL game/ controller
@@ -331,6 +400,10 @@ if (import.meta.main) {
   let freshEntrance = false;
   let routeId: string | undefined;
   let child = false;
+  // Minting the next leg's checkpoint writes saves/ and rewrites the shared
+  // saves/index.json, so exactly ONE process in a fan-out may do it. The
+  // parent hands this flag to the first seed's child only.
+  let mintNext = false;
   let wallBudgetMs: number | undefined;
   let cost = false;
   let costSampleEveryMs: number | undefined;
@@ -377,6 +450,7 @@ if (import.meta.main) {
       if (value !== "game" && value !== "planner") throw new Error(`--driver wants game|planner, got ${value}`);
       driver = value;
     } else if (arg === "--child") child = true;
+    else if (arg === "--mint-next") mintNext = true;
     else if (arg === "--list") {
       const { PROFILES } = await import("./profiles.ts");
       for (const entry of PROFILES) {
@@ -417,12 +491,21 @@ if (import.meta.main) {
         bitNode: saveEntry.bitNode,
         sha256: (await import("../tools/save-io.ts")).saveFileSha256(saveEntry),
       }
-    : experimentClass === "bitnode-route"
-      // A fresh entrance is the run's own BitNode; assertValidExperiment
-      // enforces that it equals the leg's declared node, so a stray --bitnode
-      // cannot silently retime a route leg against the wrong world.
-      ? { kind: "fresh", bitNode: runBitnode }
-      : { kind: "synthetic", bitNode: runBitnode, ...(profileId ? { profile: profileId } : {}) };
+    : profile?.chainedLeg
+      // A chained leg's derived grants are the profile's identity, not a
+      // checkpoint; `--save` above still replaces the whole entrance.
+      ? {
+          kind: "chained",
+          bitNode: runBitnode,
+          sourceFiles: { ...profile.chainedLeg.entranceSourceFiles },
+          intelligence: profile.chainedLeg.entranceIntelligence,
+        }
+      : experimentClass === "bitnode-route"
+        // A fresh entrance is the run's own BitNode; assertValidExperiment
+        // enforces that it equals the leg's declared node, so a stray --bitnode
+        // cannot silently retime a route leg against the wrong world.
+        ? { kind: "fresh", bitNode: runBitnode }
+        : { kind: "synthetic", bitNode: runBitnode, ...(profileId ? { profile: profileId } : {}) };
   const experiment: ExperimentIdentity = {
     class: experimentClass,
     entrance,
@@ -451,7 +534,7 @@ if (import.meta.main) {
   // per-seed wall clock is itself a number people read. Launch all bounded
   // children before awaiting them so independent seeds run concurrently.
   if (driver === "game" && runSeeds.length > 1 && !child) {
-    const base = args.filter((a, i) => a !== "--seeds" && args[i - 1] !== "--seeds");
+    const base = args.filter((a, i) => a !== "--seeds" && args[i - 1] !== "--seeds" && a !== "--mint-next");
     const lanes = Math.max(1, Math.min(runSeeds.length, (navigator.hardwareConcurrency || 4) - 1));
     const pending = [...runSeeds];
     let validProcesses = 0;
@@ -459,7 +542,11 @@ if (import.meta.main) {
       for (;;) {
         const seed = pending.shift();
         if (seed === undefined) return;
-        const proc = Bun.spawn(["bun", "run", "sim/run.ts", ...base, "--child", "--seed", String(seed)], {
+        // Only the first seed may mint: the children run concurrently, and two
+        // of them writing saves/index.json would leave a registered SHA-256
+        // that does not match the blob actually on disk.
+        const mintArg = seed === runSeeds[0] ? ["--mint-next"] : [];
+        const proc = Bun.spawn(["bun", "run", "sim/run.ts", ...base, "--child", ...mintArg, "--seed", String(seed)], {
           stdout: "inherit",
           stderr: "inherit",
         });
@@ -523,6 +610,9 @@ if (import.meta.main) {
         ...(profileId !== undefined ? { profile: profileId } : {}),
         ...(save !== undefined ? { saveId: save } : {}),
         experiment,
+        // A route leg's goal IS its node's destruction, so the operator hold
+        // would make the goal unreachable by construction.
+        ...(experimentClass === "bitnode-route" ? { allowBitNodeCompletion: true } : {}),
         goFidelity: AGGREGATE_GO_MODEL,
         ...(seedData ? { save: seedData } : { bitnode: runBitnode }),
         ...(features ? { features } : {}),
@@ -552,6 +642,17 @@ if (import.meta.main) {
       }
       for (const crash of outcome.crashes.slice(0, 3)) {
         console.log(`  CRASH ${crash.filename}: ${crash.error}`);
+      }
+      if (profile?.experiment === "bitnode-route") {
+        // The chain ledger (sim/tests/baselines/route-legs.json) records a
+        // leg's exit intelligence as the next leg's entrance; only a
+        // goal-reached exit qualifies. Also in the sim.result record.
+        console.log(`  exit intelligence: ${outcome.strategy.actualSkills.intelligence ?? 0}`);
+        // A fanned-out child mints only when the parent elected it; a
+        // standalone run always may.
+        if (!child || mintNext) {
+          await mintNextLegCheckpoint(profile, artifacts, outcome.strategy.actualSkills["intelligence"] ?? 0);
+        }
       }
     }
 

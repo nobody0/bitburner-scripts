@@ -10,6 +10,7 @@ folder describes what those features are for.
 | [`features/`](features/README.md) | "What is this feature, how does it unlock, what are its rules, and what makes it hard?" |
 | [`endgame.md`](endgame.md) | "Which way do we finish this node, how long will that take, and how does the guess steer the features?" |
 | [`speedrun-benchmark.md`](speedrun-benchmark.md) | "What historical order and times must the full Source-File run beat, under which rules?" |
+| [`route-legs.md`](route-legs.md) | "What state does the run hold entering each leg of the route, and which bench measures that leg?" |
 | [`graph.md`](graph.md) | "What depends on what, and which resources are contended?" |
 
 **Two kinds of file, and the split is strict.** A BitNode note is a fact sheet

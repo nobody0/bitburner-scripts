@@ -1,11 +1,11 @@
-/** Screening harness for the BN1 route: run `bn1-full` for a bounded slice and
- * report the handful of numbers the route decisions actually move.
+/** Screening harness for the BN1 route: run `leg-bn1.1` for a bounded slice
+ * and report the handful of numbers the route decisions actually move.
  *
  * Deliberately NOT a benchmark. A short slice cannot say how long BN1 takes; it
  * says whether the run installs at all, how fast augmentations accumulate, and
  * whether the route estimate is sane — which is what the install-cadence and
  * package-size knobs change. Confirm anything promising with a full
- * `bun run sim --profile bn1-full --compact` before believing it.
+ * `bun run sim --profile leg-bn1.1 --compact` before believing it.
  *
  *   bun run tools/bn1-screen.ts [--hours 4] [--seed 1] [--label baseline]
  */
@@ -23,7 +23,7 @@ const hours = Number(arg("hours", "4"));
 const seed = Number(arg("seed", "1"));
 const label = arg("label", "screen");
 
-const profile = findProfile("bn1-full");
+const profile = findProfile("leg-bn1.1");
 let t0 = 0;
 const installAt: number[] = [];
 let augCount = 0;

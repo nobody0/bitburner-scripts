@@ -138,10 +138,13 @@ export class SimArtifactSession {
     }
   }
 
-  async close(): Promise<void> {
-    this.#finishArtifact();
-    await Promise.all(this.#finalizations);
-    const manifest: SimSessionManifest = {
+  /** The manifest as it stands. Exposed so a caller can put it through
+   * `assertPromotableSession` BEFORE `close()`, while the run's own result and
+   * fingerprint are already recorded. `artifacts` is the session's record
+   * streams and nothing else — sim/compare.ts resolves every entry against
+   * this directory and parses it as JSONL. */
+  manifest(): SimSessionManifest {
+    return {
       version: 2,
       identity: this.identity,
       seed: this.#options.seed,
@@ -151,7 +154,12 @@ export class SimArtifactSession {
       ...(this.#result !== undefined ? { result: this.#result } : {}),
       artifacts: this.files.map((file) => path.basename(file)),
     };
-    writeFileSync(this.manifestFile, JSON.stringify(manifest, null, 2) + "\n");
+  }
+
+  async close(): Promise<void> {
+    this.#finishArtifact();
+    await Promise.all(this.#finalizations);
+    writeFileSync(this.manifestFile, JSON.stringify(this.manifest(), null, 2) + "\n");
   }
 
   #open(startedAt: number): void {

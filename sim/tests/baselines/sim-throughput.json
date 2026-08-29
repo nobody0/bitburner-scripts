@@ -36,9 +36,14 @@
     "  3. A budgeted run never reaches its goal. These entries are diagnostics",
     "     and are never route evidence.",
     "",
+    "ID CHANGE (2026-08-29). `bn1-full` is now the route leg `leg-bn1.1` -- the",
+    "full-node benchmarks merged into the leg naming. The entrance is unchanged",
+    "(BN1 holding SF4.3), so these throughput numbers carry across; older notes",
+    "below still name the profile as it was when they were recorded.",
+    "",
     "HOW TO RE-MEASURE.",
-    "  bun run sim -- --profile bn1-full --seed 1 --horizon 1h --compact --perf --cost",
-    "  bun run sim -- --profile bn1-full --seed 1 --compact --perf --wall-budget 2m --cost",
+    "  bun run sim -- --profile leg-bn1.1 --seed 1 --horizon 1h --compact --perf --cost",
+    "  bun run sim -- --profile leg-bn1.1 --seed 1 --compact --perf --wall-budget 2m --cost",
     "  bun run sim:profile --cpu-prof --wall-budget 2m   # where the time goes",
     "Same seed, same settings, an otherwise idle machine. Take the median of three."
   ],
@@ -51,8 +56,8 @@
     "simulatorModelVersion": 10
   },
   "profiles": {
-    "bn1-full-1h": {
-      "command": "--profile bn1-full --seed 1 --horizon 1h --compact --perf --cost",
+    "leg-bn1.1-1h": {
+      "command": "--profile leg-bn1.1 --seed 1 --horizon 1h --compact --perf --cost",
       "horizonHours": 1,
       "vhPerWallMinute": 7.1,
       "wallSeconds": 8.5,
@@ -64,8 +69,8 @@
         "a76d187b remeasured immediately before the factions pass: 5.57 vh/min, 10.8s. The factions-portfolio hot-path pass took it to 7.10 vh/min, 8.5s -- 1.27x."
       ]
     },
-    "bn1-full": {
-      "command": "--profile bn1-full --seed 1 --compact --perf --wall-budget 2m --cost",
+    "leg-bn1.1": {
+      "command": "--profile leg-bn1.1 --seed 1 --compact --perf --wall-budget 2m --cost",
       "wallBudget": "2m",
       "vhPerWallMinute": 3.0,
       "decayPct": -86,
@@ -75,7 +80,7 @@
       "events": 1058816,
       "usPerEvent": 113.8,
       "nsCalls": 3053217,
-      "what": "Cold BN1 start under the settings bench:sim:bn1-full uses. A diagnostic, not an A/B -- see the header.",
+      "what": "Cold BN1 start under the settings bench:sim:leg-bn1.1 uses. A diagnostic, not an A/B -- see the header.",
       "note": "THE PROBLEM REMAINS. The factions pass improves identical early work and buys 6.03 virtual hours in this diagnostic window, but the first half still collapses from 5.29 to 0.72 vh/min in the second (-86%). A faster simulator reaches the expensive late state sooner; this endpoint is not the A/B metric.",
       "lead": "After the factions pass the portfolio evaluator's stepFactions fell from 34.6% total to ~27% and no longer holds a dominant self-time block; the largest remaining self-time entries are spread across dispatch view/topology work, the publish-digest JSON signatures, and needs/coordination containers. The run-length decay is untouched and remains the open lead.",
       "history": [

@@ -17,12 +17,11 @@ run, rather than turning an unmeasured hunch into a new baseline.
 
 ## Rules for the new run
 
-- Start from an otherwise fresh save in **BN1.1**.
-- Bootstrap exception: inject only **Source-File 4 / Singularity access** needed
-  to make a hands-off run technically possible. BN4 is therefore the first
-  destination and must be completed first, replacing that bootstrap exception
-  with legitimately earned SF4. Before an official attempt, pin the exact
-  injected SF4 level and mechanism in the run record.
+- Start from a fresh save in **BN4**. Singularity is node-native there, so a
+  hands-off run needs no bootstrap injection of any kind — nothing to pin, and
+  nothing to replace. The first completed BitNode is 4.1 (inside the route's
+  `4.3` milestone), which earns the SF4 the rest of the route runs on; BN1
+  levels 1–3 are all earned at the route's `1.3` entry.
 - No exploits.
 - No casino.
 - No infiltration.
@@ -83,11 +82,14 @@ optimal place.
 
 The complete intended order for the current game is:
 
-`1.1, 4.3, 1.3, 15.3, 14.1, 5.1, 2.3, 14.3, 5.3, 12.3, 8.3, 10.3, 9.3, 13.3, 6.3, 7.3, 11.3, 3.3`.
+`4.3, 1.3, 15.3, 14.1, 5.1, 2.3, 14.3, 5.3, 12.3, 8.3, 10.3, 9.3, 13.3, 6.3, 7.3, 11.3, 3.3`.
 
-The initial `1.1` is explicit because the selector projects the Source-File
-awarded by the node currently being destroyed. A fresh run completing BN1.1
-therefore recognizes that milestone as satisfied and enters BN4 next.
+The selector projects the Source-File awarded by the node currently being
+destroyed, so a fresh BN4 run keeps returning the `4.3` milestone through its
+own first two destructions and moves to `1.3` only once level 3 is earned.
+The per-leg entrance state this order implies — accumulated Source-Files and
+chained intelligence — is derived and tabulated in
+[`route-legs.md`](route-legs.md).
 
 BN2, BN3, BN6, BN7, BN8, BN9, BN10, BN11, and BN13 remain in the complete route
 but are currently disabled while their automation is being prepared. Runtime
@@ -196,9 +198,16 @@ The missing layer should be added later, outside the current controller patch:
    both the game-reported clock and wall-clock elapsed time, completion status,
    and notes. Preserve every attempt; designate a personal best rather than
    overwriting history.
-3. **Checkpoint lineage.** Keep a start-of-segment save for every milestone so
-   the next section can be repeated from identical state. A winning result may
-   nominate its end save as the next milestone's parent.
+3. **Checkpoint lineage.** *(partly delivered — see
+   [`route-legs.md`](route-legs.md).)* Every route leg has a derived entrance,
+   and the checkpoint that starts it is minted from that derivation
+   (`tools/mint-leg-save.ts`); `saves/leg-bn4.1-start.json.gz` is the route's
+   committed first entrance. A leg run that reaches its goal at `valid`
+   fidelity mints the next leg's checkpoint, so a winning result does nominate
+   the next segment's parent. Still open: the checkpoint is rebuilt from the
+   route rather than captured from the winning run's own end state, and a
+   save-seeded run is a reduced surface (no prestige, Go or Stanek), so a
+   minted blob is custody and lineage rather than a drop-in bench entrance.
 4. **UI workflow.** Extend the BitNode tab with benchmark/PB/current/delta and
    cumulative columns, route coloring, campaign selection, checkpoint lineage,
    and explicit capture/restore actions. Restore remains destructive and must

@@ -2,6 +2,17 @@
   "note": [
     "THE PROOF-OF-PROGRESS LEDGER for the BN1 route.",
     "",
+    "ID CHANGE (2026-08-29). `bn1-full` is now the route leg `leg-bn1.1`:",
+    "running an entire BitNode IS the speedrun, so the full-node benchmarks",
+    "merged into the leg naming. The entrance is MECHANICALLY IDENTICAL --",
+    "BN1 holding SF4.3, formerly via the harness allowance and now earned by",
+    "the bn4.x legs -- so these numbers carry across unchanged.",
+    "",
+    "HOLD LIFTED (2026-08-29). Every number below predates a bench that could",
+    "reach its goal at all: STALL_BITNODE_COMPLETION blocked the",
+    "destroyW0r1dD43m0n dispatch, so `reached: false` was guaranteed by",
+    "construction rather than measured. Route runs now lift the hold.",
+    "",
     "Each entry is the BEST result we have actually observed on that profile, not",
     "a target and not a guess. Some of these numbers are FAILURES; they are here",
     "because a failure you have measured is the starting point of the next",
@@ -21,7 +32,7 @@
     "HOW TO RE-MEASURE. These are minutes-to-hours of wall clock, so they are run",
     "by hand rather than in a lane:",
     "  bun run tools/bn1-screen.ts --hours 4        # screen one configuration",
-    "  bun run sim --profile bn1-full --compact     # the benchmark, seeds 1-3",
+    "  bun run sim --profile leg-bn1.1 --compact    # the benchmark, seeds 1-3",
     "  bun run sim --profile bn1-speedrun --compact # the cheap regression guard",
     "Screen on seed 1; confirm anything promising on all three before recording."
   ],
@@ -32,10 +43,10 @@
     "recordedFrom": "re-measured after the BN1 route/arbiter pass: honest route ETAs (closed-form climbs, acquisition-aware invite/regrow, bank-netted donations), investment horizon fixes, wake coalescing, share cooldown, prestige killAll rounds, sim GC pacing"
   },
   "target": {
-    "note": "An optimal BN1 completes in under eight hours. bn1-full runs a 24h horizon; not reaching inside it is a defect to diagnose, not a score to optimise."
+    "note": "An optimal BN1 completes in under eight hours. leg-bn1.1 runs a 24h horizon; not reaching inside it is a defect to diagnose, not a score to optimise."
   },
   "profiles": {
-    "bn1-full": {
+    "leg-bn1.1": {
       "goal": "bn:1 + installs:2",
       "horizonHours": 24,
       "reached": false,
@@ -43,7 +54,7 @@
       "secondInstallHours": 1.2,
       "augmentationsAt5_6Hours": 16,
       "routeEtaHoursAt4Hours": 30.9,
-      "what": "Cold BN1 start, 8 GB home, the full vanilla network, every playable feature. The headline route benchmark.",
+      "what": "Cold BN1 start (holding the route's earned SF4.3), 8 GB home, the full vanilla network, every playable feature. Recorded as `bn1-full` before the leg merge.",
       "note": "NOT REACHED, but seed 3 INSTALLED THE RED PILL at 21.4h (56 augs, donation route) and stood in the final daemon regrow (~2.5h priced) at the horizon -- a ~24-26.5h trajectory, the deepest bn1-full has reached. Remaining walls from the 24h tails: the Daedalus favor-unlock reputation leg at a measured-but-starved work rate (factions loses the slot), and the zero-delay clock stall (dnet-triggered, sim-only) that eats seeds outright -- see spec/progress.md.",
       "history": [
         "Before 2026-08-20: zero installs, zero augmentations, route ETA 1,137.7h at four hours. Three chained defects -- an early count tranche demanding a quarter of the whole gate, an unanchored power-law extrapolation, and faction work never announcing the augmentations it produces. See spec/progress.md, BN1 route ledger seventh pass.",
@@ -61,8 +72,8 @@
       "note": "All three seeds now reach. The archived 2.43-2.46h generation predates the coding-contract runtime and the upstream batcher invariants; under model-10 semantics the honest-ETA strategy layer beats the previously recorded 6.23h/5.01h/DNF on every seed. The remaining spread (1.66h-3.61h) is decision-timing sensitivity worth studying.",
       "history": [
         "2026-08-20: seed 1 7.44h without the cold-start install fixes, 6.23h with them.",
-        "2026-08-20 (model 5): seed 1 6.23h, seed 3 5.01h, seed 2 not reached. 2026-08-27 (model 10, after the route/arbiter pass): all three seeds reach \u2014 3.61h / 1.66h / 2.54h.",
-        "2026-08-27 (model 10, after the upstream dnet/batcher merge and the charisma pass): 80.7m / 2.36h / 2.68h \u2014 seed 1 a new best. Seed 2's recorded 1.66h predates the merge: at rev 5d2fd3ff (pre-charisma) seed 2 HANGS at vt 2.075h (frozen clock, dnet-implicated \u2014 see spec/progress.md), so 2.36h at HEAD is the best CURRENT-generation observation, kept out of the headline per the improving-direction rule.",
+        "2026-08-20 (model 5): seed 1 6.23h, seed 3 5.01h, seed 2 not reached. 2026-08-27 (model 10, after the route/arbiter pass): all three seeds reach — 3.61h / 1.66h / 2.54h.",
+        "2026-08-27 (model 10, after the upstream dnet/batcher merge and the charisma pass): 80.7m / 2.36h / 2.68h — seed 1 a new best. Seed 2's recorded 1.66h predates the merge: at rev 5d2fd3ff (pre-charisma) seed 2 HANGS at vt 2.075h (frozen clock, dnet-implicated — see spec/progress.md), so 2.36h at HEAD is the best CURRENT-generation observation, kept out of the headline per the improving-direction rule.",
         "2026-08-28 (model 10, rev 48c6b55c, post-revert + upstream armour fixes): 80.6m / DNF / 2.68h. Seed 1's 80.6-80.7m repeats across three guard generations and takes the headline. Seed 2's DNF is the zero-delay clock stall (now a diagnosable crash via the clock tripwire), not a strategy result.",
         "2026-08-28 (model 10, rev 6b26f0b9~1, derive-chain bound landed): 77.3m / 1.58h / 1.87h — every seed a new best. WITH the rep-elasticity coupling (6b26f0b9): 1.65h / 1.76h / 3.98h — this fixture's goal is MONEY, and the coupling deliberately trades surplus income for route reputation; the bn1-full route metric improved 31 -> 40 augs at 12h on the same change. The headline keeps the money-goal bests; do not read the coupling's cost here as a route regression."
       ],

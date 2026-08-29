@@ -1,3 +1,15 @@
 {
-  "saves": []
+  "saves": [
+    {
+      "id": "leg-bn4.1-start",
+      "label": "start of bn4.1",
+      "file": "leg-bn4.1-start.json.gz",
+      "bitNode": 4,
+      "capturedAt": 1787991371801,
+      "playtimeSinceLastBitnode": 0,
+      "sha256": "dbd91418dfb9ebd6ad5b82dd0f3344acdb69d4e83676a3ec4eac636b8b0bc8af",
+      "minted": true,
+      "notes": "minted entrance for route all-sf3-bn4-first leg 0 (bn4.1, milestone 4.3): SF none, intelligence 0 (estimated); simulator model 10, vendor 3162fd2590e221eadd0c0fbd46151913f7c4c41c"
+    }
+  ]
 }

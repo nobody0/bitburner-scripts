@@ -9,21 +9,38 @@
     "(which resets charisma to 1), then the post-pill hacking regrow to the",
     "node's doubled daemon gate.",
     "",
+    "ENTRANCE CHANGED (2026-08-29). `bn15-full` is now the route leg",
+    "`leg-bn15.1`: running an entire BitNode IS the speedrun, so the full-node",
+    "benchmarks merged into the leg naming. Unlike bn1's merge this was NOT a",
+    "rename -- the leg enters BN15 holding the SF1.3 the route earns before it,",
+    "where bn15-full started cold. Different entrance, different economics, so",
+    "the old numbers are ARCHIVED below rather than carried: they remain the",
+    "evidence of what was observed, and cannot be compared with a leg run.",
+    "`profiles` starts empty and is refilled by measurement.",
+    "",
+    "HOLD LIFTED (2026-08-29). The archived numbers also predate a bench that",
+    "could reach at all: STALL_BITNODE_COMPLETION blocked the",
+    "destroyW0r1dD43m0n dispatch, so `reached: false` was guaranteed by",
+    "construction rather than measured. Route runs now lift the hold.",
+    "",
     "HOW TO RE-MEASURE:",
-    "  bun run sim --profile bn15-full --seed 1 --horizon 6h   # screen",
-    "  bun run sim --profile bn15-full --compact               # benchmark, seeds 1-3"
+    "  bun run sim --profile leg-bn15.1 --seed 1 --horizon 6h   # screen",
+    "  bun run sim --profile leg-bn15.1 --compact               # benchmark, seeds 1-3"
   ],
   "provenance": {
     "simulatorModelVersion": 10,
     "vendorCommit": "3162fd2590e221eadd0c0fbd46151913f7c4c41c",
-    "recordedAt": "2026-08-27",
-    "recordedFrom": "first BN15 measurements after the charisma route-pricing pass (charisma marginal channel, closed-form ladder climbs, maze-scaled walks, erased-progress install veto, single-city needs)"
+    "recordedAt": "2026-08-29",
+    "recordedFrom": "leg merge: bn15-full retired into leg-bn15.1, whose entrance carries the route's earned SF1.3; awaiting first measurement"
   },
   "target": {
     "note": "An optimal BN15 completes in well under eight hours; the ladder itself prices at ~5h of walks plus charisma climbs, and the post-pill regrow to the doubled daemon gate is the tail to beat."
   },
-  "profiles": {
+  "profiles": {},
+  "archived": {
     "bn15-full": {
+      "retiredAt": "2026-08-29",
+      "retiredBecause": "merged into leg-bn15.1, which enters holding the route's earned SF1.3 instead of cold — not a comparable entrance",
       "goal": "bn:15 + installs:2",
       "horizonHours": 24,
       "reached": false,

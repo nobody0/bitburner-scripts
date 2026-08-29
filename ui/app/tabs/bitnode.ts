@@ -20,7 +20,7 @@ import type { MarginalResource } from "../../../shared/strategy/progression/marg
 import {
   BITNODE_SPEEDRUN_PLAN,
   DISABLED_BITNODES,
-  STALL_BITNODE_COMPLETION,
+  isBitNodeCompletionStalled,
 } from "../../../shared/strategy/progression/bitnode-order.ts";
 
 /** BitNode tab: where we are, what we have finished, and exactly what this
@@ -107,7 +107,7 @@ function bitNodeRoute(
   );
   return (
     `<div class="bnroute-heading"><span>Automation order</span>` +
-    (STALL_BITNODE_COMPLETION
+    (isBitNodeCompletionStalled()
       ? `<span class="chip off" title="current controller policy will not dispatch destroyW0r1dD43m0n">completion stalled</span>`
       : "") +
     `</div>` +

@@ -18,7 +18,7 @@ export interface RouteLegIdentity {
 export type EntranceIdentity =
   /** A brand-new save of the named BitNode: no source files, no checkpoint.
    * The canonical checkpoint-free state for any node a route enters first —
-   * BN1 for the historical first leg, BN8 for a market-first route. */
+   * BN4 for the speedrun route's first leg, BN8 for a market-first route. */
   | { kind: "fresh"; bitNode: number }
   | {
       kind: "save";
@@ -27,6 +27,17 @@ export type EntranceIdentity =
       /** SHA-256 of the exact registered save bytes. A replaced checkpoint
        * invalidates every downstream fingerprint even if its id is reused. */
       sha256: string;
+    }
+  /** A fresh save of the leg's node holding the Source-Files and intelligence
+   * the route's earlier milestones earned — derived by
+   * shared/strategy/progression/route-legs.ts, never hand-written. Distinct
+   * from `fresh` so a chained leg cannot masquerade as a cold start in
+   * ledgers. */
+  | {
+      kind: "chained";
+      bitNode: number;
+      sourceFiles: Record<string, number>;
+      intelligence: number;
     }
   | { kind: "synthetic"; bitNode: number; profile?: string };
 
@@ -51,5 +62,7 @@ export function assertValidExperiment(identity: ExperimentIdentity): void {
     }
   } else if (identity.route) {
     throw new Error("a feature-scenario experiment cannot claim a speedrun route leg");
+  } else if (identity.entrance.kind === "chained") {
+    throw new Error("a chained entrance is derived route state; only bitnode-route experiments may use it");
   }
 }

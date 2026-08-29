@@ -1,0 +1,42 @@
+{
+  "note": [
+    "THE CHAIN LEDGER for the speedrun route's leg entrances.",
+    "",
+    "Each entry records the observed EXIT state of one route leg (route id",
+    "all-sf3-bn4-first, legs derived in shared/strategy/progression/route-legs.ts).",
+    "A leg is ONE BitNode completion (bn4.3 is the third completion of BN4,",
+    "entered holding SF4.2), so a leg's goal exit IS the next leg's entrance.",
+    "A leg's measured exit intelligence becomes the NEXT leg's entrance",
+    "intelligence -- deriveRouteLegs prefers these numbers over the",
+    "+10-per-completion estimate. Source-File entrances are never recorded",
+    "here: they are fully determined by the route order.",
+    "",
+    "SHAPE. `legs` is keyed by leg name, and each entry is:",
+    "  \"bn4.1\": { \"exit\": { \"intelligenceAtGoal\": 12 }, \"note\": \"...\" }",
+    "`intelligenceAtGoal` is the only key read (sim/profiles.ts); everything",
+    "else is for humans. A route-leg run prints `exit intelligence: <n>` and",
+    "records it in sim.result as strategy.actualSkills.intelligence.",
+    "",
+    "Recording here is what makes a measurement STICK: a completed leg also",
+    "mints the next leg's checkpoint with its observed exit baked in, but that",
+    "is one blob from one seed. Only an entry below moves the profiles.",
+    "",
+    "RULES.",
+    "  1. Record only from a run you actually observed, on the leg's own profile",
+    "     (bun run sim --profile leg-bn<node>.<level> --compact), taken at the",
+    "     run's goal. A horizon exit is not a goal exit; do not record it.",
+    "  2. Updating a leg's exit changes every downstream leg's entrance and",
+    "     therefore its scenario fingerprint. That is the chain working as",
+    "     designed: re-measure downstream legs afterwards, in order.",
+    "  3. `provenance` pins the simulator semantics, exactly as in bn1.json.",
+    "     Bumping SIMULATOR_MODEL_VERSION or the vendored commit obliges",
+    "     re-measuring the whole chain before recording new exits."
+  ],
+  "provenance": {
+    "simulatorModelVersion": 10,
+    "vendorCommit": "3162fd2590e221eadd0c0fbd46151913f7c4c41c",
+    "recordedAt": "2026-08-28",
+    "recordedFrom": "ledger created with the chained-leg profiles; no exits measured yet -- every leg entrance is still the estimate"
+  },
+  "legs": {}
+}
