@@ -1,7 +1,7 @@
 import type { NS, ResetInfo } from "@ns";
 import { initialContext, reduceRecord } from "../shared/goals/evaluate.ts";
 import type { Goal } from "../shared/goals/goal.ts";
-import { describeOverrides, type FeatureOverrides } from "../shared/features/profile.ts";
+import { describeFeatureSelection, type FeatureSelection } from "./feature-selection.ts";
 import type { SaveSeed } from "../shared/save/to-sim.ts";
 import type { LogRecord, WireMessage } from "../shared/telemetry/schema.ts";
 import { Clock } from "./clock.ts";
@@ -61,7 +61,6 @@ import { START_SCRIPT_GB } from "../game/lib/ram.ts";
 import { gameGlobal } from "../game/lib/globals.ts";
 import { setGoNeuralRuntimeForTest } from "../game/lib/features/remaining.ts";
 import { GO_REWARD_RULES } from "../shared/strategy/go/rewards.ts";
-import { setBitNodeCompletionStall } from "../shared/strategy/progression/bitnode-order.ts";
 
 /** Run the REAL game/ controller against the synthetic world.
  *
@@ -122,8 +121,8 @@ export interface GameRunOptions {
    *  every explicit option above it still wins, so a profile can override one
    *  field of a save without rebuilding it. */
   save?: SaveSeed;
-  /** Feature switches for this run (sim/profiles.ts). */
-  features?: FeatureOverrides;
+  /** Controller modules selected for this specialized run. Absent means all. */
+  features?: FeatureSelection;
   /** Run identity, echoed into sim.meta so a stored JSONL is self-describing. */
   profile?: string;
   saveId?: string;
@@ -963,7 +962,10 @@ async function runGameInstalled(
   host.scripts.set(DNET_AGENT, dnetAgent.main as ScriptMain);
   host.scripts.set(DNET_PROBER, dnetProber.main as ScriptMain);
   host.scripts.set(START_SCRIPT, startMain as ScriptMain);
-  host.scripts.set(MAIN_SCRIPT, ((ns: NS) => mainMain(ns, options.features)) as ScriptMain);
+  host.scripts.set(MAIN_SCRIPT, ((ns: NS) => mainMain(ns, {
+    selectedFeatures: options.features ? new Set(options.features) : undefined,
+    allowBitNodeCompletion: options.allowBitNodeCompletion === true,
+  })) as ScriptMain);
 
   const scenarioId = scenarioFingerprint({
     simulatorModel: SIMULATOR_MODEL_VERSION,
@@ -1088,7 +1090,7 @@ async function runGameInstalled(
       goFidelity,
       controllerAutomationSourceFiles: CONTROLLER_AUTOMATION_SOURCE_FILES,
       bitnode,
-      features: describeOverrides(options.features),
+      features: describeFeatureSelection(options.features),
       ...(options.saveId !== undefined ? { save: options.saveId } : {}),
       ...(options.profile !== undefined ? { profile: options.profile } : {}),
     },
@@ -1126,7 +1128,6 @@ async function runGameInstalled(
     ...(options.wallBudgetMs !== undefined ? { wallBudgetMs: options.wallBudgetMs } : {}),
     ...(meter ? { meter } : {}),
   });
-  const priorCompletionStall = setBitNodeCompletionStall(!options.allowBitNodeCompletion);
   try {
     globalThis.WebSocket = SimTelemetrySocket as unknown as typeof WebSocket;
     launch(host, controller);
@@ -1143,7 +1144,6 @@ async function runGameInstalled(
     host.processes.killAll(false);
     engine.stop();
     globalThis.WebSocket = originalWebSocket;
-    setBitNodeCompletionStall(priorCompletionStall);
   }
 
   const costReport = meter?.finish();

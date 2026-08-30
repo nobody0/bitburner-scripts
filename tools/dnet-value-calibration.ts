@@ -1,5 +1,5 @@
 import { parseGoals } from "../shared/goals/presets.ts";
-import { only } from "../shared/features/profile.ts";
+import { only } from "../sim/feature-selection.ts";
 import { runGame } from "../sim/game-run.ts";
 import { findProfile } from "../sim/profiles.ts";
 

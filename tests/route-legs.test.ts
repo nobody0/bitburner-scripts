@@ -4,7 +4,7 @@ import {
   deriveRouteLegs,
   routeLegProfileId,
   SPEEDRUN_ROUTE_ID,
-} from "../shared/strategy/progression/route-legs.ts";
+} from "../sim/route-legs.ts";
 
 /** The chain: every leg is ONE BitNode completion, and its entrance is
  * exactly what the earlier completions earned. Source-Files are deterministic
@@ -88,8 +88,8 @@ describe("route leg derivation", () => {
   test("spec/strategy/route-legs.md carries the current derived table", async () => {
     const { renderRouteLegsTable } = await import("../tools/route-legs.ts");
     const document = await Bun.file(new URL("../spec/strategy/route-legs.md", import.meta.url)).text();
-    const spliced = document.match(/<!-- route-legs:begin -->\n([\s\S]*?)\n<!-- route-legs:end -->/);
-    expect(spliced?.[1] ?? "MISSING MARKER BLOCK — run bun tools/route-legs.ts --write")
+    const spliced = document.match(/<!-- route-legs:begin -->\r?\n([\s\S]*?)\r?\n<!-- route-legs:end -->/);
+    expect(spliced?.[1]?.replace(/\r\n/g, "\n") ?? "MISSING MARKER BLOCK — run bun tools/route-legs.ts --write")
       .toBe(renderRouteLegsTable());
   });
 

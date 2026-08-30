@@ -12,7 +12,7 @@ import { findProfile } from "../profiles.ts";
 import { SERVER_METADATA, type Range } from "../vendor/bitburner/src/Server/data/ServerMetadata.ts";
 import { runGame } from "../game-run.ts";
 import { parseGoal } from "../../shared/goals/presets.ts";
-import { only } from "../../shared/features/profile.ts";
+import { only } from "../feature-selection.ts";
 
 function inRange(value: number, range: Range | undefined): boolean {
   return range !== undefined && value >= range[0] && value <= range[1];

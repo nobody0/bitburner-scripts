@@ -19,7 +19,7 @@ Two drivers, both driven from `sim/run.ts`:
   declared fresh save of the leg's own BitNode (`leg-bn4.1`, the route's first
   leg, is the only one), a chained entrance — a fresh save of
   the leg's node plus the Source-Files and intelligence the route's earlier
-  completions earned, derived by `shared/strategy/progression/route-legs.ts`
+  completions earned, derived by `sim/route-legs.ts`
   and never hand-written (`spec/strategy/route-legs.md`) — or a registered
   save checkpoint, which for a leg is minted from that same derivation.
   Session manifests carry the save's exact-byte
@@ -30,6 +30,8 @@ Two drivers, both driven from `sim/run.ts`:
 - `feature-scenario` runs are synthetic ideal, stress, recovery or mixed-feature
   pressure experiments. They may use arbitrary focused worlds, but comparison
   policy refuses to compare them with route legs and promotion rejects them.
+  Their feature selection filters probes and controller modules only; it never
+  rewrites the capabilities observed from the world or reaches pure strategy.
 
 `--save <id>` replaces the profile fixture with that complete checkpoint;
 profile world fields never overwrite decoded save state. `--fresh` explicitly

@@ -40,25 +40,3 @@ export const DISABLED_BITNODES: ReadonlySet<number> = new Set([
 ]);
 
 export const BITNODE_FALLBACK = 12;
-
-/** Operator hold at the irreversible boundary. While held, progression still
- * finishes and publishes the route plus next destination, but never arms or
- * dispatches destroyW0r1dD43m0n.
- *
- * Held by default: in the live game the boundary is one-way and the operator
- * decides when to cross it. A simulated route leg is the exception — its goal
- * IS the destruction, so `bn:<n>` is unreachable by construction while the
- * hold stands. The simulator lifts it per run and restores it afterwards
- * (`GameRunOptions.allowBitNodeCompletion`); nothing else should. */
-let stallBitNodeCompletion = true;
-
-export function isBitNodeCompletionStalled(): boolean {
-  return stallBitNodeCompletion;
-}
-
-/** Returns the previous value so a caller can restore it. */
-export function setBitNodeCompletionStall(stalled: boolean): boolean {
-  const previous = stallBitNodeCompletion;
-  stallBitNodeCompletion = stalled;
-  return previous;
-}

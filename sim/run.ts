@@ -3,7 +3,7 @@ import { ScriptDeath } from "./ns/api.ts";
 
 import { mkdirSync } from "node:fs";
 import { FEATURE_IDS, type FeatureId } from "../shared/features/ids.ts";
-import { only, type FeatureOverrides } from "../shared/features/profile.ts";
+import type { FeatureSelection } from "./feature-selection.ts";
 import { initialContext, reduceRecord } from "../shared/goals/evaluate.ts";
 import type { Goal } from "../shared/goals/goal.ts";
 import { parseGoals } from "../shared/goals/presets.ts";
@@ -22,7 +22,7 @@ import {
 } from "./fidelity.ts";
 import { scenarioFingerprint } from "./scenario.ts";
 import { assertPromotableSession, SimArtifactSession } from "./artifacts.ts";
-import { deriveRouteLegs } from "../shared/strategy/progression/route-legs.ts";
+import { deriveRouteLegs } from "./route-legs.ts";
 import { formatReport } from "./cost.ts";
 import {
 
@@ -86,23 +86,19 @@ function parseFeatureList(value: string): FeatureId[] {
 
 /** Combine a profile's isolation with the command line. */
 function resolveFeatures(
-  fromProfile: FeatureOverrides | undefined,
+  fromProfile: FeatureSelection | undefined,
   onlyList: FeatureId[] | undefined,
   addList: FeatureId[] | undefined,
-): FeatureOverrides | undefined {
+): FeatureSelection | undefined {
   if (onlyList) {
     // Replaces outright, profile included.
-    const base = only(...onlyList);
-    for (const id of addList ?? []) delete base[id];
-    return base;
+    return [...new Set([...onlyList, ...(addList ?? [])])];
   }
   if (!addList) return fromProfile;
-  // Widen: clear the "off" the profile set for each named feature. Not forced
-  // "on" — a feature the save cannot really play must stay locked rather than
-  // being pretended into existence.
-  const merged: FeatureOverrides = { ...(fromProfile ?? {}) };
-  for (const id of addList) delete merged[id];
-  return Object.keys(merged).length > 0 ? merged : undefined;
+  // Widen a specialized profile. Selection schedules a controller module; it
+  // does not pretend that the save has the capability required to run it.
+  if (!fromProfile) return undefined;
+  return [...new Set([...fromProfile, ...addList])];
 }
 
 /** Registered saves are complete entrance state. Profile worlds are synthetic
@@ -468,8 +464,7 @@ if (import.meta.main) {
   const horizon = horizonMs ?? (profile ? parseDuration(profile.horizon) : parseDuration("24h"));
   const save = freshEntrance ? undefined : saveId ?? profile?.save;
   const runLabel = label ?? profile?.id;
-  // `--only` replaces the profile's isolation; `--features` widens it by
-  // clearing the "off" for the named features.
+  // `--only` replaces the profile's selection; `--features` widens it.
   const features = resolveFeatures(profile?.features, featureOnly, featureAdd);
   const runBitnode = bitnode ?? profile?.bitnode ?? 1;
   const runMoney = startingMoney ?? profile?.startingMoney;

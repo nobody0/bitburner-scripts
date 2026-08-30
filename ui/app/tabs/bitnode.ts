@@ -20,7 +20,6 @@ import type { MarginalResource } from "../../../shared/strategy/progression/marg
 import {
   BITNODE_SPEEDRUN_PLAN,
   DISABLED_BITNODES,
-  isBitNodeCompletionStalled,
 } from "../../../shared/strategy/progression/bitnode-order.ts";
 
 /** BitNode tab: where we are, what we have finished, and exactly what this
@@ -101,14 +100,15 @@ function multiplierGrid(changed: ChangedMultiplier[]): string {
 function bitNodeRoute(
   currentNode: number | undefined,
   sourceFiles: Readonly<Record<string, number>>,
+  completionHeld: boolean,
 ): string {
   const nextIndex = BITNODE_SPEEDRUN_PLAN.findIndex(
     ({ node, level }) => !DISABLED_BITNODES.has(node) && (sourceFiles[String(node)] ?? 0) < level,
   );
   return (
     `<div class="bnroute-heading"><span>Automation order</span>` +
-    (isBitNodeCompletionStalled()
-      ? `<span class="chip off" title="current controller policy will not dispatch destroyW0r1dD43m0n">completion stalled</span>`
+    (completionHeld
+      ? `<span class="chip off" title="the irreversible-action gate is holding destroyW0r1dD43m0n">completion held</span>`
       : "") +
     `</div>` +
     `<div class="bnroute" aria-label="configured BitNode automation order">` +
@@ -594,8 +594,8 @@ export const bitnodeTab: Tab = {
           label: "planned next BitNode",
           value: html`${dot(completion.execute ? "good" : "ready")} BN${completion.nextBitNode}`,
           sub:
-            (completion.stalled === true
-              ? "route complete — automatic BitNode completion is stalled"
+            (completion.held === "irreversible-action-gate"
+              ? "route complete — irreversible-action gate is holding destruction"
               : completion.execute
                 ? "destroying node — destroyW0r1dD43m0n dispatched"
                 : completion.armedAt !== undefined
@@ -686,7 +686,11 @@ export const bitnodeTab: Tab = {
 
     return (
       `<div class="col wide">` +
-      card("Progression", summary + bitNodeRoute(p.bitNode, p.sourceFiles) + grid) +
+      card("Progression", summary + bitNodeRoute(
+        p.bitNode,
+        p.sourceFiles,
+        p.plan?.completion?.held === "irreversible-action-gate",
+      ) + grid) +
       route +
       cadence +
       installLifecycle +

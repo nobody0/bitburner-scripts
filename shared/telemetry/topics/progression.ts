@@ -230,7 +230,7 @@ export interface ProgressionPlan {
     targetLevel: number;
     armedAt?: number;
     /** Deliberate policy hold before the irreversible destroy call. */
-    stalled?: boolean;
+    held?: "irreversible-action-gate";
     execute: boolean;
   };
   /** Immediate, reversible route bootstrap owned by progression because it is

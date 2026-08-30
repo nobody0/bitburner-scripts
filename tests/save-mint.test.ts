@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { decodeSaveJson } from "../shared/save/decode.ts";
 import { encodeSaveJson, MINTED_SAVE_VERSION } from "../shared/save/encode.ts";
 import { saveToSeed } from "../shared/save/to-sim.ts";
-import { deriveRouteLegs } from "../shared/strategy/progression/route-legs.ts";
+import { deriveRouteLegs } from "../sim/route-legs.ts";
 import { routeLegEntranceSnapshot } from "../sim/save-mint.ts";
 import { readIndex, readSnapshot } from "../tools/save-io.ts";
 

@@ -41,6 +41,7 @@ function ctx(options: {
     } as never,
     caps: {} as never,
     now: 0,
+    selectedFeatures: new Set(),
     activeFeatures: new Set(),
   } as NeedContext;
 }

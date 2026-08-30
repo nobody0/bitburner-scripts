@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { decodeSaveJson, SaveFormatError, unwrap } from "../shared/save/decode.ts";
 import { saveToSeed } from "../shared/save/to-sim.ts";
-import { only } from "../shared/features/profile.ts";
+import { only } from "../sim/feature-selection.ts";
 import { parseGoals } from "../shared/goals/presets.ts";
 import { runGame } from "../sim/game-run.ts";
 import { DEFAULT_EPOCH_MS } from "../sim/realm/timers.ts";

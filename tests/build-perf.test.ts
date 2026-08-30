@@ -56,6 +56,14 @@ function memberStrings(source: string): Map<string, number> {
 }
 
 describe("compile-time telemetry elimination", () => {
+  test("deployable game sources contain no console.log", async () => {
+    const offenders: string[] = [];
+    for await (const file of new Bun.Glob("game/**/*.ts").scan(".")) {
+      if (/console\.log\s*\(/.test(await Bun.file(file).text())) offenders.push(file);
+    }
+    expect(offenders).toEqual([]);
+  });
+
   test("default build contains the telemetry client", async () => {
     const [main] = await buildScripts(config, { telemetry: true });
     expect(main!.content).toContain("WebSocket");
@@ -119,16 +127,9 @@ describe("compile-time telemetry elimination", () => {
     expect(main!.content).toContain('"corporation.getCorporation"');
   });
 
-  test("--perf build keeps the feature-override seam", async () => {
-    // Injected feature switches are a DECISION, applied inside caps(). If they
-    // were ever stripped from a perf build, the two builds would gate their
-    // feature drivers differently — i.e. play different games — and every
-    // --perf measurement would stop describing the real one. The seam is an
-    // internal function whose name only exists in a names-preserved build;
-    // the call-surface equality test below covers the shipped artifacts.
+  test("both builds derive capabilities from game observations", async () => {
     for (const telemetry of [true, false]) {
       const [main] = await buildScripts(config, { telemetry, minifyNames: false });
-      expect(main!.content).toContain("applyOverrides");
       expect(main!.content).toContain("deriveCapabilities");
     }
   });

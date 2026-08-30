@@ -1,6 +1,5 @@
 import type { NS } from "@ns";
-import type { FeatureOverrides } from "../shared/features/profile.ts";
-import { runController } from "./lib/controller.ts";
+import { runController, type ControllerRunPolicy } from "./lib/controller.ts";
 import { errorDetails, isScriptDeath } from "./lib/errors.ts";
 import { makeSink, type TelemetrySink } from "./lib/telemetry-sink.ts";
 import { initTelemetry, type Telemetry } from "./lib/telemetry.ts";
@@ -17,7 +16,7 @@ export function shouldReportCrash(error: unknown): boolean {
 
 /** The real game controller. start.js is only the autoexec/sync wrapper and
  * always supplies this process with a 3.2 GB launch override. */
-export async function main(ns: NS, featureOverrides?: FeatureOverrides): Promise<void> {
+export async function main(ns: NS, policy: ControllerRunPolicy = {}): Promise<void> {
   ns.disableLog("ALL");
   if (ns.args.length !== 0) throw new Error(`main.js accepts no arguments: ${JSON.stringify(ns.args)}`);
 
@@ -38,7 +37,7 @@ export async function main(ns: NS, featureOverrides?: FeatureOverrides): Promise
       tel = initTelemetry(ns, "main.js", identity);
       sink = makeSink(tel);
     }
-    await runController(ns, tel, sink, featureOverrides);
+    await runController(ns, tel, sink, policy);
   } catch (error) {
     TELEMETRY: if (shouldReportCrash(error) && __TELEMETRY__) {
       try {

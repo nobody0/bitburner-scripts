@@ -1,5 +1,4 @@
 import type { NS } from "@ns";
-import type { FeatureOverrides } from "../../shared/features/profile.ts";
 import { roundSigFigs } from '../../shared/format.ts';
 import { capsDelta } from "../../shared/features/unlock.ts";
 import type { Claim, SlotState } from "../../shared/strategy/arbiter.ts";
@@ -7,7 +6,7 @@ import { classifyReset, type PrestigeKind, type ResetIdentity } from "../../shar
 import { coordinate, emptyDigest, postNeeds, type Coordination } from "../../shared/strategy/coordination.ts";
 import type { Need } from "../../shared/strategy/needs.ts";
 import { forecastAt, unknownForecast, usableForecastSec } from "../../shared/strategy/progression/forecast.ts";
-import { FEATURE_IDS } from "../../shared/features/ids.ts";
+import { FEATURE_IDS, type FeatureId } from "../../shared/features/ids.ts";
 import { HOME_RESERVE_GB, ramArena, type ArenaPlan, type BrokerHost } from '../../shared/ram/broker.ts';
 import { parseSyncControl, SYNC_CONTROL_FILE } from "../../shared/deployment.ts";
 import { setProxyEventSink, type ProxyPlacer } from "./ns-proxy.ts";
@@ -62,13 +61,19 @@ const SWEEP_EVERY_TICKS = 150; // 30s
  *  it asked for, so a probe consumer must be idempotent under oversampling. */
 export const PROBE_EVERY_TICKS = Math.max(1, Math.floor(probeCadenceMs(ALL_PROBES) / TICK_MS));
 
+/** Runtime permissions for the controller. These are orchestration controls,
+ * never game observations or strategy inputs. The live defaults select the
+ * complete feature registry and hold the irreversible BitNode boundary. */
+export interface ControllerRunPolicy {
+  selectedFeatures?: ReadonlySet<FeatureId>;
+  allowBitNodeCompletion?: boolean;
+}
+
 export async function runController(
   ns: NS,
   tel: Telemetry | undefined,
   sink: TelemetrySink | undefined,
-  /** Injected feature switches. Absent in the game; a simulation supplies them
-   *  to isolate one feature. A decision, so deliberately not behind TELEMETRY. */
-  featureOverrides?: FeatureOverrides,
+  policy: ControllerRunPolicy = {},
 ): Promise<void> {
   TELEMETRY: if (__TELEMETRY__) {
     tel!.event("start.boot", { build: __BUILD_ID__ });
@@ -79,7 +84,7 @@ export async function runController(
   ns.tprint(`main.js online (build ${__BUILD_ID__})`);
 
   const state = initState();
-  if (featureOverrides) state.featureOverrides = featureOverrides;
+  const selectedFeatures = policy.selectedFeatures ?? new Set(FEATURE_IDS);
   const probes = initProbeRunner();
   const buildArena = () =>
     ramArena(arenaHosts(state), residentAsks(), state.topics.farm?.moneyPerSecPerGb ?? 0);
@@ -315,7 +320,7 @@ export async function runController(
     // Run after the sweep block so a sweep tick publishes its gate and fresh
     // server scan before acquisition probes observe them.
     if (tick % PROBE_EVERY_TICKS === 0) {
-      await runProbes(ns, probes, state);
+      await runProbes(ns, probes, state, selectedFeatures);
     }
 
     // Feature pass, refresh/act: refresh (evaluate -> store) -> collect
@@ -327,15 +332,16 @@ export async function runController(
     const now = Date.now();
     const active = caps(state);
     const arena = buildArena();
-    const dueModules = selectDueModules(state.featureLastRun, active, now);
+    const dueModules = selectDueModules(state.featureLastRun, active, now)
+      .filter((module) => selectedFeatures.has(module.driver.id));
     const activeFeatures = new Set(
-      FEATURE_IDS.filter((id) => driverEnabled(featureModule(id).driver, active)),
+      FEATURE_IDS.filter((id) => selectedFeatures.has(id) && driverEnabled(featureModule(id).driver, active)),
     );
 
     // A locked/disabled feature cannot leave a stale need, reservation or slot
     // claim behind merely because it will never become due again.
     for (const id of FEATURE_IDS) {
-      if (driverEnabled(featureModule(id).driver, active)) continue;
+      if (selectedFeatures.has(id) && driverEnabled(featureModule(id).driver, active)) continue;
       contributions.remove(id);
     }
 
@@ -346,7 +352,7 @@ export async function runController(
     //    previous one — the resolution of the "endgame needs the enriched
     //    state, features need the chosen route" ordering. The sort is stable,
     //    so everyone else keeps registry order.
-    const needContext: NeedContext = { state, caps: active, now, activeFeatures };
+    const needContext: NeedContext = { state, caps: active, now, selectedFeatures, activeFeatures };
     const refreshOrder = [...dueModules].sort(
       (a, b) => Number(a.driver.id === "progression") - Number(b.driver.id === "progression"),
     );
@@ -458,6 +464,7 @@ export async function runController(
           nspLong,
           state,
           caps: active,
+          selectedFeatures,
           activeFeatures,
           arena,
           tick,
@@ -466,6 +473,7 @@ export async function runController(
           horizons,
           ...(plan?.route !== undefined ? { route: plan.route } : {}),
           freeCriticalRam: (neededGb) => killWorkersForCritical(ns, hackingState(), neededGb),
+          allowBitNodeCompletion: policy.allowBitNodeCompletion === true,
         });
       } catch (error) {
         // One feature must never take the loop down with it — but a kill is

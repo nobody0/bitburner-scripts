@@ -539,7 +539,13 @@ describe("feature modules", () => {
           ? { augMeta: Object.fromEntries(Object.entries(over.prereqs).map(([name, prereqs]) => [name, { prereqs }])) }
           : {}),
       } as unknown as GameState["topics"]["factions"];
-      return { state, caps: unknownCapabilities(), now: 0, activeFeatures: new Set(FEATURE_IDS) };
+      return {
+        state,
+        caps: unknownCapabilities(),
+        now: 0,
+        selectedFeatures: new Set(FEATURE_IDS),
+        activeFeatures: new Set(FEATURE_IDS),
+      };
     }
 
     const oneOff = { name: "Cranial Signal Processors - Gen I", faction: "CyberSec", price: 1e6, affordableRep: true };

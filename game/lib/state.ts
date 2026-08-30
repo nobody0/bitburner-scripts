@@ -1,5 +1,4 @@
 import type { ContractQueueEntry, DarknetContractListing } from "./contracts.ts";
-import { applyOverrides, type FeatureOverrides } from "../../shared/features/profile.ts";
 import { unknownCapabilities, type Capabilities } from "../../shared/features/unlock.ts";
 import type { StateKey, StateMap } from "../../shared/telemetry/state-map.ts";
 import type { ContractFailure, ContractOrigin, ContractOriginTotals, ContractSolveReport } from "../../shared/telemetry/topics/side.ts";
@@ -77,9 +76,6 @@ export interface GameState {
   /** Darknet hosts whose files may have changed after Side touched a contract.
    * Home forwards these stamps to the remote controller, then clears them. */
   darknetContractRefreshHosts?: Record<string, number>;
-  /** Injected feature switches. Empty in the real game; a simulation sets them
-   *  to isolate a feature. Applied in caps(), so every consumer agrees. */
-  featureOverrides?: FeatureOverrides;
 }
 
 function emptyState(): GameState {
@@ -136,14 +132,9 @@ export function setMirror(state: GameState, key: string, value: unknown): void {
 
 /** What the save can play right now. Never undefined: before the first gate
  * batch every feature reads "unknown", which is distinct from "locked" and is
- * what stops a driver running on a feature we simply have not looked at.
- *
- * The single place injected overrides are applied, so the feature drivers, the
- * probe gating and the UI cannot disagree about which features this run may
- * use. Acquisition is untouched — the store still holds what the save really
- * has. */
+ * what stops a driver running on a feature we simply have not looked at. */
 export function caps(state: GameState): Capabilities {
-  return applyOverrides(state.topics.capabilities ?? unknownCapabilities(), state.featureOverrides);
+  return state.topics.capabilities ?? unknownCapabilities();
 }
 
 export function recordProbeFailure(state: GameState, id: string, error: unknown): void {

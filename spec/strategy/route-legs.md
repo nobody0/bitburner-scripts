@@ -12,7 +12,7 @@ completion order ([`speedrun-benchmark.md`](speedrun-benchmark.md)) to the
 benches that measure and improve each leg. It is generated — see
 **Regenerating** below — so it cannot drift from the code.
 
-Derivation: `shared/strategy/progression/route-legs.ts` (`deriveRouteLegs`).
+Derivation: `sim/route-legs.ts` (`deriveRouteLegs`).
 Bench profiles: `sim/profiles.ts` (`routeLegProfiles`). Measured
 exits: `sim/tests/baselines/route-legs.json`. Per-node trajectories, including
 the open defects a leg is currently losing to:
@@ -27,6 +27,10 @@ the open defects a leg is currently losing to:
   escalate the way a real re-entry does). Nothing is injected anywhere on
   this route — leg 0 (`bn4.1`) is fresh BN4, where Singularity is
   node-native.
+- **Features** are never restricted on a route leg. Every feature naturally
+  unlocked by the entrance runs and probes normally. `--only` and profile
+  feature selection are reserved for `feature-scenario` experiments; an
+  unmodeled full-surface call invalidates the leg instead of being masked.
 - **Intelligence** is not derivable from the order alone: it is whatever the
   previous leg actually finished with. A leg's entrance intelligence therefore
   prefers the **measured exit** of the leg before it (recorded in the chain

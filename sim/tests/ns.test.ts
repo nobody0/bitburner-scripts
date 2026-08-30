@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { setGoNeuralRuntimeForTest } from "../../game/lib/features/remaining.ts";
 import { parseGoals } from "../../shared/goals/presets.ts";
-import { only } from "../../shared/features/profile.ts";
+import { only } from "../feature-selection.ts";
+import { FEATURE_IDS } from "../../shared/features/ids.ts";
 import { ramCostContext, runGame } from "../game-run.ts";
 import { getFunctionRamCost, getRamCost } from "../ns/ram-costs.ts";
 import { StubGoValueBackend } from "../../tests/support/go-value-backend.ts";
@@ -10,7 +11,6 @@ import { Clock } from "../clock.ts";
 import { installVirtualTime } from "../realm/timers.ts";
 import { calculateExp } from "../vendor/bitburner/src/PersonObjects/formulas/skill.ts";
 import { lane } from "../../tests/support/lanes.ts";
-import { isBitNodeCompletionStalled } from "../../shared/strategy/progression/bitnode-order.ts";
 
 /** The synthetic ns exists to run game/ for real. These pin the mechanics that
  * make that possible, and the end-to-end proof that it does. */
@@ -283,7 +283,7 @@ lane({ feature: "world", bn: 1 }).describe("running game/ in the synthetic world
       // Singularity surface. Seed an actually unmodeled subsystem so this test
       // continues to exercise gap reporting rather than depending on SF4=0.
       gates: { inGang: true },
-      features: { go: "off" },
+      features: FEATURE_IDS.filter((id) => id !== "go"),
     });
 
     // Probes for features we do not simulate hit the wall and say so...
@@ -336,7 +336,7 @@ lane({ feature: "world", bn: 1 }).describe("running game/ in the synthetic world
   test("an installed Red Pill acquires the final opener, roots the daemon, and respects the operator hold", async () => {
     const events: { name?: string; data?: Record<string, unknown> }[] = [];
     let daemonRooted = false;
-    let completion: { ready?: boolean; automatic?: boolean; stalled?: boolean; execute?: boolean } | undefined;
+    let completion: { ready?: boolean; automatic?: boolean; held?: string; execute?: boolean } | undefined;
     const result = await runGame({
       ...atTheDaemonBoundary,
       onRecord: (line) => {
@@ -365,7 +365,12 @@ lane({ feature: "world", bn: 1 }).describe("running game/ in the synthetic world
       data: { program: "SQLInject.exe", cost: 250_000_000 },
     }));
     expect(daemonRooted).toBe(true);
-    expect(completion).toEqual(expect.objectContaining({ ready: true, automatic: true, stalled: true, execute: false }));
+    expect(completion).toEqual(expect.objectContaining({
+      ready: true,
+      automatic: true,
+      held: "irreversible-action-gate",
+      execute: true,
+    }));
     expect(events.some((event) => event.name === "bitnode.reset")).toBe(false);
   });
 
@@ -391,12 +396,6 @@ lane({ feature: "world", bn: 1 }).describe("running game/ in the synthetic world
       name: "bitnode.reset",
       data: expect.objectContaining({ from: 1 }),
     }));
-  });
-
-  test("the lifted hold does not leak into the next run", async () => {
-    // The hold is module state. If a lifted run failed to restore it, every
-    // later run in the process would silently arm the irreversible boundary.
-    expect(isBitNodeCompletionStalled()).toBe(true);
   });
 
   test("...but fleet placement funds it anyway, so features actually unlock", async () => {

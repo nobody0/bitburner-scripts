@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { scenarioDescribe } from "./scenario-lane.ts";
-import { only } from "../../shared/features/profile.ts";
+import { only } from "../feature-selection.ts";
 import { parseGoals } from "../../shared/goals/presets.ts";
 import type { ArbitrationDigest } from "../../shared/telemetry/topics/progression.ts";
 import { runGame } from "../game-run.ts";

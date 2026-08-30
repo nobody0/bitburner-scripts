@@ -15,7 +15,11 @@
  * exits live in the route-legs ledger (sim/tests/baselines/route-legs.json);
  * this module stays pure and takes them as an argument. */
 
-import { BITNODE_SPEEDRUN_PLAN, DISABLED_BITNODES, type BitNodeMilestone } from "./bitnode-order.ts";
+import {
+  BITNODE_SPEEDRUN_PLAN,
+  DISABLED_BITNODES,
+  type BitNodeMilestone,
+} from "../shared/strategy/progression/bitnode-order.ts";
 
 export const SPEEDRUN_ROUTE_ID = "all-sf3-bn4-first";
 
@@ -75,8 +79,7 @@ export function deriveRouteLegs(
   return legs;
 }
 
-/** Naming convention for the sim profile covering a leg. shared/ cannot see
- * sim/, so existence is checked sim-side against PROFILES. */
+/** Naming convention for the simulator profile covering a leg. */
 export function routeLegProfileId(leg: Pick<RouteLeg, "node" | "level">): string {
   return `leg-bn${leg.node}.${leg.level}`;
 }

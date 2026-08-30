@@ -89,36 +89,6 @@ describe("progression marginal value", () => {
     expect(marginals.bladeburnerRank).toMatchObject({ state: "estimated", secondsPerRelativeRate: 0 });
   });
 
-  test("hacking inherits the reputation legs it earns, at the measured elasticity", () => {
-    // Rep-bound Daedalus stage: reputation is the dominant leg. Faction-work
-    // reputation is earned BY hacking skill, so with the elasticity supplied,
-    // a hacking perturbation must move the reputation leg too — without it,
-    // worth(hacking) read 3-7k while worth(reputation) read 107-189k on a run
-    // whose reputation came entirely from hacking work.
-    const current = view({ augCount: 30, money: 200e9, hackingSkill: 2_600, daedalusRep: 0 });
-    const rates = { ...noRates(), moneyPerSec: 1e9, daedalusRepPerSec: 50, hackingSkillPerSec: 1 };
-    const blind = progressionMarginals({
-      view: current,
-      decision: stepEndgame(current),
-      rates,
-      selectedRoute: "daedalus",
-      install: unknownForecast(0, "test", "none"),
-    });
-    const coupled = progressionMarginals({
-      view: current,
-      decision: stepEndgame(current),
-      rates: { ...rates, repRateHackingElasticity: 1 },
-      selectedRoute: "daedalus",
-      install: unknownForecast(0, "test", "none"),
-    });
-    expect(coupled.hacking.secondsPerRelativeRate).toBeGreaterThan(blind.hacking.secondsPerRelativeRate);
-    // At elasticity 1 the rep leg responds to hacking one-for-one, so the two
-    // channels' worths converge on the same dominant leg.
-    expect(coupled.hacking.secondsPerRelativeRate).toBeGreaterThan(
-      coupled.reputation.secondsPerRelativeRate * 0.5,
-    );
-  });
-
   test("linear reputation work uses the closed-form gap/rate slope", () => {
     // gap 500 at a 1% relative rate: 500/1.01 seconds, pinned rather than
     // recomputed so a change to the slope shows up as a changed number here.

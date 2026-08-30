@@ -20,7 +20,7 @@ import { SimWorld } from "../world.ts";
 import { mockServer } from "../core/mocks.ts";
 import type { SimServer } from "../core/effects.ts";
 import { lane } from "../../tests/support/lanes.ts";
-import { only } from "../../shared/features/profile.ts";
+import { only } from "../feature-selection.ts";
 
 /** The purchase is only meaningful if the darknet it buys actually appears, so
  * these run the real controller rather than poking the system directly. */

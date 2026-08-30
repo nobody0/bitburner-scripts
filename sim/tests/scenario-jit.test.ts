@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { scenarioDescribe } from "./scenario-lane.ts";
-import { only } from "../../shared/features/profile.ts";
+import { only } from "../feature-selection.ts";
 import { parseGoals } from "../../shared/goals/presets.ts";
 import { makeHackContext } from "../../shared/formulas.ts";
 import { staticsFromRolls } from "../../shared/strategy/bounds.ts";

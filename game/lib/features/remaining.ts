@@ -1,12 +1,12 @@
 import type { NS } from "@ns";
 import { realmSleep } from "../wake.ts";
+import { skillFromExp } from "../../../shared/formulas.ts";
 import { AUGMENTATIONS } from "../../../shared/features/augmentations.ts";
 import { effectiveBitNodeMultipliers, WORLD_DAEMON_BASE_SKILL } from "../../../shared/features/bitnode.ts";
 import { BLADEBURNER_RANK_CHANNEL, currencyWorth } from "../../../shared/strategy/income.ts";
 import { careerBestPerSec, earnedSinceInstall, incomeShares } from "../income.ts";
 import { blindBankrollRatePerSec } from "../../../shared/strategy/stock/decide.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
-import { disabledByProfile } from "../../../shared/features/profile.ts";
 import { PRIORITY, type Claim, type ClaimValueCurve } from "../../../shared/strategy/arbiter.ts";
 import { stepBladeburner } from "../../../shared/strategy/bladeburner/decide.ts";
 import {
@@ -22,7 +22,15 @@ import {
   scoreAugMults,
   weightsFromMarginals,
 } from "../../../shared/strategy/factions/augs.ts";
-import { donationForRep, favorNeededToDonate, repUntilFavor, workRepPerSec } from "../../../shared/strategy/factions/rep.ts";
+import {
+  donationForRep,
+  favorNeededToDonate,
+  passiveRepPerSec,
+  repUntilFavor,
+  workRepPerSec,
+  type RepContext,
+  type WorkType,
+} from "../../../shared/strategy/factions/rep.ts";
 import { goDemands } from "../../../shared/strategy/go/demand.ts";
 import {
   goNeuralPositionIdentity,
@@ -66,7 +74,6 @@ import {
   routeCountVerdict,
 } from "../../../shared/strategy/progression/activation.ts";
 import { bankedFavorActivationValue, chooseNextBitNode, dwellInstallVerdict, INSTALL_VERDICT_OVERHEAD_SEC, installCadencePushRate, installCadenceRemainingSec, installVerdict, stepProgression } from "../../../shared/strategy/progression/decide.ts";
-import { isBitNodeCompletionStalled } from "../../../shared/strategy/progression/bitnode-order.ts";
 import {
   DAEDALUS_COMBAT,
   DAEDALUS_HACKING,
@@ -99,7 +106,10 @@ import {
   usableForecastSec,
   type PlanningHorizons,
 } from "../../../shared/strategy/progression/forecast.ts";
-import { progressionMarginals } from "../../../shared/strategy/progression/marginal.ts";
+import {
+  growingProgressSecondsPerRelativeRate,
+  progressionMarginals,
+} from "../../../shared/strategy/progression/marginal.ts";
 import {
   augmentationAcquisitionRate,
   cycleProgressExponent,
@@ -2244,7 +2254,7 @@ function projectedDaedalusEconomics(
   ctx: NeedContext,
   view: EndgameView,
   factionWorkRepGain: number,
-): Pick<RouteRates, "daedalusRepPerSecProjected" | "repRateHackingElasticity" | "daedalusDonateUnlockRepGap" | "daedalusDonationDollarsPerRep" | "daedalusDonationUnlocked"> {
+): Pick<RouteRates, "daedalusRepPerSecProjected" | "daedalusDonateUnlockRepGap" | "daedalusDonationDollarsPerRep" | "daedalusDonationUnlocked"> {
   const playerTopic = ctx.state.topics.player;
   const repFactionMult = (playerTopic?.mults as Record<string, number> | undefined)?.["faction_rep"] ?? 1;
   const standing = ctx.state.topics.factions?.standings?.find((s) => s.name === "Daedalus");
@@ -2274,25 +2284,75 @@ function projectedDaedalusEconomics(
     repCtx,
     true,
   );
-  // d ln(rep rate) / d ln(hacking), by finite difference of the SAME
-  // transcribed formula at the player's CURRENT skills — the coupling that
-  // lets a hacking perturbation move the reputation legs it actually earns.
-  const delta = 0.01;
-  const liveHacking = Math.max(1, view.hackingSkill);
-  const baseRep = workRepPerSec("hacking", personAt(liveHacking), favor, repCtx, true);
-  const bumpedRep = workRepPerSec("hacking", personAt(liveHacking * (1 + delta)), favor, repCtx, true);
-  const repRateHackingElasticity = baseRep > 0 ? (bumpedRep / baseRep - 1) / delta : undefined;
-
   const favorToDonate = ctx.state.topics.factions?.favorToDonate ?? favorNeededToDonate(1);
   return {
     ...(projected > 0 ? { daedalusRepPerSecProjected: projected } : {}),
-    ...(repRateHackingElasticity !== undefined && repRateHackingElasticity > 0
-      ? { repRateHackingElasticity }
-      : {}),
     daedalusDonateUnlockRepGap: repUntilFavor(favor, standing?.rep ?? 0, favorToDonate),
     daedalusDonationDollarsPerRep: donationForRep(1, repFactionMult, factionWorkRepGain),
     daedalusDonationUnlocked: favor >= favorToDonate,
   };
+}
+
+/** Value of faster hacking-experience production while the current faction
+ * objective is earning reputation. This integrates the transcribed rep formula
+ * over the future skill curve: a faster XP rate changes future skill, never the
+ * current rep rate instantaneously. The result is folded into progression's
+ * single hacking marginal so downstream features cannot count it again. */
+function currentFactionRepHackingMarginal(ctx: NeedContext): number {
+  const player = ctx.state.topics.player;
+  const factions = ctx.state.topics.factions;
+  const intent = factions?.plan?.objective?.intent;
+  const standing = intent
+    ? factions?.standings?.find((entry) => entry.name === intent.faction)
+    : undefined;
+  if (!player || !intent || !standing) return 0;
+
+  const currentWork = ctx.state.topics.career?.currentWork;
+  const activeType = currentWork?.type === "FACTION" && currentWork.detail === intent.faction
+    && (currentWork.workType === "hacking" || currentWork.workType === "field" || currentWork.workType === "security")
+      ? currentWork.workType as WorkType
+      : undefined;
+  const nodeMults = effectiveBitNodeMultipliers(
+    ctx.caps.bitNode,
+    sfLevel(ctx.caps.sourceFiles, 12),
+    ctx.state.topics.progression?.multipliers,
+  );
+  const repCtx: RepContext = {
+    factionWorkRepGain: nodeMults?.["FactionWorkRepGain"] ?? 1,
+    factionPassiveRepGain: nodeMults?.["FactionPassiveRepGain"] ?? 1,
+    shareBonus: ctx.state.topics.fleet?.sharePower ?? 1,
+    sf15Level: sfLevel(ctx.caps.sourceFiles, 15),
+    hasFocusAug: (factions?.ownedAugs ?? []).includes("Neuroreceptor Management Implant"),
+  };
+  const person = { skills: player.skills, mults: { faction_rep: player.mults.faction_rep } };
+  const rate = activeType
+    ? workRepPerSec(activeType, person, standing.favor, repCtx, true)
+    : factions?.joined.includes(intent.faction)
+      ? passiveRepPerSec(person, standing.favor, repCtx)
+      : 0;
+  if (!(rate > 0) || !(intent.repSec > 0)) return 0;
+
+  const progressPerSec = Math.max(
+    ctx.state.topics.fleet?.scriptExpGain ?? 0,
+    ctx.state.topics.farm?.expRate ?? 0,
+  );
+  return growingProgressSecondsPerRelativeRate({
+    gap: rate * intent.repSec,
+    initialProgress: player.exp.hacking,
+    progressPerSec,
+    rateAtProgress: (experience) => {
+      const projected = {
+        ...person,
+        skills: {
+          ...person.skills,
+          hacking: skillFromExp(experience, player.mults.hacking ?? 1),
+        },
+      };
+      return activeType
+        ? workRepPerSec(activeType, projected, standing.favor, repCtx, true)
+        : passiveRepPerSec(projected, standing.favor, repCtx);
+    },
+  }) ?? 0;
 }
 
 /** Measured walk estimate for the CURRENT labyrinth stage: the live walker's
@@ -2967,13 +3027,23 @@ function progressionRefresh(ctx: NeedContext): void {
       }, installBasis)
     : forecastAt(previousInstallForecast!, ctx.now);
   const forecasts: PlanningHorizons = { node: nextNodeForecast, install: nextInstallForecast };
-  const marginals = progressionMarginals({
+  const routeMarginals = progressionMarginals({
     view,
     decision: endgame,
     rates,
     ...(choice ? { selectedRoute: choice.route } : {}),
     install: nextInstallForecast,
   });
+  const factionRepHacking = currentFactionRepHackingMarginal(ctx);
+  const marginals = factionRepHacking > 0 && routeMarginals.hacking.state === "estimated"
+    ? {
+        ...routeMarginals,
+        hacking: {
+          ...routeMarginals.hacking,
+          secondsPerRelativeRate: routeMarginals.hacking.secondsPerRelativeRate + factionRepHacking,
+        },
+      }
+    : routeMarginals;
   const nextBitNode = selectedEta?.complete && view.bitNode !== undefined
     ? chooseNextBitNode(view.bitNode, view.sourceFiles)
     : undefined;
@@ -2993,7 +3063,7 @@ function progressionRefresh(ctx: NeedContext): void {
             faction: view.gangCreateFaction,
           }
         : undefined;
-  if (!selectedEta?.complete || isBitNodeCompletionStalled()) {
+  if (!selectedEta?.complete) {
     progressionMemory.nodeCompletionArmedAt = undefined;
   }
   // "About to install" and "about to destroy the BitNode" are DIFFERENT
@@ -3077,13 +3147,11 @@ function progressionRefresh(ctx: NeedContext): void {
               automatic: canAutomateNodeCompletion,
               nextBitNode: nextBitNode.bitNode,
               targetLevel: nextBitNode.targetLevel,
-              ...(isBitNodeCompletionStalled() ? { stalled: true } : {}),
               ...(progressionMemory.nodeCompletionArmedAt !== undefined
                 ? { armedAt: progressionMemory.nodeCompletionArmedAt }
                 : {}),
               execute:
                 canAutomateNodeCompletion
-                && !isBitNodeCompletionStalled()
                 && progressionMemory.nodeCompletionArmedAt !== undefined,
             },
           }
@@ -3103,6 +3171,9 @@ function progressionRefresh(ctx: NeedContext): void {
  * already reads darknet availability for the endgame route, so it is the module
  * that can act. Moving this to `dnet` would silently stop it working. */
 function shouldBuyDarkscape(ctx: DriverContext | NeedContext): boolean {
+  // Scenario selection is orchestration, not an observed capability or a
+  // strategy input. A locked selected feature may still buy its own access.
+  if (!ctx.selectedFeatures.has("dnet")) return false;
   const caps = ctx.caps;
   // The gate probe's raw `hasDarknetProgram` reading is consumed by
   // deriveCapabilities and not retained, but it is recoverable from the two
@@ -3112,7 +3183,6 @@ function shouldBuyDarkscape(ctx: DriverContext | NeedContext): boolean {
   // file is present.
   const access = caps.unlocked.dnet;
   return stepDarkscape({
-    dnetDisabled: disabledByProfile(caps, "dnet"),
     ...(caps.bitNode !== undefined ? { bitNode: caps.bitNode } : {}),
     sf15: sfLevel(caps.sourceFiles, 15),
     ...(access === "unknown" ? {} : { hasProgram: access === "yes" }),
@@ -3132,7 +3202,7 @@ const progression: FeatureDriver = {
     || takeInstallSignal(),
   async tick(ctx: DriverContext) {
     const plan = readablePlan(ctx.state);
-    if (plan?.completion?.ready && plan.completion.automatic && !isBitNodeCompletionStalled()) {
+    if (plan?.completion?.ready && plan.completion.automatic) {
       if (progressionMemory.nodeCompletionArmedAt === undefined) {
         progressionMemory.nodeCompletionArmedAt = Date.now();
         merge(ctx.state, "progression", {
@@ -3148,6 +3218,16 @@ const progression: FeatureDriver = {
         return;
       }
       if (!plan.completion.execute || plan.completion.armedAt !== progressionMemory.nodeCompletionArmedAt) return;
+
+      if (!ctx.allowBitNodeCompletion) {
+        merge(ctx.state, "progression", {
+          plan: {
+            ...plan,
+            completion: { ...plan.completion, held: "irreversible-action-gate" },
+          },
+        });
+        return;
+      }
 
       clearForCritical(ctx, "singularity.destroyW0r1dD43m0n");
       await ctx.nsp("singularity.destroyW0r1dD43m0n", plan.completion.nextBitNode, "/start.js");
@@ -3491,7 +3571,7 @@ export const progressionModule: FeatureModule = {
     // The terminal destroy asks the arbiter for nothing — no money, no work
     // slot — so once it is armed progression stops bidding rather than holding
     // the install brakes on a run that is about to end.
-    if (plan?.completion?.execute && !isBitNodeCompletionStalled()) return [];
+    if (plan?.completion?.execute) return [];
     // A pending route action is additive: it does NOT excuse the bankroll
     // reservations below. An unfunded createGang/joinBladeburner can stay
     // pending for many arbitration passes, and leaving the install brakes off

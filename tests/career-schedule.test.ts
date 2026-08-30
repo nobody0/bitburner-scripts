@@ -193,6 +193,7 @@ describe("the slot lock is bounded by the progress it protects", () => {
       board: postNeeds([]),
       now: over.now ?? 0,
       caps: {} as ClaimContext["caps"],
+      selectedFeatures: new Set(),
       activeFeatures: new Set(),
       horizons: {
         node: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
@@ -381,6 +382,7 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
       board: postNeeds([]),
       now: 0,
       caps: {} as ClaimContext["caps"],
+      selectedFeatures: new Set(),
       activeFeatures: new Set(),
       horizons: {
         node: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
@@ -575,6 +577,7 @@ describe("the work slot is priced in BN-seconds, not banded", () => {
       board: postNeeds(needs),
       now: 0,
       caps: {} as ClaimContext["caps"],
+      selectedFeatures: new Set(),
       activeFeatures: new Set(),
       horizons: {
         node: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },

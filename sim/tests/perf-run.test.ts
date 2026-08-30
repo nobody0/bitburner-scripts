@@ -11,7 +11,7 @@ describe("telemetry-free simulator runs", () => {
       horizonMs: 1_000,
       telemetry: false,
       playerState: { augmentations: [{ name: "BitWire", level: 1 }] },
-      features: { hacking: "off", progression: "off", side: "off" },
+      features: [],
     });
 
     expect(result.reached).toBe(true);

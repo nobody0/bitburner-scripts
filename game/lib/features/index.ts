@@ -58,11 +58,13 @@ export interface DriverContext {
   nspLong: NsProxy;
   state: GameState;
   caps: Capabilities;
+  /** Features selected by the runtime scheduler, whether unlocked yet or not. */
+  selectedFeatures: ReadonlySet<FeatureId>;
   /** Features whose drivers can actually run in this pass. This includes a
    * driver's dependency (`requires`), unlike checking only its own capability.
    * Providers use it before delegating work onto the needs board, so an
-   * isolation profile cannot leave a request that no enabled consumer can
-   * satisfy. */
+   * intentionally narrow controller run cannot leave a request that no
+   * scheduled consumer can satisfy. */
   activeFeatures: ReadonlySet<FeatureId>;
   /** Current RAM arena and the largest single ns call it can serve. */
   arena: ArenaPlan;
@@ -86,6 +88,8 @@ export interface DriverContext {
    * (installAugmentations, destroyW0r1dD43m0n) may use it — see
    * `clearForCritical` in ./remaining.ts. */
   freeCriticalRam?(neededGb: number): string | undefined;
+  /** Effect-layer permission for the irreversible BitNode boundary. */
+  allowBitNodeCompletion: boolean;
 }
 
 /** The arbiter's answer, pre-narrowed to one feature so a driver cannot
@@ -107,6 +111,8 @@ export interface NeedContext {
   state: GameState;
   caps: Capabilities;
   now: number;
+  /** Complete scheduler surface, including selected features not yet unlocked. */
+  selectedFeatures: ReadonlySet<FeatureId>;
   /** All enabled drivers, not merely the subset due on this cadence. */
   activeFeatures: ReadonlySet<FeatureId>;
 }
@@ -227,11 +233,8 @@ export function selectDue(
 ): FeatureDriver[] {
   return drivers.filter((driver) => {
     // A driver never runs while its OWN feature reads "no". `requires` is
-    // about a dependency; this is about the feature itself, and it is what
-    // lets an isolation profile switch off the five always-playable drivers —
-    // they declare no `requires`, so nothing else would ever stop them.
-    // In the real game this is a no-op: deriveCapabilities reports those five
-    // as "yes" unconditionally, and gated features are handled below.
+    // about a dependency; this is about the feature itself. Runtime selection
+    // is a separate controller filter and never alters these capabilities.
     if (!driverEnabled(driver, caps)) return false;
     return driver.wake?.() === true || now - (lastRun[driver.id] ?? 0) >= driver.everyMs;
   });

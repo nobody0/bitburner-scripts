@@ -6,7 +6,7 @@
  * spliced copy is stale. */
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { deriveRouteLegs, routeLegProfileId } from "../shared/strategy/progression/route-legs.ts";
+import { deriveRouteLegs, routeLegProfileId } from "../sim/route-legs.ts";
 import { PROFILES } from "../sim/profiles.ts";
 import ROUTE_LEG_LEDGER from "../sim/tests/baselines/route-legs.json" with { type: "json" };
 

@@ -1,4 +1,4 @@
-import { only, type FeatureOverrides } from "../shared/features/profile.ts";
+import { only, type FeatureSelection } from "./feature-selection.ts";
 import type { GameRunOptions } from "./game-run.ts";
 import { AUGMENTATION_TABLE } from "./vendor/bitburner/src/Augmentation/AugmentationTable.ts";
 import { calculateExp } from "./vendor/bitburner/src/PersonObjects/formulas/skill.ts";
@@ -9,7 +9,7 @@ import {
   routeLegProfileId,
   SPEEDRUN_ROUTE_ID,
   type RouteLeg,
-} from "../shared/strategy/progression/route-legs.ts";
+} from "./route-legs.ts";
 import ROUTE_LEG_LEDGER from "./tests/baselines/route-legs.json" with { type: "json" };
 import { entranceMoney, intelligenceExp } from "./save-mint.ts";
 
@@ -41,7 +41,7 @@ export interface SimProfile {
    * diverge. */
   chainedLeg?: RouteLeg;
   /** Absent = every feature the save unlocks. */
-  features?: FeatureOverrides;
+  features?: FeatureSelection;
   goals: string[];
   /** Duration string for --horizon. */
   horizon: string;
@@ -389,49 +389,13 @@ const STOCK_LADDER = {
   startingMoney: 1e9,
 } satisfies Partial<SimProfile>;
 
-/** Feature surfaces for the nodes the simulator can bench as speedrun legs.
- * A node absent here has unmodeled node-defining systems
- * (`resolveFeatureCoverage`: gang, corp, bladeburner, sleeves, …) and gets no leg
- * profile until they exist. Each surface is the full mechanically playable
- * surface of its node — running the entire BitNode IS the speedrun, so a leg
- * must not solve a smaller game than the real route faces. */
-const ROUTE_LEG_SURFACES: Readonly<Record<number, FeatureOverrides>> = {
-  // The full mechanically playable surface of an ordinary node. `only` does
-  // not force any capability on; it merely excludes the node-specific systems
-  // the simulator does not model. Career must be live because city, karma,
-  // kills and combat gates are genuine competing faction paths — disabling it
-  // makes the optimiser solve a smaller game and invalidates route timing.
-  // Hacknet, the market and coding contracts are universal income and must
-  // compete with hacking and career in a full-node benchmark.
-  1: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side"),
-  // BN4: factions are genuinely live — the node's theme is Singularity, not a
-  // feature nerf. Plus `dnet`: the node scales darknet money (0.4) rather than
-  // removing it, so phishing is a real if weak channel competing for the same
-  // charisma and slot, and a leg must not solve a smaller game than the route
-  // faces. Unlike BN8 there is no fidelity reason to hold it out — the dnet
-  // model is full for fresh multi-install controller runs.
-  4: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side", "dnet"),
-  // BN5: intelligence is node-native; this leg's measured exit seeds the
-  // entire downstream intelligence chain.
-  5: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side"),
-  // BN8: the same surface minus `side`. The zeroed income multipliers are the
-  // node's OWN statement about hacknet, crime and company money, and the
-  // arbiter refusing to fund them is part of what this leg measures. `dnet`
-  // stays excluded — its session, authentication and password models are
-  // still explicit simulator gaps (spec/dnet.md) and one unmodeled call would
-  // invalidate the leg; the bn8-manipulation pair carries that interplay.
-  8: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock"),
-  // BN14: the node's theme IS go, and go coverage is full.
-  14: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side"),
-  // BN15: plus `dnet`, which here is not optional income but the route
-  // itself — the node grants full darknet access and the labyrinth ladder
-  // ends in the pill. Career carries one extra job: company work is the
-  // node's charisma engine, and every lab stage gates on charisma.
-  15: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side", "dnet"),
-};
+/** Nodes whose defining mechanics are modeled well enough to publish a route
+ * bench. This is only a coverage index: every published leg schedules the
+ * complete controller surface and fails loudly on any newly encountered gap. */
+const COVERED_ROUTE_NODES: ReadonlySet<number> = new Set([1, 4, 5, 8, 14, 15]);
 
 /** Which legs get a bench. A leg is covered when the simulator models its
- * NODE (`ROUTE_LEG_SURFACES`) — owning an unmodeled node's Source-File is
+ * node (`COVERED_ROUTE_NODES`) — owning an unmodeled node's Source-File is
  * fine, since `applySourceFile` is just multipliers; only PLAYING that node
  * is unmodeled. So the BN8 legs are covered even though the route reaches
  * them holding SF2.3, and BN2 itself is not.
@@ -440,7 +404,7 @@ const ROUTE_LEG_SURFACES: Readonly<Record<number, FeatureOverrides>> = {
  * at the first uncovered leg: legs after a gap keep an estimated entrance
  * intelligence until their predecessor can be measured. */
 const COVERED_ROUTE_LEGS: ReadonlySet<string> = new Set(
-  deriveRouteLegs().filter((leg) => leg.node in ROUTE_LEG_SURFACES).map((leg) => leg.leg),
+  deriveRouteLegs().filter((leg) => COVERED_ROUTE_NODES.has(leg.node)).map((leg) => leg.leg),
 );
 
 /** Measured leg exits from the chain ledger. A leg present here hands its
@@ -508,7 +472,6 @@ function routeLegProfiles(): SimProfile[] {
             `Singularity is node-native, so the declared SF4.3 allowance is redundant here by construction — ` +
             `to the destruction that earns SF${leg.node}.${leg.level}.`,
         bitnode: leg.node,
-        features: ROUTE_LEG_SURFACES[leg.node],
         goals: [`bn:${leg.node}`, "installs:2"],
         homeRam: 8,
         // The same entrance money the minted checkpoint for this leg carries,
@@ -553,9 +516,7 @@ export const PROFILES: readonly SimProfile[] = [
       "Full BN1 calibration run with the exact free NeuroFlux level and multipliers granted by SF12.30.",
     bitnode: 1,
     // Identical to the `leg-bn1.1` route leg by construction — the only
-    // difference this calibration run may carry is persistent SF12 state, and
-    // tests/profile.test.ts holds the two feature sets equal.
-    features: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side"),
+    // difference this calibration run may carry is persistent SF12 state.
     goals: ["bn:1", "installs:2"],
     homeRam: 8,
     world: BN1_FULL_SF12_30_WORLD,

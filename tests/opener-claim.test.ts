@@ -6,6 +6,7 @@ describe("economic opener claim", () => {
   test("posts the modeled next program as an income-investment step", () => {
     const claims = hackingModule.claims!({
       now: 1_000,
+      selectedFeatures: new Set(["hacking"]),
       activeFeatures: new Set(["hacking"]),
       board: postNeeds([]),
       horizons: {

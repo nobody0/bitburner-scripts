@@ -119,16 +119,13 @@ milestones retain their intended positions. `BASELINE_ORDER` and the small-set
 runtime policy. Any future measured reordering should update the explicit
 complete route rather than silently changing completion execution.
 
-The operator hold at the irreversible boundary is module state in
-`shared/strategy/progression/bitnode-order.ts` — `isBitNodeCompletionStalled()`
-reads it, `setBitNodeCompletionStall(false)` lifts it and returns the previous
-value so a caller can restore it. While held, the controller still publishes a
-completed route and its next BitNode but neither arms nor dispatches
-`destroyW0r1dD43m0n`. The BitNode tab shows the hold. It is held by default in
-the live game, where the boundary is one-way; the only thing that lifts it is a
-simulated route leg, whose goal IS the destruction — `sim/run.ts` lifts it per
-`bitnode-route` run via `GameRunOptions.allowBitNodeCompletion` and restores it
-when the run ends.
+The irreversible boundary is an execution permission, not strategy state.
+Progression always publishes and arms the same completed route and next
+BitNode. The controller's `ControllerRunPolicy.allowBitNodeCompletion` is
+checked only immediately before dispatching `destroyW0r1dD43m0n`; live boot
+holds it by default, while a route run authorizes it because destruction is the
+leg's goal. A held executor publishes `completion.held` for the BitNode tab.
+No mutable strategy flag or simulator identity participates in the decision.
 
 ## How features consume the decision
 

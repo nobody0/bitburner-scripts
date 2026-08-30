@@ -1,4 +1,5 @@
 import type { NS } from "@ns";
+import type { FeatureId } from "../../shared/features/ids.ts";
 import { nsp } from "./proxies.ts";
 import {
   PRICED_PROBES,
@@ -89,6 +90,7 @@ export async function runProbes(
   ns: NS,
   runner: ProbeRunner,
   state: GameState,
+  selectedFeatures?: ReadonlySet<FeatureId>,
 ): Promise<void> {
   const servers = state.topics.servers;
   const player = state.topics.player;
@@ -100,11 +102,8 @@ export async function runProbes(
   // own ns here and hands it down rather than paying a resident round trip.
   const ctx: ProbeContext = { player, servers, caps: caps(state), state, nsp, enums: ns["enums"] };
   const applicable = (probe: PricedProbe | DirectProbe | (typeof LOCAL_PROBES)[number]): boolean => {
-    // A probe never runs while its OWN feature reads "no". Mirrors the same
-    // rule in selectDue: `requires` is a dependency, this is the feature
-    // itself, and without it an isolation profile would still probe features it
-    // switched off. No-op in the real game, where the always-playable features
-    // read "yes" unconditionally.
+    if (selectedFeatures && !selectedFeatures.has(probe.feature)) return false;
+    // A probe never runs while its OWN feature reads "no".
     if (ctx.caps.unlocked[probe.feature] === "no") return false;
     if (probe.requires && ctx.caps.unlocked[probe.requires] !== "yes") return false;
     return probe.when ? probe.when(ctx.caps, state.topics) : true;

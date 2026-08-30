@@ -1,6 +1,5 @@
 import type { NS } from "@ns";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
-import { skillFromExp } from "../../../shared/formulas.ts";
 import { roundSigFigs } from "../../../shared/format.ts";
 import { formatMoney } from "../../../shared/format.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
@@ -40,7 +39,7 @@ import {
 } from "../../../shared/strategy/factions/rep.ts";
 import { capitalIndependentScore, farmExperienceRate, farmIncomeRate } from "../../../shared/strategy/economics.ts";
 import { installHorizonSec, nodeHorizonSec, usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
-import { growingProgressSecondsPerRelativeRate, linearSecondsPerRelativeRate } from "../../../shared/strategy/progression/marginal.ts";
+import { linearSecondsPerRelativeRate } from "../../../shared/strategy/progression/marginal.ts";
 import type { MeasuredMarginal } from "../../../shared/strategy/progression/marginal.ts";
 import { hackRungValue, relativeGainSaving, type HackMarginalInput } from "../../../shared/strategy/share.ts";
 import type { ChargePricingInput } from "../../../shared/strategy/stanek/charge.ts";
@@ -214,8 +213,6 @@ function shareValue(game: GameState, caps: DriverContext["caps"]): ShareValue | 
   const currentWorkEarnsRep = currentWork?.type === "FACTION"
     && (currentWork.workType === "hacking" || currentWork.workType === "field" || currentWork.workType === "security");
   let reputationSecondsPerBonus = 0;
-  let reputationHackingSecondsPerRelativeRate = 0;
-  let reputationHackingMarginalKnown = true;
   if (player && intent && standing) {
     const nodeMults = effectiveBitNodeMultipliers(caps.bitNode, sfLevel(caps.sourceFiles, 12), game.topics.progression?.multipliers);
     const repCtx: RepContext = {
@@ -248,33 +245,11 @@ function shareValue(game: GameState, caps: DriverContext["caps"]): ShareValue | 
     // pricing) dark through every favor-building stretch of the route.
     if (rate > 0) {
       reputationSecondsPerBonus = linearSecondsPerRelativeRate(intent.repSec) * slope / rate;
-      const totalExpPerSec = game.topics.fleet?.scriptExpGain;
-      const value = growingProgressSecondsPerRelativeRate({
-        gap: rate * intent.repSec,
-        initialProgress: player.exp.hacking,
-        progressPerSec: totalExpPerSec ?? 0,
-        rateAtProgress: (experience) => {
-          const projected = {
-            ...person,
-            skills: {
-              ...person.skills,
-              hacking: skillFromExp(experience, player.mults.hacking ?? 1),
-            },
-          };
-          return activeType
-            ? workRepPerSec(activeType, projected, standing.favor, repCtx, true)
-            : passiveRepPerSec(projected, standing.favor, repCtx);
-        },
-      });
-      if (value === undefined) reputationHackingMarginalKnown = false;
-      else reputationHackingSecondsPerRelativeRate = value;
     }
   }
-  if (!reputationHackingMarginalKnown) return undefined;
   return {
     moneySecondsPerRelativeRate: marginals.money.secondsPerRelativeRate,
-    hackingSecondsPerRelativeRate:
-      marginals.hacking.secondsPerRelativeRate + reputationHackingSecondsPerRelativeRate,
+    hackingSecondsPerRelativeRate: marginals.hacking.secondsPerRelativeRate,
     ...(game.topics.fleet?.scriptIncome ? { totalMoneyPerSec: game.topics.fleet.scriptIncome[0] } : {}),
     ...(game.topics.fleet?.scriptExpGain !== undefined
       ? { totalHackingExpPerSec: game.topics.fleet.scriptExpGain }

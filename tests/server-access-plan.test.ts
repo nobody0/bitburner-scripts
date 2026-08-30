@@ -36,9 +36,10 @@ function ctx(options: {
    *  arbiter published it. */
   rivalSlotValueSec?: number;
   lambda?: number;
-}): Pick<ClaimContext, "board" | "state" | "activeFeatures"> {
+}): Pick<ClaimContext, "board" | "state" | "selectedFeatures" | "activeFeatures"> {
   return {
     board: postNeeds(options.needs),
+    selectedFeatures: new Set(options.career === false ? [] : ["career"]),
     activeFeatures: new Set(options.career === false ? [] : ["career"]),
     state: {
       topics: {

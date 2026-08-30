@@ -1,4 +1,4 @@
-import type { RouteLeg } from "../shared/strategy/progression/route-legs.ts";
+import type { RouteLeg } from "./route-legs.ts";
 import type { SavePlayer, SaveServer, SaveSnapshot } from "../shared/save/snapshot.ts";
 import { SERVER_DEFAULTS, SKILL_NAMES } from "../shared/save/snapshot.ts";
 import { MINTED_SAVE_VERSION } from "../shared/save/encode.ts";

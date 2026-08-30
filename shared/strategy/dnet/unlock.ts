@@ -19,16 +19,6 @@ import { DARKSCAPE_COST, TOR_COST } from "./rates.ts";
 export const DARKSCAPE_EARLY_BN1_ROUTE_SECONDS = 77_760;
 
 export interface DarkscapeView {
-  /** True when a simulation profile has switched `dnet` OFF. Buying access to a
-   *  feature this run has been told not to play is waste — an isolated hacking
-   *  soak has no use for a darknet, and spending there would make its numbers
-   *  incomparable with every earlier measurement.
-   *
-   *  Deliberately NOT `activeFeatures.has("dnet")`: that set comes from
-   *  `driverEnabled`, so `dnet` is missing from it exactly while it is locked,
-   *  and gating on it deadlocks the purchase the same way gating `stock` on
-   *  `hasWseAccount` once made the WSE account unbuyable. */
-  dnetDisabled: boolean;
   bitNode?: number;
   /** Active SF15 level. */
   sf15: number;
@@ -51,7 +41,6 @@ export const DARKSCAPE_TOTAL_COST = DARKSCAPE_COST + TOR_COST;
  * DARKSCAPE_TOTAL_COST when this is true. */
 export function stepDarkscape(view: DarkscapeView): boolean {
   return (
-    !view.dnetDisabled &&
     // Free in BN15 and with any active SF15: `Prestige.ts` re-grants it, and
     // TOR, at every install under `canAccessBitNodeFeature(15)`. Buying would
     // be a straight $50m loss.

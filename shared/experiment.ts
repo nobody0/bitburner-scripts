@@ -30,7 +30,7 @@ export type EntranceIdentity =
     }
   /** A fresh save of the leg's node holding the Source-Files and intelligence
    * the route's earlier milestones earned — derived by
-   * shared/strategy/progression/route-legs.ts, never hand-written. Distinct
+   * sim/route-legs.ts, never hand-written. Distinct
    * from `fresh` so a chained leg cannot masquerade as a cold start in
    * ledgers. */
   | {

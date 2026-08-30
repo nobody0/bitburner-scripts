@@ -12,7 +12,7 @@ import { gzipSync } from "bun";
 import { existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { encodeSaveJson } from "../shared/save/encode.ts";
-import { deriveRouteLegs, SPEEDRUN_ROUTE_ID, type RouteLeg } from "../shared/strategy/progression/route-legs.ts";
+import { deriveRouteLegs, SPEEDRUN_ROUTE_ID, type RouteLeg } from "../sim/route-legs.ts";
 import { routeLegEntranceSnapshot } from "../sim/save-mint.ts";
 import { SIMULATOR_MODEL_VERSION, SIMULATOR_VENDOR_COMMIT } from "../sim/fidelity.ts";
 import { readIndex, registerSave, SAVES_DIR, type SaveEntry } from "./save-io.ts";

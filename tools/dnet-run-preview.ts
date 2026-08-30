@@ -16,7 +16,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { runGame } from "../sim/game-run.ts";
 import { parseGoals } from "../shared/goals/presets.ts";
-import { only } from "../shared/features/profile.ts";
+import { only } from "../sim/feature-selection.ts";
 import { emptyState } from "../ui/app/project.ts";
 import { TABS } from "../ui/app/tabs/index.ts";
 import { setView } from "../ui/app/lib/viewstate.ts";

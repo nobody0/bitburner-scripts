@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { only } from "../../shared/features/profile.ts";
+import { only } from "../feature-selection.ts";
 import { parseGoal } from "../../shared/goals/presets.ts";
 import { runGame } from "../game-run.ts";
 import { lane } from "../../tests/support/lanes.ts";

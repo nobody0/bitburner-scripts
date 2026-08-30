@@ -1,62 +1,47 @@
 import { describe, expect, test } from "bun:test";
 import { selectDue, FEATURE_DRIVERS } from "../game/lib/features/index.ts";
-import { applyOverrides, only } from "../shared/features/profile.ts";
+import { only } from "../sim/feature-selection.ts";
 import { deriveCapabilities } from "../shared/features/unlock.ts";
 import { PROFILES, findProfile } from "../sim/profiles.ts";
 import { intelligenceExp } from "../sim/save-mint.ts";
 import { initialContext, reduceRecord } from "../shared/goals/evaluate.ts";
 import { parseGoals } from "../shared/goals/presets.ts";
 import type { LogRecord } from "../shared/telemetry/schema.ts";
-import { deriveRouteLegs, routeLegProfileId, SPEEDRUN_ROUTE_ID } from "../shared/strategy/progression/route-legs.ts";
+import { deriveRouteLegs, routeLegProfileId, SPEEDRUN_ROUTE_ID } from "../sim/route-legs.ts";
 
-/** The feature-override seam. It exists so a simulation can ask a narrow
- * question ("hacking alone, for an hour"), and it is applied in exactly one
- * place — caps() — so nothing downstream can disagree. */
+/** Specialized scenarios select controller modules without rewriting the
+ * capabilities observed from the simulated game. */
 
 const fresh = deriveCapabilities({ bitNode: 1, sourceFiles: {}, inGang: false, hasWseAccount: false });
 
-describe("feature overrides", () => {
-  test("off beats a genuine unlock", () => {
+describe("scenario feature selection", () => {
+  test("selection leaves genuine capabilities untouched", () => {
     expect(fresh.unlocked["hacking"]).toBe("yes");
-    const capped = applyOverrides(fresh, { hacking: "off" });
-    expect(capped.unlocked["hacking"]).toBe("no");
-    expect(capped.reason["hacking"]).toContain("simulation profile");
-  });
-
-  test("on beats a genuine lock", () => {
     expect(fresh.unlocked["gang"]).toBe("no");
-    const capped = applyOverrides(fresh, { gang: "on" });
-    expect(capped.unlocked["gang"]).toBe("yes");
-    // Still explains itself: a forced-on feature the save cannot really play
-    // is the kind of thing that makes a run's numbers unexplainable later.
-    expect(capped.reason["gang"]).toContain("forced on");
-  });
-
-  test("leaves the underlying reading untouched", () => {
-    const capped = applyOverrides(fresh, { hacking: "off" });
-    expect(capped).not.toBe(fresh);
+    const selected = new Set(only("hacking", "progression"));
+    expect(selected.has("hacking")).toBe(true);
+    expect(selected.has("gang")).toBe(false);
     expect(fresh.unlocked["hacking"]).toBe("yes");
-    expect(capped.bitNode).toBe(1);
+    expect(fresh.unlocked["gang"]).toBe("no");
   });
 
   test("only() disables everything else without forcing anything on", () => {
-    const overrides = only("hacking", "factions");
-    expect(overrides["hacking"]).toBeUndefined();
-    expect(overrides["factions"]).toBeUndefined();
-    expect(overrides["gang"]).toBe("off");
-    expect(overrides["hacknet"]).toBe("off");
+    const selected = only("hacking", "factions");
+    expect(selected).toEqual(["hacking", "factions"]);
     // Nothing is forced: a faction run needs factions genuinely unlocked by
     // the save, not pretended into existence.
-    expect(Object.values(overrides).every((value) => value === "off")).toBe(true);
+    expect(selected).not.toContain("gang");
+    expect(selected).not.toContain("hacknet");
   });
 
   test("an isolated feature stops its driver ticking", () => {
-    const capped = applyOverrides(fresh, only("hacking", "progression"));
-    const due = selectDue(FEATURE_DRIVERS, {}, capped, 1_000_000);
+    const selected = new Set(only("hacking", "progression"));
+    const due = selectDue(FEATURE_DRIVERS, {}, fresh, 1_000_000)
+      .filter((driver) => selected.has(driver.id));
     const ids = due.map((driver) => driver.id);
     expect(ids).toContain("hacking");
     expect(ids).toContain("progression");
-    // career/hacknet/side are always-playable, so only an override can stop them.
+    // career/hacknet/side are always playable but outside this scenario.
     expect(ids).not.toContain("hacknet");
     expect(ids).not.toContain("career");
     expect(ids).not.toContain("side");
@@ -90,6 +75,7 @@ describe("simulation profiles", () => {
       // assertValidExperiment, and every leg belongs to the one route.
       expect(profile.route?.bitNode).toBe(profile.bitnode!);
       expect(profile.route?.route).toBe(SPEEDRUN_ROUTE_ID);
+      expect(profile.features).toBeUndefined();
       if (!profile.chainedLeg) {
         // A fresh route entrance grants nothing: no earned Source Files means
         // the leg really is the cold start its route id claims.
@@ -153,13 +139,8 @@ describe("simulation profiles", () => {
 
   test("full BN1 and cross-city cadence runs include the career gate owner", () => {
     const full = findProfile("leg-bn1.1");
-    expect(full.features?.career).toBeUndefined();
-    expect(full.features?.hacknet).toBeUndefined();
-    expect(full.features?.stock).toBeUndefined();
-    // `side` joined the full-node surface with the coding-contract runtime: it
-    // is universal income and must compete with hacking and career here.
-    expect(full.features?.side).toBeUndefined();
-    expect(findProfile("install-cadence").features?.career).toBeUndefined();
+    expect(full.features).toBeUndefined();
+    expect(findProfile("install-cadence").features).toContain("career");
   });
 
   test("SF12.30 calibration changes only persistent SF12 state", () => {
@@ -189,14 +170,10 @@ describe("simulation profiles", () => {
     expect(treatment.homeRam).toBe(control.homeRam);
     expect(treatment.world).toBe(control.world);
 
-    expect(control.features?.stock).toBe("off");
-    expect(treatment.features?.stock).toBeUndefined();
-    for (const feature of Object.keys(control.features ?? {})) {
-      if (feature !== "stock") {
-        expect(treatment.features?.[feature as keyof NonNullable<typeof treatment.features>])
-          .toBe(control.features?.[feature as keyof NonNullable<typeof control.features>]);
-      }
-    }
+    expect(control.features).not.toContain("stock");
+    expect(treatment.features).toContain("stock");
+    expect(treatment.features?.filter((feature) => feature !== "stock").join(","))
+      .toBe(control.features?.join(","));
   });
 
 });

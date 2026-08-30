@@ -335,25 +335,21 @@ export async function main(ns: NS): Promise<void> {
    * cannot fit the launch and a refused darknet check alike, and it writes its
    * reason only to the launching script's own log. Retrying it silently every
    * pass is indistinguishable from having nothing to do. */
-  const launchRefusals = new Map<string, { kind: string; threads: number; wantedGb: number; since: number }>();
+  const launchRefusals = new Map<string, { kind: string; threads: number; wantedGb: number; since: number; detail: string }>();
   const noteLaunchRefused = (entry: HostEntry, order: Order, why: string): void => {
     const wantedGb = order.ramOverrideGb * order.threads;
-    // ONCE per incident, not once per pass. A refused dispatch is retried on
-    // every derive, so logging each attempt buries the signal it exists to give
-    // — one speedrun seed produced 1,300 identical lines. `since` holds the
-    // FIRST sighting for the same reason: how long a host has been failing is
-    // the number worth reading, and a stamp renewed every pass reads "0s" for
-    // ever. The panel refusal is the durable statement; this is its first cry.
+    // `since` holds the FIRST sighting: how long a host has been failing is the
+    // useful number, and a stamp renewed every pass reads "0s" forever. The
+    // durable panel refusal is the diagnostic; no transient console output is
+    // needed and no second Netscript call is safe while nextMutation is held.
     const since = launchRefusals.get(entry.hostname)?.since;
-    launchRefusals.set(entry.hostname, { kind: order.kind, threads: order.threads, wantedGb, since: since ?? Date.now() });
-    if (since !== undefined) return;
-    // `console.log`, never `ns.tprint`: this controller parks on
-    // `dnet.nextMutation`, which holds the Netscript lock, so a second ns call
-    // throws CONCURRENCY ERROR and kills it.
-    console.log(
-      `[dnet] launch refused on ${entry.hostname}: ${order.kind} x${order.threads}`
-      + ` wanted ${wantedGb.toFixed(2)}GB, room ${(durableRoomGb(entry.hostname) ?? 0).toFixed(2)}GB (${why})`,
-    );
+    launchRefusals.set(entry.hostname, {
+      kind: order.kind,
+      threads: order.threads,
+      wantedGb,
+      since: since ?? Date.now(),
+      detail: `${why}; ${(durableRoomGb(entry.hostname) ?? 0).toFixed(2)}GB room`,
+    });
   };
 
   // --- derive wake ----------------------------------------------------------
@@ -2094,7 +2090,7 @@ export async function main(ns: NS): Promise<void> {
         why: "launch-refused",
         detail: `the engine refused ${refused.kind} x${refused.threads}`
           + ` (${refused.wantedGb.toFixed(2)}GB wanted), failing for ${Math.round((at - refused.since) / 1000)}s`
-          + " — the reason is in the launcher's own script log",
+          + ` — ${refused.detail}`,
       }));
     const refusals = [...plan.refused, ...routeless, ...refusedLaunches];
     const why: Record<string, string> = {};

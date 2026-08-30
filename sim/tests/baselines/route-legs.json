@@ -3,7 +3,7 @@
     "THE CHAIN LEDGER for the speedrun route's leg entrances.",
     "",
     "Each entry records the observed EXIT state of one route leg (route id",
-    "all-sf3-bn4-first, legs derived in shared/strategy/progression/route-legs.ts).",
+    "all-sf3-bn4-first, legs derived in sim/route-legs.ts).",
     "A leg is ONE BitNode completion (bn4.3 is the third completion of BN4,",
     "entered holding SF4.2), so a leg's goal exit IS the next leg's entrance.",
     "A leg's measured exit intelligence becomes the NEXT leg's entrance",
