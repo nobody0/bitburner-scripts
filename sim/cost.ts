@@ -1,5 +1,6 @@
-import { realNowMs } from "./clock.ts";
+import { processRssBytes, realNowMs } from "./clock.ts";
 import type { Clock } from "./clock.ts";
+import { formatHeapCensus, heapCensus } from "./heap-census.ts";
 
 /** Host cost of a simulation run, measured in REAL time.
  *
@@ -58,6 +59,24 @@ export interface CostSample {
   engineCycles: number;
   records: number;
   nsCalls: number;
+  /** Resident set size of the whole process, in bytes.
+   *
+   * The other half of "cost grows with run length". Throughput decay says the
+   * host is doing more work per virtual second; RSS says the host is HOLDING
+   * more, and only the second one ends in a segfault. A 24h leg run has died
+   * at 58.69 GB (sim/tests/baselines/bn4.json,
+   * openDefects/memory-blowup-on-long-runs), which no throughput curve
+   * showed, because the run was still fast right up to the kill. */
+  rssBytes: number;
+  /** The run's own scale: live processes and known servers.
+   *
+   * Beside RSS because they are the first thing to check against it. A run
+   * whose memory climbs while these stay flat is holding garbage; a run whose
+   * memory climbs BECAUSE these climb is holding a world that grew, and the
+   * two have nothing in common as defects. Absent when the caller supplied no
+   * probe (the planner driver owns no process table). */
+  processes?: number;
+  servers?: number;
   /** Virtual hours bought per wall minute, over this sample's interval alone.
    * Falling across samples is the signature of a run-length pathology. */
   throughput: number;
@@ -83,6 +102,11 @@ export interface CostReport {
   engineCycles: number;
   records: number;
   nsCalls: number;
+  /** RSS at the final sample, and the highest any sample saw. Peak is the one
+   * that matters: the collector can give memory back between samples, but the
+   * kernel killed the process at the peak. */
+  rssBytes: number;
+  peakRssBytes: number;
   samples: CostSample[];
   /** Call counts by name, descending. */
   calls: { name: string; count: number; perVirtualHour: number }[];
@@ -95,33 +119,53 @@ export interface CostMeterOptions {
   /** Live probes into run state the meter does not own. */
   engineCycles: () => number;
   records: () => number;
+  /** Optional world-scale probes; see `CostSample.processes`. */
+  processes?: () => number;
+  servers?: () => number;
   /** Emitted as each sample is taken, so a long run reports as it goes rather
    * than only at the end — the whole point of bounding a run is that you may
    * never see its natural exit. */
   onSample?: (sample: CostSample, report: string) => void;
+  /** Arm the per-name Netscript call counters. Off by default, because the
+   * meter now runs on EVERY game-driver run to feed the progress heartbeat and
+   * `countCall` is one `Map.set` per Netscript call — a cost the samples
+   * themselves do not need. `--cost` and `SIM_COST_DETAIL` turn it on; without
+   * it `nsCalls` and the report's call table read zero. */
+  countCalls?: boolean;
 }
 
 const MS_PER_VIRTUAL_HOUR = 3_600_000;
+
+/** Bytes as GB, for report lines and for the CLI's own memory messages. */
+export function formatBytes(bytes: number): string {
+  return `${(bytes / 1024 ** 3).toFixed(2)}GB`;
+}
 
 export class CostMeter {
   #clock: Clock;
   #sampleEveryMs: number;
   #engineCycles: () => number;
   #records: () => number;
+  #processes: (() => number) | undefined;
+  #servers: (() => number) | undefined;
   #onSample: ((sample: CostSample, report: string) => void) | undefined;
   #startWall = realNowMs();
   #lastWall = this.#startWall;
   #lastVirtual = 0;
   #samples: CostSample[] = [];
+  #peakRss = 0;
 
   constructor(options: CostMeterOptions) {
     this.#clock = options.clock;
     this.#sampleEveryMs = options.sampleEveryMs ?? 10_000;
     this.#engineCycles = options.engineCycles;
     this.#records = options.records;
+    this.#processes = options.processes;
+    this.#servers = options.servers;
     this.#onSample = options.onSample;
     CALL_COUNTS.clear();
-    buckets = CALL_COUNTS;
+    if (options.countCalls) buckets = CALL_COUNTS;
+    else buckets = undefined;
   }
 
   /** Number of ns calls counted so far. */
@@ -148,6 +192,8 @@ export class CostMeter {
     // `formatReport` reads to decide whether throughput is decaying.
     if (wallNow - this.#lastWall >= this.#sampleEveryMs / 2) this.#push(wallNow);
     const nsCalls = this.nsCalls;
+    const rss = processRssBytes();
+    if (rss > this.#peakRss) this.#peakRss = rss;
     const stats = this.#clock.stats();
     const wallMs = wallNow - this.#startWall;
     const virtualMs = this.#clock.now();
@@ -176,14 +222,58 @@ export class CostMeter {
       engineCycles: this.#engineCycles(),
       records: this.#records(),
       nsCalls,
+      rssBytes: rss,
+      peakRssBytes: this.#peakRss,
       samples: this.#samples,
       calls,
     };
   }
 
+  /** Diagnosis-only per-sample detail, appended to the sample line when
+   * `SIM_COST_DETAIL=<n>` is set: the heap census, and the Netscript calls
+   * made SINCE THE PREVIOUS SAMPLE.
+   *
+   * The delta is the half that names a spin. Cumulative totals are dominated
+   * by whatever the run did most of over its whole life, so a subsystem that
+   * starts re-deciding at frame rate three hours in is invisible in them and
+   * unmissable here. Off by default: it is diagnosis, and the totals table at
+   * the end of the run is what a benchmark needs. */
+  #detailLimit = (() => {
+    const raw = Number(globalThis.process?.env?.["SIM_COST_DETAIL"]);
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+  })();
+  /** Call counts as of the previous sample, for the delta above. */
+  #lastCalls = new Map<string, number>();
+
+  #callDelta(): string {
+    if (this.#detailLimit === 0 || buckets === undefined) return "";
+    const deltas: { name: string; count: number }[] = [];
+    for (const [name, count] of buckets) {
+      const delta = count - (this.#lastCalls.get(name) ?? 0);
+      if (delta > 0) deltas.push({ name, count: delta });
+      this.#lastCalls.set(name, count);
+    }
+    if (deltas.length === 0) return "";
+    deltas.sort((a, b) => b.count - a.count);
+    const top = deltas.slice(0, this.#detailLimit).map((entry) => `${entry.name}=${entry.count}`);
+    return `\n  calls this interval: ${top.join(" ")}`;
+  }
+
+  #census(): string {
+    if (this.#detailLimit === 0) return "";
+    // NO forced collection. A census that collects first would report the heap
+    // it just cleaned, and — worse — would bound the very accumulation it was
+    // turned on to observe, so switching the instrument on would make the
+    // defect go away. `capacityBytes` and `extraBytes` do not need a sweep.
+    const census = heapCensus(this.#detailLimit, false);
+    return census ? `\n  ${formatHeapCensus(census)}` : "";
+  }
+
   #push(wallNow: number): void {
     const stats = this.#clock.stats();
     const virtualMs = this.#clock.now();
+    const rssBytes = processRssBytes();
+    if (rssBytes > this.#peakRss) this.#peakRss = rssBytes;
     const sample: CostSample = {
       wallMs: wallNow - this.#startWall,
       virtualMs,
@@ -193,12 +283,15 @@ export class CostMeter {
       engineCycles: this.#engineCycles(),
       records: this.#records(),
       nsCalls: this.nsCalls,
+      rssBytes,
+      ...(this.#processes ? { processes: this.#processes() } : {}),
+      ...(this.#servers ? { servers: this.#servers() } : {}),
       throughput: throughputOf(virtualMs - this.#lastVirtual, wallNow - this.#lastWall),
     };
     this.#lastWall = wallNow;
     this.#lastVirtual = virtualMs;
     this.#samples.push(sample);
-    this.#onSample?.(sample, formatSample(sample));
+    this.#onSample?.(sample, formatSample(sample) + this.#census() + this.#callDelta());
   }
 }
 
@@ -226,13 +319,58 @@ export function throughputDrift(
   return { first, last, pct, decaying: samples.length >= 4 && pct < -20 };
 }
 
+/** How fast the run is ACCUMULATING, in bytes of RSS per virtual hour.
+ *
+ * Measured as first half against second half rather than first sample against
+ * last, so one collection landing next to the last sample cannot report a
+ * leaking run as flat. `growing` is deliberately about the RATE and not
+ * about a threshold in absolute bytes: a run that adds a gigabyte per virtual
+ * hour is a leak whether it has reached 4 GB or 40 GB, and the whole point of
+ * the number is to catch it at 4. */
+export function rssGrowth(
+  samples: readonly CostSample[],
+): { firstBytes: number; lastBytes: number; perVirtualHour: number; growing: boolean } | undefined {
+  if (samples.length < 2) return undefined;
+  const first = samples[0]!;
+  const last = samples[samples.length - 1]!;
+  // First half against second half, exactly as `throughputDrift` compares its
+  // own series and for the same reason: the endpoints are the two least
+  // reliable samples. A forced collection landing beside the last one gives
+  // back whatever it swept, and an endpoint difference would read that single
+  // step as the run's whole trend — the case this function exists to survive.
+  // A least-squares fit would not survive it either: a terminal outlier is a
+  // high-leverage point. Halved means give one sample one vote.
+  const mid = Math.floor(samples.length / 2);
+  const meanOf = (
+    slice: readonly CostSample[],
+    of: (sample: CostSample) => number,
+  ): number => slice.reduce((sum, sample) => sum + of(sample), 0) / slice.length;
+  const early = samples.slice(0, mid);
+  const late = samples.slice(mid);
+  const hourSpan = meanOf(late, (sample) => sample.virtualMs / MS_PER_VIRTUAL_HOUR)
+    - meanOf(early, (sample) => sample.virtualMs / MS_PER_VIRTUAL_HOUR);
+  const byteRise = meanOf(late, (sample) => sample.rssBytes) - meanOf(early, (sample) => sample.rssBytes);
+  const perVirtualHour = hourSpan > 0 ? byteRise / hourSpan : 0;
+  return {
+    firstBytes: first.rssBytes,
+    lastBytes: last.rssBytes,
+    perVirtualHour,
+    // 256 MB per virtual hour puts a 24-hour leg over 6 GB of pure growth,
+    // which is already the shape that ends in a kill.
+    growing: samples.length >= 4 && perVirtualHour > 256 * 1024 ** 2,
+  };
+}
+
 export function formatSample(sample: CostSample): string {
   return (
     `cost ${(sample.wallMs / 1000).toFixed(0).padStart(4)}s real  ` +
     `${(sample.virtualMs / MS_PER_VIRTUAL_HOUR).toFixed(2).padStart(7)}h virtual  ` +
     `${sample.throughput.toFixed(2).padStart(6)} vh/min  ` +
     `events=${sample.events}  heap=${sample.heap}  cancelled=${sample.cancelled}  ` +
-    `cycles=${sample.engineCycles}  ns=${sample.nsCalls}  records=${sample.records}`
+    `cycles=${sample.engineCycles}  ns=${sample.nsCalls}  records=${sample.records}  ` +
+    `rss=${formatBytes(sample.rssBytes)}` +
+    (sample.processes === undefined ? "" : `  procs=${sample.processes}`) +
+    (sample.servers === undefined ? "" : `  servers=${sample.servers}`)
   );
 }
 
@@ -256,6 +394,17 @@ export function formatReport(report: CostReport, topCalls = 20): string {
         (drift.decaying ? "  <- cost grows with run length; suspect frame-rate churn" : ""),
     );
   }
+  lines.push(
+    `  memory: rss ${formatBytes(report.rssBytes)}, peak ${formatBytes(report.peakRssBytes)}`,
+  );
+  const growth = rssGrowth(report.samples);
+  if (growth) {
+    lines.push(
+      `  rss ${formatBytes(growth.firstBytes)} -> ${formatBytes(growth.lastBytes)} ` +
+        `(${growth.perVirtualHour >= 0 ? "+" : ""}${formatBytes(growth.perVirtualHour)} per virtual hour)` +
+        (growth.growing ? "  <- memory grows with run length; the run will not survive a long horizon" : ""),
+    );
+  }
   if (report.calls.length > 0) {
     lines.push(`  ns calls by name (count, per virtual hour):`);
     for (const call of report.calls.slice(0, topCalls)) {
@@ -266,40 +415,69 @@ export function formatReport(report: CostReport, topCalls = 20): string {
   return lines.join("\n");
 }
 
-export type StopReason = "goal" | "budget";
+export type StopReason = "goal" | "budget" | "memory";
 
-/** The pump's per-event guard: goal check, wall-clock budget and cost sampling
- * in one predicate, because `Clock.runAsync` calls `until` exactly once per
- * event and that is the only hook the pump offers.
+/** The pump's per-event guard: goal check, wall-clock budget, memory budget and
+ * cost sampling in one predicate, because `Clock.runAsync` calls `until`
+ * exactly once per event and that is the only hook the pump offers.
  *
- * `realNowMs()` is read once every `CHECK_EVERY` events rather than every
- * event. At the event rates this harness exists to measure, a clock read per
- * event is itself a measurable slice of the profile — the instrument would
- * become part of what it reports. */
+ * `realNowMs()` and the RSS probe are read once every `CHECK_EVERY` events
+ * rather than every event. At the event rates this harness exists to measure, a
+ * clock read per event is itself a measurable slice of the profile — the
+ * instrument would become part of what it reports. */
 const CHECK_EVERY = 0x3ff;
 
 export function pumpGuard(options: {
   goalDone: () => boolean;
   wallBudgetMs?: number;
+  /** Stop the pump when the process holds more than this, rather than letting
+   * the host's OOM killer or a segfault end the run with nothing written.
+   * Per PROCESS: a multi-seed profile fans out to one child per seed, so the
+   * host total is seeds x budget. */
+  memoryBudgetBytes?: number;
   meter?: CostMeter;
-}): { until: () => boolean; stoppedBy: () => StopReason } {
-  const { goalDone, wallBudgetMs, meter } = options;
+  /** Injectable for tests, exactly as `CollectionPacer` takes them. */
+  rssBytes?: () => number;
+  collect?: (force: boolean) => void;
+}): { until: () => boolean; stoppedBy: () => StopReason; stoppedAtBytes: () => number } {
+  const { goalDone, wallBudgetMs, memoryBudgetBytes, meter } = options;
+  const readRss = options.rssBytes ?? processRssBytes;
+  const collect = options.collect
+    ?? (globalThis as { Bun?: { gc?: (force: boolean) => void } }).Bun?.gc;
   const deadline = wallBudgetMs === undefined ? undefined : realNowMs() + wallBudgetMs;
+  const sampling = deadline !== undefined || memoryBudgetBytes !== undefined || meter !== undefined;
   let stopped: StopReason = "goal";
+  let stoppedAt = 0;
   let events = 0;
 
   return {
     until: () => {
-      if (((events++ & CHECK_EVERY) === 0) && (deadline !== undefined || meter !== undefined)) {
+      if (((events++ & CHECK_EVERY) === 0) && sampling) {
         const wallNow = realNowMs();
         meter?.tick(wallNow);
         if (deadline !== undefined && wallNow >= deadline) {
           stopped = "budget";
           return true;
         }
+        if (memoryBudgetBytes !== undefined && readRss() >= memoryBudgetBytes) {
+          // Collect once and look again before killing a healthy run. The
+          // collection pacer only forces a sweep on 512 MB of GROWTH, so a
+          // reading over the budget may be garbage that nothing has swept yet
+          // — and a budget that stopped runs on uncollected garbage would be a
+          // worse instrument than no budget at all. One collection, one
+          // re-read, then decide; never a loop.
+          collect?.(true);
+          const after = readRss();
+          if (after >= memoryBudgetBytes) {
+            stopped = "memory";
+            stoppedAt = after;
+            return true;
+          }
+        }
       }
       return goalDone();
     },
     stoppedBy: () => stopped,
+    stoppedAtBytes: () => stoppedAt,
   };
 }

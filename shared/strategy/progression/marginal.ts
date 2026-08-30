@@ -1,4 +1,6 @@
 import {
+  FALLBACK_DAEDALUS_REP_PER_SEC,
+  FALLBACK_GANG_REP_PER_SEC,
   FALLBACK_MONEY_PER_SEC,
   FALLBACK_RANK_PER_SEC,
   FALLBACK_SEC_PER_AUG,
@@ -167,10 +169,38 @@ function scalePointResource(
     : { ...point, hacking: 1 + Math.max(0, point.hacking - 1) * scale };
 }
 
+/** The reputation rate the ROUTE is actually priced with — measured if the
+ * stream has been worked, else the driver's formula projection, else the
+ * declared fallback.
+ *
+ * The exact precedence `eta.ts` applies when it prices the reputation legs,
+ * kept in one place because `perturbedRates` has to perturb the rate the value
+ * DEPENDS ON. It did not: it scaled `daedalusRepPerSec`, which is the measured
+ * tracker and is zero until Daedalus has been worked, while the ETA priced the
+ * leg from `daedalusRepPerSecProjected`. Zero times 1.01 is zero, the estimate
+ * did not move, and reputation was the only live channel whose worth fell back
+ * to the coarse all-parts floor — measured on `leg-bn4.1` seed 1, where the
+ * published marginal read `horizon: "future-binding"` with no `atRatePerSec`
+ * beside a 28.68h reputation leg that was 72% of the whole route. A derivative
+ * taken with respect to a variable the value does not use is not a derivative. */
+function effectiveDaedalusRepPerSec(rates: RouteRates): number {
+  if (rates.daedalusRepPerSec > 0) return rates.daedalusRepPerSec;
+  const projected = rates.daedalusRepPerSecProjected ?? 0;
+  return projected > 0 ? projected : FALLBACK_DAEDALUS_REP_PER_SEC;
+}
+
+function effectiveGangRepPerSec(rates: RouteRates): number {
+  return rates.gangRepPerSec > 0 ? rates.gangRepPerSec : FALLBACK_GANG_REP_PER_SEC;
+}
+
 /** The absolute rate a resource's relative perturbation operates on — the same
  * measured-or-declared-fallback substitution `perturbedRates` applies, exposed
  * so the published marginal can carry its own operating point. */
-function operatingRate(rates: RouteRates, resource: MarginalResource): number | undefined {
+function operatingRate(
+  rates: RouteRates,
+  resource: MarginalResource,
+  route?: RouteId,
+): number | undefined {
   switch (resource) {
     case "money":
       return rates.moneyPerSec > 0 ? rates.moneyPerSec : FALLBACK_MONEY_PER_SEC;
@@ -184,6 +214,10 @@ function operatingRate(rates: RouteRates, resource: MarginalResource): number | 
       return rates.augsPerSec > 0 ? rates.augsPerSec : 1 / FALLBACK_SEC_PER_AUG;
     case "bladeburnerRank":
       return rates.bladeburnerRankPerSec > 0 ? rates.bladeburnerRankPerSec : FALLBACK_RANK_PER_SEC;
+    case "reputation":
+      // Which stream depends on the route: the gang route earns its Red Pill
+      // reputation from the gang faction, everything else from Daedalus.
+      return route === "gang" ? effectiveGangRepPerSec(rates) : effectiveDaedalusRepPerSec(rates);
     default:
       return undefined;
   }
@@ -234,8 +268,15 @@ function perturbedRates(rates: RouteRates, resource: MarginalResource, relativeD
   } else {
     // The selected route can use either reputation stream. Scaling both is the
     // resource-level question; only the route's actual part contributes.
-    next.daedalusRepPerSec = Math.max(0, rates.daedalusRepPerSec) * scale;
-    next.gangRepPerSec = Math.max(0, rates.gangRepPerSec) * scale;
+    //
+    // Both substitute the measured-or-projected-or-declared rate the ETA
+    // itself priced with, exactly as the six branches above do — see
+    // `effectiveDaedalusRepPerSec` for what scaling the bare tracker cost.
+    next.daedalusRepPerSec = effectiveDaedalusRepPerSec(rates) * scale;
+    if (rates.daedalusRepPerSecProjected !== undefined && rates.daedalusRepPerSecProjected > 0) {
+      next.daedalusRepPerSecProjected = rates.daedalusRepPerSecProjected * scale;
+    }
+    next.gangRepPerSec = effectiveGangRepPerSec(rates) * scale;
   }
   if (rates.cycle && (resource === "money" || resource === "hacking")) {
     next.cycle = {
@@ -282,7 +323,7 @@ export function progressionMarginals(
     // an absolute-rate consumer converts with the same denominator the ETA
     // itself was priced with — measured when measured, the declared fallback
     // when not.
-    const atRate = operatingRate(input.rates, resource);
+    const atRate = operatingRate(input.rates, resource, input.selectedRoute);
     const at = atRate !== undefined && atRate > 0 ? { atRatePerSec: atRate } : {};
     const installSaved = forecastSaved(input.install, resource, delta);
 
@@ -306,7 +347,27 @@ export function progressionMarginals(
     }
     const install = installSaved !== undefined && installSaved > 0 ? installSaved : 0;
     const node = nodeSaved !== undefined && nodeSaved > 0 ? nodeSaved : 0;
-    const perturbedSlope = Math.max(install, node) / delta;
+    // A perturbation may not report more saving than the resource's own legs
+    // CONTAIN. `routeEtas` chooses between discrete branches — the Daedalus
+    // route takes the cheaper of grinding the reputation and donating for it —
+    // and a 1% rate change that flips such a branch moves the estimate by the
+    // whole branch difference, which `/ delta` then multiplies by a hundred.
+    // That is a step, not a slope, and every consumer downstream multiplies it
+    // by a FINITE relative rate change. Capping it at the linear reading of the
+    // same legs says the honest thing: a 1% faster rate is worth at most 1% of
+    // the time that rate governs.
+    //
+    // Only where the resource HAS labelled legs. Bladeburner rank deliberately
+    // has none (`partResourcesFor`), so it has nothing to be capped against and
+    // the perturbation is its only pricing.
+    const installResourceSec = input.install.state === "unknown"
+      ? 0
+      : resourceSeconds(input.install.components, resource);
+    const nodeResourceSec = baselineRoute ? resourceSeconds(baselineRoute.parts, resource) : 0;
+    const linearCap = partResourcesFor(resource).length > 0
+      ? linearSecondsPerRelativeRate(Math.max(installResourceSec, nodeResourceSec), delta)
+      : Infinity;
+    const perturbedSlope = Math.min(Math.max(install, node) / delta, linearCap);
 
     // FLOOR the perturbed slope with the local slope of every leg this
     // resource must still complete — including AND-parallel legs masked by a
@@ -322,10 +383,6 @@ export function progressionMarginals(
     const hiddenNodeSec = baselineRoute
       ? resourceSeconds(baselineRoute.parts.filter((part) => part.hidden === true), resource)
       : 0;
-    const installResourceSec = input.install.state === "unknown"
-      ? 0
-      : resourceSeconds(input.install.components, resource);
-    const nodeResourceSec = baselineRoute ? resourceSeconds(baselineRoute.parts, resource) : 0;
     const dependentSec = perturbedSlope > 0
       ? hiddenNodeSec
       : Math.max(installResourceSec, nodeResourceSec);

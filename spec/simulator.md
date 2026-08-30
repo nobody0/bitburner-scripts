@@ -240,10 +240,43 @@ and `noteTickLateness` all answer "how fast did the player get there", never
   an hours-long simulation profilable at all. A budgeted run never reaches its
   goal, so `assertPromotableSession` refuses it and no truncated run can enter
   route lineage.
+- `--memory-budget <size>` stops the pump once the process holds more than that
+  and reports `stoppedBecause: "memory"`. `--wall-budget` bounds the wait; this
+  bounds the host. It exists because the alternative to stopping is not a longer
+  run: a `leg-bn4.1` seed that reached 22 GB had to be killed from outside, and
+  one that reached 58.69 GB segfaulted Bun — and neither wrote a manifest, a
+  sidecar or a result, so hours of simulation produced no evidence at all. Sizes
+  read like durations (`512mb`, `8gb`, a bare number is bytes). It is checked on
+  the guard's existing 1024-event cadence and **collects once before it
+  believes the reading**: `CollectionPacer` only forces a sweep on 512 MB of
+  growth, so a reading over the budget is routinely garbage nothing has swept
+  yet, and a budget that killed runs on uncollected garbage would be a worse
+  instrument than none. Per PROCESS — a multi-seed profile fans out to one child
+  per seed, so the machine must hold `seeds x budget`. A memory-stopped run
+  never reaches its goal, so it cannot enter route lineage.
 - `--cost` reports throughput in **virtual hours per wall minute** — the number a
-  performance change has to move — plus per-event cost, queue shape, and
-  Netscript calls bucketed by name. It samples every 10s of real time, because
-  the whole-run average hides the shape.
+  performance change has to move — plus per-event cost, queue shape, process
+  and server counts, process RSS, and Netscript calls bucketed by name. It
+  samples every 10s of real time, because the whole-run average hides the shape.
+  `SIM_COST_DETAIL=<n>` adds, per sample, a `bun:jsc` heap census (live bytes
+  against heap capacity, and the top object types) and the Netscript calls made
+  **since the previous sample**. The delta is the half that names a spin: the
+  cumulative table is dominated by whatever a run did most of over its whole
+  life, so a subsystem that starts re-deciding at frame rate three hours in is
+  invisible there and unmissable here.
+- **RSS is reported beside throughput because they are the same defect.** A run
+  that decays in throughput also stretches the interval between collections, and
+  the second is what kills the process. `CollectionPacer` (`sim/clock.ts`) is
+  what bounds it: the pump forces a full collection on RSS growth since the last
+  one, with the virtual-time trigger kept as the cheap common case, a wall
+  ceiling as a backstop, and the old two-second floor kept because it is what
+  stops a fast simulator spending its wall clock inside synchronous collections.
+  Pacing on virtual time alone is what made a 24-hour `leg-bn4.1` seed reach
+  58.69 GB and segfault Bun: garbage is produced by HOST WORK, so when
+  throughput decays the same ten virtual minutes stretches from under a second
+  of allocation to minutes of it. Nothing in `game/` or `shared/` observes
+  collection (there is no `WeakRef` or `FinalizationRegistry` in the tree), so
+  the pacing cannot change what a run decides.
 
 Both are in `sim/cost.ts`. The one rule: `sim/realm/timers.ts` has replaced
 `performance.now` and `Date.now` with virtual time by the time a run is pumping,
@@ -273,6 +306,77 @@ Read `--cost`'s throughput curve before the profile's hot list. A flat CPU
 profile cannot distinguish "this function is expensive" from "this function is
 called more often the longer the run goes", and as the next section records,
 this simulator's worst performance bugs have all been the second kind.
+
+## Watching a run that has not finished
+
+A leg run takes tens of wall minutes and used to produce nothing between its
+two header lines and its result block — indistinguishable, from outside, from a
+hung one. Two things fix that, and neither depends on holding the process's
+stdout in a pipe.
+
+**The heartbeat.** Every session writes
+`runs/<createdAt>-sim-<label>-seed<N>-<id>.progress.ndjson`: one JSON object
+per line, appended synchronously, from before the first record until after the
+last. A `start` line, a `config` line, a `sample` line every cost interval
+(wall/virtual time, throughput, RSS, events, records, live processes and
+servers) and a terminal `done` line carrying the verdict.
+
+```
+tail -f runs/*-seed1-*.progress.ndjson        # follow a live run
+tail -1 runs/*.progress.ndjson                # where is every run right now
+```
+
+One seed per file, so a fanned-out batch does not interleave. The sampling is
+the `CostMeter`'s, which now runs on every game-driver run; `--cost` addition-
+ally prints the sample lines, attaches the report to the result, and is the
+only thing that arms the per-name Netscript call counters, so a run that is
+merely being watched pays no per-call cost for it.
+
+**A stale heartbeat beside a live pid is a stalled pump**, and that is a
+diagnosis, not an absence of one. The 21.9h `ns-proxy` deadlock presented as an
+ordinary silent run for two hours; it would now present as a heartbeat that
+stopped advancing while the process was still alive.
+
+**What survives a kill.** `close()` used to be the only durable write in a
+session's life, so a run killed by a watchdog, the OOM killer or a segfault
+left a partial JSONL and nothing else — no manifest, no sidecar, no result.
+Neither a signal handler nor an atexit hook can change that, because neither
+SIGKILL nor a segfault can be caught. So the session checkpoints as it goes:
+every heartbeat interval and every install rotation flushes the JSONL and
+rewrites the manifest and the open artifact's sidecar, each through a temporary
+and a rename so a reader never catches a half-written one. A killed run is
+therefore at most one interval stale. SIGINT and SIGTERM additionally close the
+session properly and, in a fanned-out batch, are forwarded to every child
+before the parent exits — a Ctrl-C leaves closed sessions, not orphans.
+
+Two defects found while pinning this, both now fixed and both worth knowing
+because they are the same mistake in different clothes:
+
+- **`Infinity` does not survive JSON.** A run that did not reach its goal
+  reports `timeToGoalMs: Infinity`, which arrives at the artifact writer as
+  `null`; requiring a number there dropped the entire result, so every horizon-,
+  budget- and memory-stopped session wrote a manifest carrying no verdict at all
+  — 49 of the last 60 in `runs/`, and precisely the class of run whose verdict
+  someone goes looking for.
+- **`Date.now` inside a run is the virtual clock.** Sidecars written from inside
+  an installed realm dated themselves to the simulated year (2024-01-02,
+  measured), so `updatedAt` could not distinguish a live run from an abandoned
+  one. Everything a human or another process reads now goes through
+  `realEpochMs()` (`sim/clock.ts`), the `Date.now` counterpart to `realNowMs`.
+
+**What a run said about itself.** `ns.tprint` output is captured, not printed,
+and used to be discarded entirely: the
+`WARNING: ns resident nsp cannot be PLACED at all` that named the deadlock above
+was emitted 12,908 times and shown zero times. The per-seed summary now prints
+the distinct lines with occurrence counts — a flood becomes one line with an
+`x12908` on it — and the capture itself is bounded (`MAX_CAPTURED_OUTPUT`,
+`sim/ns/api.ts`): the ordered line list stops at the cap, but the count per
+DISTINCT line is tallied at the source and stays exact, so the flood reports
+what actually happened and a diagnostic emitted after the cap is still seen. This is the shape
+any diagnostic in a long run should take: counted at the source, summarized
+once, never one line per occurrence. `game/` may not `console.log` at all
+(`tests/build-perf.test.ts`), which is why the old `[dnet] launch refused` line
+that buried an operator's cost samples 18,590 times is gone.
 
 ## Hot paths the first CPU profile found (FIXED)
 

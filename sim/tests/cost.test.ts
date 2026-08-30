@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { parseGoals } from "../../shared/goals/presets.ts";
 import { assertPromotableSession, type SimSessionManifest } from "../artifacts.ts";
-import { Clock, realNowMs } from "../clock.ts";
-import { CostMeter, formatReport, pumpGuard, throughputDrift, type CostSample } from "../cost.ts";
+import { Clock, processRssBytes, realNowMs } from "../clock.ts";
+import { CostMeter, formatReport, pumpGuard, rssGrowth, throughputDrift, type CostSample } from "../cost.ts";
+import { formatHeapCensus, heapCensus } from "../heap-census.ts";
 import { runGame } from "../game-run.ts";
 import { installVirtualTime } from "../realm/timers.ts";
 import { findProfile } from "../profiles.ts";
@@ -59,6 +60,87 @@ describe("wall-clock budget", () => {
     done = true;
     expect(guard.until()).toBe(true);
     expect(guard.stoppedBy()).toBe("goal");
+  });
+});
+
+/** The guard checks memory once per 1024 events, so every case here calls
+ * `until` that many times to reach one check. */
+const ONE_CHECK = 0x400;
+
+function pump(guard: { until: () => boolean }, calls = ONE_CHECK): boolean {
+  for (let i = 0; i < calls; i++) if (guard.until()) return true;
+  return false;
+}
+
+describe("memory budget", () => {
+  test("stops the pump when RSS stays over the budget", () => {
+    let collections = 0;
+    const guard = pumpGuard({
+      goalDone: () => false,
+      memoryBudgetBytes: 1_000,
+      // A run genuinely holding more than the budget: collecting frees nothing.
+      rssBytes: () => 4_000,
+      collect: () => void collections++,
+    });
+    expect(pump(guard)).toBe(true);
+    expect(guard.stoppedBy()).toBe("memory");
+    expect(guard.stoppedAtBytes()).toBe(4_000);
+    // Collect once, look once, decide. Never a loop.
+    expect(collections).toBe(1);
+  });
+
+  test("a collection that brings RSS back under the budget keeps the run alive", () => {
+    // The case that makes the budget usable at all. `CollectionPacer` only
+    // forces a sweep on 512 MB of GROWTH, so a reading over the budget is
+    // routinely garbage nothing has swept yet — and a budget that killed runs
+    // on uncollected garbage would be a worse instrument than none.
+    let collected = false;
+    const guard = pumpGuard({
+      goalDone: () => false,
+      memoryBudgetBytes: 1_000,
+      rssBytes: () => (collected ? 400 : 4_000),
+      collect: () => void (collected = true),
+    });
+    expect(pump(guard)).toBe(false);
+    expect(guard.stoppedBy()).toBe("goal");
+    expect(guard.stoppedAtBytes()).toBe(0);
+  });
+
+  test("a run under its budget is never collected or stopped", () => {
+    let collections = 0;
+    const guard = pumpGuard({
+      goalDone: () => false,
+      memoryBudgetBytes: 1_000,
+      rssBytes: () => 999,
+      collect: () => void collections++,
+    });
+    expect(pump(guard, ONE_CHECK * 4)).toBe(false);
+    expect(collections).toBe(0);
+  });
+
+  test("the wall budget still wins when both are armed", () => {
+    const guard = pumpGuard({
+      goalDone: () => false,
+      wallBudgetMs: -1,
+      memoryBudgetBytes: 1,
+      rssBytes: () => 1_000_000,
+      collect: () => {},
+    });
+    expect(pump(guard)).toBe(true);
+    expect(guard.stoppedBy()).toBe("budget");
+  });
+
+  test("no budget means no RSS probe at all", () => {
+    let reads = 0;
+    const guard = pumpGuard({
+      goalDone: () => false,
+      rssBytes: () => {
+        reads++;
+        return 1e12;
+      },
+    });
+    expect(pump(guard, ONE_CHECK * 4)).toBe(false);
+    expect(reads).toBe(0);
   });
 });
 
@@ -173,7 +255,7 @@ describe("cost reporting", () => {
   test("throughput drift compares halves, so one noisy interval cannot flip it", () => {
     const sample = (throughput: number): CostSample => ({
       wallMs: 0, virtualMs: 0, events: 0, heap: 0, cancelled: 0,
-      engineCycles: 0, records: 0, nsCalls: 0, throughput,
+      engineCycles: 0, records: 0, nsCalls: 0, rssBytes: 0, throughput,
     });
     // Steadily decaying, but with a single fast outlier landing last. Endpoint
     // comparison would call this an improvement; the halves see the decay.
@@ -186,6 +268,65 @@ describe("cost reporting", () => {
     // Too few samples for the halves to be more than single readings.
     expect(throughputDrift([10, 1].map(sample))!.decaying).toBe(false);
     expect(throughputDrift([sample(1)])).toBeUndefined();
+  });
+
+  test("every sample carries RSS, and the report carries the peak", () => {
+    const clock = new Clock();
+    const meter = new CostMeter({ clock, sampleEveryMs: 0, engineCycles: () => 0, records: () => 0 });
+    meter.tick(realNowMs());
+    meter.tick(realNowMs());
+    const report = meter.finish();
+    // A real reading, not a placeholder: this process is running, so it is
+    // resident. A zero here means the instrument is measuring nothing.
+    expect(report.samples[0]!.rssBytes).toBeGreaterThan(0);
+    expect(report.rssBytes).toBeGreaterThan(0);
+    expect(report.peakRssBytes).toBeGreaterThanOrEqual(
+      Math.max(...report.samples.map((sample) => sample.rssBytes)),
+    );
+    expect(formatReport(report)).toContain("memory: rss");
+  });
+
+  test("rss growth is a rate per virtual hour, so a short window cannot cry leak", () => {
+    const at = (virtualHours: number, gb: number): CostSample => ({
+      wallMs: 0, virtualMs: virtualHours * 3_600_000, events: 0, heap: 0, cancelled: 0,
+      engineCycles: 0, records: 0, nsCalls: 0, rssBytes: gb * 1024 ** 3, throughput: 1,
+    });
+    // 1 GB added over 24 virtual hours: a big process, not a leaking one.
+    const flat = rssGrowth([at(0, 1), at(8, 1.3), at(16, 1.7), at(24, 2)])!;
+    expect(flat.growing).toBe(false);
+    // The measured shape of the defect: 1.2 GB at 12h, 58 GB at 26h.
+    const blowup = rssGrowth([at(0, 0.6), at(6, 0.9), at(12, 1.2), at(26, 58)])!;
+    expect(blowup.growing).toBe(true);
+    // Gigabytes per virtual hour, which is the claim. The exact figure is the
+    // estimator's (halved means, so the final 58 GB sample gets one vote and
+    // not the whole trend), not the endpoint difference.
+    expect(blowup.perVirtualHour).toBeGreaterThan(1024 ** 3);
+    // THE REASON THIS IS A SLOPE AND NOT AN ENDPOINT DIFFERENCE: a forced
+    // collection landing beside the final sample gives back what it swept, and
+    // an endpoint reading would call the run flat on the strength of that one
+    // sample. Every sample votes, so one cannot.
+    const swept = rssGrowth([at(0, 1), at(6, 8), at(12, 15), at(18, 22), at(24, 1.5)])!;
+    expect(swept.growing).toBe(true);
+    // The endpoint reading the slope replaces: 0.5 GB over 24 virtual hours.
+    expect((swept.lastBytes - swept.firstBytes) / 24).toBeLessThan(256 * 1024 ** 2);
+    // Two samples cannot establish a trend, however steep the line between them.
+    expect(rssGrowth([at(0, 1), at(1, 40)])!.growing).toBe(false);
+    expect(rssGrowth([at(0, 1)])).toBeUndefined();
+  });
+
+  test("the heap census splits live JavaScript from what the collector has given up on", () => {
+    // The reading that decided the memory diagnosis: a run holding 1.19 GB of
+    // RSS had 42.5 MB of live JavaScript in it. Without the split, the only
+    // available conclusion is "something leaks", which is wrong.
+    const census = heapCensus(5)!;
+    expect(census).toBeDefined();
+    expect(census.liveBytes).toBeGreaterThan(0);
+    expect(census.capacityBytes).toBeGreaterThanOrEqual(census.liveBytes);
+    expect(census.objectCount).toBeGreaterThan(0);
+    expect(census.types.length).toBeGreaterThan(0);
+    expect(census.types.length).toBeLessThanOrEqual(5);
+    expect(formatHeapCensus(census)).toContain("capacity=");
+    expect(processRssBytes()).toBeGreaterThan(census.liveBytes);
   });
 
   test("counters are disarmed once a run finishes", async () => {

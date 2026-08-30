@@ -5,7 +5,7 @@ import { describeFeatureSelection, type FeatureSelection } from "./feature-selec
 import type { SaveSeed } from "../shared/save/to-sim.ts";
 import type { LogRecord, WireMessage } from "../shared/telemetry/schema.ts";
 import { Clock } from "./clock.ts";
-import { CostMeter, pumpGuard, type CostReport } from "./cost.ts";
+import { CostMeter, pumpGuard, type CostReport, type CostSample } from "./cost.ts";
 import type { SimPlayerOptions } from "./core/player.ts";
 import type { ServerSpec } from "./core/effects.ts";
 import { mulberry32 } from "./core/rng.ts";
@@ -37,7 +37,7 @@ import {
   withDarkwebServer,
 } from "./network.ts";
 import { makeSingularity } from "./ns/singularity.ts";
-import { launch, makeSimNs, type ScriptMain, type SimNsHost } from "./ns/api.ts";
+import { launch, makeSimNs, summarizeOutput, type ScriptMain, type SimNsHost } from "./ns/api.ts";
 import { ProcessTable } from "./ns/process.ts";
 import { installVirtualTime, type VirtualTime } from "./realm/timers.ts";
 import { noteUnmodeled, resetUnmodeled, setUnmodeledReporter, unmodeled, unmodeledCounts } from "./realm/unmodeled.ts";
@@ -149,6 +149,15 @@ export interface GameRunOptions {
    * only way to profile a window of a simulation that would otherwise run for
    * hours. A budgeted run never reaches its goal, so it cannot be promoted. */
   wallBudgetMs?: number;
+  /** Stop the pump once the process holds more than this many bytes and report
+   * `stoppedBecause: "memory"`. `wallBudgetMs` bounds the wait; this bounds the
+   * host. It exists because the alternative to stopping is not "a longer run":
+   * a leg seed that reached 22 GB had to be killed from outside, and one that
+   * reached 58.69 GB segfaulted Bun — and neither wrote a manifest, a sidecar
+   * or a result, so the hours already spent produced no evidence at all. Like a
+   * wall-budgeted run, a memory-stopped run never reaches its goal and cannot
+   * be promoted. */
+  memoryBudgetBytes?: number;
   /** Lift the operator hold on destroyW0r1dD43m0n for this run. A route leg's
    * goal IS the node's destruction, so `bn:<n>` is unreachable while the hold
    * stands. The previous value is restored when the run ends — the hold is
@@ -159,6 +168,10 @@ export interface GameRunOptions {
   /** Real milliseconds between cost samples. */
   costSampleEveryMs?: number;
   onCostSample?: (line: string) => void;
+  /** Called with every cost sample, whether or not `cost` was requested. The
+   * progress heartbeat rides this: a run has to be observable while it is
+   * still going, and that must not depend on remembering a flag. */
+  onProgress?: (sample: CostSample) => void;
 }
 
 /** Singularity RAM is governed only by active SF4 (or BN4 inside getRamCost),
@@ -185,7 +198,9 @@ export interface GameRunResult {
   reached: boolean;
   timeToGoalMs: number;
   records: number;
-  stoppedBecause: "goal" | "empty" | "horizon" | "budget";
+  stoppedBecause: "goal" | "empty" | "horizon" | "budget" | "memory";
+  /** RSS at the moment a memory budget tripped, in bytes. Absent otherwise. */
+  stoppedAtRssBytes?: number;
   /** 200ms game cycles processed — the second timebase's progress. */
   engineCycles: number;
   /** Host cost of the run, present only when `cost` was requested. */
@@ -194,6 +209,12 @@ export interface GameRunResult {
   unmodeled: Record<string, number>;
   crashes: { pid: number; filename: string; error: string }[];
   output: string[];
+  /** Lines tprinted in total; larger than `output.length` when a run flooded
+   * past the retention cap (sim/ns/api.ts MAX_CAPTURED_OUTPUT). */
+  outputTotal: number;
+  /** Occurrences per distinct tprinted line, exact for every line up to the
+   * distinct-line cap — what the per-seed summary prints. */
+  outputCounts: { line: string; count: number }[];
   validity: RunValidity;
   scenario: ScenarioClass;
   /** Terminal stock economics. Wealth includes cash plus what closing every
@@ -1114,18 +1135,29 @@ async function runGameInstalled(
   // per-event cost this measures, and folding it in would flatter every
   // throughput number by whatever the fixture cost to build.
   const emitCostSample = options.onCostSample ?? ((line: string) => console.log(line));
-  const meter = options.cost
+  // The meter runs whenever anything consumes its samples — `--cost` for the
+  // stdout curve and the attached report, `onProgress` for the heartbeat file.
+  // Only `--cost` arms the per-name call counters, so a run that is merely
+  // being watched does not pay a Map write per Netscript call.
+  const meter = options.cost || options.onProgress
     ? new CostMeter({
         clock,
         ...(options.costSampleEveryMs !== undefined ? { sampleEveryMs: options.costSampleEveryMs } : {}),
         engineCycles: () => engine.cyclesProcessed,
         records: () => recordCount,
-        onSample: (_sample, line) => emitCostSample(line),
+        processes: () => host.processes.size,
+        servers: () => world.servers.size,
+        ...(options.cost ? { countCalls: true } : {}),
+        onSample: (sample, line) => {
+          options.onProgress?.(sample);
+          if (options.cost) emitCostSample(line);
+        },
       })
     : undefined;
   const guard = pumpGuard({
     goalDone: () => goal.done(ctx),
     ...(options.wallBudgetMs !== undefined ? { wallBudgetMs: options.wallBudgetMs } : {}),
+    ...(options.memoryBudgetBytes !== undefined ? { memoryBudgetBytes: options.memoryBudgetBytes } : {}),
     ...(meter ? { meter } : {}),
   });
   try {
@@ -1146,7 +1178,11 @@ async function runGameInstalled(
     globalThis.WebSocket = originalWebSocket;
   }
 
-  const costReport = meter?.finish();
+  // Always finish the meter: it takes the closing sample (one last heartbeat
+  // line) and disarms the counting hook. Only `--cost` attaches the report to
+  // the result, so a merely-watched run keeps the shape it had before.
+  const finalCost = meter?.finish();
+  const costReport = options.cost ? finalCost : undefined;
   const reached = stoppedBecause === "goal";
   const gaps = unmodeledCounts();
   const validity: RunValidity = Object.keys(gaps).length > 0 || host.crashes.length > 0 ? "invalid-for-goal" : "valid";
@@ -1164,11 +1200,14 @@ async function runGameInstalled(
     timeToGoalMs: reached ? clock.now() : Infinity,
     records: recordCount,
     stoppedBecause,
+    ...(stoppedBecause === "memory" ? { stoppedAtRssBytes: guard.stoppedAtBytes() } : {}),
     engineCycles: engine.cyclesProcessed,
     ...(costReport ? { cost: costReport } : {}),
     unmodeled: gaps,
     crashes: host.crashes,
     output: host.output,
+    outputTotal: host.outputTotal ?? host.output.length,
+    outputCounts: summarizeOutput(host.outputCounts),
     validity,
     scenario,
     stock: {

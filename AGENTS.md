@@ -18,11 +18,17 @@ This is a clean-sheet Bitburner automation project. The predecessor scripts
 - `bun test` is the correctness suite; simulations live in lanes (`bun run long --list`)
   and are worth running when the feature they measure changed.
 - A simulation that takes too long is a measurable fact, not a mood. `--horizon`
-  bounds virtual time, `--wall-budget` bounds the real wait, and `--cost` reports
-  virtual hours bought per wall minute; `bun run sim:profile --cpu-prof` takes a
-  bounded run under Bun's sampler. Read the throughput curve before the hot
-  list — this simulator's worst performance bugs have all been cost growing with
-  run length rather than one expensive function. See `spec/simulator.md`.
+  bounds virtual time, `--wall-budget` bounds the real wait, `--memory-budget`
+  bounds the host, and `--cost` reports virtual hours bought per wall minute;
+  `bun run sim:profile --cpu-prof` takes a bounded run under Bun's sampler. Read
+  the throughput curve before the hot list — this simulator's worst performance
+  bugs have all been cost growing with run length rather than one expensive
+  function. See `spec/simulator.md`.
+- A long run must be watchable and must survive being killed. Every session
+  appends `runs/*.progress.ndjson` — `tail -f` it rather than holding the run in
+  a pipe — and checkpoints its manifest and sidecars as it goes, so a SIGKILL or
+  a segfault costs at most one sample interval of evidence. A stale heartbeat
+  beside a live pid means the pump stalled.
 - Use the pinned upstream checkout documented in `spec/game-source.md` when game
   behavior or API details are unclear.
 - Strategy belongs in `shared/strategy/` as pure functions; `game/` drivers

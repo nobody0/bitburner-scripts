@@ -37,6 +37,127 @@ export function realNowMs(): number {
   return realPerformanceNow();
 }
 
+/** The same capture for `Date.now`, and needed for the same reason.
+ *
+ * `realNowMs` is monotonic-since-process-start, which measures intervals and
+ * dates nothing. Anything a HUMAN or another process reads while a run is in
+ * flight — an artifact's `updatedAt`, a heartbeat line's timestamp — has to be
+ * a real epoch, or it reports the simulated year. Sim sidecars written from
+ * inside a run were stamped 2024-01-02 for exactly this reason. */
+const realDateNow = globalThis.Date.now.bind(globalThis.Date);
+
+export function realEpochMs(): number {
+  return realDateNow();
+}
+
+/** Resident set size of the whole process, in bytes, or 0 where the host does
+ * not report it.
+ *
+ * Here beside `realNowMs` for the same reason: both measure the HOST rather
+ * than the simulation, and both must be reachable from code running inside an
+ * installed realm. `process.memoryUsage.rss()` is the cheap form — it skips
+ * building the object the full `memoryUsage()` returns. */
+export function processRssBytes(): number {
+  const usage = globalThis.process?.memoryUsage as
+    | ((() => { rss: number }) & { rss?: () => number })
+    | undefined;
+  if (usage === undefined) return 0;
+  try {
+    return usage.rss ? usage.rss() : usage().rss;
+  } catch {
+    return 0;
+  }
+}
+
+/** Virtual time between forced collections, in the common case. */
+export const COLLECT_VIRTUAL_INTERVAL_MS = 600_000;
+/** Never collect more often than this. A cost bound, not a memory bound. */
+export const COLLECT_MIN_WALL_MS = 2_000;
+/** Never go longer than this between collections, whatever the clocks say. */
+export const COLLECT_MAX_WALL_MS = 15_000;
+/** RSS growth since the last collection that forces the next one. */
+export const COLLECT_RSS_GROWTH_BYTES = 512 * 1024 ** 2;
+/** Events between consultations of the two triggers that cost a syscall. */
+const COLLECT_CHECK_EVERY = 0x3ff;
+
+/** When the pump forces a full collection — and why virtual time cannot decide
+ * it alone.
+ *
+ * Garbage is produced by HOST WORK: events popped, Netscript calls served,
+ * closures and promises built. The original rule was "every ten virtual
+ * minutes, but no more often than every two wall seconds", and those two
+ * clocks agree only while throughput is steady. A leg run's throughput decays
+ * by an order of magnitude across its horizon — 8.06 to 0.12 virtual hours per
+ * wall minute on `leg-bn4.1` seed 3 — so the same ten virtual minutes stretches
+ * from under a second of allocation to minutes of it, and the interval between
+ * collections grows without bound in the only units that matter. It is
+ * self-reinforcing: a heap that big makes every pass slower, which stretches
+ * the interval further. That spiral is how a 24-hour leg run reached 58.69 GB
+ * and segfaulted Bun (sim/tests/baselines/bn4.json).
+ *
+ * So the pacing is bounded on the resource itself. RSS growth since the last
+ * collection is the primary trigger: it is what actually kills the process, and
+ * it assumes nothing about how fast a phase allocates. The virtual trigger
+ * stays as the cheap common case, a wall ceiling backstops a host that reports
+ * no RSS, and the two-second floor stays because it is what stops a fast
+ * simulator spending its wall clock inside synchronous collections. */
+export class CollectionPacer {
+  readonly #collect: ((force: boolean) => void) | undefined;
+  readonly #wallNow: () => number;
+  readonly #rssBytes: () => number;
+  #events = 0;
+  #nextVirtualMs = COLLECT_VIRTUAL_INTERVAL_MS;
+  #lastWallMs: number;
+  #lastRssBytes: number;
+  /** Collections performed, for tests and cost reporting. */
+  collections = 0;
+
+  constructor(options: {
+    /** Defaults to `Bun.gc`; absent outside Bun, where the pacer is inert. */
+    collect?: (force: boolean) => void;
+    wallNow?: () => number;
+    rssBytes?: () => number;
+  } = {}) {
+    this.#collect = options.collect
+      ?? (globalThis as { Bun?: { gc?: (force: boolean) => void } }).Bun?.gc;
+    this.#wallNow = options.wallNow ?? realNowMs;
+    this.#rssBytes = options.rssBytes ?? processRssBytes;
+    this.#lastWallMs = this.#wallNow();
+    this.#lastRssBytes = this.#rssBytes();
+  }
+
+  /** Call once per popped event. Returns whether it collected. */
+  tick(virtualNowMs: number): boolean {
+    const collect = this.#collect;
+    if (collect === undefined) return false;
+    // The virtual trigger is a comparison, so it is consulted every event. The
+    // other two cost a syscall each and are consulted every CHECK_EVERY events
+    // — at the event rates this harness measures, a clock and an RSS read per
+    // event would themselves show up in the profile.
+    const virtualDue = virtualNowMs >= this.#nextVirtualMs;
+    const sampleDue = (this.#events++ & COLLECT_CHECK_EVERY) === 0;
+    if (!virtualDue && !sampleDue) return false;
+    const wallNow = this.#wallNow();
+    const sinceWall = wallNow - this.#lastWallMs;
+    if (sinceWall < COLLECT_MIN_WALL_MS) return false;
+    const rss = this.#rssBytes();
+    if (
+      !virtualDue
+      && sinceWall < COLLECT_MAX_WALL_MS
+      && rss - this.#lastRssBytes < COLLECT_RSS_GROWTH_BYTES
+    ) return false;
+    this.#nextVirtualMs = virtualNowMs + COLLECT_VIRTUAL_INTERVAL_MS;
+    this.#lastWallMs = wallNow;
+    collect(true);
+    // Re-read AFTER collecting: the new baseline is what the collection gave
+    // back, not what it started from. Keeping the pre-collection reading would
+    // leave the growth trigger armed and collect on every check from then on.
+    this.#lastRssBytes = this.#rssBytes();
+    this.collections++;
+    return true;
+  }
+}
+
 /** One real macrotask: every pending microtask and already-resolved promise
  * chain settles before it returns. */
 export function drainMicrotasks(): Promise<void> {
@@ -154,24 +275,15 @@ export class Clock {
         })()
       : undefined;
     // Virtual time can create allocations faster than the host collector's
-    // ordinary pacing. Periodic full collection bounds simulator memory;
-    // Bun.gc is absent outside Bun.
-    const gc = (globalThis as { Bun?: { gc?: (force: boolean) => void } }).Bun?.gc;
-    let nextGcAt = 600_000;
-    // Wall floor too: the virtual trigger's wall frequency scales with sim
-    // throughput, so a faster simulator would otherwise spend an ever-larger
-    // share of wall time in forced synchronous collections.
-    let nextGcWallMs = realNowMs() + 2_000;
+    // ordinary pacing, so the pump forces its own; see CollectionPacer for why
+    // the pacing cannot be read off the virtual clock.
+    const pacer = new CollectionPacer();
     for (;;) {
       await drain();
       if (until()) return "goal";
       const next = this.#takeNext(horizonMs);
       if (next === "empty" || next === "horizon") return next;
-      if (gc && this.now() >= nextGcAt && realNowMs() >= nextGcWallMs) {
-        nextGcAt = this.now() + 600_000;
-        nextGcWallMs = realNowMs() + 2_000;
-        gc(true);
-      }
+      pacer.tick(this.now());
       trace?.(next);
       next.fn();
     }

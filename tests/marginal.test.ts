@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { stepEndgame } from "../shared/strategy/progression/endgame.ts";
-import { noRates } from "../shared/strategy/progression/eta.ts";
+import { FALLBACK_DAEDALUS_REP_PER_SEC, noRates } from "../shared/strategy/progression/eta.ts";
 import { estimatedForecast, unknownForecast } from "../shared/strategy/progression/forecast.ts";
 import {
   growingProgressSecondsPerRelativeRate,
@@ -10,6 +10,80 @@ import {
 import { freshEndgameView as view } from "./fixtures/endgame-view.ts";
 
 describe("progression marginal value", () => {
+  /** The reputation channel is the one the BN4 route is bound by: on
+   * `leg-bn4.1` seed 1 at t=18.68h the `daedalus reputation` leg was 28.68h of
+   * a 39.77h route, and the published marginal read
+   * `horizon: "future-binding"` with no `atRatePerSec` — the signature of a
+   * perturbation that moved nothing. */
+  describe("the reputation slope is taken at the rate the route is priced with", () => {
+    /** Daedalus not yet worked, so the MEASURED tracker is zero and the ETA
+     * prices the leg off the driver's formula projection. */
+    const unworked = () => ({
+      ...noRates(),
+      moneyPerSec: 1_000_000,
+      daedalusRepPerSec: 0,
+      daedalusRepPerSecProjected: 24,
+    });
+    const marginalsFor = (rates: ReturnType<typeof unworked>) => {
+      const current = view({ augCount: 30, money: 0, hackingSkill: 2_500 });
+      return progressionMarginals({
+        view: current,
+        decision: stepEndgame(current),
+        rates,
+        selectedRoute: "daedalus",
+        install: unknownForecast(0, "route-only", "no install forecast"),
+      });
+    };
+
+    test("a projected-only rate still produces a perturbed slope, not the floor", () => {
+      const marginals = marginalsFor(unworked());
+      expect(marginals.reputation.state).toBe("estimated");
+      expect(marginals.reputation.secondsPerRelativeRate).toBeGreaterThan(0);
+      // `future-binding` is this module's label for "neither perturbation
+      // moved, so the coarse all-parts floor was used". Scaling the measured
+      // tracker — zero — could only ever produce that.
+      expect(marginals.reputation.horizon).not.toBe("future-binding");
+    });
+
+    test("it publishes the operating point the slope was taken at", () => {
+      // Without this a consumer converting an absolute rep/sec gain into a
+      // relative one has no denominator, which is the circular starvation this
+      // file already documents having fixed for money.
+      expect(marginalsFor(unworked()).reputation.atRatePerSec).toBe(24);
+      // Measured beats projected, exactly as eta.ts orders them.
+      expect(marginalsFor({ ...unworked(), daedalusRepPerSec: 37 }).reputation.atRatePerSec).toBe(37);
+      // Neither: the declared fallback the ETA itself would have priced with.
+      const bare = { ...noRates(), moneyPerSec: 1_000_000 };
+      expect(marginalsFor(bare as ReturnType<typeof unworked>).reputation.atRatePerSec)
+        .toBe(FALLBACK_DAEDALUS_REP_PER_SEC);
+    });
+
+    test("a branch flip is capped to a slope, not read as a hundredfold one", () => {
+      // `routeEtas` picks the cheaper of grinding the reputation and donating
+      // for it. A 1% rate change that flips that branch moves the estimate by
+      // the WHOLE branch difference, and dividing a step by delta=0.01
+      // multiplies it by a hundred — which is how a channel that is worth
+      // roughly its own leg came to out-bid every other use of the work slot,
+      // stalling a leg seed outright (bench3 seed 1: hacking 3 for the 7.8h
+      // after its last install). The slope may never exceed the linear reading
+      // of the same legs.
+      const marginals = marginalsFor(unworked());
+      const repSec = 2_500_000 / 24; // the gap at the projected rate
+      expect(marginals.reputation.secondsPerRelativeRate)
+        .toBeLessThanOrEqual(linearSecondsPerRelativeRate(repSec) * 1.01);
+    });
+
+    test("a faster projected rate is worth strictly fewer seconds", () => {
+      // The property the slope exists to express: the same reputation gap at a
+      // higher rate is a shorter leg, so the marginal second is worth less.
+      const slow = marginalsFor(unworked()).reputation.secondsPerRelativeRate;
+      const fast = marginalsFor({ ...unworked(), daedalusRepPerSecProjected: 240 }).reputation
+        .secondsPerRelativeRate;
+      expect(fast).toBeLessThan(slow);
+    });
+  });
+
+
   test("falls back to the node when money is not the install bottleneck", () => {
     const current = view({ augCount: 30, money: 0, hackingSkill: 2_500 });
     const install = estimatedForecast(0, "rep-bound", [

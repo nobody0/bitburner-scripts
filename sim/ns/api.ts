@@ -87,8 +87,15 @@ export interface SimNsHost {
   ramCtx: RamCostContext;
   /** ns.getResetInfo's answer. */
   reset: ResetInfo;
-  /** ns.tprint output, in order. */
+  /** ns.tprint output, in order, retained up to {@link MAX_CAPTURED_OUTPUT}. */
   output: string[];
+  /** Lines tprinted in total, including any past the retention cap. */
+  outputTotal?: number;
+  /** Occurrences per DISTINCT line, counted at the source so a flood's real
+   * count survives the retention cap. Bounded the same way: once
+   * {@link MAX_CAPTURED_OUTPUT} distinct lines are known, a new one is counted
+   * in the total only. */
+  outputCounts?: Map<string, number>;
   /** Unhandled script errors, for the run summary. */
   crashes: { pid: number; filename: string; error: string }[];
   /** BitNodeOptions.disableBladeburner, which is independent of API access. */
@@ -269,6 +276,47 @@ function launch(host: SimNsHost, process: SimProcess): void {
   });
 }
 
+/** Lines of `ns.tprint` output a run retains.
+ *
+ * The capture is unbounded work the run does for the operator's benefit, and a
+ * misbehaving controller can produce a great deal of it: one leg run emitted
+ * the same placement warning 12,908 times. Retaining every copy holds a string
+ * per line for the whole run, so the tail is counted rather than kept. The
+ * order of what IS kept is unchanged — duplicates included, because two
+ * identical lines from two installs are two facts.
+ *
+ * The COUNT per distinct line is kept whatever the cap does, because the
+ * summary is the only consumer and the count is the useful half. Retaining a
+ * bounded prefix and counting only within it would do neither job: the flood
+ * that fills the prefix would report `x5000` instead of `x12908`, and every
+ * distinct line emitted after it — in a run whose flood never stops, that is
+ * every later diagnostic the run makes — would be lost entirely. */
+export const MAX_CAPTURED_OUTPUT = 5_000;
+
+/** The distinct lines a run printed with `ns.tprint`, most frequent first.
+ *
+ * A run's loudest self-diagnosis is captured and was then discarded: the
+ * `WARNING: ns resident nsp cannot be PLACED at all` that named the 21.9h
+ * controller deadlock was emitted 12,908 times and shown zero. Per occurrence
+ * it is a flood; deduplicated with a count it is one line and the most useful
+ * one on the page. */
+export function summarizeOutput(
+  counts: ReadonlyMap<string, number> | undefined,
+): { line: string; count: number }[] {
+  return [...(counts ?? new Map<string, number>())]
+    .map(([line, count]) => ({ line, count }))
+    .sort((a, b) => b.count - a.count);
+}
+
+function captureOutput(host: SimNsHost, line: string): void {
+  host.outputTotal = (host.outputTotal ?? 0) + 1;
+  const counts = (host.outputCounts ??= new Map<string, number>());
+  const seen = counts.get(line);
+  if (seen !== undefined) counts.set(line, seen + 1);
+  else if (counts.size < MAX_CAPTURED_OUTPUT) counts.set(line, 1);
+  if (host.output.length < MAX_CAPTURED_OUTPUT) host.output.push(line);
+}
+
 export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
   const world = host.world;
 
@@ -340,8 +388,8 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     pid: process.pid,
 
     // --- output ---------------------------------------------------------
-    tprint: (...parts: unknown[]) => void host.output.push(parts.map(String).join("")),
-    tprintf: (format: string, ...rest: unknown[]) => void host.output.push([format, ...rest].map(String).join(" ")),
+    tprint: (...parts: unknown[]) => captureOutput(host, parts.map(String).join("")),
+    tprintf: (format: string, ...rest: unknown[]) => captureOutput(host, [format, ...rest].map(String).join(" ")),
     print: () => {},
     printf: () => {},
     disableLog: () => {},

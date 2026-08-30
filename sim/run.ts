@@ -23,7 +23,8 @@ import {
 import { scenarioFingerprint } from "./scenario.ts";
 import { assertPromotableSession, SimArtifactSession } from "./artifacts.ts";
 import { deriveRouteLegs } from "./route-legs.ts";
-import { formatReport } from "./cost.ts";
+import { formatBytes, formatReport } from "./cost.ts";
+import { realEpochMs } from "./clock.ts";
 import {
 
   assertValidExperiment,
@@ -271,6 +272,18 @@ function parseDuration(raw: string): number {
   return Number(match[1]) * scale;
 }
 
+/** Distinct `ns.tprint` lines shown in a run's summary. */
+const TOP_OUTPUT_LINES = 5;
+
+/** Sizes the way `parseDuration` reads durations: a bare number is bytes, a
+ * suffix scales it. Binary units, because RSS is reported in them. */
+export function parseBytes(raw: string): number {
+  const match = /^(\d+(?:\.\d+)?)(b|kb|mb|gb)?$/i.exec(raw);
+  if (!match) throw new Error(`bad size: ${raw}`);
+  const scale = { b: 1, kb: 1024, mb: 1024 ** 2, gb: 1024 ** 3 }[(match[2] ?? "b").toLowerCase()]!;
+  return Number(match[1]) * scale;
+}
+
 function parseSeeds(raw: string): number[] {
   const range = /^(\d+)\.\.(\d+)$/.exec(raw);
   if (range) {
@@ -401,6 +414,7 @@ if (import.meta.main) {
   // parent hands this flag to the first seed's child only.
   let mintNext = false;
   let wallBudgetMs: number | undefined;
+  let memoryBudgetBytes: number | undefined;
   let cost = false;
   let costSampleEveryMs: number | undefined;
   let featureOnly: FeatureId[] | undefined;
@@ -426,6 +440,10 @@ if (import.meta.main) {
     // run that stops cleanly after N real seconds is what makes a window of an
     // hours-long simulation profilable at all.
     else if (arg === "--wall-budget") wallBudgetMs = parseDuration(next());
+    // --wall-budget bounds the wait; --memory-budget bounds the host. Per
+    // PROCESS, and a multi-seed profile fans out to one child per seed below,
+    // so what the machine must hold is seeds x budget.
+    else if (arg === "--memory-budget") memoryBudgetBytes = parseBytes(next());
     else if (arg === "--cost") cost = true;
     // Sampling finer than the default matters on short budgets: the drift
     // number needs several intervals before its direction means anything.
@@ -533,6 +551,22 @@ if (import.meta.main) {
     const lanes = Math.max(1, Math.min(runSeeds.length, (navigator.hardwareConcurrency || 4) - 1));
     const pending = [...runSeeds];
     let validProcesses = 0;
+    // A Ctrl-C on the batch must reach the seeds, not just the parent. Each
+    // child owns the only copy of its artifact session, so a parent that
+    // exited on the signal would leave three runs to be killed by the shell
+    // with no manifest between them. Forward, stop launching, and let the
+    // workers below await the exits they already have.
+    const children = new Set<{ kill: (signal?: number | NodeJS.Signals) => void }>();
+    let interrupted = false;
+    for (const signal of ["SIGINT", "SIGTERM"] as const) {
+      process.on(signal, () => {
+        if (interrupted) process.exit(signal === "SIGINT" ? 130 : 143);
+        interrupted = true;
+        pending.length = 0;
+        console.log(`\n${signal}: stopping ${children.size} seed process(es)`);
+        for (const proc of children) proc.kill(signal);
+      });
+    }
     const worker = async (): Promise<void> => {
       for (;;) {
         const seed = pending.shift();
@@ -545,16 +579,57 @@ if (import.meta.main) {
           stdout: "inherit",
           stderr: "inherit",
         });
-        if ((await proc.exited) === 0) validProcesses++;
+        children.add(proc);
+        try {
+          if ((await proc.exited) === 0) validProcesses++;
+        } finally {
+          children.delete(proc);
+        }
       }
     };
     await Promise.all(Array.from({ length: lanes }, () => worker()));
     console.log(`\n${validProcesses}/${runSeeds.length} seed processes completed without invalid results`);
-    process.exit(validProcesses === runSeeds.length ? 0 : 2);
+    process.exit(interrupted ? 130 : validProcesses === runSeeds.length ? 0 : 2);
   }
 
   const times: number[] = [];
   const saveBitNode = saveEntry?.bitNode;
+  // The session the signal handlers must close. Reassigned per seed; a handler
+  // that fires between seeds finds the finished one, whose close() is a no-op.
+  let openSession: SimArtifactSession | undefined;
+  let stoppingAt: number | undefined;
+  // A Ctrl-C in a terminal is delivered by the kernel to the whole foreground
+  // process group, so a fanned-out seed receives it directly AND again from the
+  // parent's forward a moment later. Treating that echo as "the operator says
+  // the first one is not working" would `process.exit` straight through the
+  // close this handler exists to perform. Only a signal that arrives after the
+  // close has had its bounded chance escalates.
+  const ECHO_WINDOW_MS = 1_500;
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.on(signal, () => {
+      if (stoppingAt !== undefined) {
+        if (realEpochMs() - stoppingAt >= ECHO_WINDOW_MS) process.exit(signal === "SIGINT" ? 130 : 143);
+        return;
+      }
+      stoppingAt = realEpochMs();
+      const session = openSession;
+      // Registering a handler suppresses default termination, so the exit has
+      // to be explicit — and bounded, because a wedged sink must not turn a
+      // Ctrl-C into a hang. The last checkpoint is on disk either way, so a
+      // close that REJECTS must exit exactly like one that hangs: without the
+      // catch the rejection escapes, `.then` never runs, and the Ctrl-C looks
+      // like it did nothing at all.
+      void Promise.race([session?.close() ?? Promise.resolve(), Bun.sleep(1_000)])
+        .then(
+          () => `session closed -> ${session?.manifestFile ?? "(none open)"}`,
+          (error: unknown) => `session close FAILED: ${String(error)}`,
+        )
+        .then((outcome) => {
+          console.log(`\n${signal}: ${outcome}`);
+          process.exit(signal === "SIGINT" ? 130 : 143);
+        });
+    });
+  }
   for (const seed of runSeeds) {
     const artifacts = new SimArtifactSession({
       outDir,
@@ -563,6 +638,17 @@ if (import.meta.main) {
       bitNode: saveBitNode ?? (driver === "game" ? runBitnode : bitnode),
       ...(save ? { seededFrom: save } : {}),
       experiment,
+    });
+    openSession = artifacts;
+    artifacts.note({
+      phase: "config",
+      goal: goal.describe(),
+      driver,
+      rev: gitRev,
+      ...(runLabel !== undefined ? { profile: runLabel } : {}),
+      horizonMs: horizon,
+      ...(wallBudgetMs !== undefined ? { wallBudgetMs } : {}),
+      ...(memoryBudgetBytes !== undefined ? { memoryBudgetBytes } : {}),
     });
 
     let result: {
@@ -573,85 +659,135 @@ if (import.meta.main) {
       validity: RunValidity;
       scenario: ScenarioClass;
     };
-    if (driver === "planner") {
-      result = runSim({
-        goal,
-        seed,
-        horizonMs: horizon,
-        label: runLabel ?? gitRev,
-        experiment,
-        farm,
-        world: { bitnode: runBitnode, homeRam, startingMoney: runMoney, verbose },
-        onRecord: (line) => artifacts.write(line),
-      });
-    } else {
-      const { runGame } = await import("./game-run.ts");
-      let seedData;
-      if (save) {
-        const { findSave, readSnapshot } = await import("../tools/save-io.ts");
-        const { saveToSeed } = await import("../shared/save/to-sim.ts");
-        seedData = saveToSeed(readSnapshot(findSave(save).file));
-      }
-      const outcome = await runGame({
-        goal,
-        seed,
-        horizonMs: horizon,
-        label: runLabel ?? gitRev,
-        verbose,
-        // A registered checkpoint is the authoritative route entrance. A
-        // profile's synthetic fixture must not overwrite its topology/player
-        // state merely because the profile supplies strategy/goals.
-        ...(profileWorldForEntrance(profile?.world, save !== undefined) ?? {}),
-        ...(profileId !== undefined ? { profile: profileId } : {}),
-        ...(save !== undefined ? { saveId: save } : {}),
-        experiment,
-        // A route leg's goal IS its node's destruction, so the operator hold
-        // would make the goal unreachable by construction.
-        ...(experimentClass === "bitnode-route" ? { allowBitNodeCompletion: true } : {}),
-        goFidelity: AGGREGATE_GO_MODEL,
-        ...(seedData ? { save: seedData } : { bitnode: runBitnode }),
-        ...(features ? { features } : {}),
-        ...(homeRam !== undefined ? { homeRam } : profile?.homeRam !== undefined ? { homeRam: profile.homeRam } : {}),
-        ...(runMoney !== undefined ? { startingMoney: runMoney } : {}),
-        ...(perf ? { telemetry: false } : {}),
-        ...(wallBudgetMs !== undefined ? { wallBudgetMs } : {}),
-        ...(cost ? { cost: true } : {}),
-        ...(costSampleEveryMs !== undefined ? { costSampleEveryMs } : {}),
-        ...(compact ? {
-          // Preserve identity, validity, milestones and terminal result while
-          // dropping enormous periodic state payloads. Goal evaluation still
-          // consumes every record inside runGame before this artifact filter.
-          recordFilter: (record) => record.kind === "event" && (
-            record.name.startsWith("sim.") ||
-            record.name === "endgame.route" ||
-            record.name.startsWith("install")
-          ),
-        } : {}),
-        onRecord: (line) => artifacts.write(line),
-      });
-      result = outcome;
-      if (outcome.cost) console.log(formatReport(outcome.cost));
-      const gaps = Object.entries(outcome.unmodeled);
-      if (gaps.length > 0) {
-        console.log(`  not modelled: ${gaps.map(([name, count]) => `${name} x${count}`).join(", ")}`);
-      }
-      for (const crash of outcome.crashes.slice(0, 3)) {
-        console.log(`  CRASH ${crash.filename}: ${crash.error}`);
-      }
-      if (profile?.experiment === "bitnode-route") {
-        // The chain ledger (sim/tests/baselines/route-legs.json) records a
-        // leg's exit intelligence as the next leg's entrance; only a
-        // goal-reached exit qualifies. Also in the sim.result record.
-        console.log(`  exit intelligence: ${outcome.strategy.actualSkills.intelligence ?? 0}`);
-        // A fanned-out child mints only when the parent elected it; a
-        // standalone run always may.
-        if (!child || mintNext) {
-          await mintNextLegCheckpoint(profile, artifacts, outcome.strategy.actualSkills["intelligence"] ?? 0);
+    // Everything from here to `close()` is inside the try: a throw out of a
+    // driver used to lose the whole session, manifest included, because
+    // `close()` was only ever reached on the success path.
+    try {
+      if (driver === "planner") {
+        result = runSim({
+          goal,
+          seed,
+          horizonMs: horizon,
+          label: runLabel ?? gitRev,
+          experiment,
+          farm,
+          world: { bitnode: runBitnode, homeRam, startingMoney: runMoney, verbose },
+          onRecord: (line) => artifacts.write(line),
+        });
+      } else {
+        const { runGame } = await import("./game-run.ts");
+        let seedData;
+        if (save) {
+          const { findSave, readSnapshot } = await import("../tools/save-io.ts");
+          const { saveToSeed } = await import("../shared/save/to-sim.ts");
+          seedData = saveToSeed(readSnapshot(findSave(save).file));
+        }
+        const outcome = await runGame({
+          goal,
+          seed,
+          horizonMs: horizon,
+          label: runLabel ?? gitRev,
+          verbose,
+          // A registered checkpoint is the authoritative route entrance. A
+          // profile's synthetic fixture must not overwrite its topology/player
+          // state merely because the profile supplies strategy/goals.
+          ...(profileWorldForEntrance(profile?.world, save !== undefined) ?? {}),
+          ...(profileId !== undefined ? { profile: profileId } : {}),
+          ...(save !== undefined ? { saveId: save } : {}),
+          experiment,
+          // A route leg's goal IS its node's destruction, so the operator hold
+          // would make the goal unreachable by construction.
+          ...(experimentClass === "bitnode-route" ? { allowBitNodeCompletion: true } : {}),
+          goFidelity: AGGREGATE_GO_MODEL,
+          ...(seedData ? { save: seedData } : { bitnode: runBitnode }),
+          ...(features ? { features } : {}),
+          ...(homeRam !== undefined ? { homeRam } : profile?.homeRam !== undefined ? { homeRam: profile.homeRam } : {}),
+          ...(runMoney !== undefined ? { startingMoney: runMoney } : {}),
+          ...(perf ? { telemetry: false } : {}),
+          ...(wallBudgetMs !== undefined ? { wallBudgetMs } : {}),
+          ...(memoryBudgetBytes !== undefined ? { memoryBudgetBytes } : {}),
+          ...(cost ? { cost: true } : {}),
+          // The heartbeat, and the only reason a long run is watchable. Every
+          // sample appends one NDJSON line and checkpoints the manifest and the
+          // open artifact's sidecar, so `tail -f` follows a live run and a run
+          // killed from outside still leaves its evidence one interval stale.
+          onProgress: (sample) => {
+            artifacts.note({
+              phase: "sample",
+              wallMs: Math.round(sample.wallMs),
+              virtualMs: Math.round(sample.virtualMs),
+              throughput: Number(sample.throughput.toFixed(3)),
+              rssBytes: sample.rssBytes,
+              events: sample.events,
+              records: sample.records,
+              ...(sample.processes !== undefined ? { processes: sample.processes } : {}),
+              ...(sample.servers !== undefined ? { servers: sample.servers } : {}),
+            });
+            artifacts.checkpoint();
+          },
+          ...(costSampleEveryMs !== undefined ? { costSampleEveryMs } : {}),
+          ...(compact ? {
+            // Preserve identity, validity, milestones and terminal result while
+            // dropping enormous periodic state payloads. Goal evaluation still
+            // consumes every record inside runGame before this artifact filter.
+            recordFilter: (record) => record.kind === "event" && (
+              record.name.startsWith("sim.") ||
+              record.name === "endgame.route" ||
+              record.name.startsWith("install")
+            ),
+          } : {}),
+          onRecord: (line) => artifacts.write(line),
+        });
+        result = outcome;
+        if (outcome.cost) console.log(formatReport(outcome.cost));
+        const gaps = Object.entries(outcome.unmodeled);
+        if (gaps.length > 0) {
+          console.log(`  not modelled: ${gaps.map(([name, count]) => `${name} x${count}`).join(", ")}`);
+        }
+        for (const crash of outcome.crashes.slice(0, 3)) {
+          console.log(`  CRASH ${crash.filename}: ${crash.error}`);
+        }
+        if (outcome.stoppedBecause === "memory") {
+          console.log(
+            `  stopped: memory budget ${formatBytes(memoryBudgetBytes ?? 0)} exceeded ` +
+              `(rss ${formatBytes(outcome.stoppedAtRssBytes ?? 0)} after a forced collection)`,
+          );
+        }
+        // What the run said about itself, deduplicated. Printed rather than
+        // dropped: this channel carried the warning that named a controller
+        // deadlock through an entire silent run. Counts come from the source
+        // tally, so a flood reports the number of times it actually happened
+        // rather than the number of copies the capture happened to retain.
+        const spoken = outcome.outputCounts;
+        for (const { line, count } of spoken.slice(0, TOP_OUTPUT_LINES)) {
+          console.log(`  said${count > 1 ? ` x${count}` : ""}: ${line}`);
+        }
+        const counted = spoken.reduce((sum, entry) => sum + entry.count, 0);
+        if (spoken.length > TOP_OUTPUT_LINES || counted < outcome.outputTotal) {
+          const parts: string[] = [];
+          if (spoken.length > TOP_OUTPUT_LINES) {
+            parts.push(`${spoken.length - TOP_OUTPUT_LINES} more distinct output lines`);
+          }
+          if (counted < outcome.outputTotal) {
+            parts.push(`${outcome.outputTotal - counted} lines past the distinct-line cap`);
+          }
+          console.log(`  ... ${parts.join(", and ")}`);
+        }
+        if (profile?.experiment === "bitnode-route") {
+          // The chain ledger (sim/tests/baselines/route-legs.json) records a
+          // leg's exit intelligence as the next leg's entrance; only a
+          // goal-reached exit qualifies. Also in the sim.result record.
+          console.log(`  exit intelligence: ${outcome.strategy.actualSkills.intelligence ?? 0}`);
+          // A fanned-out child mints only when the parent elected it; a
+          // standalone run always may.
+          if (!child || mintNext) {
+            await mintNextLegCheckpoint(profile, artifacts, outcome.strategy.actualSkills["intelligence"] ?? 0);
+          }
         }
       }
+    } finally {
+      await artifacts.close();
     }
-
-    await artifacts.close();
     times.push(result.timeToGoalMs);
     console.log(
       `seed ${seed}: [${result.validity}] ${result.reached ? `reached in ${formatDuration(result.timeToGoalMs)}` : `NOT reached (${result.stoppedBecause})`}  ` +
