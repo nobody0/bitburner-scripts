@@ -32,8 +32,9 @@ export interface HackNodeMults {
   HackingSpeedMultiplier?: number;
   /** Scales the SKILL derived from hacking experience, not the experience
    *  itself. Needed wherever a future hacking level is projected: it is 0.35 in
-   *  BN4 and 0.25 in BN9, so omitting it over-projects the level roughly
-   *  threefold and makes every projected hack percentage wrong.
+   *  BN6, BN7 and BN10 and 0.25 in BN13, so omitting it over-projects the level
+   *  roughly threefold and makes every projected hack percentage wrong. BN4
+   *  does not override it at all (1); BN9 is 0.5.
    *  Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Person.ts */
   HackingLevelMultiplier?: number;
   HackExpGain?: number;

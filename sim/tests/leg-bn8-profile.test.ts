@@ -89,9 +89,5 @@ lane({ feature: "progression", bn: 8 }).describe("BN8 full-route validity smoke"
     // so the money marginal is large from the first pass and the auction can
     // defend the grant before any income is measured.
     expect(result.stock.wealth).toBeGreaterThan(100e6);
-    console.info(
-      "[leg-bn8.1] smoke wealth=" + result.stock.wealth.toExponential(3)
-      + " trades=" + String(result.stock.tradesMade),
-    );
   }, 600_000);
 });

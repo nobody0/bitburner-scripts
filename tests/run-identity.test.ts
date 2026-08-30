@@ -20,8 +20,8 @@ describe("hierarchical run identity", () => {
     try {
       const experiment = {
         class: "bitnode-route" as const,
-        entrance: { kind: "fresh" as const, bitNode: 1 as const },
-        route: { route: "all-source-files-3", leg: "bn1-first", index: 0, bitNode: 1 },
+        entrance: { kind: "fresh" as const, bitNode: 4 as const },
+        route: { route: "all-sf3-bn4-first", leg: "bn4.1", index: 0, bitNode: 4 },
       };
       const session = new SimArtifactSession({
         outDir: dir,

@@ -100,8 +100,8 @@ describe("runSim initialization", () => {
     expect(fingerprint(1, true)).not.toBe(baseline);
     expect(fingerprint(1, false, {
       class: "bitnode-route",
-      entrance: { kind: "fresh", bitNode: 1 },
-      route: { route: "all-source-files-3", leg: "bn1-first", index: 0, bitNode: 1 },
+      entrance: { kind: "fresh", bitNode: 4 },
+      route: { route: "all-sf3-bn4-first", leg: "bn4.1", index: 0, bitNode: 4 },
     })).not.toBe(baseline);
   });
 

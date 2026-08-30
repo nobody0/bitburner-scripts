@@ -1,7 +1,7 @@
 import type { NS } from "@ns";
 import { TELEMETRY_PORT, WIRE_VERSION, type LogRecord } from "../../shared/telemetry/schema.ts";
 import type { StateKey, StateMap } from "../../shared/telemetry/state-map.ts";
-import type { ArtifactIdentity } from "../../shared/run-identity.ts";
+import { shortIdentity, type ArtifactIdentity } from "../../shared/run-identity.ts";
 
 /** In-game telemetry client. Streams LogRecords to the ui/ process over a bare
  * `new WebSocket()` (browser global — 0 GB ns RAM).
@@ -105,7 +105,24 @@ export interface Telemetry {
 }
 
 export function initTelemetry(ns: NS, script: string, identity: ArtifactIdentity): Telemetry {
-  const run = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  // Derived from the identity this run already holds, never from Math.random.
+  // The simulator replaces Math.random with the run's SEEDED stream
+  // (sim/realm/timers.ts), so one draw here shifted every later random number
+  // in the process: a telemetry build and a --perf build played measurably
+  // different games from the same seed, which is exactly what the "--perf must
+  // be behaviourally identical, only quieter" rule forbids. `install.id`
+  // already encodes lineage, BitNode and start epoch, so this is at least as
+  // unique and is reproducible.
+  //
+  // The SCRIPT is part of it because the install id is not: main.js and the
+  // darknet controller are two emitters of the SAME install, so without it the
+  // only thing separating their run ids is the millisecond they happened to
+  // start in -- and under the simulator's virtual clock, which only advances on
+  // a sleep, that is routinely the same instant. `RunStore.append` dedupes by
+  // `(run, seq)` and both emitters count from 0, so a collision does not merge
+  // the streams, it silently DISCARDS most of both.
+  const emitter = script.replaceAll(/[^a-z0-9]/gi, "") || "script";
+  const run = `${Date.now().toString(36)}-${shortIdentity(identity.install.id)}-${emitter}`;
   const startedAt = Date.now();
   const buffer = makeRecordBuffer();
   let seq = 0;

@@ -313,6 +313,7 @@ export const overviewTab: Tab = {
       || name === "feature.failed"
       || name === "ram.starvation"
       || name === "proxy.slow"
+      || name === "proxy.impossible"
       || name === "telemetry.dropped"
       || name.startsWith("probe.")
       || name.startsWith("contract.");

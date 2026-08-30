@@ -225,6 +225,24 @@ the resident stops wanting the room.
   30 s, `proxy.recovered` when it lands. A resident that cannot exec means its
   reservation is violated; throwing would trade a visible stall for a dead
   controller.
+- **A floor no offer can ever reach DOES throw**, after one minute. This is the
+  opposite case and the distinction is the whole point: the fleet offering
+  nothing, or nothing big enough, for a minute is a structural answer, not a
+  busy moment. Waiting on it is worse than failing, because `#tail` serializes
+  every queued call behind the respawn — one impossible floor silently ends the
+  run while the engine keeps cycling and the workers keep earning (leg-bn4.1:
+  a `guaranteeFit` union demanded 162.1 GB, was offered 65.6 GB twelve thousand
+  times, and the controller never completed another pass). `proxy.impossible`
+  is emitted and the call rejects, which a feature can report; the resident
+  stays usable for everyone else. A refused `exec` is explicitly excluded: the
+  block WAS offered, so RAM is not the answer and the unbounded retry above
+  stands.
+- **A guessed price is not a floor.** `priceOf` reports whether the runtime
+  actually gave the cost; `UNKNOWN_CALL_GB` is 80 and `guaranteeFit` sums it
+  once per unpriceable member, so two unknown names alone out-demand every host
+  in an early fleet. A partly-guessed union is therefore clamped to
+  `MAX_ASK_GB` — but never below the sum of the members that WERE priced,
+  which is evidence and must still be granted.
 - **A resident killed mid-call HANGS its caller.** This is the one failure mode
   that is worse than the dodger's, and it is worth stating plainly: a dodge
   stub had a ten-second watchdog, whereas a killed resident simply never

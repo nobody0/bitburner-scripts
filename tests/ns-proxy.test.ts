@@ -362,10 +362,49 @@ describe("ns proxy", () => {
     expect(world.execs).toHaveLength(0);
 
     // The carve opens; the same call then lands without the caller retrying.
+    // Poll rather than sleeping a fixed span: `#respawn` escalates its retry
+    // delay to a one-second ceiling, so a carve that opens mid-backoff is seen
+    // up to RETRY_CEILING_MS later. Asserting after a flat 60ms made this a
+    // race that the loop lost whenever it had already escalated.
     world.setGrantCap(128);
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    for (let waited = 0; waited < 3_000 && world.execs.length === 0; waited += 20) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
     expect(world.execs[0].ramGb).toBe(82.1);
     await proxy.free();
+  });
+
+  /** A DEMAND THE FLEET CAN NEVER MEET MUST FAIL, NOT WAIT.
+   *
+   * `#respawn` had no failure exit, and `#tail` serializes every queued call
+   * behind it, so one unsatisfiable floor silently ended a whole run: on
+   * leg-bn4.1 the resident asked for 162.1 GB, was offered 65.6 GB twelve
+   * thousand times, and the controller never completed another pass while the
+   * engine kept cycling and the workers kept earning. Nothing crashed and
+   * nothing was unmodelled — it simply stopped, which is the worst way to
+   * fail. */
+  test("a floor no offer can ever reach fails loudly instead of waiting for ever", async () => {
+    const events: string[] = [];
+    setProxyEventSink((name) => events.push(name));
+    const realNow = Date.now;
+    let offset = 0;
+    // Drive the proxy's own wait clock rather than sleeping a real minute.
+    Date.now = () => realNow() + offset;
+    try {
+      const world = realm({ members: { "singularity.getOwnedAugmentations": { gb: 80 } }, grantCapGb: 20 });
+      const proxy = createNsProxy({ label: "nsp", budgetGb: 8, place: world.place });
+      const pending = loose(proxy)("singularity.getOwnedAugmentations");
+      // Let it discover that 20 GB is the best the fleet has, then let its own
+      // clock cross the impossible threshold.
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      offset = 120_000;
+      await expect(pending).rejects.toThrow(/needs 82.1GB and the fleet's best offer in \d+s was/);
+      expect(events).toContain("proxy.impossible");
+      expect(world.execs).toHaveLength(0);
+      await proxy.free();
+    } finally {
+      Date.now = realNow;
+    }
   });
 
   test("free releases the placement so the host returns to the farm", async () => {

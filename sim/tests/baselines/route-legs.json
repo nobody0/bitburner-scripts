@@ -33,10 +33,10 @@
     "     re-measuring the whole chain before recording new exits."
   ],
   "provenance": {
-    "simulatorModelVersion": 10,
+    "simulatorModelVersion": 11,
     "vendorCommit": "3162fd2590e221eadd0c0fbd46151913f7c4c41c",
-    "recordedAt": "2026-08-28",
-    "recordedFrom": "ledger created with the chained-leg profiles; no exits measured yet -- every leg entrance is still the estimate"
+    "recordedAt": "2026-08-30",
+    "recordedFrom": "re-pinned at model 11 (sim/fidelity.ts) after the BN4 leg-1 pass. Three defects fixed, all outside BN4 and all affecting every leg: a seeded-stream leak (initTelemetry drew from Math.random, which the simulator seeds, so telemetry-on and --perf runs of one seed diverged completely -- recorded evidence is all --perf and therefore unmoved); an ns-proxy deadlock (a guaranteeFit union asked for less than it demanded and priced unpriceable names at the 80 GB fallback, so the resident demanded 162.1 GB, was offered 65.6 GB twelve thousand times, and the controller silently stopped at 21-24h); and DarknetMoneyMultiplier read from the SF5-gated getter rather than the static table. Still no exits measured: leg-bn4.1 now runs its whole horizon but does not reach its goal (sim/tests/baselines/bn4.json), so every leg entrance remains the estimate."
   },
   "legs": {}
 }

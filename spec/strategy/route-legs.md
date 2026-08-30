@@ -14,7 +14,9 @@ benches that measure and improve each leg. It is generated — see
 
 Derivation: `shared/strategy/progression/route-legs.ts` (`deriveRouteLegs`).
 Bench profiles: `sim/profiles.ts` (`routeLegProfiles`). Measured
-exits: `sim/tests/baselines/route-legs.json`.
+exits: `sim/tests/baselines/route-legs.json`. Per-node trajectories, including
+the open defects a leg is currently losing to:
+`sim/tests/baselines/bn4.json` (leg 0), `bn1.json`, `bn15.json`.
 
 ## Entrance state
 
@@ -45,6 +47,12 @@ exits: `sim/tests/baselines/route-legs.json`.
   leg is a single completion, nothing about a leg is unbenchable — a
   mid-milestone leg like `bn4.2` is just a run whose entrance carries the
   partial SF4.1 and `sourceFileLevel: 1`.
+- Each leg's surface is the full mechanically playable surface of its NODE,
+  not one uniform list: `ROUTE_LEG_SURFACES` (`sim/profiles.ts`) excludes only
+  the node-defining systems the simulator does not model. BN4 therefore
+  carries `dnet` — the node scales darknet money to 0.4 rather than removing
+  it — while BN8 does not, and `stanek` is on no leg at all because Church of
+  the Machine God requires BN13 or SF13.
 - Legs are covered by generated `bitnode-route` profiles named
   `leg-bn<node>.<level>` on route id `all-sf3-bn4-first`, for every node whose
   defining systems the sim models. **Running an entire BitNode IS the
@@ -140,8 +148,16 @@ registers it.
 
 ```
 bun run tools/mint-leg-save.ts bn4.1   # the route's starting checkpoint
-bun run sim -- --profile leg-bn4.1 --save leg-bn4.1-start
+bun run bench:sim:leg-bn4.1            # how you actually RUN leg 0
 ```
+
+Note which command is which. **Minting a leg's checkpoint is not how you run
+that leg.** Seeding any run from a save is a reduced surface — see *Minted
+saves are checkpoints, not benches* below — so
+`--profile leg-bn4.1 --save leg-bn4.1-start` cannot reach `bn:4`: it hits
+`unmodeled("subsystem", "augmentation prestige")` the moment the controller
+installs, and records a fidelity gap rather than a result. The bench runs from
+the leg's synthetic entrance, which is the same state the blob encodes.
 
 `saves/leg-bn4.1-start.json.gz` is committed: the route has a real first
 checkpoint, and `tests/save-mint.test.ts` holds it equal to what the

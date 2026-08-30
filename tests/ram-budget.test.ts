@@ -17,7 +17,8 @@ const priceOfCalls = (calls: readonly string[]): number => {
   return Math.round(total * 1e6) / 1e6;
 };
 import { getFunctionRamCost } from "../sim/ns/ram-costs.ts";
-import { priceCall, UNKNOWN_CALL_GB } from "../game/lib/ns-proxy.ts";
+import { MAX_ASK_GB, priceCall, priceOf as proxyPriceOf, UNKNOWN_CALL_GB } from "../game/lib/ns-proxy.ts";
+import { RESIDENT_BASE_GB } from "../shared/ram/broker.ts";
 import { nsMainGlobal } from "../game/lib/ns-proxy-shared.ts";
 import { MAIN_SCRIPT_GB, START_SCRIPT_GB } from "../game/lib/ram.ts";
 import { DEFAULT_SPREAD_LIMITS } from "../shared/strategy/dnet/plan.ts";
@@ -136,6 +137,47 @@ describe("in-game static RAM budget", () => {
     } finally {
       nsMainGlobal().nsMain = held;
     }
+  });
+
+  /** A GUESSED price is not evidence, and must not become a hard floor.
+   *
+   * This is the defect that silently ended leg-bn4.1: `UNKNOWN_CALL_GB` is 80,
+   * `priceOf` returns it whenever `getFunctionRamCost` throws — including the
+   * transient case where `nsMain()` is momentarily unpublished, which says
+   * nothing about the call — and `guaranteeFit` sums it once per member. Two
+   * unpriceable names in one union therefore demanded a 162.1 GB contiguous
+   * block. Nothing in an early fleet can serve that, so the resident refused
+   * every 65.6 GB grant it was offered, `#respawn` retried 7,000+ times, and
+   * every call queued behind it — the whole controller — stopped. The two
+   * calls actually cost 0.05 and 1.3 GB. */
+  test("an unpriceable name is reported as a guess, not as a measured cost", () => {
+    const held = nsMainGlobal().nsMain;
+    nsMainGlobal().nsMain = {
+      getFunctionRamCost: (name: string) => {
+        if (name === "renamed.method") throw new Error("unknown method");
+        return 5;
+      },
+    } as unknown as NS;
+    try {
+      expect(proxyPriceOf("renamed.method")).toEqual({ gb: UNKNOWN_CALL_GB, known: false });
+      expect(proxyPriceOf("singularity.purchaseAugmentation")).toEqual({ gb: 5, known: true });
+    } finally {
+      nsMainGlobal().nsMain = held;
+    }
+  });
+
+  test("a guessed price cannot demand more than a resident can be granted", () => {
+    // The ceiling is what the ask is already bounded by, so a guess can never
+    // ask for a block the placer has no way to offer. A REAL price above it
+    // still raises the floor: that call cannot run in less.
+    //
+    // Both quantities are resident BUDGET, exclusive of RESIDENT_BASE_GB —
+    // `#respawn` adds the base on to form the block it demands. Comparing a
+    // budget against `RESIDENT_BASE_GB + MAX_ASK_GB` would sanction a floor
+    // 1.6 GB past the largest block the design says a resident can hold.
+    expect(UNKNOWN_CALL_GB).toBeGreaterThan(MAX_ASK_GB);
+    expect(2 * UNKNOWN_CALL_GB).toBeGreaterThan(MAX_ASK_GB);
+    expect(RESIDENT_BASE_GB + MAX_ASK_GB).toBeGreaterThan(MAX_ASK_GB);
   });
 
   test("the game bills the shipped start.js at exactly its declared budget", async () => {

@@ -119,4 +119,50 @@ describe("telemetry socket teardown", () => {
     // no-op.
     expect(socket.closes).toBe(2);
   });
+
+  /** THE --perf PARITY INVARIANT, at its one historical breach.
+   *
+   * AGENTS.md: "A --perf build must be behaviourally identical to a telemetry
+   * build -- only quieter." The simulator replaces `Math.random` with the run's
+   * SEEDED stream (sim/realm/timers.ts), so a single draw taken on the
+   * telemetry path shifts every later random number in the process. It did:
+   * `initTelemetry` built its run id from `Math.random()`, and leg-bn4.1 seed 3
+   * played a measurably different game with telemetry on (2 installs, 24 augs,
+   * hacking 379) than with --perf (6 installs, 35 augs, hacking 867) -- each
+   * mode internally deterministic, so it read as a real strategy result rather
+   * than as a seed shift.
+   *
+   * Any RNG draw on the telemetry path reintroduces that, so the bound is
+   * ZERO draws, not "few". */
+  test("initTelemetry consumes no randomness, so a telemetry build cannot shift a seeded stream", () => {
+    class SilentSocket {
+      static readonly CONNECTING = 0;
+      readyState = SilentSocket.CONNECTING;
+      onopen: ((event: Event) => void) | null = null;
+      onclose: ((event: CloseEvent) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      send(): void {}
+      close(): void {}
+    }
+    globalThis.WebSocket = SilentSocket as unknown as typeof WebSocket;
+    globalThis.setTimeout = (() => 1) as unknown as typeof setTimeout;
+
+    const realRandom = Math.random;
+    let draws = 0;
+    Math.random = () => { draws++; return realRandom(); };
+    try {
+      const ns = { atExit: () => {} } as unknown as NS;
+      const identity: ArtifactIdentity = {
+        lineage: { id: "lineage", kind: "game", label: "test", createdAt: 1 },
+        install: { id: "lineage:bn:1:install:1", startedAt: 1 },
+      };
+      const telemetry = initTelemetry(ns, "test.js", identity);
+      telemetry.event("something");
+      telemetry.state("capabilities", {} as never);
+      telemetry.dispose();
+    } finally {
+      Math.random = realRandom;
+    }
+    expect(draws).toBe(0);
+  });
 });

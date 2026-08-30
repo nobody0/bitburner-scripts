@@ -2169,9 +2169,16 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
     sfLevel(ctx.caps.sourceFiles, 12),
     progression?.multipliers,
   );
+  // `ServerMaxMoney` belongs here with the two ScriptHackMoney factors: hacked
+  // income is a fraction of what the target servers hold, so a node that scales
+  // the ceiling scales the rate. Omitting it left BN4's prior at 50k/s when the
+  // node's own multipliers say ~5.6k -- an optimistic prior deflates every
+  // money-gap ETA exactly while the leg is most money-starved. BN1, BN5, BN8
+  // and BN10 do not override it, so their priors are unchanged.
   const hackingPrior = FALLBACK_MONEY_PER_SEC
     * (nodeMultsForPrior?.["ScriptHackMoney"] ?? 1)
-    * (nodeMultsForPrior?.["ScriptHackMoneyGain"] ?? 1);
+    * (nodeMultsForPrior?.["ScriptHackMoneyGain"] ?? 1)
+    * (nodeMultsForPrior?.["ServerMaxMoney"] ?? 1);
   const stockTopicForPrior = ctx.state.topics.stock;
   const marketPrior = stockTopicForPrior?.hasTixApiAccess === true
     ? blindBankrollRatePerSec(

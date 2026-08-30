@@ -3,6 +3,7 @@ import { stepDarknet } from "../../../shared/strategy/dnet/decide.ts";
 import { FARM_NOMINAL_CHANNEL_WORTH_SEC } from "../../../shared/strategy/dnet/farm.ts";
 import { MONEY_CHANNEL } from "../../../shared/strategy/income.ts";
 import { CONTRACT_QUEUE_LIMIT } from "../../../shared/strategy/side/contracts.ts";
+import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import {
   holdHostFrom,
   planBackdoors,
@@ -949,7 +950,16 @@ const dnet: FeatureDriver = {
         charismaExpMult: playerMults?.charisma_exp ?? 1,
         crimeMoneyMult: playerMults?.crime_money ?? 1,
         dnetMoneyMult: playerMults?.dnet_money ?? 1,
-        nodeMoneyMult: progression?.multipliers?.["DarknetMoneyMultiplier"] ?? 1,
+        // The static table, not the observed topic. `progression.multipliers`
+        // comes only from `ns.getBitNodeMultipliers`, which needs BN5/SF5, so
+        // reading it raw silently prices darknet money at 1.0 in every node
+        // without SF5 -- 2.5x too high in BN4 and BN3, 20x in BN9. Same call
+        // career.ts uses; an observed getter result still wins field-by-field.
+        nodeMoneyMult: effectiveBitNodeMultipliers(
+          progression?.bitNode,
+          progression?.sourceFiles["12"] ?? 0,
+          progression?.multipliers,
+        )?.["DarknetMoneyMultiplier"] ?? 1,
       };
       rendezvous.configure({
         charisma: ctx.state.topics.player?.skills.charisma ?? 1,

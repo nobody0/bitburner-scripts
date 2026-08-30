@@ -190,6 +190,12 @@ between. A resident's own lifecycle is on the wire beside them:
 budget raised the floor) — and `proxy.undersized {label, grantedGb, minGb}`
 when the fleet could not meet a pending call's floor.
 
+A floor the fleet never meets at all is the one case that does throw.
+`proxy.impossible {label, minGb, bestOfferGb, preferredGb, attempts, waitMs}`
+is emitted after a minute of placement refusal, immediately before the call
+rejects, and it counts as a failure in the overview feed. A refused `exec` is
+NOT this case and still retries unbounded, because the block was offered.
+
 Coding contracts split repeated state from forensic detail. The `side` topic
 carries totals, solver coverage, the front 20 rows of a private 100-contract
 work queue, compact quarantine summaries, scan freshness, the last batch

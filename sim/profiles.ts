@@ -405,8 +405,12 @@ const ROUTE_LEG_SURFACES: Readonly<Record<number, FeatureOverrides>> = {
   // compete with hacking and career in a full-node benchmark.
   1: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side"),
   // BN4: factions are genuinely live — the node's theme is Singularity, not a
-  // feature nerf — so the ordinary surface applies unchanged.
-  4: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side"),
+  // feature nerf. Plus `dnet`: the node scales darknet money (0.4) rather than
+  // removing it, so phishing is a real if weak channel competing for the same
+  // charisma and slot, and a leg must not solve a smaller game than the route
+  // faces. Unlike BN8 there is no fidelity reason to hold it out — the dnet
+  // model is full for fresh multi-install controller runs.
+  4: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side", "dnet"),
   // BN5: intelligence is node-native; this leg's measured exit seeds the
   // entire downstream intelligence chain.
   5: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock", "side"),

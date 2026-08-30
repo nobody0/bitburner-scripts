@@ -2007,9 +2007,13 @@ value:
 
 - `graftAugmentation` / `waitForOngoingGrafting` — needs a second work type with
   entropy on completion.
-- `b1tflum3` / `destroyW0r1dD43m0n` — structural: `currentNodeMults` is module
-  state and `sim/run.ts` is one BitNode per process. BitNode ordering is
-  therefore evaluated analytically across runs, not inside one.
+- `b1tflum3` — structural: `currentNodeMults` is module state and `sim/run.ts`
+  is one BitNode per process. BitNode ordering is therefore evaluated
+  analytically across runs, not inside one. `destroyW0r1dD43m0n` is no longer
+  in this list: it is implemented (`sim/ns/singularity.ts`), fires
+  `onBitNodeComplete` and records the `bitnode.reset` transition, which is what
+  makes a `bn:<n>` route-leg goal reachable at all. It still does not fabricate
+  the next node's world inside the completed run — that node is a separate run.
 - `UnstableCircadianModulator` multipliers — time-seeded upstream.
 - The casino — no ns API at all (it is DOM-driven).
 - **SF4 level 1 outside BN4** — a single `SingularityFn3` call is 5 GB × 16 =

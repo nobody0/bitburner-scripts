@@ -1,0 +1,122 @@
+{
+  "note": [
+    "THE PROOF-OF-PROGRESS LEDGER for the BN4 legs -- the speedrun route's",
+    "FIRST three completions (bn4.1, bn4.2, bn4.3), of which only leg-bn4.1 has",
+    "ever been measured.",
+    "",
+    "FIRST MEASUREMENT (2026-08-29). Before this file, `leg-bn4.1` had never run",
+    "past ten virtual minutes: every run in runs/ was a smoke with lastT between",
+    "45s and 600s, there was no `bench:sim:leg-bn4.1` script and no BN4 lane. The",
+    "route's own first leg was its least-covered one. These numbers are the first",
+    "evidence it has.",
+    "",
+    "WHAT THIS LEG IS. A genuinely fresh BN4: 8 GB home, $1,000, no Source-Files.",
+    "Singularity is node-native, which is why the route starts here and why",
+    "nothing is injected. BN4 is also the hardest possible opening --",
+    "WorldDaemonDifficulty 3 puts the daemon at hacking 9000 (three times BN1)",
+    "while ScriptHackMoney 0.2 x ServerMaxMoney 0.1125 leaves hacking earning",
+    "~2% of BN1, HackExpGain is 0.4, and hacknet/crime/company money are 0.05 /",
+    "0.2 / 0.1. Stocks and coding contracts are the only unnerfed money channels.",
+    "",
+    "NO LIKE-FOR-LIKE TARGET EXISTS. The historical 17d run",
+    "(spec/strategy/speedrun-benchmark.md) did 4.1 in 14h15m, but it entered BN4",
+    "holding SF1.1 earned in a 21-minute manual BN1. This leg enters with",
+    "nothing, so 14h15m is a reference point, not a target to miss.",
+    "",
+    "Each entry is the BEST result we have actually observed on that profile, not",
+    "a target and not a guess. Some of these numbers are FAILURES; they are here",
+    "because a failure you have measured is the starting point of the next",
+    "improvement.",
+    "",
+    "RULES.",
+    "  1. Only ever move a number in the improving direction, and only from a run",
+    "     you actually observed. Never relax one to make a red run green.",
+    "  2. `timeToGoalHours` and `firstInstallHours` improve DOWNWARD.",
+    "     `augmentationsAt`, `installs` and `reached` improve UPWARD.",
+    "  3. `provenance` pins the simulator semantics these numbers were measured",
+    "     under. Bumping SIMULATOR_MODEL_VERSION or the vendored commit changes",
+    "     what the simulator DOES, so old numbers stop being comparable.",
+    "",
+    "HOW TO RE-MEASURE. Cheaper than BN1 -- a money-starved node runs fewer",
+    "scripts, so 24 virtual hours costs ~11 wall minutes rather than hours:",
+    "  bun run long bn4                             # the validity smoke, 15 vmin",
+    "  bun run bench:sim:leg-bn4.1                  # the benchmark, seeds 1-3",
+    "  bun run sim -- --profile leg-bn4.1 --seed 3 --horizon 72h --compact --perf"
+  ],
+  "provenance": {
+    "simulatorModelVersion": 11,
+    "vendorCommit": "3162fd2590e221eadd0c0fbd46151913f7c4c41c",
+    "recordedAt": "2026-08-29",
+    "recordedFrom": "the BN4 leg-1 pass: dnet added to BN4's leg surface, DarknetMoneyMultiplier read from the static table rather than the SF5-gated getter, ServerMaxMoney folded into the unmeasured-money prior"
+  },
+  "target": {
+    "note": "Unknown. Seed 3 at a 30h horizon reached 8 installs and was still running with 21.3h of route ETA left, which puts this leg somewhere near 50h -- roughly 3.5x the historical 14h15m, which had SF1.1 that this leg does not. That is a projection from a live controller rather than the frozen snapshot the pre-fix numbers gave, but it is still a projection: no seed has completed the node."
+  },
+  "profiles": {
+    "leg-bn4.1": {
+      "goal": "bn:4 + installs:2",
+      "horizonHours": 24,
+      "reached": false,
+      "firstInstallHours": 1.067,
+      "secondInstallHours": 4.79,
+      "bestAugmentationsAt24Hours": 31,
+      "bestRouteEtaHoursAt24Hours": 45.81,
+      "what": "Genuinely fresh BN4 start -- 8 GB home, $1,000, no Source-Files -- with the full playable surface including dnet. Route leg 0 of all-sf3-bn4-first.",
+      "note": "NOT REACHED on any seed in 24h. These are the FIRST numbers taken from a controller that runs the whole horizon: every earlier measurement of this leg was truncated by the ns-proxy deadlock at 21-24h (see openDefects). Seed 3 is the deep one -- 6 installs, 31 augs, hacking 681, $55.9b, 45.81h of route ETA remaining at the horizon. Seed 1 is much weaker at 4 installs / 10 augs / 333.3h remaining, so seed spread is still large and still unexplained. Seed 2 did not finish: it crashed Bun at 58.69 GB RSS (openDefects/memory-blowup-on-long-runs), so this is a 2-of-3 batch and should be re-run once that is fixed. No seed shows a resident placement warning any more, where the pre-fix runs showed 12,908.",
+      "history": [
+        "2026-08-29 (model 11, first measurement ever, 3 seeds at 24h): 3/3 valid, 0/3 reached. First install 1.067h (seed 3), second 4.790h (seed 1). Install cadences: s1 1.117/4.790/9.614/11.820/16.421/22.113/22.815/23.729h, s2 4.446/11.565/16.378h, s3 1.067/5.036/8.742/11.561/19.706/21.363h. At the horizon -- s1 31 augs/8 installs/hacking 385/$10.5M/60.1h remaining, s2 30 augs/3 installs/hacking 622/$18.4b/43.7h remaining, s3 35 augs/6 installs/hacking 867/$420b wealth/16.1h remaining. Route `daedalus` on all three; the reputation leg is unmeasured on all three.",
+        "2026-08-29 (model 11, horizon probes): seed 1 at 120h and seed 3 at 72h both DNF with zero progress after t=24.4h and t=21.4h respectively. Seed 3's 72h reading is identical to its 24h reading on installs, augs, hacking, trades and route ETA (16.1h remaining, frozen). The leg's blocker is a hard stop on the Daedalus reputation chain, not the horizon and not BN4's income multipliers.",
+        "2026-08-29 (model 11, --perf A/B): the same command with and without --perf diverged within 30 virtual minutes, traced to a single Math.random() draw in initTelemetry shifting the simulator's seeded stream, and FIXED. Telemetry-on now reproduces the --perf trajectory exactly at 30h. These numbers are unaffected: they were always on the unshifted stream.",
+        "2026-08-29 (model 11, diagnosis): the 21-24h stop is a controller deadlock, not a strategy outcome. The ns-proxy resident needs a 162.1 GB placement (a 160 GB declared union of batched calls) that no host can hold, and #respawn retries it forever while the controller awaits it. Every telemetry topic goes silent 2.1h before the horizon while the engine completes all 432,000 cycles.",
+        "2026-08-30 (model 11, first post-deadlock-fix measurement, 24h): 2/3 seeds completed (seed 2 crashed Bun at 58.69 GB RSS). s1 4 installs/10 augs/hacking 472/$83.2b/333.3h remaining; s3 6 installs/31 augs/hacking 681/$55.9b/45.81h remaining. First install 1.067h (s3), second 4.790h (s1). Zero resident warnings."
+      ],
+      "measuredUnder": "--perf, post-deadlock-fix. Telemetry-on reproduces --perf exactly since the seeded-stream fix, so the mode no longer changes the result."
+    }
+  },
+  "openDefects": [
+    {
+      "id": "perf-build-plays-a-different-game",
+      "status": "FIXED 2026-08-29, with a regression test",
+      "what": "`--perf` (telemetry off) and the ordinary telemetry build played measurably different games from the same seed, which AGENTS.md forbids: 'A --perf build must be behaviourally identical to a telemetry build -- only quieter.' On leg-bn4.1 seed 3 at a 30h horizon, --perf reached 6 installs / 35 augs / hacking 867 / 16.12h route ETA while telemetry on reached 2 installs / 24 augs / hacking 379 / 151.18h.",
+      "cause": "`initTelemetry` built its run id from `Math.random()` (game/lib/telemetry.ts). The simulator replaces `Math.random` with the run's SEEDED stream (sim/realm/timers.ts:168), so that single draw shifted every later random number in the process. Each mode stayed internally deterministic, which is why the divergence read as a strategy result rather than as a seed shift.",
+      "fix": "The run id is now derived from `shortIdentity(identity.install.id)` -- state the run already holds, no RNG, still unique. Verified: telemetry-on and --perf now agree EXACTLY at a 30h horizon, prestiges [1.067, 5.036, 8.742, 11.561, 19.706, 21.363] and identical installs/augs/hacking/trades/route ETA. Pinned by tests/telemetry-client.test.ts, which asserts initTelemetry takes ZERO draws and fails on the old line.",
+      "impactOnRecordedEvidence": "NONE, and this is the important correction. The unshifted stream is the --perf one, and every route-leg baseline in this repo was recorded under --perf, so no recorded number moves. The bug was also inert in the real game, where `Math.random` is not seeded. What it broke was comparability: any simulator run taken with telemetry on -- a UI-attached run, a dashboard session -- was not comparable to the --perf benchmarks it would be read against."
+    },
+    {
+      "id": "controller-deadlocks-on-an-unplaceable-ns-proxy-batch",
+      "what": "DIAGNOSED. leg-bn4.1 does not stall on strategy -- the CONTROLLER LOOP STOPS. At t~21.9h the ns-proxy resident `nsp` needs a 162.1 GB placement that no host in the fleet can hold, and `NsProxy.#respawn` (game/lib/ns-proxy.ts:528-605) retries it in an unbounded `for(;;)` loop. The controller awaits that call, so it never completes another pass: every telemetry topic goes silent at 21.89-21.97h with hours of horizon left, no installs happen, no augmentations are bought, and the published route ETA freezes at its last value. The run stays `valid` with no crashes and no unmodeled calls, because nothing actually fails -- it waits forever.",
+      "evidence": [
+        "The run prints it: sim.result `output` carries `WARNING: ns resident nsp cannot be PLACED at all (needs 162.1GB) -- retrying; no host in the fleet has that much free.` and the same at 82.1 GB earlier.",
+        "Every topic stops publishing at once, 2.1 hours before the horizon: progression 21.97h, arbitration 21.97h, factions 21.95h, career 21.91h, player 21.89h, endgame.route 21.70h, against a 24h horizon.",
+        "The engine is fine -- engineCycles=432000 is exactly 24h of 200ms cycles. Already-dispatched work continues without the controller: charisma 575 -> 711 and money $54.3b -> $56.6b after it goes silent, while hacking (+12), installs, augmentations and stock trades are frozen.",
+        "Reproduced by a probe matching the CLI exactly (label, profile, experiment, goFidelity, allowBitNodeCompletion): prestiges [1.067, 5.036, 8.742, 11.561, 19.706, 21.363], identical to bench:sim:leg-bn4.1."
+      ],
+      "suspect": "Not yet isolated, and note it must be re-established under whichever mode survives openDefects/perf-build-plays-a-different-game: the freeze above is a property of the --perf trajectory. A filtered telemetry-on probe of the same leg did NOT reproduce it -- there faction reputation accrues steadily (The Black Hand 3,188 -> 162,927 rep over 19.2h-24.25h) toward a 7-augmentation package -- but that probe is a different trajectory for the same reason.",
+      "nextStep": "Two candidate fixes, and the choice is a design decision in a load-bearing subsystem rather than a bolt-on. (1) Chunk the declared union: unlike a single indivisible call, a 160 GB union of many calls can be split into placeable batches, which is the direct fix. (2) Bound the retry: `#respawn` should not spin forever on a requirement no host can ever satisfy -- it should surface a blocker the way factions does for the 80 GB SingularityFn3 wall (shared/strategy/factions/decide.ts:379), so the run fails loudly instead of going quiet. Doing (2) alone would turn a silent stall into a diagnosable one without unblocking the leg.",
+      "cause": "TWO defects in `game/lib/ns-proxy.ts`, compounding. (1) `#guaranteeFit` capped what it ASKED for at MAX_ASK_GB (64) while demanding the uncapped priced sum, so the arena reserved 65.6 GB for a respawn that would accept nothing under 162.1 GB -- ask and demand could never meet. (2) `priceCall` returned the 80 GB `UNKNOWN_CALL_GB` fallback whenever `getFunctionRamCost` threw, which includes the transient case where `nsMain()` is momentarily unpublished (it is, across a prestige -- the first 162.1 GB demand lands in the same instant as the third install). The union sums that guess once PER member, so the two-path dnet `guaranteeFit` demanded 2 x 80 = 160 GB for calls that really cost 0.05 and 1.3 GB.",
+      "whyItIsADeadlock": "The controller needs the placement to act; the placement needs free fleet RAM; freeing it means buying a bigger server, which is `hacking:infrastructure:ram` wanting $3.16t and DENIED (`reason: outbid`, `available: 0`) while stock holds the bankroll as working capital; and issuing that purchase requires the controller, which is blocked. Nothing in the loop can break the cycle, which is why it survives to a 120h horizon.",
+      "status": "FIXED 2026-08-30, with regression tests",
+      "fix": "`priceOf` now reports whether the runtime actually gave a price, so a GUESS can inform the ask but never becomes an unsatisfiable floor; a partly-guessed union is held to what a resident can be granted, while a fully-priced one keeps its floor however large, because those calls genuinely cannot run in less. `#guaranteeFit` now raises the ask to cover its own floor. And `#respawn` gained the failure exit it never had: a minute of unbroken refusal is declared impossible and throws, emitting `proxy.impossible`, so a demand the fleet cannot meet becomes a fault a feature can report instead of a silent halt that takes the whole controller with it. Pinned by tests/ns-proxy.test.ts and tests/ram-budget.test.ts.",
+      "result": "leg-bn4.1 seed 3 at a 30h horizon: prestiges [1.067, 5.036, 8.742, 11.561, 17.99, 23.087, 25.603, 26.239] against [1.067, 5.036, 8.742, 11.561, 19.706, 21.363] before -- three installs past the old freeze point, 8 installs against 6, hacking 947 against 867, 1,183 stock trades against 632, $2.6t cash against $75b, and ZERO resident placement warnings where there were 12,908 undersized refusals."
+    },
+    {
+      "id": "daedalus-reputation-unmeasured",
+      "what": "The `daedalus reputation` route leg is `measured: false` on every seed at the horizon, at 4.2h/26.5h/42.7h, and is the largest remaining term on seeds 1 and 2. bn1.json names the same wall for BN1: 'the Daedalus favor-unlock reputation leg at a measured-but-starved work rate (factions loses the slot)'. It is therefore not a BN4 problem, but BN4 is where it decides the leg.",
+      "evidence": "strategy.routeParts in all three seeds' sim.result",
+      "nextStep": "Attack it as a factions/arbiter question, not a BN4 one; a fix moves both legs."
+    },
+    {
+      "id": "dnet-launch-refusals",
+      "what": "Enabling dnet on BN4's surface exposed a high-volume dispatch refusal: 9,693 refusal incidents on seed 1 alone, 64,283 across seeds 2-3, spanning 1,904 distinct darknet hosts. The wanted RAM is often BELOW the reported room (e.g. `phish x3 wanted 11.10GB, room 11.85GB`), yet `exec` returns 0. game/dnet/controller.ts already logs once per incident and treats `exec` returning 0 as ambiguous between a missing script, a host that cannot fit, and a refused darknet check -- so this may be the session check rather than RAM. It did not invalidate any run.",
+      "evidence": "the `[dnet] launch refused` lines in the seeds 1-3 bench logs",
+      "nextStep": "Decide whether the refusals cost throughput or are ordinary darknet-host churn (hosts mutate, so new hostnames are expected). If they are real, `durableRoomGb` and the engine disagree about what fits."
+    },
+    {
+      "id": "memory-blowup-on-long-runs",
+      "status": "OPEN, found while re-measuring after the deadlock fix",
+      "what": "A 24h leg-bn4.1 seed crashed Bun outright -- `panic(main thread): Segmentation fault`, RSS 58.69 GB, peak 0.07 TB, after 1,553s. Seeds 1 and 3 of the same batch completed valid; seed 2 died. An earlier dnet-off control run died the same way (exit 133). REPRODUCED: a second 30h seed-3 run reached 59.87 GB RSS on the same trajectory and was killed before it could segfault. It is not caused by the ns-proxy fix -- it reproduces on the reviewed code and on the code before it -- but it now BLOCKS verification, because a full-horizon leg run is the only way to check the leg end to end and it does not reliably survive one.",
+      "whyItSurfacedNow": "Probably not new. Before the ns-proxy fix these runs wedged at ~21h and coasted doing almost nothing, so they never reached the memory the working controller needs. A run that actually keeps deciding for 24 virtual hours is a much heavier run.",
+      "nextStep": "Profile a long run's heap (`bun run sim:profile --cpu-prof` has a sampler; the equivalent for allocation is what is needed). spec/simulator.md already records that run cost grows with run length (-77% throughput decay across a 24h run) and calls it the simulator's historically worst class of bug; this looks like the same lead reaching its conclusion. Until it is fixed a 3-seed 24h batch is not reliably completable on this machine."
+    }
+  ]
+}

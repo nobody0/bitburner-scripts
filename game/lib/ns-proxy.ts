@@ -145,7 +145,7 @@ export const UNKNOWN_CALL_GB = 80;
  * stop somewhere; past this, recycling is the cheaper trade. It bounds only
  * the ask — one call priced above it still raises the floor and places,
  * because that call cannot run any other way. */
-const MAX_BUDGET_GB = 64;
+export const MAX_ASK_GB = 64;
 
 /** `exec` returns 0 for a transient condition as readily as a permanent one —
  * the target host can be momentarily full because a process has not been
@@ -153,13 +153,27 @@ const MAX_BUDGET_GB = 64;
  * macrotask to win the reap race, then the delay escalates to a 1 s ceiling.
  * A resident that cannot exec means its reservation is violated; throwing
  * would trade a visible stall for a dead controller, so slowness is reported
- * instead — `proxy.slow` events and one tprint per incident. */
+ * instead — `proxy.slow` events and one tprint per incident.
+ *
+ * This stays true of a REFUSED EXEC specifically. `IMPOSSIBLE_AFTER_MS` below
+ * is a bound on an unplaceable FLOOR — the fleet never offering a big enough
+ * block — and deliberately does not apply once an adequate block has been
+ * offered, because then RAM demonstrably is not the problem and the condition
+ * really is transient (an unsynced resident script, a host mid-reap). */
 const FAST_RETRIES = 10;
 const RETRY_CEILING_MS = 1_000;
 const SLOW_AFTER_MS = 1_000;
 const SLOW_REEMIT_MS = [10_000, 60_000];
 const SLOW_PERIOD_MS = 60_000;
 const WARN_AFTER_MS = 30_000;
+/** How long a placer may keep offering nothing, or too-small blocks, before
+ * the FLOOR is declared impossible. Comfortably past `WARN_AFTER_MS`, so the
+ * warning is still the first thing an operator sees, and past any plausible
+ * burst of farm pressure: the fleet frees a hack block every weaken cycle, so
+ * a minute of unbroken refusal is a structural answer rather than a busy
+ * moment. It bounds the PLACEMENT only — see `FAST_RETRIES` for why a refused
+ * `exec` is a different question and stays unbounded. */
+const IMPOSSIBLE_AFTER_MS = 60_000;
 
 /** How long a clean shutdown waits for the resident's own atExit before giving
  * up and re-execing anyway. The engine frees a dead process's RAM one tick
@@ -245,12 +259,43 @@ const nsMain = (): NS => {
  * every SF4 level and inside BN4 without the caller knowing which it is in.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L1501-L1507 */
 export function priceCall(path: string): number {
+  return priceOf(path).gb;
+}
+
+/** A price plus whether the runtime actually gave it.
+ *
+ * The distinction is load-bearing, and its absence wedged a whole run. A
+ * GUESS may inform what a resident asks for, but it must never become a hard
+ * floor: `UNKNOWN_CALL_GB` is 80, so two unpriceable paths in one
+ * `guaranteeFit` union demanded a 162.1 GB contiguous block that no host in
+ * the fleet could ever serve, `#respawn` refused every 65.6 GB grant it was
+ * offered, and the controller behind it never ran again. The calls in question
+ * really cost 0.05 and 1.3 GB.
+ *
+ * `getFunctionRamCost` throws for a name the runtime does not know — a renamed
+ * API, the genuine case this fallback exists for — and also whenever
+ * `nsMain()` is momentarily unpublished, which is transient and says nothing
+ * about the call at all. Neither is evidence that the call is enormous. */
+export function priceOf(path: string): { gb: number; known: boolean } {
   try {
-    return nsMain().getFunctionRamCost(path);
+    return { gb: nsMain().getFunctionRamCost(path), known: true };
   } catch {
-    return UNKNOWN_CALL_GB;
+    return { gb: UNKNOWN_CALL_GB, known: false };
   }
 }
+
+/** The largest budget a resident may DEMAND on the strength of a guessed
+ * price. A real price above this still raises the floor -- that call cannot
+ * run any other way -- but a guess has no such standing, so it is held to what
+ * a resident can actually be granted. Under-allocating risks the engine
+ * killing the resident mid-call, which is loud and recoverable; the
+ * alternative is a silent permanent halt.
+ *
+ * In the same units as `#preferredGb` and `#respawn`'s `needGb`: the resident
+ * BUDGET, exclusive of `RESIDENT_BASE_GB`, which `#respawn` adds on to form
+ * `minGb`. Adding the base here too would demand a block 1.6 GB larger than
+ * the ceiling the ask is bounded by, which is the one thing this must not do. */
+const GUESSED_FLOOR_CEILING_GB = MAX_ASK_GB;
 
 function resolvePath(ns: NS, path: string): (...args: unknown[]) => unknown {
   let current: unknown = ns;
@@ -340,8 +385,31 @@ class Resident {
   ): Promise<T> {
     const declared = [...new Set(paths)];
     if (declared.length === 0) throw new Error("nsp.guaranteeFit requires at least one declared path");
-    const costs = new Map(declared.map((path) => [path, priceCall(path)]));
+    const priced = new Map(declared.map((path) => [path, priceOf(path)]));
+    const costs = new Map([...priced].map(([path, price]) => [path, price.gb]));
     const declaredGb = [...costs.values()].reduce((sum, cost) => sum + cost, 0);
+    // THE ASK MUST COVER THE DEMAND. This union capped what it ASKED for at
+    // MAX_ASK_GB while demanding the uncapped sum, so the arena reserved 65.6 GB
+    // for a respawn that would accept nothing under 162.1 GB and the two could
+    // never meet. A union is also where a guessed price does the most damage,
+    // because `UNKNOWN_CALL_GB` is summed once PER unpriceable member: two
+    // unknown names alone out-demand every host in an early fleet, and on
+    // leg-bn4.1 that silently ended the run. A partly-guessed union is
+    // therefore held to what a resident can actually be granted; a fully
+    // priced one keeps its floor, however large, because those calls genuinely
+    // cannot run in less -- and the ask below rises to match it.
+    // Only the GUESSED part of the sum may be clamped away. The measured part
+    // is evidence: a union of a real 80 GB SF4-level-1 singularity read and one
+    // renamed name must still be granted the 80 GB, or the engine kills the
+    // resident mid-call on a demand it could in fact have met.
+    const knownGb = [...priced.values()].reduce((sum, price) => sum + (price.known ? price.gb : 0), 0);
+    const anyGuessed = [...priced.values()].some((price) => !price.known);
+    const floorGb = anyGuessed
+      ? Math.max(
+        knownGb + PRICE_MARGIN_GB,
+        Math.min(declaredGb + PRICE_MARGIN_GB, GUESSED_FLOOR_CEILING_GB),
+      )
+      : declaredGb + PRICE_MARGIN_GB;
     const missingGb = declared.reduce(
       (sum, path) => sum + (this.#ns !== undefined && this.#paid.has(path) ? 0 : costs.get(path)!),
       0,
@@ -358,10 +426,14 @@ class Resident {
         });
         const workingSetGb = this.#paidGb + missingGb + PRICE_MARGIN_GB;
         if (workingSetGb > this.#preferredGb) {
-          this.#preferredGb = Math.min(workingSetGb, MAX_BUDGET_GB);
+          this.#preferredGb = Math.min(workingSetGb, MAX_ASK_GB);
         }
       }
-      await this.#respawn(reason, declaredGb + PRICE_MARGIN_GB);
+      // MAX_ASK_GB bounds appetite, not a floor this sequence cannot run
+      // without: the arena reserves the ask, so an ask below the floor is a
+      // reservation that can never satisfy the respawn it exists for.
+      if (floorGb > this.#preferredGb) this.#preferredGb = floorGb;
+      await this.#respawn(reason, floorGb);
     }
 
     // A placer may grant less than the preferred working set, but never less
@@ -415,6 +487,8 @@ class Resident {
     // simply raises the floor, and the placer finds a host that fits. The
     // pre-SF4-level-3 singularity reads (48-80 GB) and destroyW0r1dD43m0n
     // arrive here and nowhere else.
+    // One call raises BOTH the floor and the ask, so the arena reserves exactly
+    // what the respawn will demand and the two can never disagree.
     const needGb = costGb + PRICE_MARGIN_GB;
     if (needGb > this.#preferredGb) this.#preferredGb = needGb;
     if (!this.#ns || this.#paidGb + costGb > this.#budgetGb) {
@@ -435,7 +509,7 @@ class Resident {
         // fleet grows.
         const workingSetGb = this.#paidGb + costGb + PRICE_MARGIN_GB;
         if (workingSetGb > this.#preferredGb) {
-          this.#preferredGb = Math.min(workingSetGb, MAX_BUDGET_GB);
+          this.#preferredGb = Math.min(workingSetGb, MAX_ASK_GB);
         }
       }
       await this.#respawn(reason, needGb);
@@ -533,6 +607,10 @@ class Resident {
     let slowEmits = 0;
     let attempts = 0;
     let incident = "";
+    /** Largest block the placer has actually offered this respawn. Zero while
+     * it has offered nothing at all, which is ordinary fleet pressure rather
+     * than an impossible demand. */
+    let bestOfferGb = 0;
 
     for (;;) {
       attempts++;
@@ -565,12 +643,38 @@ class Resident {
         this.#placement = undefined;
       } else if (next !== undefined) {
         // A grant below the floor would be killed mid-call for overrunning.
+        if (next.gb > bestOfferGb) bestOfferGb = next.gb;
         next.release();
         if (next === held) this.#placement = undefined;
         proxyEventSink?.("proxy.undersized", { label: this.#label, grantedGb: next.gb, minGb });
       }
 
       const waitMs = Date.now() - startedAt;
+      // IMPOSSIBLE, NOT MERELY SLOW. A minute of unbroken refusal — whether the
+      // placer offers nothing at all or keeps offering a block too small — is a
+      // structural answer, not a busy moment: the farm frees a hack block every
+      // weaken cycle. This loop had no other exit. Left unbounded it takes the whole
+      // controller with it: `#tail` serializes every queued call behind the
+      // respawn, so one impossible floor silently ends the run while the
+      // engine keeps cycling and the workers keep earning. Fail loudly
+      // instead; a call that throws is a fault a feature can report, and the
+      // resident stays usable for everyone else.
+      //
+      // ONLY the floor. `incident` is assigned exactly when an adequate block
+      // WAS obtained and the engine then refused the exec — a resident script
+      // that is not synced yet, or a host mid-reap. RAM is not the answer
+      // there, the error below would blame it anyway (`bestOfferGb` counts
+      // undersized offers only), and `FAST_RETRIES` says that case must keep
+      // retrying. So it is excluded.
+      if (waitMs >= IMPOSSIBLE_AFTER_MS && incident === "") {
+        proxyEventSink?.("proxy.impossible", {
+          label: this.#label, minGb, bestOfferGb, preferredGb, attempts, waitMs,
+        });
+        throw new Error(
+          `ns resident ${this.#label} needs ${minGb}GB and the fleet's best offer in`
+          + ` ${Math.round(waitMs / 1000)}s was ${bestOfferGb}GB`,
+        );
+      }
       if (waitMs >= nextSlowAt) {
         proxyEventSink?.("proxy.slow", { label: this.#label, minGb, preferredGb, attempts, waitMs });
         slowEmits++;
