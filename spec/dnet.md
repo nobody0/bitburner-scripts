@@ -686,12 +686,17 @@ stamp to be raced clear.
 
 The managed dispatch cycle also RACES its own RAM. A handoff (the resident
 exiting for the dispatcher, or a finished order) wakes the controller
-synchronously, but the engine frees the dead process's allocation one tick
-later — so a same-instant replant reads a "full" host that is actually empty.
-Two rules bridge the tick: `preparePlant`'s fit-guard judges a claim against
+synchronously, but the engine can still expose the retiring allocation to the
+next `exec` — so a same-turn replant reads a "full" host that is actually empty.
+Two rules bridge that turn: `preparePlant`'s fit-guard judges a claim against
 durable CAPACITY (`maxRam − blockedRam − proberGb`, never `getServerUsedRam`),
-and a refused plant `exec` takes a 300 ms breath and retries twice before it
-counts as a real refusal.
+and a genuinely refused replant `exec` waits 300 ms before each of two retries.
+The controller records retirement independently of surviving process handles,
+so both the replacement prober and resident receive that grace after
+`retireVantage` cleared the old pair. Initial launches have no retiring
+predecessor to wait for. The wait is a realm timer, not a microtask yield or a
+Netscript call; an uncaptured child is never retried because it may already hold
+the target's RAM.
 
 The automatic ordinary-backdoor policy treats those mutation branches as a
 recycler. It holds exactly two, avoiding both global authentication penalties,
@@ -1433,7 +1438,9 @@ Ordinary agents launch through the host's prober lender. A stasis prober is
 probe-only; its agents launch through one atomic shared-proxy lease that
 prepays `connectToSession` and `exec`, runs both on the same resident PID, and
 prevents a recycle between them. If that resident dies, the controller retries
-the entire pair on a fresh proxy process.
+the entire pair on a fresh proxy process. An `exec` refusal takes the same
+300 ms grace as a plant launch, inside the managed dispatch's five-second
+deadline, so all three attempts cannot race the same retiring allocation.
 
 **The rule that nearly makes this impossible.** A session belongs to the PID,
 so one process cannot authenticate on behalf of another.
@@ -1637,6 +1644,14 @@ bodies, `game/dnet/shared.ts` the contract between them.
    deferred into the controller's next derive microtask so the engine has freed
    the old allocation before another `exec` is attempted. No idle agent and no
    agent-to-agent handoff exists.
+
+A plant's first-probe barrier is stronger than receipt of the probe callback.
+The controller folds the report, runs the resulting derive, files the new
+host's first eligible order, and only then releases the plant to
+`claimPlanted`. If no order remains and a prober is already standing, the plant
+closes successfully without launching a base agent whose only possible action
+would be to exit immediately; later work launches through that prober or the
+managed stasis path.
 
 All automation-owned `exec` and armour `spawn` calls set `temporary: true`, so
 these short-lived processes do not inflate the save's completed-script history.

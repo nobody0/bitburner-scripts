@@ -4,12 +4,14 @@ import { isDarknetDataFile, parseDarknetFileClue } from "../../shared/strategy/d
 import { harvestLogs } from "../../shared/strategy/dnet/oracle.ts";
 import { grammarDrift, LOG_LINES, targetStateFor } from "./report-shared.ts";
 import { handoffLaunch, temporaryRunOptions, type LaunchOutcome } from "../lib/launch-shared.ts";
+import { realmSleep } from "../lib/wake.ts";
 import type { DnetAgentLaunch, DnetProberLaunch } from "./launch.ts";
 import {
   live,
   priceOf,
   PROBER_GB,
   PROBER_STASIS_GB,
+  REFUSED_EXEC_RETRY_MS,
   SCRIPT_BASE_GB,
   processSizeFor,
   type AgentIo,
@@ -251,7 +253,7 @@ async function plantOne(
   }
 
   // A replant can race RAM cleanup for the process it replaces. Retry only a
-  // refused exec after yielding the microtask queue.
+  // refused exec after giving the engine a real timer turn to release it.
   // ONLY a refused exec is retried. `handoffLaunch` also returns 0 when the
   // child DID start and merely failed to acknowledge its descriptor in time:
   // that process is alive and holding its RAM (and an agent with no
@@ -265,15 +267,18 @@ async function plantOne(
   const lastOutcome: LaunchOutcome = {};
   const execWithGrace = async (
     launchAttempt: (outcome: LaunchOutcome) => Promise<number>,
+    retiringAllocation: boolean,
   ): Promise<number> => {
     for (let attempt = 0; ; attempt++) {
       const outcome: LaunchOutcome = {};
       const pid = await launchAttempt(outcome);
       lastOutcome.refused = outcome.refused;
       lastOutcome.uncaptured = outcome.uncaptured;
-      if (pid !== 0 || outcome.refused !== true || attempt >= 2) return pid;
-      // Process cleanup completes on the microtask queue; no timed sleep is needed.
-      await Promise.resolve();
+      if (pid !== 0 || outcome.refused !== true || !retiringAllocation || attempt >= 2) return pid;
+      // A Netscript sleep would occupy this process's one allowed API-call
+      // slot while the timer is pending. The realm timer yields the browser
+      // turn needed for RAM retirement without colliding with the next exec.
+      await realmSleep(REFUSED_EXEC_RETRY_MS);
     }
   };
   /** The block at the moment a launch failed. `getServerMaxRam` is NOT in this
@@ -299,7 +304,7 @@ async function plantOne(
         launchId,
       ),
       outcome,
-    ));
+    ), false);
     if (pid === 0) {
       count(LOCAL_CODE.LaunchRefused);
       return diagnose("exec refused while launching local reclaim", "launch-refused");
@@ -317,7 +322,8 @@ async function plantOne(
   const controller = live();
   // Claim the queued successor before sizing the exec. Stasis-linked targets
   // are remotely recoverable, and may already own the ordinary constant probe.
-  const prepared = controller?.preparePlant(target.host) ?? { reuseProber: false };
+  const prepared = controller?.preparePlant(target.host)
+    ?? { reuseProber: false, retiringAllocation: false };
   const omitProber = target.omitProber === true || prepared.reuseProber;
   const claim = omitProber ? undefined : await controller?.beginProbeRefresh(target.host);
   const proberPid = omitProber
@@ -335,7 +341,7 @@ async function plantOne(
             ramOverride: target.controllerManaged === true ? PROBER_STASIS_GB : PROBER_GB,
           }), launchId),
           outcome,
-        ))
+        ), prepared.retiringAllocation)
         : -1;
   if (proberPid === 0) {
     if (claim !== undefined) controller?.cancelProbeRefresh(target.host, claim.refresh);
@@ -361,6 +367,19 @@ async function plantOne(
   // revealed. Take that order and size the exec for it so the new process
   // starts on useful work immediately.
   const claimed = controller?.claimPlanted(target.host);
+  // A prober is already a complete standing vantage. If the probe produced no
+  // order, do not exec a base-sized agent whose first line can only discover
+  // that same absence and exit. Later work launches through the lender (or the
+  // managed stasis path) in the ordinary controller pass.
+  if (claimed === undefined && (prepared.reuseProber || proberPid > 0)) {
+    controller?.abandonPlant(target.host);
+    return {
+      ok: true,
+      codes,
+      host: seen(),
+      detail: `${target.host}: prober ready; no queued order requires an agent`,
+    };
+  }
   const { threads: agentThreads, ramOverride: agentRam } = processSizeFor(
     claimed,
     SCRIPT_BASE_GB,
@@ -377,7 +396,7 @@ async function plantOne(
       launchId,
     ),
     outcome,
-  ));
+  ), prepared.retiringAllocation);
   if (pid === 0) {
     if (proberPid > 0) jobNs["kill"](proberPid);
     // Hand the claimed first order back: nothing is coming to run it.

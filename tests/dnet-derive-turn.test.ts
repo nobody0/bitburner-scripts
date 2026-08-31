@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
-import { dnetRealm, processSizeFor, type ControllerHandle, type HostEntry, type Order } from "../game/dnet/shared.ts";
+import { dnetRealm, processSizeFor, REFUSED_EXEC_RETRY_MS, type ControllerHandle, type HostEntry, type Order } from "../game/dnet/shared.ts";
 import { handoffLaunch, resetLaunchState } from "../game/lib/launch-shared.ts";
 import type { DnetRecoveryState } from "../game/dnet/wire.ts";
 
@@ -11,8 +11,9 @@ import type { DnetRecoveryState } from "../game/dnet/wire.ts";
  * staged queue before the SAME process's exit chain reads it, or the plant
  * waits a tick — and the `.d` hint file waiting on the opened host names a
  * neighbour as of the authenticate instant, so a tick of slack loses it to
- * `exactNeighbourClueEpoch`. These tests therefore advance NO timers: every
- * assertion is reached by draining microtasks alone. */
+ * `exactNeighbourClueEpoch`. Fact-to-order assertions therefore advance no
+ * timers; the explicit refused-exec regression later waits for its real retry
+ * grace because a timer turn is the behavior it pins. */
 
 const VANTAGE = "vantage";
 const TARGET = "target";
@@ -279,6 +280,7 @@ describe("a fact derives in its own turn", () => {
       label: "induce target",
       payload: {},
     });
+    first.hosts.get(VANTAGE)!.retiredAllocationAt = Date.now();
     first.deps.recordCredential({ hostname: TARGET, password: "1234", at: Date.now() });
     await settleMicrotasks();
 
@@ -292,6 +294,7 @@ describe("a fact derives in its own turn", () => {
     const durable = captured.recovery.knowledge.hosts.get(VANTAGE)! as HostEntry;
     expect(durable.agent).toBeUndefined();
     expect(durable.ns).toBeUndefined();
+    expect(durable.retiredAllocationAt).toBeUndefined();
 
     durable.depth = 999;
     expect(first.snapshot().recovery.knowledge.hosts.get(VANTAGE)?.depth).not.toBe(999);
@@ -394,8 +397,12 @@ describe("a fact derives in its own turn", () => {
     // What the plant body does: open the window, then report the new host's
     // own first probe. TARGET still has no process at all.
     handle.preparePlant(TARGET);
-    handle.reportProbe(TARGET, [VANTAGE], Date.now(), 12);
-    await settleMicrotasks();
+    const barrier = await handle.beginProbeRefresh(TARGET);
+    handle.reportProbe(TARGET, [VANTAGE], Date.now(), 12, barrier.refresh);
+    // The barrier itself must imply that derivation has filed the first order.
+    // Requiring a separate microtask drain here hid the real plant ordering:
+    // the waiting body resumes as soon as this promise does.
+    await expect(barrier.refresh.refreshed).resolves.toBeDefined();
     expect(handle.hosts.get(TARGET)?.agent).toBeUndefined();
 
     // The derive staged work for it anyway, and the plant hands that order to
@@ -625,6 +632,9 @@ describe("armour is resized at the order boundary", () => {
       labExpected: false,
       stasisSnapshot: { hosts: [VANTAGE], at: Date.now() },
     });
+    await settleMicrotasks();
+    expect(leaseAttempt).toBe(1);
+    await new Promise<void>((resolve) => setTimeout(resolve, REFUSED_EXEC_RETRY_MS + 25));
     await settleMicrotasks();
 
     expect(leaseAttempt).toBe(2);

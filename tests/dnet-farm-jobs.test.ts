@@ -8,6 +8,7 @@ import { runOrder } from "../game/dnet/orders.ts";
 import {
   DNET_PROTOCOL,
   KIND_CALLS,
+  REFUSED_EXEC_RETRY_MS,
   dnetRealm,
   type AgentIo,
   type ControllerDeps,
@@ -332,7 +333,15 @@ describe("darknet farm job cache observations", () => {
     const launches: { file: string; options: { temporary?: boolean } }[] = [];
     const order: string[] = [];
     const killed: number[] = [];
-    let residentAccepted = true;
+    let proberRefusals = 0;
+    let residentRefusals = 0;
+    let reuseProber = false;
+    let retiringAllocation = false;
+    let claimedOrder: Order | undefined = makeOrder(
+      "inventory",
+      { host: "dn-1", from: "dn-1" },
+      {},
+    );
     let autoFirstReport = false;
     let reportFirst: (() => void) | undefined;
     dnetRealm().dnet_controller = {
@@ -342,9 +351,9 @@ describe("darknet farm job cache observations", () => {
       announceProbeRefresh: () => {},
       preparePlant: (host: string) => {
         order.push(`prepare:${host}`);
-        return { controllerManaged: false, reuseProber: false };
+        return { reuseProber, retiringAllocation };
       },
-      claimPlanted: (host: string) => { order.push(`claim:${host}`); return undefined; },
+      claimPlanted: (host: string) => { order.push(`claim:${host}`); return claimedOrder; },
       abandonPlant: () => {},
     } as unknown as ControllerHandle;
     const ns = {
@@ -362,6 +371,7 @@ describe("darknet farm job cache observations", () => {
         launches.push({ file, options });
         if (file.includes("prober")) {
           order.push("prober");
+          if (proberRefusals-- > 0) return 0;
           const launch = captureLaunch<DnetProberLaunch>("dnet-prober", launchId);
           const report = () => {
             order.push("first-probe");
@@ -372,14 +382,12 @@ describe("darknet farm job cache observations", () => {
         }
         else {
           order.push("agent");
+          if (residentRefusals-- > 0) return 0;
           captureLaunch<DnetAgentLaunch>("dnet-agent", launchId);
         }
-        if (!file.includes("prober") && !residentAccepted) return 0;
         return launches.length;
       },
       kill: (pid: number) => { killed.push(pid); return true; },
-      // The replant grace between refused exec attempts; instant in tests.
-      asleep: async () => true,
       getFunctionRamCost: (method: string) => method === "dnet.probe" ? 0.2 : method === "spawn" ? 2 : 0,
     } as unknown as NS;
     const planting = runOrder(
@@ -406,7 +414,7 @@ describe("darknet farm job cache observations", () => {
     launches.length = 0;
     order.length = 0;
     autoFirstReport = true;
-    residentAccepted = false;
+    residentRefusals = 1;
     const refused = await runOrder(
       ns,
       makeOrder("plant", { host: "dn-2", from: "darkweb" }, { targets: [{ host: "dn-2", password: "pw" }], payloads: ["dnet/agent.js", "dnet/prober.js"] }),
@@ -414,6 +422,45 @@ describe("darknet farm job cache observations", () => {
     );
     expect(refused.ok).toBe(false);
     expect(killed).toEqual([1]);
+
+    // Retirement is its own fact: retireVantage clears both process handles,
+    // so a replacement with no surviving prober must still grace both execs.
+    launches.length = 0;
+    order.length = 0;
+    reuseProber = false;
+    retiringAllocation = true;
+    proberRefusals = 1;
+    residentRefusals = 1;
+    const retrying = runOrder(
+      ns,
+      makeOrder("plant", { host: "dn-3", from: "darkweb" }, { targets: [{ host: "dn-3", password: "pw" }], payloads: ["dnet/agent.js", "dnet/prober.js"] }),
+      makeIo(),
+    );
+    await Promise.resolve();
+    expect(launches).toHaveLength(1);
+    await new Promise<void>((resolve) => setTimeout(resolve, REFUSED_EXEC_RETRY_MS + 25));
+    await Promise.resolve();
+    expect(launches).toHaveLength(3);
+    await new Promise<void>((resolve) => setTimeout(resolve, REFUSED_EXEC_RETRY_MS + 25));
+    await expect(retrying).resolves.toMatchObject({ ok: true });
+    expect(launches).toHaveLength(4);
+
+    // A surviving prober is already a standing vantage. With no order to run,
+    // the plant closes cleanly instead of exec'ing a base agent that exits on
+    // its first line.
+    launches.length = 0;
+    order.length = 0;
+    reuseProber = true;
+    retiringAllocation = false;
+    claimedOrder = undefined;
+    const ready = await runOrder(
+      ns,
+      makeOrder("plant", { host: "dn-3", from: "darkweb" }, { targets: [{ host: "dn-3", password: "pw" }], payloads: ["dnet/agent.js", "dnet/prober.js"] }),
+      makeIo(),
+    );
+    expect(ready.ok).toBe(true);
+    expect(launches).toEqual([]);
+    expect(order).toEqual(["scp", "prepare:dn-3", "claim:dn-3"]);
   });
 
   test("prober repair stays active until the replacement has filed its first probe", async () => {

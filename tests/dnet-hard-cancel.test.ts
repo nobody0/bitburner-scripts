@@ -211,7 +211,7 @@ function rig(): Rig {
     beginProbeRefresh: () => { throw new Error("not used"); },
     cancelProbeRefresh: () => {},
     reportProbe: () => {},
-    preparePlant: () => ({ controllerManaged: false, reuseProber: false }),
+    preparePlant: () => ({ reuseProber: false, retiringAllocation: false }),
     claimPlanted: () => undefined,
     abandonPlant: () => {},
     registerBootstrap: () => {},

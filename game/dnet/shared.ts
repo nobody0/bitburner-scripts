@@ -350,6 +350,11 @@ export interface HostEntry extends DnetHost {
      * and one that is not is a ghost. No clock is involved either way. */
     pid?: number;
   };
+  /** A controller-directed retirement recently released one or more process
+   * allocations on this host. `preparePlant` uses this fact independently of
+   * whether a prober survived: `retireVantage` clears both handles before the
+   * engine necessarily makes their RAM available to the replacement exec. */
+  retiredAllocationAt?: number;
   /** A spawn-free local reclaimer — not an agent, and must not be staged to. */
   bootstrap?: { pid: number; startedAt: number };
   /** Pending orders, kept priority-sorted; the next agent consumes one. */
@@ -432,7 +437,7 @@ export interface ControllerHandle {
   reportProbe(host: string, neighbours: readonly string[], at: number, pid: number, refresh?: DnetProbeRefresh): void;
   /** Plant calls this before launching the prober: it settles how the agent
    * will be launched and opens the placing window. */
-  preparePlant(host: string): { reuseProber: boolean };
+  preparePlant(host: string): { reuseProber: boolean; retiringAllocation: boolean };
   /** Plant calls this after the first probe and immediately before the agent
    * `exec`: it closes the placing window and hands back the order the derive
    * staged in it for the new process to adopt. The `exec` is sized from that
@@ -517,7 +522,9 @@ export const KIND_CALLS: Readonly<Record<OrderKind, readonly string[]>> = {
   // No `dnet.authenticate` (0.4 GB): a plant holds the credential already, so
   // `connectToSession` is its only way in — falling back to the expensive call
   // spent seconds re-doing work that had just succeeded, and cracking belongs
-  // to `attempt`. No `asleep` either: its retry yields a microtask now.
+  // to `attempt`. A zero-RAM realm timer provides the grace between two
+  // genuinely refused execs; a microtask does not give the browser a turn to
+  // finish retiring the allocation the launch is replacing.
   plant: ["dnet.connectToSession", "scp", "exec", "kill", "dnsLookup", ...DETAILS],
   reclaim: ["dnet.memoryReallocation", ...DETAILS],
   // Spawn-free local recovery: base + one action per thread.
@@ -535,6 +542,11 @@ export const KIND_CALLS: Readonly<Record<OrderKind, readonly string[]>> = {
   storm: ["dnet.unleashStormSeed", "ls", "read", "rm", ...DETAILS],
   relaunchProbe: ["exec"],
 };
+
+/** A refused darknet exec can be observing the allocation its predecessor is
+ * still retiring. One browser turn is required before retrying; 300 ms spans
+ * the game's ordinary 200 ms cycle without making a healthy launch wait. */
+export const REFUSED_EXEC_RETRY_MS = 300;
 
 /** The permanent prober's calls, and ONLY the two that are host-BOUND.
  *

@@ -89,6 +89,7 @@ import {
   PROBER_GB,
   PROBER_ARMOURED_GB,
   PROBER_STASIS_GB,
+  REFUSED_EXEC_RETRY_MS,
   SCRIPT_BASE_GB,
   CONTROLLER_GB,
   processSizeFor,
@@ -157,6 +158,10 @@ const DERIVE_FALLBACK_MS = 20_000;
  * new prober's first report. It exists only to answer "will this ever arrive",
  * and past this point the honest answer is no. */
 const LAUNCH_WINDOW_MS = 10_000;
+/** A deliberate kill can disappear from controller state one engine turn
+ * before its RAM allocation. Cover the complete three-attempt replant window,
+ * then stop treating later capacity failures as retirement races. */
+const RETIRING_ALLOCATION_WINDOW_MS = REFUSED_EXEC_RETRY_MS * 3;
 /** Fallback duration used only to compare loaded vantages. */
 const TYPICAL_ORDER_MS = 6_000;
 const MAX_GRAMMAR_LINES = 20;
@@ -174,7 +179,7 @@ function looseId(password: string): string {
 
 const RUNTIME_HOST_FIELDS = [
   "agentAlive", "jobFreeGb", "busy", "ns", "prober", "probeRefresh",
-  "probeRefreshPid", "agent", "inbound",
+  "probeRefreshPid", "agent", "inbound", "retiredAllocationAt",
   "bootstrap", "staged", "pendingOrder", "wake",
   "completed", "failed", "lastError",
 ] as const;
@@ -234,6 +239,23 @@ export async function main(ns: NS): Promise<void> {
   /** The fold helpers take `DnetHost` values, and a `HostEntry` IS one (its
    * runtime fields are optional), so the same map serves both. */
   const knowledge = hosts as unknown as DnetHosts;
+  /** Probe reports whose facts have landed but whose plant barrier must wait
+   * until a derive pass has filed the new host's first order. Resolving the
+   * barrier directly in `reportProbe` lets the waiting plant resume one
+   * microtask before `fileWork`, claim nothing, and launch an empty agent. */
+  const readyProbeRefreshes = new Map<DnetProbeRefresh, DnetProbeReport>();
+  const releaseProbeRefresh = (
+    entry: HostEntry,
+    value: DnetProbeReport | undefined,
+    expected?: DnetProbeRefresh,
+  ): void => {
+    const refresh = entry.probeRefresh;
+    if (refresh === undefined || (expected !== undefined && refresh !== expected)) return;
+    entry.probeRefresh = undefined;
+    entry.probeRefreshPid = undefined;
+    readyProbeRefreshes.delete(refresh);
+    refresh.settle(value);
+  };
   let mutationsSeen = restored?.knowledge.mutationsSeen ?? 0;
   const vault = new Map<string, VaultEntry>();
   /** Credentials restored from a checkpoint or disk are quarantined until an
@@ -532,6 +554,11 @@ export async function main(ns: NS): Promise<void> {
   const retireVantage = (hostname: string, reason: string, detached?: HostEntry): void => {
     const entry = hosts.get(hostname) ?? detached;
     if (entry !== undefined) {
+      const retiredAllocation = (entry.agent?.pid ?? 0) > 0
+        || (entry.prober?.pid ?? 0) > 0
+        || (entry.bootstrap?.pid ?? 0) > 0
+        || (entry.inbound?.pid ?? 0) > 0;
+      if (retiredAllocation) entry.retiredAllocationAt = Date.now();
       entry.inbound = undefined;
       if (entry.agent !== undefined) {
         entry.agent.settle({ id: entry.agent.order.id, kind: entry.agent.order.kind, host: entry.agent.order.host, from: entry.agent.order.from, ok: false, died: true, detail: reason });
@@ -546,8 +573,7 @@ export async function main(ns: NS): Promise<void> {
       entry.agent = undefined;
       entry.staged = [];
       entry.pendingOrder = undefined;
-      entry.probeRefresh?.settle(undefined);
-      entry.probeRefresh = undefined;
+      releaseProbeRefresh(entry, undefined);
       // A prober outlives the agent beside it (a finished `pin` leaves one
       // standing alone). Kill it rather than forgetting its pid, so the
       // re-plant starts from an empty host instead of around a stranded 1.8 GB.
@@ -1237,6 +1263,10 @@ export async function main(ns: NS): Promise<void> {
         pid = outcome.pid;
         failureCode = outcome.code;
         if (failureCode === 401 || failureCode === 503) break;
+        if (pid === 0 && attempt + 1 < MANAGED_DISPATCH_ATTEMPTS) {
+          const delayMs = Math.min(REFUSED_EXEC_RETRY_MS, Math.max(0, deadline - Date.now()));
+          if (delayMs > 0) await realmSleep(delayMs);
+        }
       } catch {
         // The whole authority pair is the retry unit. A resident killed from
         // outside the proxy loses its PID-bound session with it.
@@ -1965,8 +1995,7 @@ export async function main(ns: NS): Promise<void> {
       // coming to file.
       const barrier = entry.probeRefresh;
       if (barrier !== undefined && entry.probeRefreshPid === undefined) {
-        entry.probeRefresh = undefined;
-        barrier.settle(undefined);
+        releaseProbeRefresh(entry, undefined, barrier);
       }
     }
   };
@@ -2269,6 +2298,15 @@ export async function main(ns: NS): Promise<void> {
         && (entry.staged ?? []).length === 0;
     };
     for (const task of tasks) if (JOBS[task.kind].farm && spare(task.from)) file(task);
+    // The first-probe promise means "the report has been planned", not merely
+    // "the report callback ran". Release it only after filing, so the plant's
+    // immediate `claimPlanted` sees the order this probe created.
+    for (const entry of hosts.values()) {
+      const refresh = entry.probeRefresh;
+      if (refresh === undefined) continue;
+      const report = readyProbeRefreshes.get(refresh);
+      if (report !== undefined) releaseProbeRefresh(entry, report, refresh);
+    }
     // Every host that is free and holding work. `stage` starts what it files,
     // so this only catches hosts that became free since — a worker exited, a
     // refused launch was put back, a lender arrived on a host that was already
@@ -2498,9 +2536,7 @@ export async function main(ns: NS): Promise<void> {
         // The prober died between exec and settle. Left standing, every later
         // plant on this host would await a report nobody will file.
         const stale = entry.probeRefresh;
-        entry.probeRefresh = undefined;
-        entry.probeRefreshPid = undefined;
-        stale.settle(undefined);
+        releaseProbeRefresh(entry, undefined, stale);
       }
       let settled = false;
       let resolve!: (report: DnetProbeReport | undefined) => void;
@@ -2518,9 +2554,8 @@ export async function main(ns: NS): Promise<void> {
     },
     cancelProbeRefresh(host, refresh) {
       const entry = hosts.get(host);
-      if (entry?.probeRefresh !== refresh) return;
-      entry.probeRefresh = undefined;
-      refresh.settle(undefined);
+      if (entry === undefined) return;
+      releaseProbeRefresh(entry, undefined, refresh);
     },
     reportProbe(host, neighbours, at, pid, refresh) {
       const entry = hosts.get(host);
@@ -2543,8 +2578,7 @@ export async function main(ns: NS): Promise<void> {
         ...(stillArmoured ? { armoured: true } : {}),
       };
       if (refresh !== undefined && entry.probeRefresh === refresh) {
-        entry.probeRefresh = undefined;
-        refresh.settle({ host, neighbours: [...neighbours], at, pid });
+        readyProbeRefreshes.set(refresh, { host, neighbours: [...neighbours], at, pid });
       }
       signalDerive();
     },
@@ -2626,7 +2660,7 @@ export async function main(ns: NS): Promise<void> {
     },
     preparePlant(host) {
       const entry = hosts.get(host);
-      if (entry === undefined) return { reuseProber: true };
+      if (entry === undefined) return { reuseProber: true, retiringAllocation: false };
       // Only while the files group is actually UNKNOWN — never seen, or
       // dirtied by an action whose `ls` has not landed. Re-arming on every
       // plant regardless is a livelock: spread keeps planting a host whose
@@ -2647,11 +2681,16 @@ export async function main(ns: NS): Promise<void> {
       // `launch-refused` forever. A live LENDER is the proof one is standing —
       // a fact the prober published, not one we polled for.
       const proberPid = entry.prober?.pid;
+      const retiringAllocation = entry.retiredAllocationAt !== undefined
+        && Date.now() - entry.retiredAllocationAt <= RETIRING_ALLOCATION_WINDOW_MS;
       // An armoured successor in the air counts as a standing prober. It is a
       // millisecond away and it will `lend` on arrival; launching beside it
       // spends the same 3.15 GB twice and leaves `lend` to kill one of them.
-      if (proberRespawnPending(entry, Date.now())) return { reuseProber: true };
-      return { reuseProber: entry.ns !== undefined && proberPid !== undefined && proberPid > 0 };
+      if (proberRespawnPending(entry, Date.now())) return { reuseProber: true, retiringAllocation };
+      return {
+        reuseProber: entry.ns !== undefined && proberPid !== undefined && proberPid > 0,
+        retiringAllocation,
+      };
     },
     abandonPlant(host) {
       const entry = hosts.get(host);
@@ -3001,8 +3040,7 @@ export async function main(ns: NS): Promise<void> {
 
   if (realm.dnet_controller === rendezvous) delete realm.dnet_controller;
   for (const entry of hosts.values()) {
-    entry.probeRefresh?.settle(undefined);
-    entry.probeRefresh = undefined;
+    releaseProbeRefresh(entry, undefined);
     const probe = entry.prober;
     // Marked for the same reason, and not left to the fact that the rendezvous
     // was deleted above: an armour hook that outlived this loop must have one
