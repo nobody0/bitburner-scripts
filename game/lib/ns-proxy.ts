@@ -212,7 +212,10 @@ export interface ProxyPlacement {
   gb: number;
   release(): void;
 }
-export type ProxyPlacer = (minGb: number, preferredGb: number) => ProxyPlacement | undefined;
+/** `label` names the resident that is ASKING. A placer which holds room back
+ * for the residents that have yet to land needs it to tell itself apart from
+ * its siblings — see `placeResident` in game/lib/controller.ts. */
+export type ProxyPlacer = (minGb: number, preferredGb: number, label?: string) => ProxyPlacement | undefined;
 
 export interface NsProxyOptions {
   /** Names this proxy in telemetry and in the warning it prints. */
@@ -616,7 +619,7 @@ class Resident {
       attempts++;
       const held = this.#placement;
       const reusable = held !== undefined && minGb <= held.gb && preferredGb <= held.gb;
-      const next = reusable ? held : this.#place(minGb, preferredGb);
+      const next = reusable ? held : this.#place(minGb, preferredGb, this.#label);
 
       if (next !== undefined && next.gb + 1e-9 >= minGb) {
         incident = `${this.#label}:${next.host}:${next.gb}`;

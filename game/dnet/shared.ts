@@ -205,7 +205,7 @@ export interface Report {
    *  a completed move (the engine resets on landing). */
   induceCharge?: number;
   stormFiredAt?: number;
-  grammar?: { unrecognised: number; shapes: string[] };
+  grammar?: { unrecognised: number; lines: string[] };
   detail?: string;
 }
 

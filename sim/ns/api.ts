@@ -380,12 +380,30 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     };
   }
 
+  /** `helpers.getNormalServer`: the rooting verbs and the three hacking verbs
+   * refuse a darknet server outright, they do not merely fail on it.
+   *
+   * Without this the simulator hands a script root on any darknet host for the
+   * price of one `nuke` — the ports are never required — and root there is not
+   * cosmetic: it divides every authentication's charisma gain by five
+   * (`calculatePasswordAttemptChaGain`), feeds `getBackdoorAuthTimeDebuff`'s
+   * rooted count, skips the first-root cache roll, opens `connectToSession`,
+   * and makes the labyrinth answer its own password instead of the maze.
+   * Source: src/Netscript/NetscriptHelpers.tsx:521-535 @ 3162fd2 */
+  function requireNormalServer(hostname: string, verb: string): SimServer {
+    const server = requireServer(host, hostname);
+    if (server.simKind === "DarknetServer") {
+      throw new Error(`${verb}: Cannot be executed on ${hostname}. The server must not be a darknet server.`);
+    }
+    return server;
+  }
+
   function openPort(
     hostname: string,
     program: string,
     flag: "sshPortOpen" | "ftpPortOpen" | "smtpPortOpen" | "httpPortOpen" | "sqlPortOpen",
   ): boolean {
-    const server = requireServer(host, hostname);
+    const server = requireNormalServer(hostname, program.replace(/\.exe$/, "").toLowerCase());
     if (!filesOn(host, "home").has(program)) return false;
     if (!server[flag]) {
       server[flag] = true;
@@ -729,7 +747,7 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     httpworm: (hostname: string): boolean => openPort(hostname, "HTTPWorm.exe", "httpPortOpen"),
     sqlinject: (hostname: string): boolean => openPort(hostname, "SQLInject.exe", "sqlPortOpen"),
     nuke: (hostname: string): boolean => {
-      const server = requireServer(host, hostname);
+      const server = requireNormalServer(hostname, "nuke");
       if (server.hasAdminRights) return true;
       if (!filesOn(host, "home").has("NUKE.exe")) return false;
       if ((server.openPortCount ?? 0) < (server.numOpenPortsRequired ?? 0)) return false;

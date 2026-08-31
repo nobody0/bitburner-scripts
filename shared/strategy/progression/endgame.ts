@@ -177,6 +177,15 @@ export interface EndgameView {
   /** Whether the controller can carry out labyrinth traversal. Mechanical
    * availability and executable automation are intentionally distinct. */
   labyrinthAutomationAvailable?: boolean;
+  /** A finished maze whose reward has NOT been claimed: `the_great_work` is
+   * sitting on the lab and nothing has opened it yet.
+   *
+   * The exit is the only thing that drops that file, so its presence is proof
+   * the stage was walked — and until it is opened the reward is not queued,
+   * which means every install-side signal derived from `queuedAugs` is blind
+   * to a walk that is complete. `prestigeDarknetState` drops the maze on any
+   * install, so a reset here throws the whole stage away. */
+  labCacheUnclaimed?: boolean;
   inBladeburner: boolean;
   charismaSkill?: number;
   /** Completed black operations, when known. Optional because the reading may

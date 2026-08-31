@@ -156,6 +156,24 @@ describe("darkweb, the one darknet host reachable without a credential", () => {
     expect(ns.exec("child.js", "n00dles", 1)).toBe(0);
   });
 
+  test("nuke and the port openers refuse a darknet server outright", () => {
+    // `helpers.getNormalServer` THROWS for a DarknetServer rather than failing
+    // (NetscriptHelpers.tsx:521-535), and root out there is not cosmetic: it
+    // divides every authentication's charisma gain by five, feeds
+    // getBackdoorAuthTimeDebuff's rooted count, skips the first-root cache
+    // roll, opens connectToSession, and makes a labyrinth answer its own
+    // password instead of sending the walker into the maze.
+    const { ns } = harness(["BruteSSH.exe"], false, 15, true);
+    expect(() => ns.nuke("darkweb")).toThrow(/must not be a darknet server/);
+    expect(() => ns.brutessh("darkweb")).toThrow(/must not be a darknet server/);
+
+    // The ordinary path is untouched: n00dles wants one port, so opening it
+    // and nuking still roots it.
+    expect(ns.brutessh("n00dles")).toBe(true);
+    expect(ns.nuke("n00dles")).toBe(true);
+    expect(ns.hasRootAccess("n00dles")).toBe(true);
+  });
+
   test("with access, home can exec onto darkweb — and only home can", () => {
     // The beachhead the whole feature stands on. `scp` and `exec` both
     // short-circuit their admin and session checks for darkweb, so no credential

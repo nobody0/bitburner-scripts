@@ -159,7 +159,7 @@ const DERIVE_FALLBACK_MS = 20_000;
 const LAUNCH_WINDOW_MS = 10_000;
 /** Fallback duration used only to compare loaded vantages. */
 const TYPICAL_ORDER_MS = 6_000;
-const MAX_GRAMMAR_SHAPES = 20;
+const MAX_GRAMMAR_LINES = 20;
 const MAX_LOOSE_PASSWORDS = 40;
 const MAX_PROVISIONAL_CREDENTIALS = 80;
 
@@ -250,6 +250,16 @@ export async function main(ns: NS): Promise<void> {
   const spentGuesses = new Set<string>();
   const guessFor = new Map<string, string>();
   const stasisLinked = new Set<string>(restored?.stasisSnapshot?.hosts ?? []);
+  /** Labyrinth hosts observed ROOTED — the one durable "this maze is finished".
+   *
+   * Upstream refuses a lab's own password ("the best way to beat a maze is to
+   * find the end") and grants admin only on arrival at the exit
+   * (`src/DarkNet/effects/labyrinth.ts:278,310` @ 3162fd2), so admin is the
+   * only thing that means walked. Holding the lab's PASSWORD means nothing: it
+   * is capturable passively like any host's. Re-derived from `hasRootAccess`
+   * in `describeThrough`, so it survives a controller restart without entering
+   * the recovery blob. */
+  const labRooted = new Set<string>();
   let stasisObservedAt = restored?.stasisSnapshot?.at ?? 0;
   let charismaNeeded: number | undefined = restored?.charismaNeeded;
   let promoteSymbols: PromoteSymbol[] = [];
@@ -267,8 +277,11 @@ export async function main(ns: NS): Promise<void> {
     && bootAt - lastStormFiredAt < STORM_QUIET_MS
     ? lastStormFiredAt + STORM_QUIET_MS
     : undefined;
-  const grammarShapes: Record<string, number> = { ...(restored?.grammar?.shapes ?? {}) };
-  let grammarUnrecognised = restored?.grammar?.unrecognised ?? 0;
+  // The former recovery shape carried anonymised `shapes` instead of `lines`.
+  // Do not preserve its count without the diagnostics that explain it.
+  const restoredGrammar = restored?.grammar?.lines === undefined ? undefined : restored.grammar;
+  const grammarLines: Record<string, number> = { ...(restoredGrammar?.lines ?? {}) };
+  let grammarUnrecognised = restoredGrammar?.unrecognised ?? 0;
   const unknownModels: Record<string, number> = { ...(restored?.unknownModels ?? {}) };
   const agentHostsSeen = new Set<string>(restored?.agentHostsSeen ?? []);
   let lastLab: DnetLabReport | undefined = restored?.lab ? cloneData(restored.lab) : undefined;
@@ -854,9 +867,9 @@ export async function main(ns: NS): Promise<void> {
     for (const [code, count] of Object.entries(result.codes ?? {})) note(Number(code), count);
     if (result.grammar) {
       grammarUnrecognised += result.grammar.unrecognised;
-      for (const shape of result.grammar.shapes) {
-        if (grammarShapes[shape] !== undefined) grammarShapes[shape] += 1;
-        else if (Object.keys(grammarShapes).length < MAX_GRAMMAR_SHAPES) grammarShapes[shape] = 1;
+      for (const line of result.grammar.lines) {
+        if (grammarLines[line] !== undefined) grammarLines[line] += 1;
+        else if (Object.keys(grammarLines).length < MAX_GRAMMAR_LINES) grammarLines[line] = 1;
       }
     }
     if (result.karmaLoss !== undefined) karmaLoss += result.karmaLoss;
@@ -1314,6 +1327,7 @@ export async function main(ns: NS): Promise<void> {
         ...(view.difficulty !== undefined ? { difficulty: view.difficulty } : {}),
         ...(view.maxRam !== undefined ? { maxRam: view.maxRam } : {}),
         freeGb: usableGb(entry.hostname, at, expiry),
+        ...(labRooted.has(entry.hostname) ? { walked: true } : {}),
         ...(walkerAt === entry.hostname ? { irreplaceable: true } : {}),
       };
     });
@@ -1664,9 +1678,20 @@ export async function main(ns: NS): Promise<void> {
   const describeThrough = async (host: string, neighbours?: readonly string[], seenAt = Date.now()): Promise<ReportHost | undefined> => {
     try {
       const details = await nsp("dnet.getServerDetails", host);
-      if (!details.isOnline) return { hostname: host, at: seenAt, present: false };
+      if (!details.isOnline) {
+        labRooted.delete(host);
+        return { hostname: host, at: seenAt, present: false };
+      }
       const identity = await nsp("dnsLookup", host);
       const maxRam = await nsp("getServerMaxRam", host);
+      // Only the lab pays this fourth round trip: admin is the walked signal
+      // and `dnet.getServerDetails` does not carry it, but there is exactly one
+      // labyrinth in the net at a time and describing every host through
+      // `hasRootAccess` would buy nothing anywhere else.
+      if (isLabyrinth(host, details.modelId)) {
+        if (await nsp("hasRootAccess", host)) labRooted.add(host);
+        else labRooted.delete(host);
+      }
       return {
         hostname: host,
         ...(identity.length > 0 ? { identity } : {}),
@@ -1693,7 +1718,10 @@ export async function main(ns: NS): Promise<void> {
       // That is a death, and the only throw that is one. It is how a torn-down
       // labyrinth host reads: the shutdown path skips offline registration for
       // lab names.
-      if (message.includes("Invalid host")) return { hostname: host, at: seenAt, present: false };
+      if (message.includes("Invalid host")) {
+        labRooted.delete(host);
+        return { hostname: host, at: seenAt, present: false };
+      }
       // Every other throw is a failure of OURS, not a fact about the host: no
       // darkscape access (which throws for every host at once, and would
       // otherwise retire all of them in a single pass), or a name that resolves
@@ -2011,7 +2039,7 @@ export async function main(ns: NS): Promise<void> {
     });
 
     const seedHolder = stormHosts.find((h) => h.stormSeed === true);
-    const labWalkedNow = [...hosts.values()].some((entry) => isLabyrinth(entry.hostname, fresh<string>(entry, "modelId", at, expiry)) && vault.has(entry.hostname));
+    const labWalkedNow = labRooted.size > 0;
     const seedHunt = seedHolder === undefined && (labWalkedNow || stasisLinked.size >= stasisLimit) && (lastStormFiredAt === undefined || at - lastStormFiredAt > STORM_COOLDOWN_MS);
     // Hold BEFORE farm: the farm's gang grind is aimed at the hold plan's lab
     // candidate, whose block is the last gate before the walker starts.
@@ -2724,7 +2752,7 @@ export async function main(ns: NS): Promise<void> {
         karmaLoss,
         profit: cloneData(profit),
         ...(grammarUnrecognised > 0
-          ? { grammar: { unrecognised: grammarUnrecognised, shapes: { ...grammarShapes } } }
+          ? { grammar: { unrecognised: grammarUnrecognised, lines: { ...grammarLines } } }
           : {}),
         ...(lastPhishCacheAt !== undefined ? { lastPhishCacheAt } : {}),
         ...(lastStormFiredAt !== undefined ? { lastStormAt: lastStormFiredAt } : {}),

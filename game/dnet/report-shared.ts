@@ -1,5 +1,4 @@
 import type { Report } from "./shared.ts";
-import { logShape } from "../../shared/strategy/dnet/oracle.ts";
 
 /** Pure report-shaping helpers shared by the order bodies.
  *
@@ -13,26 +12,31 @@ import { logShape } from "../../shared/strategy/dnet/oracle.ts";
  * preserves any records that cannot be read yet because charisma is too low. */
 export const LOG_LINES = 200;
 
-/** At most this many distinct shapes per job. Drift shows up in the first one or
- * two; a whole bleed's worth would be a list of the same shape. */
-export const SHAPES_PER_JOB = 2;
+/** At most this many distinct unparsed lines per job. Drift normally shows up in
+ * the first one or two; a whole bleed's worth would repeat the same line. */
+export const LINES_PER_JOB = 2;
 
-/** What a bleed learned about our own parser, in a form that is safe to carry.
- *
- * The COUNT says the grammar has drifted; the shapes say which line drifted, and
- * `logShape` is what makes reporting them safe — see its comment. Undefined when
- * nothing was unrecognised, so the common case adds no field. */
+/** Enough of a line to write the parser fix against; the rest is more of the
+ * same. BOUNDED because a line is not a shape any more: it travels on the wire
+ * report, is kept as a KEY in the controller's recovery blob and the `dnet`
+ * topic, and is rendered into a table. A log ring line is generated text of no
+ * declared maximum, so without this one pathological line becomes a map key of
+ * that length in three places at once. */
+export const LINE_MAX = 160;
+
+/** What a bleed learned about our own parser. Undefined when nothing was
+ * unrecognised, so the common case adds no field. */
 export function grammarDrift(
   unrecognised: readonly string[],
-): { unrecognised: number; shapes: string[] } | undefined {
+): { unrecognised: number; lines: string[] } | undefined {
   if (unrecognised.length === 0) return undefined;
-  const shapes: string[] = [];
-  for (const line of unrecognised) {
-    const shape = logShape(line);
-    if (shape.length > 0 && !shapes.includes(shape)) shapes.push(shape);
-    if (shapes.length >= SHAPES_PER_JOB) break;
+  const lines: string[] = [];
+  for (const raw of unrecognised) {
+    const line = raw.slice(0, LINE_MAX);
+    if (line.length > 0 && !lines.includes(line)) lines.push(line);
+    if (lines.length >= LINES_PER_JOB) break;
   }
-  return { unrecognised: unrecognised.length, shapes };
+  return { unrecognised: unrecognised.length, lines };
 }
 
 /** The two response codes that say something about the TARGET rather than the

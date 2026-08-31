@@ -136,7 +136,7 @@ import { resetGateSignal, signalGateRecheck } from "../gate-signal.ts";
 import { resetInstallSignal, takeInstallSignal } from "../install-signal.ts";
 import { merge, set, type GameState } from "../state.ts";
 import { bladeburnerApiActionType } from "../bladeburner.ts";
-import { dnetLabCacheDeferral } from "./dnet.ts";
+import { dnetLabCacheClock, dnetLabCacheDeferral } from "./dnet.ts";
 import { liquidatableValue } from "./factions.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
 
@@ -2038,10 +2038,23 @@ function endgameView(ctx: NeedContext): EndgameView | undefined {
     // grant. Passing only the first flag would advertise a Red Pill route that
     // does not exist in the node we are standing in.
     darknetFullAccess: ctx.caps.darknetFullAccess === "yes",
-    // The current dnet driver can observe and plan traversal but deliberately
-    // refuses host-local authentication/stasis actions until dispatch can
-    // lease the intended darknet host. Do not select an ETA we cannot execute.
-    labyrinthAutomationAvailable: false,
+    // A walked-but-unbanked stage. `openable` is deliberately NOT the test: a
+    // resident dying does not un-walk the maze, and the install would still
+    // destroy it.
+    ...(ctx.state.topics.dnet?.labCache !== undefined ? { labCacheUnclaimed: true } : {}),
+    // MEASURED, not asserted. `leg-bn15.1` seed 1 walked stage 1 end to end on
+    // 2026-08-31: the walker reached the exit, `the_great_work` dropped, the
+    // `dnet-lab-cache` blocker opened it, `The W1ngs of Icarus` installed, and
+    // the net deepened to `cru3l_l4byr1nth`. Before that this was a hardcoded
+    // `false`, and rightly so — the flag exists to stop the SHAPE of the code
+    // being read as a working plan, and no stage had ever completed.
+    //
+    // It is derived rather than re-hardcoded to `true` so it can go back to
+    // reporting the truth if the ability is lost: the labyrinth is drivable
+    // exactly while the darknet is reachable. Without full access there is no
+    // lab to walk at all, which `darknetFullAccess` above already says, so the
+    // two agree by construction rather than by coincidence.
+    labyrinthAutomationAvailable: ctx.caps.darknetFullAccess === "yes",
     inBladeburner: ctx.caps.unlocked.bladeburner === "yes",
     charismaSkill: skills.charisma,
     ...(blackOpsComplete !== undefined ? { blackOpsComplete } : {}),
@@ -2889,6 +2902,13 @@ function progressionRefresh(ctx: NeedContext): void {
   // `dnet` says the cache is openable RIGHT NOW, and abandoned once the window
   // has run out — so an install can never stall on a cache we do not have,
   // cannot reach, or asked for and never got.
+  //
+  // The window is READ here and STAMPED after the decision, because it runs
+  // from the moment the blocker is raised rather than from the moment the
+  // cache appears. A maze is walked early in a cycle and the install is wanted
+  // at the end of it; starting the clock on the walk expired it long before
+  // anything wanted the cache, so the blocker was never raised and the install
+  // destroyed the walked maze.
   const labCacheOpen = ctx.state.topics.dnet?.labCache?.openable === true;
   const labCacheDefer = dnetLabCacheDeferral(labCacheOpen, ctx.now);
 
@@ -2950,6 +2970,8 @@ function progressionRefresh(ctx: NeedContext): void {
     ...(intent?.etaSec !== undefined ? { pushEtaSec: intent.etaSec } : {}),
     ...(marginalInstall !== undefined ? { marginalInstall } : {}),
   });
+
+  dnetLabCacheClock(labCacheOpen, decision.installBlockers.includes("dnet-lab-cache"), ctx.now);
 
   const queueKey = pending.join("\0");
   const persistedArm = prog?.plan?.installReady && prog.plan.installArmedAt !== undefined

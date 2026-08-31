@@ -515,7 +515,7 @@ describe("tab rendering", () => {
       },
       netDepth: 7,
       charisma: 400,
-      grammar: { unrecognised: 5, shapes: { "a a: a#": 3 } },
+      grammar: { unrecognised: 5, lines: { "Response time: 1234ms": 3 } },
       hold: {
         admitted: { pin: 1, walk: 1 },
         refused: { "no-slot": 2 },
@@ -678,12 +678,10 @@ describe("tab rendering", () => {
     // than prose buried in a refusal.
     expect(rendered).toContain("4.00GB blocked");
 
-    // Grammar drift is the same class of event as an unrecognised model id, and
-    // it reaches the screen as a SHAPE. The line itself never leaves the game:
-    // an unparsed line is one we failed to read, and the noise generator writes
-    // cleartext passwords into log lines.
+    // Grammar drift is the same class of event as an unrecognised model id. The
+    // actual line reaches the screen so the parser failure can be diagnosed.
     expect(rendered).toContain("unparsed log lines");
-    expect(rendered).toContain("a a: a#");
+    expect(rendered).toContain("Response time: 1234ms");
 
     // The three actions with a real price. Their refusals get as much room as
     // the actions, because "why not" is the usual answer for all three.

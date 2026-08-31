@@ -47,7 +47,7 @@ allowed to read both sides:
 | `shared/strategy/stanek/pack.ts` | ships inside the game bundle | `sim/tests/stanek-parity.test.ts` |
 | `shared/strategy/ram-supply.ts` | ships inside the game bundle | `sim/tests/drift-pins.test.ts` |
 | `shared/strategy/gang/formulas.ts` | ships inside the game bundle; Gang imports the live player singleton | `tests/gang.test.ts` plus `sim/tests/drift-pins.test.ts` source hashes |
-| `sim/features/dnet.ts` timing | `DarkNet/` cannot be vendored — see below | **required before `"full"`; needs the checkout** |
+| `sim/features/dnet.ts` timing, `sim/features/dnet-names.ts` | `DarkNet/` cannot be vendored — see below | `sim/tests/dnet-parity.test.ts` (skips without the checkout) |
 
 The stock pair is worth a note, because three of its constants are inline
 literals upstream rather than named exports — the 0.45 cycle-flip chance, the
@@ -83,7 +83,19 @@ Two rules follow, and they are the reason to prefer transcription over shape:
 - **A parity suite is required before `dnet` may become `"full"`** in
   `sim/fidelity.ts`. Since `DarkNet/` cannot be vendored, that suite has to
   match the checkout's source text the way the stock pair matches inline
-  literals, and it can only run where the checkout is present.
+  literals, and it can only run where the checkout is present. That suite is
+  `sim/tests/dnet-parity.test.ts`, and `dnet` is `"full"` because of it: it
+  resolves `BITBURNER_SRC ?? ../bitburner-src`, gates on `describe.skipIf`
+  rather than a lane — a lane would also skip on a default `bun test`, and a
+  drift pin that only runs when asked for is not a drift pin — and pins the
+  name generator's coins and loop bounds, its four tables entry for entry, the
+  `l33t` KEY ORDER (upstream indexes `Object.keys` with a draw), the
+  authentication and charisma-gain terms, the propaganda curve, and the
+  labyrinth ladder including the rule that only ARRIVAL roots a lab.
+- `sim/tests/drift-pins.test.ts` sweeps `shared/strategy/dnet/` as well as
+  `sim/`. It is outside `sim/` because the game agents read it, which makes its
+  twenty-two `src/DarkNet/` citations more load-bearing rather than less:
+  `authenticateWaitMs` and `LAB_LADDER` are what the route prices a walk with.
 
 ## The market, and the three things it cannot bring with it
 

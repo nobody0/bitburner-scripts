@@ -6,7 +6,7 @@ export type FeatureCoverage = "full" | "partial" | "oracle-only" | "unmodeled";
 
 /** Increment whenever handwritten simulator semantics change in a way that can
  * alter an outcome. It is part of every comparison fingerprint. */
-export const SIMULATOR_MODEL_VERSION = 12;
+export const SIMULATOR_MODEL_VERSION = 14;
 /** Pinned upstream revision mirrored by sim/vendor/manifest.json. */
 export const SIMULATOR_VENDOR_COMMIT = "3162fd2590e221eadd0c0fbd46151913f7c4c41c";
 
@@ -71,11 +71,12 @@ const BASE_FEATURE_COVERAGE: Readonly<Record<FeatureId, FeatureCoverage>> = {
   // mutation/restart, sessions, labyrinth/storms, exact cache/clue rewards,
   // live stock grants, and coding-contract generation/solve/reward lifecycle.
   // Save/offline/UI-only state is intentionally outside this coverage claim.
-  // Downgraded from "full" by the v3.0.1 audit: hostnames are synthetic rather
-  // than generated (see DNET_ASSUMPTIONS "dnet.hostnames"), which both spends a
-  // different number of draws than the game and shows strategy a hostname shape
-  // the game never produces.
-  dnet: "partial",
+  // Restored to "full": the synthetic hostnames that the v3.0.1 audit
+  // downgraded this for are gone. `sim/features/dnet-names.ts` transcribes
+  // generateDarknetServerName and its tables, and `sim/tests/dnet-parity.test.ts`
+  // is the source-text suite `spec/game-source.md` requires before this line
+  // may say "full" at all.
+  dnet: "full",
   // Generated and cache-minted contracts use the vendored problem definitions;
   // the real side driver discovers, solves and claims them through Netscript.
   // `getContract`, `getDescription` and `createDummyContract` are still absent

@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { capturePackets, type PacketWorld } from "../sim/features/dnet-feedback.ts";
 import { mulberry32 } from "../sim/core/rng.ts";
 import { PACKET_SNIFF_PHRASES } from "../shared/strategy/dnet/phrases.ts";
+import { grammarDrift } from "../game/dnet/report-shared.ts";
 import {
   extractPacketCredentials,
   harvestLogs,
-  logShape,
   looseCandidates,
   parseHeartbleedLine,
 } from "../shared/strategy/dnet/oracle.ts";
@@ -228,6 +228,12 @@ describe("noise and grammar drift", () => {
     expect(harvestLogs(["4:15:23 PM: dn-0-1 - heartbeat check (alive)"]).unrecognised).toEqual([]);
   });
 
+  test("a server restart is lifecycle noise, not grammar drift", () => {
+    const line = "Server restarting, terminating scripts...";
+    expect(parseHeartbleedLine(line)).toEqual({ kind: "noise", text: line, recognised: true });
+    expect(harvestLogs([line]).unrecognised).toEqual([]);
+  });
+
   test("an unrecognised line is surfaced, never swallowed", () => {
     // A rising unrecognised count is the signal that the game's log grammar has
     // moved and this parser needs revisiting. Dropping the text would hide that.
@@ -268,41 +274,18 @@ describe("noise and grammar drift", () => {
   });
 });
 
-describe("grammar drift is reported as a shape, never as a line", () => {
-  test("every digit and letter run is erased, and the structure survives", () => {
-
-    // The shape has to be specific enough to write a fix against...
-    expect(logShape("Logging in with passcode: hunter2")).toBe("a a a a: a#");
-    expect(logShape("Response time: 1234ms")).toBe("a a: #a");
-    // ...and identical for two lines that differ only in their secret, which is
-    // what makes it safe to publish and useful to count.
-    expect(logShape("passcode: swordfish")).toBe(logShape("passcode: correcthorse"));
+describe("grammar drift", () => {
+  test("reports the actual distinct unparsed lines", () => {
+    expect(grammarDrift(["first line", "first line", "second line", "third line"])).toEqual({
+      unrecognised: 4,
+      lines: ["first line", "second line"],
+    });
   });
 
   test("every upstream packet-spam phrase is recognized rather than reported as grammar drift", () => {
     const summary = harvestLogs(PACKET_SNIFF_PHRASES);
     expect(summary.unrecognised).toEqual([]);
     expect(summary.credentials).toEqual([]);
-  });
-
-  test("no password survives being turned into a shape", () => {
-    // The property this function exists for. An unrecognised line is BY
-    // DEFINITION one the parser failed to read, and the noise generator puts
-    // cleartext passwords in log lines — so reporting examples would report the
-    // passwords we missed.
-    const secret = "tr0ub4dor";
-    const shape = logShape(`dn-7 accepted ${secret} at 09:41`);
-    expect(shape).not.toContain(secret);
-    for (const fragment of ["tr0", "ub4", "dor", "b4d"]) {
-      expect(shape).not.toContain(fragment);
-    }
-    // Only the alphabet of the shape itself, plus punctuation.
-    expect(/^[a#\s\p{P}\p{S}]*$/u.test(shape)).toBe(true);
-  });
-
-  test("a shape is bounded, however long the line was", () => {
-    // Unbounded, a single pathological line would become a 200-entry map key.
-    expect(logShape("x!".repeat(500)).length).toBeLessThanOrEqual(60);
   });
 });
 
@@ -321,29 +304,39 @@ describe("target-owned log evidence", () => {
   });
 
 
+  // Seeds 2 and 4 used to produce these; they are 57 and 6 now. The noise
+  // stream MOVED, once, and legitimately: the branch that emits a hostname
+  // calls `generateDarknetServerName` as upstream does, and that spends its
+  // own draws where the old substitution spent one index draw. The behaviour
+  // under test — several hints buried in one capture, and every one of them
+  // harvested — is unchanged, so the seeds moved rather than the assertions
+  // being loosened.
   test("capturePackets really can bury multiple contains hints in packet junk", () => {
-    const rand = mulberry32(2);
+    const rand = mulberry32(57);
     const world: PacketWorld = {
-      movablePasswords: () => ["9999"], serverNames: () => ["dn-1"],
+      movablePasswords: () => ["9999"], generateName: () => "dn-1",
       lastAttempted: () => "4800", rand,
     };
     const data = capturePackets({ hostname: "dn-1", password: "4827", difficulty: 8 }, world);
-    expect(data).toContain("I can see a 7 and a 4.");
-    expect(data).toContain("Theres a 7, and maybe a 4...");
+    expect(data).toContain("Theres a 2, and maybe a 7...");
+    expect(data).toContain("I can see a 8 and a 2.");
     const summary = harvestLogs([
       JSON.stringify({ code: 401, passwordAttempted: "0000", data }),
     ], { bledFrom: "dn-1", knownHosts: ["dn-1"], at: 456 });
     expect(summary.credentials).toContainEqual({ kind: "credential", host: "dn-1", password: "4827", via: "packet" });
+    // Three, not two: the third phrasing ("Did it have a 4 and a 2?") is a
+    // contains hint the harvester reads as well.
     expect(summary.evidence.filter((fact) => fact.kind === "contains")).toEqual([
-      { kind: "contains", chars: ["7", "4"], at: 456 },
-      { kind: "contains", chars: ["7", "4"], at: 456 },
+      { kind: "contains", chars: ["2", "7"], at: 456 },
+      { kind: "contains", chars: ["8", "2"], at: 456 },
+      { kind: "contains", chars: ["4", "2"], at: 456 },
     ]);
   });
 
   test("capturePackets can also bury placement feedback in the same junk", () => {
     const data = capturePackets({ hostname: "dn-1", password: "4827", difficulty: 8 }, {
-      movablePasswords: () => ["9999"], serverNames: () => ["dn-1"],
-      lastAttempted: () => "4800", rand: mulberry32(4),
+      movablePasswords: () => ["9999"], generateName: () => "dn-1",
+      lastAttempted: () => "4800", rand: mulberry32(6),
     });
     expect(data).toContain("The characters 4, 8 are in the right place.");
     const summary = harvestLogs([

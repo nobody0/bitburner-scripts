@@ -25,6 +25,7 @@ import {
   type LabStage,
 } from "../../shared/strategy/dnet/rates.ts";
 import { generateSecret, passwordRng, type PasswordFormat } from "./dnet-generators.ts";
+import { generateDarknetServerName } from "./dnet-names.ts";
 import {
   checkPassword as checkPasswordAgainst,
   getExactCorrectChars,
@@ -84,13 +85,15 @@ export const DNET_ASSUMPTIONS: readonly string[] = [
   + "an already-rooted host and ten times on a first success — on FAILURE as well as success, which is what makes "
   + "iterative solving free in charisma terms rather than pure cost. hasDarknetBonusTime()'s 1.5x is false by truth: the "
   + "sim has no offline accrual",
-  "dnet.hostnames: SYNTHETIC, not generated. Hosts are named `dnet-<depth>-x<n>` off a counter; upstream builds each name "
-  + "with generateDarknetServerName/getBaseName/decorateName/l33tifyName (DarknetServerOptions.ts:99-204), which is "
-  + "transcribed nowhere in this repo. Two consequences, both real: upstream spends draws on every name and the sim spends "
-  + "none, so the shared stream advances differently from the game's; and anything reasoning about the SHAPE of a hostname "
-  + "sees a shape the game never produces — shared/strategy/dnet/solvers/deep.ts's `hostish` character class and every "
-  + "packet-sniffing leak that quotes a hostname. Distinct from the capturePackets substitution recorded under dnet.models, "
-  + "which is only about noise-only names",
+  "dnet.hostnames: GENERATED. generateDarknetServerName, getBaseName, decorateName and l33tifyName are transcribed in "
+  + "sim/features/dnet-names.ts, with loreNames derived from the vendored Faction and Location enums and the preset, "
+  + "prefix, suffix, connector and l33t tables copied from dictionaryData.ts. The offline-name reuse coin, the three "
+  + "base-name coins, the decoration loop with its twenty-iteration escape hatch and the float-bounded l33t loop all run "
+  + "at upstream's probabilities. What differs is the ENTROPY SOURCE, for the same reason the mutation's connection "
+  + "rolls do: upstream's name block is VARIABLE WIDTH -- 8 draws at best, 11-17 typically, unbounded when hostnames "
+  + "collide -- and MUTATION_DRAWS is fixed so topology cannot perturb the stock stream across an A/B, so every draw is "
+  + "a salted subDraw off the one stream draw #addHost has already taken. The noise-only name in capturePackets is "
+  + "generated the same way but on the DEDICATED noise stream, where variable width costs nothing",
   "dnet.models: all twenty-four models mint their password, hint and hint data through upstream's own per-model config "
   + "builder, getPassword and getPasswordType — so passwordFormat is derived rather than declared, a numeric password of "
   + "length >= 2 never starts with 0, and passwordLength is the length of the GENERATED string rather than the length its "
@@ -100,7 +103,7 @@ export const DNET_ASSUMPTIONS: readonly string[] = [
   + "ENTROPY SOURCE: getXorMaskEncryptedPasswordConfig, getPasswordMadeUpOfPrimesProduct and "
   + "generateSimpleArithmeticExpression are unbounded rejection loops, so a host takes exactly ONE draw off the world stream "
   + "and derives a mulberry32 from it (mixed with the hostname) that every generator then runs on. Same distributions, fixed "
-  + "cost per host, and a host's secret is reproducible from (secretDraw, hostname) alone. One substitution inside capturePackets emits an existing darknet hostname instead of generating a noise-only name",
+  + "cost per host, and a host's secret is reproducible from (secretDraw, hostname) alone.",
   "dnet.playerDraws: three player-initiated darknet rolls take their entropy from the DEDICATED noise stream rather than "
   + "the shared gameplay one — the authentication timeout coin, the placement of an induced migration, and the maze's "
   + "start/endpoint offsets. Upstream draws all three from Math.random(). The probabilities and distributions are "
@@ -1632,7 +1635,19 @@ export class DarknetSystem {
       movablePasswords: () => [...this.hosts.values()]
         .filter((entry) => entry.online && !entry.isStationary)
         .map((entry) => entry.password),
-      serverNames: () => [...this.hosts.keys()],
+      // A noise-only name, generated and discarded exactly as upstream does.
+      // On the NOISE stream: variable width is fine here, and billing it to
+      // the gameplay stream would let log volume move stock prices.
+      generateName: () => {
+        const noise = this.#opts.logNoise ?? this.#opts.generate;
+        return generateDarknetServerName(
+          (candidate) => candidate.length === 0
+            || this.hosts.get(candidate)?.online === true
+            || this.#opts.servers.has(candidate),
+          () => noise(),
+          () => this.#opts.world.clock.now(),
+        );
+      },
       lastAttempted: () => {
         for (const line of host.logs) {
           const parsed = parseLogLine(line);
@@ -2370,12 +2385,27 @@ export class DarknetSystem {
     const cell = free[Math.floor(drawB * free.length)];
     if (!cell) return;
     const [depth, column] = cell;
-    let hostname = "dnet-" + depth + "-x" + this.#added++;
+    // `generateDarknetServerName`: the 3% offline-name reuse first, then the
+    // real generator. Both run on sub-draws of `drawA`, because upstream's
+    // name block is variable-width and `MUTATION_DRAWS` is fixed — see
+    // `sim/features/dnet-names.ts`. `#added` survives only to keep the reused
+    // salt unique across two hosts added in one tick.
+    let hostname: string | undefined;
     if (this.#opts.fullAccess() && subDraw(drawA, 1000) < 0.03 && this.#offlineServers.size > 0) {
       const offline = [...this.#offlineServers];
       let offset = Math.floor(subDraw(drawA, 1001) * offline.length);
       while (offset < offline.length && offline[offset]!.includes(".")) offset++;
       if (offline[offset] !== undefined) hostname = offline[offset]!;
+    }
+    if (hostname === undefined) {
+      const nonce = this.#added++;
+      hostname = generateDarknetServerName(
+        (candidate) => candidate.length === 0
+          || this.hosts.get(candidate)?.online === true
+          || this.#opts.servers.has(candidate),
+        (salt) => subDraw(drawA, 2000 + nonce * 4096 + salt),
+        () => this.#opts.world.clock.now(),
+      );
     }
     if (this.hosts.get(hostname)?.online === true) return;
     this.#buildHost(hostname, rolledDifficulty, depth, column);

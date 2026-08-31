@@ -226,7 +226,7 @@ function packetWorld(seed: number): PacketWorld {
   let state = seed >>> 0;
   return {
     movablePasswords: () => [],
-    serverNames: () => ["darkweb"],
+    generateName: () => "darkweb",
     lastAttempted: () => null,
     rand: () => {
       state = (state * 1664525 + 1013904223) >>> 0;

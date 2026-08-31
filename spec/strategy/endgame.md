@@ -81,8 +81,12 @@ Red Pill out of a stale aug list). A complete route wins immediately.
   the second climb.
 - **The labyrinth is multi-install** — six reward installs plus The Red Pill
   outside BN15, four reward installs plus The Red Pill in BN15. The walk time
-  is an explicit guess (`LABYRINTH_WALK_SEC`) and marked `measured: false`, so the
-  calibration loop can see exactly which figure was invented.
+  is measured: `LAB_WALK_ATTEMPTS` (`shared/strategy/dnet/rates.ts`) is the mean
+  attempts the deployed walker spends per rung over 64 seeded mazes apiece, and
+  one attempt is priced with the transcribed `authenticateWaitMs`. What stays
+  conservative is the profile — each stage's own charisma gate, one thread —
+  because the route cannot know what the walker will be given, and both only
+  make the real walk faster.
 
 Every part carries `{what, sec, measured}`. `measured: false` means a
 fallback produced it; the distinction is load-bearing for tuning.

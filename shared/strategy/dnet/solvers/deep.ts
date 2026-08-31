@@ -735,13 +735,31 @@ export function passwordFromNamedPacket(blob: string, facts: PasswordFacts): str
   return undefined;
 }
 
-/** The character class `generateDarknetServerName` draws a hostname from. A
- * character loop rather than a RegExp: see the RAM note in `oracle.ts`. */
+/** Whether this token's head can be a hostname at all.
+ *
+ * It used to accept only `[A-Za-z0-9_.-]`, described as "the character class
+ * `generateDarknetServerName` draws a hostname from". That was wrong, and it
+ * threw away real passwords: `connectors` alone contributes `; : $ ^ % @ &`,
+ * `decorateName` appends `:<digits>`, `l33tifyName` can inject a multi-code-
+ * unit emoji, `safelyReverseString` can reverse any of it, and `presetNames`
+ * holds `);DROP-TABLE-SERVERS;--`, `茶店` and `...`. Genuine hostnames like
+ * `apex@matrix`, `digital_citadel:6576` and `🅱️1trunners` were all refused,
+ * and refusing the head means never reading the password after it.
+ *
+ * So the only thing a hostname genuinely cannot contain is WHITESPACE — the
+ * capture's own delimiter. `sim/tests/dnet-parity.test.ts` holds this to every
+ * character the transcribed generator can emit. Discrimination is not lost:
+ * `passwordFromNamedPacket` tells the candidate splits apart by the reported
+ * password LENGTH, which is a fact about the model rather than a guess about
+ * punctuation.
+ *
+ * A character loop rather than a RegExp: see the RAM note in `oracle.ts`. */
 function hostish(name: string): boolean {
+  if (name.length === 0) return false;
   for (const ch of name) {
-    const ok = (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (ch >= "0" && ch <= "9")
-      || ch === "_" || ch === "." || ch === "-";
-    if (!ok) return false;
+    const code = ch.charCodeAt(0);
+    // space, tab, LF, VT, FF, CR
+    if (code === 32 || (code >= 9 && code <= 13)) return false;
   }
   return true;
 }

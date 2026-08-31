@@ -32,7 +32,7 @@ import type { ProvisionalCredential, VaultEntry } from "../shared/strategy/dnet/
 
 const world: PacketWorld = {
   movablePasswords: () => [],
-  serverNames: () => ["darkweb"],
+  generateName: () => "darkweb",
   lastAttempted: () => null,
   rand: () => 0.5,
 };

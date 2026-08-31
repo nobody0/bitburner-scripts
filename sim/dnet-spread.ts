@@ -467,10 +467,39 @@ export function runSpreadCase(
 
   const expiry = (): ExpiryOpts => ({ netDepth, bitNode: 15, stasisLinked });
 
+  /** Last observed ip per hostname, so a REUSED name retires everything keyed
+   * by the old one.
+   *
+   * Darknet hostnames come back after a deletion — `generateDarknetServerName`
+   * reuses an offline name 3% of the time — and the replacement is a different
+   * server with a different password and no admin rights. `foldReports`
+   * already retires the knowledge RECORD on an identity change, but this
+   * arena's own bookkeeping (vault, stasis set, agents, crack costs) is keyed
+   * by hostname alone, and the production controller retires all of it
+   * (`retireLifetime`, "server identity replaced"). Without the same rule here
+   * the arena hands the strategy a host it believes it holds a credential for
+   * and cannot exec onto, which is a world the game cannot produce. */
+  const identities = new Map<string, string>();
+  const retireReused = (reports: readonly ReportHost[]): void => {
+    for (const report of reports) {
+      if (!report.present || report.identity === undefined) continue;
+      const held = identities.get(report.hostname);
+      identities.set(report.hostname, report.identity);
+      if (held === undefined || held === report.identity) continue;
+      vault.delete(report.hostname);
+      stasisLinked.delete(report.hostname);
+      agents.delete(report.hostname);
+      tried.delete(report.hostname);
+      crackCost.delete(report.hostname);
+    }
+  };
+
   const fold = (reports: ReportHost[]): void => {
+    retireReused(reports);
     foldReports(knowledge, reports, clock, expiry());
   };
   const discover = (reports: ReportHost[]): void => {
+    retireReused(reports);
     discoverReports(knowledge, reports, clock, expiry());
   };
 

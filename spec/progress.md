@@ -1893,6 +1893,258 @@ Every phase but the regrow is REPUTATION-bound: the intent stream shows
   fixture; the ledger note there says not to read that as a route
   regression.
 
+## The BN15 walk-start fix, and the resident starvation behind it (2026-08-31)
+
+**The lab-walked inference is fixed.** `planWalk` refused the labyrinth on
+`lab.hasCredential` ("we already hold this lab's password, so its maze has been
+finished"), which is wrong for a lab: its password is capturable passively like
+any darknet host's, and upstream deliberately answers the correct password with
+"the best way to beat a maze is to find the end"
+(`src/DarkNet/effects/labyrinth.ts:278`). Walked is **admin on the lab** — the
+exit is the only thing that grants it (`:310`), and it is never taken away. The
+controller now carries `labRooted`, re-derived from `hasRootAccess` inside
+`describeThrough` (labyrinth hosts only — one host in the net, and
+`dnet.getServerDetails` does not carry admin), stamps it as `HoldHost.walked`,
+and the three places that read the credential — `planWalk`'s refusal, `planHold`'s
+`labWalked`, and the controller's `labWalkedNow` storm gate — read that instead.
+`tests/dnet-hold-plan.test.ts` pins both directions: a rooted lab refuses, a
+merely credentialed one is walked.
+
+**The screen then found a blocker upstream of the darknet entirely.**
+`leg-bn15.1` seed 1 at 6 h horizon completes in **1.8 seconds of wall time** —
+it does nothing. No `dnet` topic is ever published; the whole run is 21,626
+`exec` calls, one per tick, and 2,160 crimes.
+
+The deadlock is between the two ns residents, and it lands at **t = 500 ms**:
+
+- `factions`, `go` and `dnet` all unlock at t=500 in BN15, so the controller
+  runs the entire faction/augmentation read surface immediately.
+- `nsp` recycles-and-grows through it in one instant — 13.7 → 16.8 → 17.8 →
+  22.1 → **27.1 GB**, all on home.
+- The leg enters with SF1.3, so home is 32 GB. `main.js` holds 3.2. That leaves
+  1.7 GB, and `nspLong`'s floor is 2.7.
+- `nspLong` never spawns. `proxy.slow` re-emits for the remaining six hours
+  (`attempts: 614` by t=600 s) and nothing else ever happens.
+
+`placeResident` (`game/lib/controller.ts:130`) grants `min(preferredGb,
+host.freeGb)` — the whole free block — and nothing holds back the SIBLING
+resident's floor. `ramArena`'s `hold()` (`shared/ram/broker.ts:110`) is
+`Math.max` per host rather than a sum, so two residents standing on home
+reserve one block between them, not two.
+
+**It is BN15 that exposes it, not BN15 that causes it.** `leg-bn1.1` runs the
+identical growth sequence — same paths, same sizes — but at **t = 4,712,696 ms
+(1.3 virtual hours)**, by which time home has been upgraded, `nspLong` has long
+since spawned at 4 GB, and `nsp` climbs past 54 GB without starving anything.
+BN1 gates factions to `"no"`, so the read burst is deferred; BN15 does not. Any
+node that unlocks its whole singularity surface against a 32 GB home is exposed
+to the same race.
+
+**Fixed by a landing slot.** `placeResident` (`game/lib/controller.ts`) now
+takes at most `freeGb` minus what every resident that has NEVER PLACED still
+needs to land, floored at the asking call's own minimum so the hold-back stays
+a courtesy rather than a refusal. `host === undefined` is the precise test: a
+grow-respawn keeps its old placement until the new one is held, so a recycling
+resident never counts itself, and once both stand somewhere the hold-back is
+zero. `leg-bn1.1` seed 1 still reaches its third install inside 6 h, unchanged.
+
+**Then the darknet ran, and the fidelity gap it exposed.** With the residents
+sharing home, `leg-bn15.1` seed 1 goes from *1.8 seconds of wall time doing
+nothing* to a live run: 34 darknet hosts known, 32 cracked, phishing and
+propaganda in flight, Go, stock, backdoors and faction work all moving.
+
+`ns.nuke` and the five port openers took `requireServer`, which does not
+distinguish a darknet host. Upstream routes all six (and hack/grow/weaken)
+through `helpers.getNormalServer`, which throws for a `DarknetServer`
+(`src/Netscript/NetscriptHelpers.tsx:521-535`). Root on a darknet host is not
+cosmetic — it divides every authentication's charisma gain by five, feeds
+`getBackdoorAuthTimeDebuff`'s rooted count, skips the first-root cache roll,
+opens `connectToSession`, and makes a labyrinth answer its own password instead
+of the maze — so `sim/ns/api.ts` now has `requireNormalServer` and the six
+verbs refuse. (This was not what rooted the lab: `scan` already hides darknet
+hosts, so nothing ever nuked one. It is a real gap found while looking.) It
+changes semantics that can alter an outcome, so `SIMULATOR_MODEL_VERSION` moves
+to 13; nothing is invalidated, because no leg exit has ever been recorded.
+
+**The walk happens.** `leg-bn15.1` seed 1 now refuses the maze on `charisma`
+("the maze needs charisma 300") from t=15.5 s — the correct rung of the ladder,
+which no run had ever reached — launches a walker once charisma passes 300, and
+by **t=691 s** has reached the exit: the lab is rooted, its `the_great_work`
+cache is on disk, and `hold.refused` reads `lab-walked` truthfully for the
+first time. The lab report shows the carved maze with `exitKnown: true`.
+
+**The walk pace, measured.** The lab-report walkers give the whole trace. In
+install 1 a walker starts at t=661.5 s and the lab is rooted at t=691 s; in
+install 2 (the net had not deepened, because the reward was never installed)
+one starts at t=5,866.7 s and the lab is rooted at t=5,897.0 s. **29.5 s and
+30.3 s** for the 21x13 maze — 10x6 = 60 rooms — against
+`LABYRINTH_SEC_PER_ROOM = 12`'s 720 s. The constant went to **0.5** as an
+interim, and was then retired outright in favour of the lab lane's measured
+attempts — see *The labyrinth walk, priced from measurement* below.
+
+The trace also says the SHAPE is wrong: the walker took about 30 moves through
+60 rooms (`believedLeft` 28.5 -> 18.5, `radars: 1`) because `labradar` shows it
+the exit and it beelines, so cost tracks the WALK, not the maze's area.
+
+Note also that `labyrinthWalkEstimates` (`game/lib/features/remaining.ts`)
+already reports `measured: true` — but only while a walker is LIVE. Six samples
+in install 1 carried one; every other pass fell back. Retaining the observed
+pace after a walk ends is the obvious next improvement and is not done.
+
+The controller then holds the reward cache deliberately —
+`cache-lab-deferred`, "a labyrinth cache queues an augmentation; held until the
+last purchase is made" — so the route's blocker stays "complete labyrinth
+stage 1" until the install window opens. `labyrinthAutomationAvailable` stays
+`false` for now, and its comment now names the real reason: the pipeline is
+demonstrably drivable, but no stage has been *completed* end to end (walk,
+cache, install) yet.
+
+## The BN15 ladder, closed (2026-08-31)
+
+Stage 1 of the labyrinth now completes **end to end** on `leg-bn15.1` seed 1:
+the walker reaches the exit at t=691 s, `the_great_work` drops, the
+`dnet-lab-cache` blocker opens it, `The W1ngs of Icarus` installs, and the net
+deepens — `cru3l_l4byr1nth` is the current lab in the next install segment.
+Before this pass no run had ever started a walk.
+
+**The reward cache was never claimed, because the clock started too early.**
+Opening a lab cache queues an augmentation and the price multiplier is
+`1.9 ^ queued`, so it is deliberately held until the cycle's LAST purchase
+(`game/lib/features/dnet.ts:568-596`). The blocker that permits it needs
+`installWanted && labCacheOpenable && purchasableAugmentation === undefined`
+(`decide.ts:436`) — but `remaining.ts` started the 150 s abandonment window
+from the moment the cache became *openable*, outside all three conditions. The
+maze finished at t=691 s and the install came at t≈5,545 s, so the window had
+expired eighty minutes before anything wanted the cache: the blocker was never
+raised, `openLabCache` never went true, `farm.ts:407` refused for ever, and the
+install destroyed the walked maze. `labCacheDeferral` is now
+`labCacheWindowOpen` (read before the decision) plus `advanceLabCacheDeferral`
+(stamped after it, from whether the blocker was actually RAISED). The clock
+means what it says again: *we asked for the cache and it has not arrived*.
+
+**And the install brake could not see the walk it was about to destroy.**
+`optionalInstallErasedSec` priced a labyrinth walk only from
+`rates.labyrinthWalks[].investedSec`, which `labyrinthWalkEstimates` emits only
+for a LIVE walker — so the term fell to zero the instant the walker reached the
+exit, releasing the brake exactly when the walk was most at risk. An unopened
+`the_great_work` is the observable for "walked and unbanked", so `EndgameView`
+gained `labCacheUnclaimed` and the whole stage's walk time is charged while it
+is set.
+
+**`labyrinthAutomationAvailable` is derived now, on that evidence.** It was a
+hardcoded `false`, and rightly so until a stage completed; it now follows
+`darknetFullAccess`, since the labyrinth is drivable exactly while the darknet
+is reachable.
+
+## The darknet's hostnames, and the parity suite that gates "full" (2026-08-31)
+
+`dnet` is `"full"` in `sim/fidelity.ts` for the first time. Two things had to
+land, and `spec/game-source.md` named both.
+
+**Hostnames are generated.** `sim/features/dnet-names.ts` transcribes
+`generateDarknetServerName`, `getBaseName`, `decorateName` and `l33tifyName`
+with their four tables, `loreNames` derived from the vendored Faction and
+Location enums, and `safelyReverseString`'s grapheme reverse. Upstream's name
+block is VARIABLE WIDTH — 8 draws at best, 11-17 typically, unbounded while
+hostnames collide — and `MUTATION_DRAWS` is fixed so topology cannot perturb
+the stock stream across an A/B, so every draw is a salted `subDraw` off the one
+stream draw `#addHost` had already taken. Same probabilities, fixed cost. The
+noise-only name in `capturePackets` is generated the same way but on the
+dedicated noise stream, where variable width costs nothing.
+
+The net now produces `apex@matrix`, `digital_citadel:6576`,
+`so1aris_space_sys7ems` and `j0e_s_guns` where it used to produce `dnet-7-x42`.
+
+**Which exposed a live defect.** `hostish`
+(`shared/strategy/dnet/solvers/deep.ts`) accepted only `[A-Za-z0-9_.-]`,
+described as "the character class `generateDarknetServerName` draws a hostname
+from". It is not: `connectors` alone contributes `; : $ ^ % @ &`,
+`decorateName` appends `:<digits>`, `l33tifyName` injects a multi-code-unit
+emoji, and `presetNames` holds a SQL-injection joke and a CJK name. It gates
+credential extraction in `passwordFromNamedPacket`, whose own comment already
+reasoned correctly about `decorateName`'s colon — the parser was written
+against the real generator and the validator was not. A rejected head means the
+password after it is never read. The only thing a hostname genuinely cannot
+hold is whitespace, and that is what it tests now.
+
+**And a staleness hole the reuse made reachable.** Names come back after a
+deletion (the 3% offline-reuse branch), and the replacement is a different
+server with a different password and no admin rights. The live controller
+already retires everything keyed by the old name (`retireLifetime`, "server
+identity replaced"), but `sim/dnet-spread.ts` kept its own vault, stasis set
+and crack costs keyed by hostname alone — so the arena handed the strategy a
+host it believed it held a credential for and could not `exec` onto, a world
+the game cannot produce. One seed in twelve. It retires on identity change now,
+like production.
+
+**The parity suite.** `sim/tests/dnet-parity.test.ts` matches the CHECKOUT's
+source text, which is what the spec requires and the only option available:
+`tools/vendor.ts` strips `DarknetServer` because "its import graph detonates
+into the whole game UI", so there is no `DarkNet/` to import and diff. It pins
+the generator's coins and loop bounds, the four tables entry for entry, the
+`l33t` KEY ORDER (upstream indexes `Object.keys` with a draw), the
+authentication and charisma-gain terms, the propaganda curve, and the labyrinth
+ladder including the rule that only ARRIVAL roots a lab. `describe.skipIf`
+rather than a `lane()`: a lane would also skip on a default `bun test`, and a
+drift pin that only runs when asked for is not a drift pin.
+
+`sim/tests/drift-pins.test.ts` now sweeps `shared/strategy/dnet/` too. It was
+sweeping `sim/` only, so that directory's twenty-two `src/DarkNet/` citations
+were pinned by nothing — including `authenticateWaitMs` and `LAB_LADDER`, which
+are what the route prices a walk with. Turning the sweep on found two more
+unpinned files immediately (`DarkNet/ui/NetworkDisplayWrapper.tsx`,
+`utils/helpers/roundToTwo.ts`).
+
+## The labyrinth walk, priced from measurement (2026-08-31)
+
+`LABYRINTH_SEC_PER_ROOM` is gone. It priced a stage as `rooms x constant`, and
+the shape was the larger of its two errors: the walker pays `labradar` for a
+radius-3 view and then BEELINES, so it spends about 22 attempts on the first
+lab's 60 rooms and about 160 on the deep labs' 600. Area over-priced the deep
+rungs by an order of magnitude, and they are where a BN15 route's time sits.
+
+Both terms already existed. `sim/dnet-lab.ts` runs the DEPLOYED route over
+seeded mazes and is the lane built for this question; `authenticateWaitMs`
+(`shared/strategy/dnet/rates.ts`) is the transcribed
+`calculateAuthenticationTime`. So `LAB_WALK_ATTEMPTS` records the measured mean
+attempts per rung over 64 seeds apiece — 512 of 512 solved — and
+`labyrinthWalkFallbackSec` multiplies it by what one authentication costs.
+
+| rung | attempts | seconds |
+|---|---:|---:|
+| `th3_l4byr1nth` | 21.8 | 107 |
+| `cru3l_l4byr1nth` | 42.6 | 198 |
+| `m3rc1l3ss_l4byr1nth` | 68.9 | 305 |
+| `ub3r_l4byr1nth` | 166.1 | 725 |
+| `et3rn4l_l4byr1nth` | 162.5 | 706 |
+
+BN15's five walks: **34 minutes**, against 5.6 hours under the old constant.
+The seconds stay conservative on purpose — priced at each stage's own charisma
+gate and at ONE thread, because the route cannot know what the walker will be
+given, and both only make the real walk faster. A walk in flight still
+overrides the table.
+
+`sim/tests/dnet-lab-benchmark.test.ts` re-derives the table from the lane and
+holds `labyrinthWalkFallbackSec` to the lane's own milliseconds, so `shared/`
+and `sim/` cannot drift apart on a formula they both transcribe.
+
+## Still open on the BN15 leg (2026-08-31)
+
+- **No leg exit is recorded.** `sim/tests/baselines/bn15.json` still has
+  `profiles: {}` and `route-legs.json` still has `legs: {}`. Stage 1 is proven
+  end to end, but a recorded number needs the 3-seed 24 h benchmark on the
+  final code, and `SIMULATOR_MODEL_VERSION` moved to 14 in this pass — every
+  earlier BN15 figure is a different measuring instrument.
+- **Only stage 1 has been walked.** The four deeper rungs are priced from the
+  lab lane, which is a measurement of the WALK and not of getting to it: the
+  charisma climbs to 600, 1500, 2500 and 3000 between them are the route's real
+  cost and are still projected rather than observed.
+- **The walk pace retained after a walk ends** is still not implemented.
+  `labyrinthWalkEstimates` reports `measured: true` only while a walker is
+  live — six samples out of the observed run — so every other pass falls back
+  to the table. The table is now measured, which makes this much less urgent
+  than it was, but a live pace is still better evidence than a lane mean.
+
 ## Known gaps in the current implementation
 
 Stated plainly rather than buried, because several features are implemented to
@@ -1982,9 +2234,6 @@ the *strategy* level without full end-to-end execution:
   funded third of the remaining node-relative gate. The corrected run had no
   install at 2 h with seven augs banked, then installed twelve at 2.59 h
   (`runs/1786550754662-sim-sf12-30-count-cadence-release-seed1.jsonl`).
-- **The labyrinth route fallback is uncalibrated** (`LABYRINTH_WALK_SEC`). The
-  walk is implemented and simulated; the route ETA still marks its fallback
-  unmeasured until completed walks provide a stable calibration.
 - **`POOL_PRESSURE_OPS` is unmeasured, and blocked on a broken fixture.** Its
   own comment states that the -20% result behind it was taken while `planTake`
   was quadratic, so "always on" was also "always quadratic" and stranding was

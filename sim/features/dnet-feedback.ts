@@ -140,9 +140,15 @@ export function getKingOfTheHillAltitude(
 export interface PacketWorld {
   /** Every movable host's password, for the `--<password>--` leak. */
   movablePasswords: () => readonly string[];
-  /** Darknet hostnames, standing in for upstream's `generateDarknetServerName`
-   *  — see the `dnet.models` entry in DNET_ASSUMPTIONS. */
-  serverNames: () => readonly string[];
+  /** A freshly GENERATED darknet hostname for the noise line at `:45`.
+   *
+   *  Upstream calls `generateDarknetServerName()` here and throws the result
+   *  away — the name never joins the net. It matters because it is what the
+   *  deep solvers read hostname SHAPE from: a run that emitted `dnet-7-x42`
+   *  here taught them a shape the game never produces. Variable-width by
+   *  nature, which is fine: log noise has its own stream precisely so its
+   *  volume cannot perturb gameplay. */
+  generateName: () => string;
   /** The password of the most recent authentication attempt in this host's log
    *  ring, or null. `getMostRecentAuthLog`. */
   lastAttempted: () => string | null;
@@ -213,8 +219,7 @@ function getRandomData(
         result += " " + getExactCharactersHint(mostRecent, password);
       }
     } else if (rand() < 0.6) {
-      const names = world.serverNames();
-      result += " " + (names[Math.floor(rand() * names.length)] ?? server.hostname) + " ";
+      result += " " + world.generateName() + " ";
     } else if (rand() < 0.15) {
       result += "/" + LOCATION_NAME_KEYS[Math.floor(rand() * LOCATION_NAME_KEYS.length)] + "/";
     } else if (rand() < 0.05) {

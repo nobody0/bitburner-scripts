@@ -24,6 +24,7 @@ import { PACKET_SNIFF_PHRASES } from "./phrases.ts";
  * Source: ../bitburner-src at 3162fd2590e221eadd0c0fbd46151913f7c4c41c
  *   src/DarkNet/models/packetSniffing.ts  (getLogNoise, logPasswordAttempt,
  *                                          capturePackets, getRandomCharsInPassword)
+ *   src/DarkNet/controllers/NetworkMovement.ts:308 (restartServer log)
  *   src/NetscriptFunctions/Darknet.ts:286-288 (how a line is serialised) */
 
 /** The engine's own `PasswordResponse`, as it appears once JSON-stringified into
@@ -75,7 +76,7 @@ export interface HintCapture {
 
 export interface NoiseLine {
   kind: "noise";
-  /** Kept so an unrecognised shape can be shown rather than silently dropped —
+  /** Kept so an unrecognised line can be shown rather than silently dropped —
    *  this is how we find out the grammar has drifted. */
   text: string;
   /** Known game noise is not grammar drift. */
@@ -106,6 +107,7 @@ const TRANSACTION_SUFFIX = ".]";
 /** `<time>: <host> - heartbeat check (alive)`. Recognised so it does not count
  * as grammar drift. */
 const HEARTBEAT = /- heartbeat check \(alive\)$/;
+const SERVER_RESTARTING = "Server restarting, terminating scripts...";
 const PACKET_SPAM = new Set(PACKET_SNIFF_PHRASES);
 
 /** The eight `getRandomCharsInPassword` templates. Each names two characters
@@ -292,6 +294,7 @@ export function parseHeartbleedLine(raw: string, knownHosts: readonly string[] =
   }
 
   if (HEARTBEAT.test(line)) return { kind: "noise", text: line, recognised: true };
+  if (line === SERVER_RESTARTING) return { kind: "noise", text: line, recognised: true };
   if (PACKET_SPAM.has(line)) return { kind: "noise", text: line, recognised: true };
 
   if (line === NO_PASSWORD_HINT) return { kind: "hint", contains: [] };
@@ -330,49 +333,6 @@ export interface HarvestSummary {
    *  than swallowed. */
   unrecognised: string[];
 }
-
-/** One unrecognised line, reduced to its SHAPE.
- *
- * A rising `unrecognised` count means our grammar has drifted from the game, and
- * a count on its own cannot say WHICH shape drifted — so the natural fix is to
- * report examples. That fix is unsafe, and dangerously so: an unrecognised line
- * is by definition one we failed to parse, and three of the noise generator's
- * branches put a plaintext password into a log line. Shipping examples would
- * ship exactly the passwords our parser missed.
- *
- * So the shape travels and the text does not. Every run of digits collapses to
- * `#` and every run of letters to `a`, which leaves the punctuation and the
- * structure — enough to say "a line like `a: a-#` stopped parsing" and to write
- * the fix against, and not enough to carry a secret.
- *
- * A character loop and `String` methods only: `RegExp.prototype.exec` anywhere
- * in a bundle that reaches a game script bills the full 1.3 GB of `ns.exec`, and
- * this module is imported by the job bodies. */
-export function logShape(line: string): string {
-  let out = "";
-  let last = "";
-  for (const ch of line.slice(0, SHAPE_SCAN)) {
-    const cls = ch >= "0" && ch <= "9"
-      ? "#"
-      : (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z")
-        ? "a"
-        : "";
-    if (cls === "") {
-      out += ch;
-      last = "";
-      continue;
-    }
-    // Collapse the RUN, so `passcode1234` and `passcode9` are one shape.
-    if (cls !== last) out += cls;
-    last = cls;
-  }
-  return out.slice(0, SHAPE_MAX);
-}
-
-/** Enough of a line to tell its shape; the rest is more of the same. */
-const SHAPE_SCAN = 240;
-/** What actually travels. A shape longer than this is not a shape. */
-const SHAPE_MAX = 60;
 
 /** Fold a batch of log lines into everything they gave us.
  *

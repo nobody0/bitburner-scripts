@@ -44,6 +44,12 @@ describe("handwritten simulator source drift", () => {
       }
     };
     visit(join(import.meta.dir, ".."));
+    // ...and `shared/strategy/dnet/`, which cites twenty-two `src/DarkNet/`
+    // formulas and was covered by nothing. It is outside `sim/` because the
+    // game agents read it, but that makes its citations MORE load-bearing, not
+    // less: `authenticateWaitMs` and `LAB_LADDER` are what the route prices a
+    // labyrinth walk with.
+    visit(join(import.meta.dir, "..", "..", "shared", "strategy", "dnet"));
 
     const cited = new Set<string>();
     const citations = [

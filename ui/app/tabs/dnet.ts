@@ -1560,16 +1560,12 @@ export const dnetTab: Tab = {
             hint("unparsed log lines", "our grammar has fallen behind the game's — see shared/strategy/dnet/oracle.ts"),
             String(drift!.unrecognised),
           ]])
-          // SHAPES, not lines. An unparsed line is one we failed to read, and
-          // the noise generator writes cleartext passwords into log lines, so
-          // the examples would be the passwords we missed. Digits and letters
-          // are collapsed; the structure is what a fix is written against.
           + table(
-            [hint("shape", "digits are #, letters are a — the line itself never leaves the game"), "seen"],
-            Object.entries(drift!.shapes)
+            ["unparsed line", "seen"],
+            Object.entries(drift!.lines ?? {})
               .sort((a, b) => b[1] - a[1])
-              .map(([shape, n]) => [esc(shape), String(n)]),
-            { empty: "no shape recorded", left: [0], wrap: [0] },
+              .map(([line, n]) => [esc(line), String(n)]),
+            { empty: "no line recorded", left: [0], wrap: [0] },
           )
           : ""),
       )

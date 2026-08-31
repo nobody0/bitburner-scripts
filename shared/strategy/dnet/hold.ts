@@ -79,6 +79,16 @@ export interface HoldHost {
   agentAlive: boolean;
   /** We hold this host's password. */
   hasCredential: boolean;
+  /** This labyrinth's maze has been FINISHED.
+   *
+   * The exit is the only thing that roots a lab — `handleLabyrinthPassword`
+   * refuses the correct password outright ("the best way to beat a maze is to
+   * find the end") and grants admin only on arrival
+   * (`src/DarkNet/effects/labyrinth.ts:278,310` @ 3162fd2) — and admin is never
+   * taken away, so it is the one durable answer. `hasCredential` is NOT: a
+   * lab's password is capturable passively like any host's, through sniffing,
+   * caches and dictionaries, and holding it says nothing about the maze. */
+  walked?: boolean;
   /** Hosts we believe are adjacent to it. */
   neighbours?: string[];
   isStationary?: boolean;
@@ -290,7 +300,8 @@ export interface HoldPlanInputs {
 export interface HoldPlan {
   tasks: HoldTask[];
   refused: HoldRefusal[];
-  /** The labyrinth's password is held: the walk is over. */
+  /** The labyrinth is ROOTED, which only its exit does: the walk is over. See
+   * `HoldHost.walked` — holding the lab's password says nothing. */
   labWalked: boolean;
   labCandidate?: string;
   /** The maze's charisma gate when it refused the walk. */
@@ -313,10 +324,15 @@ export function planWalk(
   inputs: Pick<HoldPlanInputs, "hosts" | "charisma" | "walkerAt" | "walkGb" | "reclaimGb">,
   refuse: (host: string, why: string, detail: string) => void,
 ): WalkPlan {
-  const lab = inputs.hosts.find((h) => isLabyrinth(h.hostname, h.modelId));
+  // Prefer an UNWALKED lab when knowledge holds more than one. The route is
+  // five stages here and the net deepens at the install after each exit, so a
+  // just-finished lab and its successor can both be known for a moment; taking
+  // the walked one would refuse the stage that is actually next.
+  const labs = inputs.hosts.filter((h) => isLabyrinth(h.hostname, h.modelId));
+  const lab = labs.find((h) => h.walked !== true) ?? labs[0];
   if (lab === undefined) return { tasks: [] };
-  if (lab.hasCredential) {
-    refuse(lab.hostname, "lab-walked", "we already hold this lab's password, so its maze has been finished");
+  if (lab.walked === true) {
+    refuse(lab.hostname, "lab-walked", "the lab is rooted, which only its exit does, so the maze has been finished");
     return { lab, tasks: [] };
   }
   const needed = labStage(lab.hostname)?.cha;
@@ -434,7 +450,7 @@ export function planHold(inputs: HoldPlanInputs): HoldPlan {
     const standing = inputs.hosts.find((h) => h.hostname === task.from);
     if (standing) standing.irreplaceable = true;
   }
-  const labWalked = walk.lab !== undefined && walk.lab.hasCredential;
+  const labWalked = walk.lab?.walked === true;
   const stasis = planStasis({ ...view, reserveForWalker: !labWalked && inputs.labExpected });
   for (const refusal of stasis.refused) refuse(refusal.hostname, refusal.why, refusal.detail);
   for (const task of admitPins(inputs.hosts, stasis.release, inputs.pinGb, refuse, undefined, false)) {

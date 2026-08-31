@@ -51,6 +51,10 @@ export interface BrokerHost {
  * the case the reserve exists for, since a resident that cannot find room
  * spins in `#respawn` holding nothing at all. */
 export interface ResidentAsk {
+  /** Which resident this is. The broker itself never needs it; a placer does,
+   * to tell the resident it is placing apart from the siblings it is holding
+   * room back for. */
+  label?: string;
   host?: string;
   /** Executable GB currently granted; 0 before the first placement. */
   gb: number;

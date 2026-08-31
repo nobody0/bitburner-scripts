@@ -51,12 +51,14 @@ the open defects a leg is currently losing to:
   leg is a single completion, nothing about a leg is unbenchable — a
   mid-milestone leg like `bn4.2` is just a run whose entrance carries the
   partial SF4.1 and `sourceFileLevel: 1`.
-- Each leg's surface is the full mechanically playable surface of its NODE,
-  not one uniform list: `ROUTE_LEG_SURFACES` (`sim/profiles.ts`) excludes only
-  the node-defining systems the simulator does not model. BN4 therefore
-  carries `dnet` — the node scales darknet money to 0.4 rather than removing
-  it — while BN8 does not, and `stanek` is on no leg at all because Church of
-  the Machine God requires BN13 or SF13.
+- A leg does not restrict its surface at all: it schedules the complete
+  controller surface and fails loudly on any gap it meets, so an unmodeled
+  call invalidates the leg rather than being masked. What is filtered is which
+  legs get PUBLISHED — `COVERED_ROUTE_NODES` (`sim/profiles.ts`) lists the
+  nodes whose defining mechanics the simulator models, and only their legs get
+  a bench profile. Owning an unmodeled node's Source-File is fine, since
+  `applySourceFile` is only multipliers; it is PLAYING that node that is not
+  modeled.
 - Legs are covered by generated `bitnode-route` profiles named
   `leg-bn<node>.<level>` on route id `all-sf3-bn4-first`, for every node whose
   defining systems the sim models. **Running an entire BitNode IS the

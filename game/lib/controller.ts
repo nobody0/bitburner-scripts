@@ -98,8 +98,36 @@ export async function runController(
   // simply granted more. A resident stands for the whole run, so it prefers
   // the arena hosts the farm planner already keeps clear over a batcher host
   // whose RAM the dispatcher wants back.
-  const placeResident: ProxyPlacer = (minGb, preferredGb) => {
+  const placeResident: ProxyPlacer = (minGb, preferredGb, label) => {
     const heap = hackingState().memory.dispatch.heap;
+    // LEAVE A LANDING SLOT FOR A RESIDENT THAT HAS NEVER PLACED.
+    //
+    // The two residents compete for the same blocks, and the appetite of the
+    // first is bounded only by `MAX_ASK_GB` (64) — twice a post-SF1 home. In a
+    // node that unlocks its whole singularity read surface at once, `nsp`
+    // learns that surface in a single instant and grows 13.7 -> 27.1 GB on a
+    // 32 GB home before `nspLong` has ever run. With `main.js` holding 3.2
+    // that leaves 1.7 GB against `nspLong`'s 2.7 GB floor, and the run spends
+    // the next six hours re-emitting `proxy.slow` and doing nothing else
+    // (spec/progress.md, 2026-08-31).
+    //
+    // So a resident may not take a block down past what an UNPLACED sibling
+    // still needs to land. SIBLING is the whole word: the caller is excluded by
+    // `label`, because the resident being placed right now is the one landing,
+    // and holding its own want back from it would grant it `minGb` in exactly
+    // the case the block was big enough for what it asked. That is not
+    // hypothetical — `free()` clears the placement, so after a
+    // `recycleResidents()` (and after an exec the engine refuses) BOTH
+    // residents are `host === undefined` and each would subtract itself.
+    //
+    // `host === undefined` is otherwise the precise condition: a grow-respawn
+    // keeps its old placement until the new one is held, so a recycling
+    // resident never counts here either. Once every resident stands somewhere
+    // the hold-back is zero and appetite is unbounded again — a placed
+    // sibling's RAM is already out of `freeGb`.
+    const landingGb = residentAsks()
+      .filter((ask) => ask.host === undefined && ask.label !== label)
+      .reduce((sum, ask) => sum + ask.wantGb, 0);
     const arenaSet = new Set(buildArena().hosts);
     const hosts = arenaHosts(state);
     const host = hosts
@@ -127,7 +155,10 @@ export async function runController(
       // today, but never permanently.
       return { host: "home", gb: minGb, release: () => {} };
     }
-    const gb = Math.round(Math.min(preferredGb, host.freeGb) * 100) / 100;
+    // `Math.max(minGb, ...)` because the hold-back is a courtesy, never a
+    // refusal: a call priced above what is left still has to run somewhere.
+    const takeableGb = Math.max(minGb, host.freeGb - landingGb);
+    const gb = Math.round(Math.min(preferredGb, takeableGb) * 100) / 100;
     // A host the heap does not describe (home before the first sweep) is taken
     // without a lease.
     if (heap?.host(host.hostname) === undefined) {

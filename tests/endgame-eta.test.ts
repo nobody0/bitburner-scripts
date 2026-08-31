@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   BLACK_OP_COUNT,
   DAEDALUS_MONEY,
+  labyrinthStageIndex,
   RED_PILL_REP,
   stepEndgame,
   type EndgameView,
@@ -289,6 +290,21 @@ describe("route ETAs", () => {
     };
     expect(optionalInstallErasedSec([], view({ bitNode: 15 }), midWalk, "labyrinth")).toBe(450);
     expect(optionalInstallErasedSec([], view({ bitNode: 15 }), midWalk, "daedalus")).toBe(0);
+  });
+
+  // A COMPLETED walk used to be worth nothing to the brake: `labyrinthWalks`
+  // is fed by live walkers, so the term fell to zero the instant the walker
+  // reached the exit — and the install that followed destroyed the maze with
+  // the reward still sitting on it unopened. Measured on leg-bn15.1: the
+  // ladder never left stage 1.
+  test("an unclaimed lab cache is erased at the whole stage's walk time", () => {
+    const finished = view({ bitNode: 15, labCacheUnclaimed: true });
+    const stageSec = labyrinthWalkFallbackSec(labyrinthStageIndex(finished));
+    expect(stageSec).toBeGreaterThan(0);
+    expect(optionalInstallErasedSec([], finished, noRates(), "labyrinth")).toBe(stageSec);
+    // Only on the route that owns the walk, and only while it is unclaimed.
+    expect(optionalInstallErasedSec([], finished, noRates(), "daedalus")).toBe(0);
+    expect(optionalInstallErasedSec([], view({ bitNode: 15 }), noRates(), "labyrinth")).toBe(0);
   });
 
   test("route evaluation for all BitNodes remains comfortably below the 10ms budget", () => {

@@ -99,6 +99,49 @@ export function labMazeSize(stage: Pick<LabStage, "mazeWidth" | "mazeHeight">): 
   };
 }
 
+/** Authentications the DEPLOYED walker spends to reach each rung's exit, mean
+ * over 64 seeded mazes apiece, all 512 solved.
+ *
+ * MEASURED, in `sim/dnet-lab.ts` — the lane exists for exactly this question.
+ * It runs `plannerRoute()`, the same route `game/dnet/walk.ts` deploys, over
+ * `generateLabCorpus` and never hands it the maze, the exit, the shortest path
+ * or the seed. Regenerate with `bun run bench:sim:dnet-lab`;
+ * `sim/tests/dnet-walk-pricing.test.ts` re-derives this table and fails when
+ * the deployed route drifts away from it.
+ *
+ * It replaced a `12 s per maze ROOM` guess, and the shape was the bigger error
+ * of the two: the walker pays `labradar` for a radius-3 view and then BEELINES,
+ * so it spends about 22 moves on the first lab's 60 rooms and about 160 on the
+ * deep labs' 600. Area over-priced the deep rungs by an order of magnitude, and
+ * they are where a BN15 route's time actually sits.
+ *
+ * Attempts, not seconds: one attempt costs `authenticateWaitMs`, which falls
+ * with charisma and with thread count, so seconds are a property of the RUN
+ * and belong at the call site. */
+export const LAB_WALK_ATTEMPTS: Readonly<Record<string, number>> = {
+  th3_l4byr1nth: 21.8,
+  cru3l_l4byr1nth: 42.6,
+  m3rc1l3ss_l4byr1nth: 68.9,
+  ub3r_l4byr1nth: 166.1,
+  et3rn4l_l4byr1nth: 162.5,
+  end13ss_l4byr1nth: 161.1,
+  f1n4l_l4byr1nth: 157.4,
+  b0nus_l4byr1nth: 160.9,
+};
+
+/** A labyrinth as `authenticateWaitMs` sees it: difficulty 10 and depth -1, so
+ * the generic under-level penalty never applies — the maze rejects a
+ * below-gate player separately, with a 451.
+ * Source: src/DarkNet/controllers/NetworkGenerator.ts:235-261 */
+export function labTimingTarget(stage: LabStage): DnetTimingTarget {
+  return {
+    modelId: LABYRINTH_MODEL_ID,
+    difficulty: 10,
+    depth: -1,
+    requiredCharismaSkill: stage.cha,
+  };
+}
+
 const LAB_BY_HOST = new Map(LAB_LADDER.map((stage) => [stage.hostname, stage]));
 
 /** The model id every lab host reports. Source: src/DarkNet/Enums.ts (ModelIds.labyrinth) */

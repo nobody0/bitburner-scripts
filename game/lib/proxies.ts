@@ -83,10 +83,10 @@ export function initProxies(): void {
 export function residentAsks(): ResidentAsk[] {
   const held = realm();
   const asks: ResidentAsk[] = [];
-  for (const handle of [held.ns_proxy, held.ns_proxy_long]) {
+  for (const [label, handle] of [["nsp", held.ns_proxy], ["nspLong", held.ns_proxy_long]] as const) {
     if (!handle) continue;
     const host = handle.host();
-    asks.push({ ...(host !== undefined ? { host } : {}), gb: handle.grantedGb(), wantGb: handle.wantedGb() });
+    asks.push({ label, ...(host !== undefined ? { host } : {}), gb: handle.grantedGb(), wantGb: handle.wantedGb() });
   }
   return asks;
 }

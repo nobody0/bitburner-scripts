@@ -84,7 +84,7 @@ function server(over: Partial<CheckableServer> & { password: string }): Checkabl
 const QUIET_WORLD: PacketWorld = {
   rand: mulberry32(99),
   movablePasswords: () => ["1111"],
-  serverNames: () => ["probe-0"],
+  generateName: () => "probe-0",
   lastAttempted: () => null,
 };
 

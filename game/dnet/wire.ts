@@ -121,7 +121,7 @@ export interface DnetRecoveryState {
   charismaNeeded?: number;
   karmaLoss: number;
   profit: DarknetProfit;
-  grammar?: { unrecognised: number; shapes: Record<string, number> };
+  grammar?: { unrecognised: number; lines: Record<string, number> };
   lastPhishCacheAt?: number;
   lastStormAt?: number;
   unknownModels: Record<string, number>;

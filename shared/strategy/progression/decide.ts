@@ -127,7 +127,8 @@ export interface ProgressionView {
    *
    * Absent or false is the ordinary case and means NO BLOCKER AT ALL. The driver
    * only ever passes true when the cache is openable this instant and the
-   * deferral's own deadline has not run out; see `labCacheDeferral`. */
+   * deferral's own deadline has not run out; see `labCacheWindowOpen` and
+   * `advanceLabCacheDeferral`. */
   labCacheOpenable?: boolean;
   /** The final sweep could still convert at least one rep-met, affordable
    * offer. Purchases are end-loaded, so mid-cycle the queue is empty BY
@@ -158,23 +159,39 @@ export type InstallBlockerKind = "factions" | "stock" | "graft" | "augmentations
  * world moved. */
 export const LAB_CACHE_DEFER_MS = 150_000;
 
-/** Whether the lab-cache deferral should hold the install this pass, and when it
- * started holding it.
+/** Whether the deferral's window is still open, given when it started.
+ *
+ * An unstarted clock is always open: the window bounds how long we WAIT for a
+ * cache we have asked for, and we have not asked yet.
  *
  * Pure and separate from `stepProgression` because it is the half that needs a
- * CLOCK, and because it is the half a test has to be able to drive directly: the
- * one behaviour that must be proven is that it expires rather than latches.
+ * CLOCK, and because it is the half a test has to be able to drive directly:
+ * the one behaviour that must be proven is that it expires rather than
+ * latches. */
+export function labCacheWindowOpen(since: number | undefined, now: number): boolean {
+  return since === undefined || now - since < LAB_CACHE_DEFER_MS;
+}
+
+/** Advance the deferral clock, and answer where it now stands.
+ *
+ * THE CLOCK STARTS WHEN THE BLOCKER IS RAISED, not when the cache becomes
+ * openable, and the difference is the whole reason this is a separate
+ * function. `dnet-lab-cache` is raised only once the install is wanted AND the
+ * cycle's last purchase is made; a maze walked early in a cycle sits openable
+ * for as long as the shopping takes. Starting the clock there expired the
+ * window long before anything wanted the cache — observed at 80 minutes on
+ * `leg-bn15.1` — so the blocker was never raised, the cache never opened, and
+ * the install destroyed the walked maze.
  *
  * `openable` false at any point resets the window outright — a cache that has
  * become unreachable is not a cache we are waiting for. */
-export function labCacheDeferral(
-  previous: { since?: number },
-  openable: boolean,
+export function advanceLabCacheDeferral(
+  since: number | undefined,
+  facts: { openable: boolean; raised: boolean },
   now: number,
-): { since?: number; defer: boolean } {
-  if (!openable) return { defer: false };
-  const since = previous.since ?? now;
-  return { since, defer: now - since < LAB_CACHE_DEFER_MS };
+): number | undefined {
+  if (!facts.openable) return undefined;
+  return facts.raised ? since ?? now : since;
 }
 
 export interface ProgressionDecision {

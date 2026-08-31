@@ -86,15 +86,41 @@ describe("planWalk's preparation checklist", () => {
     expect(plan.candidate).toBe("dnet-6-x1");
   });
 
-  test("a walked lab refuses lab-walked and admits nothing", () => {
+  test("a ROOTED lab refuses lab-walked and admits nothing", () => {
+    const { list, refuse } = refusals();
+    const plan = planWalk({
+      hosts: [labHost({ walked: true }), vantage()],
+      charisma: LAB.cha,
+      walkGb: WALK_GB,
+    }, refuse);
+    expect(plan.tasks).toEqual([]);
+    expect(list[0]!.why).toBe("lab-walked");
+  });
+
+  // The defect this pins cost every BN15 run its labyrinth: a lab's password
+  // is capturable passively, upstream refuses it at the maze anyway, and
+  // reading it as "walked" refused the only route through the node for ever.
+  test("holding the lab's password is not walking it", () => {
     const { list, refuse } = refusals();
     const plan = planWalk({
       hosts: [labHost({ hasCredential: true }), vantage()],
       charisma: LAB.cha,
       walkGb: WALK_GB,
     }, refuse);
-    expect(plan.tasks).toEqual([]);
-    expect(list[0]!.why).toBe("lab-walked");
+    expect(list.map((r) => r.why)).toEqual([]);
+    expect(plan.tasks.map((t) => t.kind)).toEqual(["walk"]);
+  });
+
+  test("with a walked lab and its successor both known, the successor is walked", () => {
+    const next = labHost({ hostname: LAB_LADDER[1]!.hostname });
+    const { list, refuse } = refusals();
+    const plan = planWalk({
+      hosts: [labHost({ walked: true }), next, vantage({ neighbours: [next.hostname] })],
+      charisma: LAB_LADDER[1]!.cha,
+      walkGb: WALK_GB,
+    }, refuse);
+    expect(list.map((r) => r.why)).toEqual([]);
+    expect(plan.tasks.map((t) => t.host)).toEqual([next.hostname]);
   });
 });
 
@@ -145,9 +171,9 @@ describe("planHold end to end", () => {
     expect(hosts[1]!.irreplaceable).toBe(true);
   });
 
-  test("a walked lab reports labWalked and files no walk", () => {
+  test("a rooted lab reports labWalked and files no walk", () => {
     const plan = planHold({
-      hosts: [labHost({ hasCredential: true }), vantage()],
+      hosts: [labHost({ walked: true }), vantage()],
       netDepth: LAB.depth,
       stasisLimit: 1,
       stasisLinkedCount: 1,

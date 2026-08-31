@@ -28,7 +28,7 @@ import {
   type ExpiryOpts,
 } from "../../../shared/strategy/dnet/host.ts";
 import type { Need } from "../../../shared/strategy/needs.ts";
-import { labCacheDeferral } from "../../../shared/strategy/progression/decide.ts";
+import { advanceLabCacheDeferral, labCacheWindowOpen } from "../../../shared/strategy/progression/decide.ts";
 import type { DarknetAgentDigest, DarknetKnownHost } from "../../../shared/telemetry/topics/dnet.ts";
 import {
   PROBER_GB,
@@ -1220,14 +1220,26 @@ function dnetNeeds(ctx: NeedContext): Need[] {
   ];
 }
 
-/** The lab-cache deferral, evaluated against dnet's own memory of when it was
- * first raised. `progression` calls this each refresh — the deferral gates ITS
- * install — but the SINCE stamp is darknet state: `dnetModule.reset` clears it
- * with everything else the feature derived from the world it is leaving. */
+/** Whether the lab-cache deferral may hold the install this pass.
+ *
+ * Two halves, because the clock starts when the BLOCKER is raised rather than
+ * when the cache appears: this one answers before `stepProgression` runs, and
+ * `dnetLabCacheClock` stamps after it, having seen whether the blocker was
+ * actually raised. `progression` calls both each refresh — the deferral gates
+ * ITS install — but the SINCE stamp is darknet state: `dnetModule.reset`
+ * clears it with everything else the feature derived from the world it is
+ * leaving. */
 export function dnetLabCacheDeferral(labCacheOpen: boolean, now: number): boolean {
-  const deferral = labCacheDeferral({ since: home.labCacheSince }, labCacheOpen, now);
-  home.labCacheSince = deferral.since;
-  return deferral.defer;
+  return labCacheOpen && labCacheWindowOpen(home.labCacheSince, now);
+}
+
+/** Advance the deferral clock with the decision's own answer. */
+export function dnetLabCacheClock(labCacheOpen: boolean, raised: boolean, now: number): void {
+  home.labCacheSince = advanceLabCacheDeferral(
+    home.labCacheSince,
+    { openable: labCacheOpen, raised },
+    now,
+  );
 }
 
 export const dnetModule: FeatureModule = {

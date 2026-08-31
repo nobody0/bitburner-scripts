@@ -41,7 +41,8 @@ import {
   installCadenceRemainingSec,
   installVerdict,
   LAB_CACHE_DEFER_MS,
-  labCacheDeferral,
+  advanceLabCacheDeferral,
+  labCacheWindowOpen,
   routeCountInstallValue,
   orderingCost,
   phaseOf,
@@ -925,33 +926,55 @@ describe("progression", () => {
       // filed, the host died under it, and nothing will ever come back. Without
       // this the install cycle waits for ever on a cache nobody is going to open.
       const start = 1_000_000;
-      let held = labCacheDeferral({}, true, start);
-      expect(held).toEqual({ since: start, defer: true });
+      const raised = { openable: true, raised: true };
+      let since = advanceLabCacheDeferral(undefined, raised, start);
+      expect(since).toBe(start);
+      expect(labCacheWindowOpen(since, start)).toBe(true);
 
       // The window runs from when it was FIRST raised, not from the last pass —
       // a deferral that restamped itself every tick would never expire.
-      held = labCacheDeferral(held, true, start + LAB_CACHE_DEFER_MS - 1);
-      expect(held.defer).toBe(true);
-      expect(held.since).toBe(start);
+      since = advanceLabCacheDeferral(since, raised, start + LAB_CACHE_DEFER_MS - 1);
+      expect(since).toBe(start);
+      expect(labCacheWindowOpen(since, start + LAB_CACHE_DEFER_MS - 1)).toBe(true);
 
-      held = labCacheDeferral(held, true, start + LAB_CACHE_DEFER_MS);
-      expect(held.defer).toBe(false);
+      expect(labCacheWindowOpen(since, start + LAB_CACHE_DEFER_MS)).toBe(false);
       // ...and once it has given up it stays given up while the cache sits there.
-      expect(labCacheDeferral(held, true, start + LAB_CACHE_DEFER_MS + 1).defer).toBe(false);
+      since = advanceLabCacheDeferral(since, raised, start + LAB_CACHE_DEFER_MS);
+      expect(labCacheWindowOpen(since, start + LAB_CACHE_DEFER_MS + 1)).toBe(false);
+    });
+
+    // The defect this pins cost BN15 its whole ladder. A maze is walked early
+    // in a cycle and the install is wanted at the END of it, after the last
+    // purchase — eighty minutes later in the measured run. Starting the clock
+    // when the cache became OPENABLE expired the window long before anything
+    // wanted the cache, so the blocker was never raised, `openLabCache` never
+    // went true, the reward was never claimed, and the install destroyed the
+    // walked maze.
+    test("the clock starts when the blocker is RAISED, not when the cache appears", () => {
+      const start = 1_000_000;
+      const waiting = { openable: true, raised: false };
+      // Openable for an hour while the cycle shops. The clock never starts...
+      let since = advanceLabCacheDeferral(undefined, waiting, start);
+      since = advanceLabCacheDeferral(since, waiting, start + 3_600_000);
+      expect(since).toBeUndefined();
+      // ...so the window is still open when the install finally wants it.
+      expect(labCacheWindowOpen(since, start + 3_600_000)).toBe(true);
+      since = advanceLabCacheDeferral(since, { openable: true, raised: true }, start + 3_600_000);
+      expect(since).toBe(start + 3_600_000);
     });
 
     test("a cache that stops being openable releases the install immediately", () => {
       // Not merely on the deadline: a lab that went offline, or a resident that
       // died, is not something to keep waiting for.
       const start = 1_000_000;
-      const held = labCacheDeferral({}, true, start);
-      const released = labCacheDeferral(held, false, start + 1);
-      expect(released.defer).toBe(false);
-      expect(released.since).toBeUndefined();
+      const since = advanceLabCacheDeferral(undefined, { openable: true, raised: true }, start);
+      const released = advanceLabCacheDeferral(since, { openable: false, raised: false }, start + 1);
+      expect(released).toBeUndefined();
       // And re-raising later starts a FRESH window rather than resuming a spent
       // one — otherwise a flapping resident could inherit an expired clock and
       // be refused a deferral it is entitled to.
-      expect(labCacheDeferral(released, true, start + 2)).toEqual({ since: start + 2, defer: true });
+      expect(advanceLabCacheDeferral(released, { openable: true, raised: true }, start + 2))
+        .toBe(start + 2);
     });
   });
 

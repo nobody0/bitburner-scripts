@@ -16,7 +16,7 @@ import {
 } from "./endgame.ts";
 import { cycleProgressEtaWithPrior, type CyclePoint, type CurveResource } from "./regrowth.ts";
 import { expForSkill } from "../../formulas.ts";
-import { LAB_LADDER, labMazeSize } from "../dnet/rates.ts";
+import { LAB_LADDER, LAB_WALK_ATTEMPTS, authenticateWaitMs, labTimingTarget } from "../dnet/rates.ts";
 
 /** Per-route time-to-finish HEURISTICS, and the route choice built on them.
  *
@@ -62,14 +62,6 @@ export const FALLBACK_GANG_START_SEC = 3_600;
 /** Seconds per charisma level, when unmeasured. Charisma trains like the
  * combat stats (class/company work) and shares their skill curve. */
 export const FALLBACK_SEC_PER_CHARISMA_LEVEL = 6;
-/** Labyrinth walk seconds per maze ROOM (odd-coordinate cell), when no walk
- * pace has been measured. Every move is one darknet authentication (roughly
- * `850ms * (5*chaGate + 100*(diff+1)) / (charisma+150)` at the gate — several
- * seconds), and a radar-assisted walk visits each room a bounded number of
- * times, so the walk scales with the PRODUCED maze's room count rather than
- * being one flat constant: the first lab (10x6 rooms) and the deep 30x20
- * ones differ ten-fold. Deliberately pessimistic until calibrated. */
-export const LABYRINTH_SEC_PER_ROOM = 12;
 /** Install + requeue overhead around the Red Pill install. */
 export const INSTALL_OVERHEAD_SEC = 300;
 /** The post-install climb is faster than the first one (the installed
@@ -363,6 +355,14 @@ export function optionalInstallErasedSec(
     for (const walk of Object.values(rates.labyrinthWalks ?? {})) {
       erased += Math.max(0, walk.investedSec ?? 0);
     }
+    // A FINISHED walk is worth more than a live one, and it used to be worth
+    // nothing: `labyrinthWalks` is fed by live walkers only, so the term went
+    // to zero the instant the walker reached the exit — releasing the brake at
+    // exactly the moment the walk was most at risk. An unclaimed
+    // `the_great_work` is the observable that the stage was completed and not
+    // yet banked, and a reset does not lose part of that walk, it loses the
+    // whole stage.
+    if (view.labCacheUnclaimed === true) erased += labyrinthWalkFallbackSec(labyrinthStageIndex(view));
   }
   for (const need of needs ?? []) {
     if (need.kind === "money") {
@@ -554,13 +554,27 @@ function labyrinthCharismaParts(
   return { byStage };
 }
 
-/** Fallback walk time for one labyrinth stage, scaled by the PRODUCED maze's
- * room count — a 60x40 request stitches to 61x41 with 30x20 rooms, ten times
- * the first lab. */
+/** Walk time for one labyrinth stage: the attempts the deployed walker
+ * measurably spends, at what one authentication measurably costs.
+ *
+ * `LAB_WALK_ATTEMPTS` comes from the lab lane and `authenticateWaitMs` is the
+ * transcribed `calculateAuthenticationTime`, so neither half is a guess. What
+ * remains conservative is the PROFILE: priced at the stage's own charisma gate
+ * (the floor at which the walk is legal at all) and at one thread, because the
+ * route does not know what the walker will be given. Both only ever make the
+ * real walk faster than this, and a walk actually in flight overrides it
+ * anyway — see `rates.labyrinthWalks`. */
 export function labyrinthWalkFallbackSec(stage: number): number {
   const ladder = LAB_LADDER[Math.min(stage, LAB_LADDER.length - 1)]!;
-  const { width, height } = labMazeSize(ladder);
-  return ((width - 1) / 2) * ((height - 1) / 2) * LABYRINTH_SEC_PER_ROOM;
+  const attempts = LAB_WALK_ATTEMPTS[ladder.hostname] ?? 0;
+  const perAttemptMs = authenticateWaitMs(labTimingTarget(ladder), {
+    charisma: ladder.cha,
+    intelligence: 0,
+    hasBoots: false,
+    sf15Level: 0,
+    authenticationDurationMultiplier: 1,
+  });
+  return (attempts * perAttemptMs) / 1_000;
 }
 
 function labyrinthWalkPart(stage: number, rates: RouteRates): EtaPart {

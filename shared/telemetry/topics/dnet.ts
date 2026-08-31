@@ -280,18 +280,10 @@ export interface DarknetState {
     expectedMoneyPerSec: number;
     expectedCharismaExpPerSec: number;
   };
-  /** How far our log parser has drifted from the game's grammar.
-   *
-   *  SHAPES, never lines, and the distinction is a credential one rather than a
-   *  tidiness one: an unrecognised line is by definition one `oracle.ts` failed
-   *  to read, and three of the noise generator's branches write a plaintext
-   *  password into a log line — so publishing examples would publish exactly the
-   *  passwords we missed. `logShape` collapses every digit and letter run,
-   *  leaving the punctuation and the structure.
-   *
-   *  A rising count is the same class of event as `unknownModels`: a game update,
-   *  or a hole in our transcription, and both are things to hear about. */
-  grammar?: { unrecognised: number; shapes: Record<string, number> };
+  /** How far our log parser has drifted from the game's grammar. A rising count
+   *  is the same class of event as `unknownModels`: a game update, or a hole in
+   *  our transcription, and both are things to hear about. */
+  grammar?: { unrecognised: number; lines: Record<string, number> };
   /** The three DELIBERATE decisions, and the fourth one home makes itself.
    *
    *  `spread` and `farm` above are things a host does as a matter

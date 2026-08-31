@@ -84,6 +84,14 @@ const TRANSCRIPTION_SOURCE_PATHS = [
   "src/DarkNet/utils/darknetNetworkUtils.ts",
   "src/DarkNet/models/packetSniffing.ts",
   "src/DarkNet/models/dictionaryData.ts",
+  // Reached from the hostname generator: `loreNames` sanitises with
+  // `oneInvalidCharacter`, and `decorateName` reverses with
+  // `safelyReverseString`. Both are transcribed in sim/features/dnet-names.ts.
+  // Cited by shared/strategy/dnet/, which the drift sweep now covers.
+  "src/DarkNet/ui/NetworkDisplayWrapper.tsx",
+  "src/utils/helpers/roundToTwo.ts",
+  "src/Paths/Directory.ts",
+  "src/utils/StringHelperFunctions.ts",
   "src/Gang/Gang.ts",
   "src/Gang/GangMember.ts",
   "src/Gang/formulas/formulas.ts",
