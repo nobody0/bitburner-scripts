@@ -5,7 +5,7 @@
  * `NSFull`, and that import graph detonates into the whole game the same way
  * Hacking.ts's DarknetServer import does (see tools/vendor.ts). The tree below
  * is a pure literal. Its upstream source hash is pinned by
- * sim/tests/transcription-drift.test.ts, so a release bump forces a semantic
+ * sim/tests/drift-pins.test.ts, so a release bump forces a semantic
  * audit before the accepted hash can be updated.
  *
  * This matters more than it looks. probe-runner prices every probe with
@@ -423,13 +423,107 @@ export const RAM_COSTS: CostNode = {
   gang,
   go,
   dnet,
+  // EVERY 0 GB LEAF IS STILL A LEAF. Upstream's RamCosts is typed
+  // RamCostTree<NSFull> — a non-optional mapped type — so a name absent from it
+  // is a name the API does not have, and that is the ONLY thing
+  // ns.getFunctionRamCost throws for (RamCostGenerator.ts:743-764). Leaving
+  // these out made the sim throw for 73 paths the game answers with 0, which
+  // misprices exactly the free members a probe is cheapest to build from.
+  // Their behaviour is still unmodelled — calling them reports through the
+  // namespace proxy — but their PRICE is knowable and is the game's.
   formulas: {
+    mockServer: 0,
+    mockPlayer: 0,
+    mockPerson: 0,
+    reputation: {
+      calculateFavorToRep: 0,
+      calculateRepToFavor: 0,
+      repFromDonation: 0,
+      donationForRep: 0,
+      sharePower: 0,
+    },
+    skills: { calculateSkill: 0, calculateExp: 0 },
+    hacking: {
+      hackChance: 0,
+      hackExp: 0,
+      hackPercent: 0,
+      growPercent: 0,
+      growThreads: 0,
+      growAmount: 0,
+      hackTime: 0,
+      growTime: 0,
+      weakenTime: 0,
+      weakenEffect: 0,
+    },
+    hacknetNodes: {
+      moneyGainRate: 0,
+      levelUpgradeCost: 0,
+      ramUpgradeCost: 0,
+      coreUpgradeCost: 0,
+      hacknetNodeCost: 0,
+      constants: 0,
+    },
+    hacknetServers: {
+      hashGainRate: 0,
+      levelUpgradeCost: 0,
+      ramUpgradeCost: 0,
+      coreUpgradeCost: 0,
+      cacheUpgradeCost: 0,
+      hashUpgradeCost: 0,
+      hacknetServerCost: 0,
+      constants: 0,
+    },
+    gang: {
+      wantedPenalty: 0,
+      respectGain: 0,
+      wantedLevelGain: 0,
+      moneyGain: 0,
+      ascensionPointsGain: 0,
+      ascensionMultiplier: 0,
+    },
+    work: {
+      crimeSuccessChance: 0,
+      crimeGains: 0,
+      gymGains: 0,
+      universityGains: 0,
+      factionGains: 0,
+      companyGains: 0,
+    },
+    bladeburner: { skillMaxUpgradeCount: 0 },
     dnet: {
       getAuthenticateTime: 0,
       getHeartbleedTime: 0,
       getExpectedRamBlockRemoved: 0,
     },
   },
+  ui: {
+    openTail: 0,
+    renderTail: 0,
+    moveTail: 0,
+    resizeTail: 0,
+    closeTail: 0,
+    setTailTitle: 0,
+    setTailFontSize: 0,
+    setTailMinimized: 0,
+    getTheme: 0,
+    setTheme: 0,
+    resetTheme: 0,
+    getStyles: 0,
+    setStyles: 0,
+    resetStyles: 0,
+    getGameInfo: 0,
+    clearTerminal: 0,
+    windowSize: 0,
+  },
+  openDevMenu: 0,
+  exploit: 0,
+  bypass: 0,
+  alterReality: 0,
+  rainbow: 0,
+  heart: { break: 0 },
+  tprintRaw: 0,
+  printRaw: 0,
+  dynamicImport: 0,
   bladeburner,
   format: { number: 0, ram: 0, percent: 0, time: 0 },
   infiltration: { getPossibleLocations: 0, getInfiltration: C.InfiltrationGetInfiltrations },

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { AUGMENTATION_TABLE } from "../vendor/bitburner/src/Augmentation/AugmentationTable.ts";
 import { AUGMENTATIONS, describeMults, multLabel } from "../../shared/features/augmentations.ts";
+import { SOA_SET } from "../ns/singularity.ts";
 
 /** `shared/features/augmentations.ts` is a hand-transcribed copy of the
  * vendored augmentation table: `ui/` needs it to answer "what does this give
@@ -12,6 +13,23 @@ import { AUGMENTATIONS, describeMults, multLabel } from "../../shared/features/a
  * to regenerate the transcription. */
 
 describe("augmentation transcription parity", () => {
+  /** A NAME THAT MATCHES NOTHING IS SILENT. Every one of SOA_SET's nine entries
+   * was written without the "SoA - " prefix the game ships, so the set matched
+   * no augmentation at all: priceOf's SoA branch was unreachable and
+   * queuedNonSoA counted the very augmentations it excludes. Nothing failed,
+   * because a Set miss has no symptom — SoA augs were simply priced with the
+   * generic formula and every queued one inflated the next NeuroFlux by 1.9x.
+   * Source: src/Augmentation/Enums.ts:139-147, src/Augmentation/AugmentationHelpers.ts:140-153 */
+  test("every SoA augmentation name resolves against the vendored table", () => {
+    expect(SOA_SET.size).toBe(9);
+    for (const name of SOA_SET) {
+      expect(AUGMENTATION_TABLE[name], `${name} matches no augmentation`).toBeDefined();
+    }
+    // And the set is exactly the nine the game prices that way.
+    const prefixed = Object.keys(AUGMENTATION_TABLE).filter((name) => name.startsWith("SoA - "));
+    expect([...SOA_SET].sort()).toEqual(prefixed.sort());
+  });
+
   test("the same augmentations exist on both sides", () => {
     expect(Object.keys(AUGMENTATIONS).sort()).toEqual(Object.keys(AUGMENTATION_TABLE).sort());
   });

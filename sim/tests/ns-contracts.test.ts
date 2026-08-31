@@ -178,6 +178,33 @@ describe("darkweb, the one darknet host reachable without a credential", () => {
   });
 });
 
+describe("ns.go argument fidelity", () => {
+  /** playAsWhite is a real third parameter on makeMove and a real first/second
+   * on passTurn/opponentNextTurn (src/NetscriptFunctions/Go.ts:45-65). The sim
+   * declared arity 2/0/0, so JS silently dropped it and makeMove(x, y, true)
+   * placed a BLACK stone and returned a normal Play — a wrong board, wrong
+   * score and wrong reward with no error and no unmodeled() record. */
+  test("playing as white is refused, not silently played as black", () => {
+    const h = harness();
+    const before = h.ns.go.getBoardState().join("|");
+    // Against an AI opponent the game throws, so the sim must too.
+    expect(() => h.ns.go.makeMove(2, 3, true)).toThrow(/only play as white/);
+    expect(() => h.ns.go.passTurn(true)).toThrow(/only play as white/);
+    // Nothing may have moved on the board. (The black side is deliberately not
+    // exercised here: a real move awaits the opponent, and the Go AI's WebGPU
+    // worker does not exist under Bun — see spec/simulator.md.)
+    expect(h.ns.go.getBoardState().join("|")).toBe(before);
+  });
+
+  /** Upstream analyses the SUPPLIED board and only falls back to the live game
+   * when the argument is omitted (src/NetscriptFunctions/Go.ts:104-107). */
+  test("analysing a supplied board reports rather than answering about the live one", () => {
+    const h = harness();
+    expect(() => h.ns.go.analysis.getControlledEmptyNodes()).not.toThrow();
+    expect(() => h.ns.go.analysis.getControlledEmptyNodes(["XXXXXXX"])).toThrow(/not modelled/);
+  });
+});
+
 describe("Netscript contract fidelity", () => {
   test("share/getSharePower expose the 10 second contribution lifecycle", async () => {
     const { ns, host } = harness();

@@ -777,6 +777,40 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
       expect(h.ns.dnet.getStasisLinkedServers(true)).toEqual([h.world.servers.get(host.hostname)!.ip]);
     });
 
+    test("the restart wave lands on the FIRST gap, not the second", () => {
+      // Upstream's launchWebstorm sleeps 5 s on its warning toast and then, in
+      // ONE synchronous block, deletes, moves and restartAllDarknetServers()
+      // (src/DarkNet/effects/webstorm.ts:41-46). Splitting that block across
+      // two phases put the restart at 9 s and slid every later action one gap
+      // out, so the rebalance ran at 30 s instead of 25 s. Nothing caught it:
+      // the existing burst test runs all six gaps out and only checks the end
+      // state, which is identical either way. This pins the SCHEDULE.
+      //
+      // shared/strategy/dnet/rates.ts's STORM_RESTART_BY_MS = 15_000 and
+      // spec/dnet.md both already described upstream correctly — the
+      // simulator was the only thing that disagreed.
+      const h = harness();
+      const now = 60 * 60 * 1000;
+
+      const movable = [...h.dnet.hosts.values()]
+        .filter((entry) => entry.online && !entry.isStationary && !entry.stasisLinked);
+      for (const entry of movable) h.dnet.addSession(entry.hostname, 43);
+      const seedHost = movable[0]!.hostname;
+      h.dnet.plantStormSeed(seedHost);
+      expect(h.dnet.unleashStormSeed(seedHost, now).success).toBe(true);
+
+      // Nothing has elapsed yet: the warning gap is still running.
+      expect([...h.dnet.hosts.values()].some((entry) => entry.sessions.size > 0)).toBe(true);
+
+      // Exactly the first gap — 25 cycles, 5 s. Every surviving movable host
+      // must ALREADY have been restarted, so no session outlives this tick.
+      h.dnet.darknetProcess(STORM_PHASE_CYCLES[0]!);
+      const stillSessioned = [...h.dnet.hosts.values()]
+        .filter((entry) => !entry.isStationary && !entry.stasisLinked && entry.sessions.size > 0)
+        .map((entry) => entry.hostname);
+      expect(stillSessioned).toEqual([]);
+    });
+
     test("the storm seed and the webstorm — reroll the net, spare the pinned", async () => {
       // The endgame cache farm's whole mechanism, in one arranged board: a seed
       // is fired, the burst deletes/moves/restarts everything movable, adds

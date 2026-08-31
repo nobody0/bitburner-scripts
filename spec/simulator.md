@@ -189,11 +189,13 @@ benchmarks, and the normal telemetry path when inspecting detailed decisions.
   grafting, Hacknet and the stock lifecycle used by the shipped controller.
   Career and progression are partial; user-created stock order mutation/fills,
   gang, corporation, Bladeburner and sleeves remain unmodeled. The Darknet is
-  full for fresh and multi-install controller runs: all 23 APIs, passwords and
-  sessions, mutation/restart, labyrinth/storms, clue/cache rewards, live stock
-  grants, and coding-contract generation/solve/reward are modeled.
-  `DNET_ASSUMPTIONS` records the remaining entropy-stream and save/offline/UI
-  boundary choices.
+  partial for fresh and multi-install controller runs: all 22 APIs, passwords
+  and sessions, mutation/restart, labyrinth/storms, clue/cache rewards, live
+  stock grants, and coding-contract generation/solve/reward are modeled, but
+  hostnames are synthetic rather than generated, which both spends a different
+  number of draws than the game and shows strategy a hostname shape the game
+  never produces. `DNET_ASSUMPTIONS` records that and the remaining
+  entropy-stream and save/offline/UI boundary choices.
   Stanek's placement, charging, effects, battery and multiplier lifecycle are
   modeled for fresh/controller worlds; gift acceptance, sleeves and
   save-seeded gift state remain explicit gaps. Go has a controller-facing

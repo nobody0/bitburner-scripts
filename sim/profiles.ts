@@ -11,7 +11,7 @@ import {
   type RouteLeg,
 } from "./route-legs.ts";
 import ROUTE_LEG_LEDGER from "./tests/baselines/route-legs.json" with { type: "json" };
-import { entranceMoney, intelligenceExp } from "./save-mint.ts";
+import { entranceHomeRam, entranceMoney, intelligenceExp } from "./save-mint.ts";
 
 /** Named simulation runs.
  *
@@ -473,7 +473,7 @@ function routeLegProfiles(): SimProfile[] {
             `to the destruction that earns SF${leg.node}.${leg.level}.`,
         bitnode: leg.node,
         goals: [`bn:${leg.node}`, "installs:2"],
-        homeRam: 8,
+        homeRam: entranceHomeRam(leg.entranceSourceFiles),
         // The same entrance money the minted checkpoint for this leg carries,
         // so a leg measured from its synthetic entrance and one restored from
         // its checkpoint start with the same bankroll.

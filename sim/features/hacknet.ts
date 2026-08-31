@@ -20,6 +20,14 @@ import { HacknetServerConstants } from "../vendor/bitburner/src/Hacknet/data/Con
 import { mockServer } from "../core/mocks.ts";
 import type { SimServer } from "../core/effects.ts";
 import { unmodeled } from "../realm/unmodeled.ts";
+import { SpecialServers } from "../vendor/bitburner/src/Server/data/SpecialServers.ts";
+
+const WORLD_DAEMON = SpecialServers.WorldDaemon;
+/** AugmentationName.TheRedPill. Read through `hasAugmentation(..., true)`:
+ *  upstream passes ignoreQueued, so a Red Pill that is only QUEUED does not
+ *  open the World Daemon — the same spelling game-run.ts:926 uses for the
+ *  BitNode-completion gate. */
+const RED_PILL = "The Red Pill";
 
 /** The hacknet subsystem.
  *
@@ -161,26 +169,51 @@ export class HacknetSystem {
     return index;
   }
 
+  /* THE FOUR UPGRADES. Two things here are easy to get wrong and were:
+   *
+   * 1. A request that overshoots the cap is NOT a refusal. Upstream recurses on
+   *    the remaining difference and buys it (HacknetHelpers.tsx:238-364), so a
+   *    node at level 195 asked for 10 buys 5 and returns true. Returning false
+   *    made "upgrade to max in one call" stall at the cap in simulation only.
+   * 2. `n` must be rounded and screened BEFORE it reaches the node. The
+   *    vendored cost formulas return 0 for `sanitizedLevels < 1`, which sailed
+   *    through a `Number.isFinite(cost) && money >= cost` guard — so a negative
+   *    count LOWERED the node for free, and a fractional one wrote a fractional
+   *    level straight into calculateMoneyGainRate. Upstream's
+   *    `isNaN(cost) || cost <= 0 || sanitizedLevels < 0` rejects all of it. */
+
   upgradeLevel(index: number, n = 1): boolean {
     const node = this.nodes[index];
     if (!node) return false;
-    const cost = this.levelCost(index, n);
-    if (!Number.isFinite(cost) || this.#player.money < cost) return false;
+    const levels = Math.round(n);
+    const cost = this.levelCost(index, levels);
+    if (Number.isNaN(cost) || cost <= 0 || levels < 0) return false;
+    const max = this.hashMode ? HacknetServerConstants.MaxLevel : HacknetNodeConstants.MaxLevel;
+    if (node.level >= max) return false;
+    if (node.level + levels > max) return this.upgradeLevel(index, Math.max(0, max - node.level));
+    if (this.#player.money < cost) return false;
     this.#player.money -= cost;
     this.#world.recordMoney("hacknet_expenses", -cost);
-    node.level = Math.min(this.hashMode ? HacknetServerConstants.MaxLevel : HacknetNodeConstants.MaxLevel, node.level + n);
+    node.level += levels;
     return true;
   }
 
   upgradeRam(index: number, n = 1): boolean {
     const node = this.nodes[index];
     if (!node) return false;
-    const cost = this.ramCost(index, n);
-    if (!Number.isFinite(cost) || this.#player.money < cost) return false;
+    const levels = Math.round(n);
+    const cost = this.ramCost(index, levels);
+    if (Number.isNaN(cost) || cost <= 0 || levels < 0) return false;
+    const max = this.hashMode ? HacknetServerConstants.MaxRam : HacknetNodeConstants.MaxRam;
+    if (node.ram >= max) return false;
+    if (node.ram * Math.pow(2, levels) > max) {
+      return this.upgradeRam(index, Math.max(0, Math.log2(Math.round(max / node.ram))));
+    }
+    if (this.#player.money < cost) return false;
     this.#player.money -= cost;
     this.#world.recordMoney("hacknet_expenses", -cost);
     // RAM DOUBLES per upgrade; adding would make every cost projection wrong.
-    node.ram = Math.min(this.hashMode ? HacknetServerConstants.MaxRam : HacknetNodeConstants.MaxRam, node.ram * Math.pow(2, n));
+    node.ram *= Math.pow(2, levels);
     if (this.hashMode && node.hostname) {
       const server = this.#world.servers.get(node.hostname);
       if (server) server.maxRam = node.ram;
@@ -191,11 +224,16 @@ export class HacknetSystem {
   upgradeCore(index: number, n = 1): boolean {
     const node = this.nodes[index];
     if (!node) return false;
-    const cost = this.coreCost(index, n);
-    if (!Number.isFinite(cost) || this.#player.money < cost) return false;
+    const levels = Math.round(n);
+    const cost = this.coreCost(index, levels);
+    if (Number.isNaN(cost) || cost <= 0 || levels < 0) return false;
+    const max = this.hashMode ? HacknetServerConstants.MaxCores : HacknetNodeConstants.MaxCores;
+    if (node.cores >= max) return false;
+    if (node.cores + levels > max) return this.upgradeCore(index, Math.max(0, max - node.cores));
+    if (this.#player.money < cost) return false;
     this.#player.money -= cost;
     this.#world.recordMoney("hacknet_expenses", -cost);
-    node.cores = Math.min(this.hashMode ? HacknetServerConstants.MaxCores : HacknetNodeConstants.MaxCores, node.cores + n);
+    node.cores += levels;
     if (this.hashMode && node.hostname) {
       const server = this.#world.servers.get(node.hostname);
       if (server) server.cpuCores = node.cores;
@@ -206,11 +244,17 @@ export class HacknetSystem {
   upgradeCache(index: number, n = 1): boolean {
     const node = this.nodes[index];
     if (!this.hashMode || !node) return false;
-    const cost = this.cacheCost(index, n);
-    if (!Number.isFinite(cost) || this.#player.money < cost) return false;
+    const levels = Math.round(n);
+    const cost = this.cacheCost(index, levels);
+    if (Number.isNaN(cost) || cost <= 0 || levels < 0) return false;
+    const cache = node.cache ?? 1;
+    if (cache + levels > HacknetServerConstants.MaxCache) {
+      return this.upgradeCache(index, Math.max(0, HacknetServerConstants.MaxCache - cache));
+    }
+    if (this.#player.money < cost) return false;
     this.#player.money -= cost;
     this.#world.recordMoney("hacknet_expenses", -cost);
-    node.cache = Math.min(HacknetServerConstants.MaxCache, (node.cache ?? 1) + n);
+    node.cache = cache + levels;
     return true;
   }
 
@@ -284,7 +328,16 @@ export class HacknetSystem {
       return unmodeled("subsystem", `hacknet.${name}`, "hash-upgrade effect is not modelled yet");
     }
     const server = target ? this.#world.servers.get(target) : undefined;
-    if ((name === "Reduce Minimum Security" || name === "Increase Maximum Money") && (!server || server.purchasedByPlayer)) return false;
+    // checkServerOwnership(target, Foreign) has TWO clauses, and only the first
+    // was here: owned servers are rejected, AND the World Daemon is rejected
+    // until The Red Pill is installed (src/Server/ServerHelpers.ts:297-323).
+    // Without the second, a run could shave w0r1d_d43m0n's minimum security
+    // without TRP — a shortcut on the very BitNode-completion gate route legs
+    // exist to measure.
+    if (name === "Reduce Minimum Security" || name === "Increase Maximum Money") {
+      if (!server || server.purchasedByPlayer) return false;
+      if (server.hostname === WORLD_DAEMON && !this.#player.hasAugmentation(RED_PILL, true)) return false;
+    }
     this.hashes -= cost;
     this.hashLevels[name] = (this.hashLevels[name] ?? 0) + count;
     if (name === "Sell for Money") {

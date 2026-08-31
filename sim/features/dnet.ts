@@ -84,6 +84,13 @@ export const DNET_ASSUMPTIONS: readonly string[] = [
   + "an already-rooted host and ten times on a first success — on FAILURE as well as success, which is what makes "
   + "iterative solving free in charisma terms rather than pure cost. hasDarknetBonusTime()'s 1.5x is false by truth: the "
   + "sim has no offline accrual",
+  "dnet.hostnames: SYNTHETIC, not generated. Hosts are named `dnet-<depth>-x<n>` off a counter; upstream builds each name "
+  + "with generateDarknetServerName/getBaseName/decorateName/l33tifyName (DarknetServerOptions.ts:99-204), which is "
+  + "transcribed nowhere in this repo. Two consequences, both real: upstream spends draws on every name and the sim spends "
+  + "none, so the shared stream advances differently from the game's; and anything reasoning about the SHAPE of a hostname "
+  + "sees a shape the game never produces — shared/strategy/dnet/solvers/deep.ts's `hostish` character class and every "
+  + "packet-sniffing leak that quotes a hostname. Distinct from the capturePackets substitution recorded under dnet.models, "
+  + "which is only about noise-only names",
   "dnet.models: all twenty-four models mint their password, hint and hint data through upstream's own per-model config "
   + "builder, getPassword and getPasswordType — so passwordFormat is derived rather than declared, a numeric password of "
   + "length >= 2 never starts with 0, and passwordLength is the length of the GENERATED string rather than the length its "
@@ -221,9 +228,11 @@ const LOW_LEVEL_SERVER_DENSITY = 0.7;
 export const MUTATION_DRAWS = 32;
 
 /** The webstorm's phase gaps in engine cycles (200 ms each): the 5 s warning,
- * then 4 s to the deletes' aftermath, 4 s, 4 s, 8 s between the add waves, and
- * a 5 s tail — ~30 s in all, during which `mutationLock` freezes the ordinary
- * clock. Each phase's ACTION is applied when its gap elapses.
+ * then 4 s, 4 s, 4 s between the add waves, 8 s to the balance, and a 5 s tail
+ * — ~30 s in all, during which `mutationLock` freezes the ordinary clock. Each
+ * phase's ACTION is applied when its gap elapses, so the actions land at
+ * 5 s (delete + move + restart), 9 s / 13 s / 17 s (the three add waves),
+ * 25 s (balance) and nothing at 30 s.
  * Source: src/DarkNet/effects/webstorm.ts:41-70 */
 export const STORM_PHASE_CYCLES = [25, 20, 20, 20, 40, 25] as const;
 
@@ -1101,7 +1110,7 @@ export class DarknetSystem {
   /** The webstorm in progress — the `mutationLock` analog. While set, the
    * ordinary mutation clock is frozen and `nextMutation()` resolves on storm
    * phases instead. */
-  #storm: { phase: number; cyclesLeft: number; serversToDelete?: number } | undefined;
+  #storm: { phase: number; cyclesLeft: number } | undefined;
 
   /** Whether `STORM_SEED.exe` sits on this host — what `ls` appends. */
   stormSeedOn(hostname: string): boolean {
@@ -1159,7 +1168,7 @@ export class DarknetSystem {
    * `nextMutation()` — upstream's waiters wake on storm phases while the lock
    * is held. */
   #stormProcess(cycles: number): void {
-    let storm: { phase: number; cyclesLeft: number; serversToDelete?: number } | undefined = this.#storm;
+    let storm: { phase: number; cyclesLeft: number } | undefined = this.#storm;
     if (!storm) return;
     storm.cyclesLeft -= cycles;
     while (storm.cyclesLeft <= 0) {
@@ -1176,49 +1185,55 @@ export class DarknetSystem {
         this.#cyclesSinceMutation = 0;
         return;
       }
-      storm = { phase: next, cyclesLeft: STORM_PHASE_CYCLES[next]! + leftover, serversToDelete: storm.serversToDelete };
+      storm = { phase: next, cyclesLeft: STORM_PHASE_CYCLES[next]! + leftover };
       this.#storm = storm;
     }
   }
 
-  /** One phase's action, per `launchWebstorm`'s sequence: warning, then
-   * deletion target `0.6 * movables + random(0, netDepth) - 6`, then movement count
-   * `(postDeleteMovables - requestedDeletes) * 0.6`, and every movable restarted;
-   * three add waves then add
-   * NET_WIDTH * 5 fresh hosts, then the density balance. Every pool the
-   * phases draw from excludes stationary and stasis-linked hosts, which is
-   * the entire reason a link is worth a slot. Player-initiated draws, so the
-   * dedicated stream (see `dnet.playerDraws`). */
-  #applyStormPhase(storm: { phase: number; serversToDelete?: number }): void {
+  /** One phase's action, per `launchWebstorm`'s sequence. After the 5 s warning
+   * upstream runs ONE synchronous block — deletion target
+   * `0.6 * movables + random(0, netDepth) - 6`, then movement count
+   * `(postDeleteMovables - requestedDeletes) * 0.6`, then every movable
+   * restarted — followed by three add waves totalling NET_WIDTH * 5 fresh
+   * hosts, then the density balance. Every pool the phases draw from excludes
+   * stationary and stasis-linked hosts, which is the entire reason a link is
+   * worth a slot. Player-initiated draws, so the dedicated stream (see
+   * `dnet.playerDraws`). */
+  #applyStormPhase(storm: { phase: number }): void {
     const draw = this.#opts.logNoise ?? this.#opts.generate;
     const { phase } = storm;
     switch (phase) {
       case 0: {
+        // ONE synchronous block upstream: deletes, moves and restartAll all
+        // land on the first gap. Splitting it across two phases pushed the
+        // restart wave to 9 s and every later action one gap out, which is
+        // what shared/strategy/dnet/rates.ts's STORM_RESTART_BY_MS = 15_000
+        // and spec/dnet.md already described correctly.
         const movable = this.#movable();
-        const count = Math.max(0, movable.length * 0.6 + draw() * this.netDepth() - 6);
-        storm.serversToDelete = count;
-        for (let i = 0; i < count; i++) this.#deleteOne(draw());
-        break;
-      }
-      case 1: {
-        const count = Math.max(0, (this.#movable().length - (storm.serversToDelete ?? 0)) * 0.6);
-        for (let i = 0; i < count; i++) {
+        const deletes = Math.max(0, movable.length * 0.6 + draw() * this.netDepth() - 6);
+        for (let i = 0; i < deletes; i++) this.#deleteOne(draw());
+        // Re-read AFTER the deletes, as upstream's second
+        // getAllMovableDarknetServers() call does.
+        const moves = Math.max(0, (this.#movable().length - deletes) * 0.6);
+        for (let i = 0; i < moves; i++) {
           const name = this.#pick(this.#movable(), draw());
           this.#moveHost(name, draw(), draw());
         }
+        // restartAllDarknetServers walks getAllMovableDarknetServers, so the
+        // movable pool is the right scope here.
         for (const name of this.#movable()) this.#restartHost(name);
         break;
       }
+      case 1:
       case 2:
-      case 3:
-      case 4: {
-        const count = phase === 2 ? NET_WIDTH : 2 * NET_WIDTH;
+      case 3: {
+        const count = phase === 1 ? NET_WIDTH : 2 * NET_WIDTH;
         for (let i = 0; i < count; i++) {
           this.#addHost(Math.floor(draw() * this.netDepth()), draw(), draw());
         }
         break;
       }
-      case 5: {
+      case 4: {
         // balanceDarknetServers, off a synthesized draw block: `#balance`
         // indexes into a mutation-shaped roll array, and the storm's draws
         // come off the dedicated stream rather than the gameplay one.
@@ -1227,6 +1242,11 @@ export class DarknetSystem {
         this.#balance(roll);
         break;
       }
+      case 5:
+        // Upstream's final `await cancellableSleep(5000)`: the lock is still
+        // held, but nothing happens on it. The gap exists so the storm lasts
+        // ~30 s; the last ACTION (balance) is at 25 s.
+        break;
     }
   }
 

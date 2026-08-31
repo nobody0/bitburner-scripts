@@ -156,6 +156,13 @@ export class SimWorld {
   moneyEarned = 0;
   scriptExpEarned = 0;
   readonly moneySources = { sinceInstall: emptyMoneySource(), sinceStart: emptyMoneySource() };
+  /** The stock half of `Player.scriptProdSinceLastAug`: the SIGNED cash flow of
+   * script-initiated TRADES only (BuyingAndSelling.tsx). Deliberately not the
+   * `stock` money-source bucket, which also carries the WSE/TIX/4S access
+   * purchases — upstream never counts those as script production, so folding
+   * the bucket into getTotalScriptIncome would report a ~$31b hole after every
+   * market unlock. */
+  scriptStockFlowSinceInstall = 0;
 
   /** Single source of truth, delegated so the many `this.money += x` sites
    *  keep working while the value itself lives on the player. */
@@ -336,8 +343,17 @@ export class SimWorld {
     }
   }
 
+  /** Script-initiated stock cash flow, for the `scriptProdSinceLastAug` half of
+   * `ns.getTotalScriptIncome`. Callers still own the balance mutation and the
+   * `stock` money-source record; this is the trade-only subset of them. */
+  recordScriptStockFlow(amount: number): void {
+    if (!Number.isFinite(amount) || amount === 0) return;
+    this.scriptStockFlowSinceInstall += amount;
+  }
+
   resetInstallMoneySources(): void {
     Object.assign(this.moneySources.sinceInstall, emptyMoneySource());
+    this.scriptStockFlowSinceInstall = 0;
   }
 
   /** Player/server half of prestigeAugmentation. Factions, stock, Hacknet and

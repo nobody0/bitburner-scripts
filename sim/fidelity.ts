@@ -6,7 +6,7 @@ export type FeatureCoverage = "full" | "partial" | "oracle-only" | "unmodeled";
 
 /** Increment whenever handwritten simulator semantics change in a way that can
  * alter an outcome. It is part of every comparison fingerprint. */
-export const SIMULATOR_MODEL_VERSION = 11;
+export const SIMULATOR_MODEL_VERSION = 12;
 /** Pinned upstream revision mirrored by sim/vendor/manifest.json. */
 export const SIMULATOR_VENDOR_COMMIT = "3162fd2590e221eadd0c0fbd46151913f7c4c41c";
 
@@ -64,11 +64,18 @@ const BASE_FEATURE_COVERAGE: Readonly<Record<FeatureId, FeatureCoverage>> = {
   // Core placement/charge/effect/process lifecycle is modeled. acceptGift,
   // sleeves, and save-seeded gift state remain explicit gaps.
   stanek: "partial",
-  // Full for fresh and multi-install controller runs: all 22 ns.dnet members,
+  // Full for fresh and multi-install controller runs: all 22 ns.dnet members
+  // (RamCostGenerator.ts lists 23 because it still carries a `getServer` entry
+  // for a member removed from the Darknet interface; sim/ns/ram-costs.ts keeps
+  // that stale price and correctly implements no such member),
   // mutation/restart, sessions, labyrinth/storms, exact cache/clue rewards,
   // live stock grants, and coding-contract generation/solve/reward lifecycle.
   // Save/offline/UI-only state is intentionally outside this coverage claim.
-  dnet: "full",
+  // Downgraded from "full" by the v3.0.1 audit: hostnames are synthetic rather
+  // than generated (see DNET_ASSUMPTIONS "dnet.hostnames"), which both spends a
+  // different number of draws than the game and shows strategy a hostname shape
+  // the game never produces.
+  dnet: "partial",
   // Generated and cache-minted contracts use the vendored problem definitions;
   // the real side driver discovers, solves and claims them through Netscript.
   // `getContract`, `getDescription` and `createDummyContract` are still absent

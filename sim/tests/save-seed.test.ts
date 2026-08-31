@@ -6,6 +6,8 @@ import { satisfies, type SatisfyContext } from "../features/requirements.ts";
 import { makeSingularity } from "../ns/singularity.ts";
 import { ProgramSystem } from "../features/programs.ts";
 import { darkwebServerSpec } from "../network.ts";
+import { entranceHomeRam } from "../save-mint.ts";
+import { deriveRouteLegs } from "../route-legs.ts";
 
 describe("save-seeded faction and player state", () => {
   test("the simulated Netscript surface preserves standings, invitations, queued augs, and source files", () => {
@@ -97,6 +99,38 @@ describe("save-seeded faction and player state", () => {
     expect(factions.get("Chongqing")).toMatchObject({ banned: false, rep: 0 });
     expect(factions.get("Chongqing")?.favor ?? 0).toBeGreaterThan(0);
     expect(factions.get("Sector-12")?.favor ?? 0).toBeGreaterThan(0);
+  });
+});
+
+describe("route-leg entrance home RAM", () => {
+  /** Prestige.ts:246-252 does NOT always give 8 GB: SF9.2 gives 128, SF1 gives
+   * 32, and only a run with neither gets 8. Both the minted checkpoint and the
+   * synthetic leg profile hardcoded 8, so every leg from bn1.2 onward entered
+   * with a quarter of the home RAM the game hands it — which moves early batch
+   * throughput and therefore every measured leg time. */
+  test("follows the prestige ladder rather than a constant", () => {
+    expect(entranceHomeRam({})).toBe(8);
+    expect(entranceHomeRam({ "1": 1 })).toBe(32);
+    expect(entranceHomeRam({ "1": 3 })).toBe(32);
+    // SF9.2 wins over SF1.
+    expect(entranceHomeRam({ "1": 3, "9": 2 })).toBe(128);
+    expect(entranceHomeRam({ "9": 1 })).toBe(8);
+  });
+
+  test("the route's own legs get the RAM the game would give them", () => {
+    const legs = deriveRouteLegs();
+    const ramFor = (id: string): number => {
+      const leg = legs.find((entry) => entry.leg === id);
+      if (!leg) throw new Error(`no such leg: ${id}`);
+      return entranceHomeRam(leg.entranceSourceFiles);
+    };
+    // The first four legs genuinely hold no SF1 — bn4.1, the only promotable
+    // leg today, is unaffected and its recorded evidence still stands.
+    expect(ramFor("bn4.1")).toBe(8);
+    expect(ramFor("bn1.1")).toBe(8);
+    // SF1.1 is earned by completing bn1.1, so bn1.2 onward enters at 32.
+    expect(ramFor("bn1.2")).toBe(32);
+    expect(ramFor("bn15.1")).toBe(32);
   });
 });
 
@@ -248,6 +282,30 @@ describe("Singularity darkweb parity", () => {
     tor = false;
     expect(api["getDarkwebPrograms"]!()).toEqual([]);
     expect(api["getDarkwebProgramCost"]!("FTPCrack.exe" as never)).toBe(-1);
+  });
+
+  /** The six creatable programs the vendored PROGRAM_TABLE omits report a gap
+   * rather than a false — but ONLY while the player does not already have the
+   * file. Upstream's "you already have this program" check runs before it ever
+   * looks at `create`, and owning one is ordinary: BN5/SF5 runs start with
+   * Formulas.exe on home (game-run.ts:902), a b1t_flum3 carrier keeps
+   * b1t_flum3.exe, and AutoLink/DeepscanV1/V2 are darkweb purchases. Throwing
+   * there would crash a driver where the game simply answers false. */
+  test("an unvendored program the player already owns is a plain false, not a gap", () => {
+    const world = new SimWorld({ seed: 9, bitnode: 5 });
+    world.person.skills.hacking = 5_000;
+    const files = new Set(["Formulas.exe", "b1t_flum3.exe"]);
+    const programs = new ProgramSystem(world, world.player, () => files);
+
+    expect(programs.start("Formulas.exe")).toBe(false);
+    expect(programs.start("formulas.exe")).toBe(false);
+    expect(programs.start("b1t_flum3.exe")).toBe(false);
+    expect(world.player.currentWork).toBeUndefined();
+
+    // Not owned, still unvendored: the gap must report.
+    expect(() => programs.start("AutoLink.exe")).toThrow(/not modelled/);
+    // And a name the game does not have at all is an ordinary false.
+    expect(programs.start("NotAProgram.exe")).toBe(false);
   });
 });
 

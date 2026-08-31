@@ -24,6 +24,7 @@ import { noteUnmodeled, unmodeled } from "../realm/unmodeled.ts";
 import type { SimWorld } from "../world.ts";
 import { getCloudServerCost, getCloudServerLimit, getCloudServerMaxRam, getCloudServerUpgradeCost } from "../core/effects.ts";
 import { getFunctionRamCost, SCRIPT_BASE_RAM_GB, type RamCostContext } from "./ram-costs.ts";
+import { GoOpponent, GoValidity } from "../vendor/bitburner/src/Go/Enums.ts";
 import { ProcessTable, ScriptDeath, type SimProcess } from "./process.ts";
 import { publicResetInfo, publicServer, resolveServer } from "./contracts.ts";
 import { makeStanek } from "./stanek.ts";
@@ -183,6 +184,17 @@ function unknownNode(path: string, host: SimNsHost, process: SimProcess): unknow
       concurrentCall(host, process, path);
       return unmodeled("ns", path);
     },
+    // ENUMERATION MUST REPORT TOO. Not every ns member is a function: `ns.enums`
+    // is a PROPERTY, and a probe reads it with Object.values (three call sites
+    // in game/lib/probes/priced.ts). The proxy target is a function, and a
+    // function's own properties are non-enumerable, so without these traps
+    // Object.keys/values/entries answered `[]` — silently, with no throw and no
+    // noteUnmodeled record, so the run was not even marked invalid-for-goal.
+    // An unimplemented faction enum then read as "this BitNode defines no
+    // factions", which is exactly the fabrication unmodeled() exists to stop.
+    ownKeys: (): never => unmodeled("ns", path),
+    getOwnPropertyDescriptor: (): never => unmodeled("ns", path),
+    has: (): never => unmodeled("ns", path),
   });
 }
 
@@ -620,7 +632,18 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
         current += running.onlineMoneyMade / running.onlineRunningTimeSeconds;
       }
       const sinceInstallSec = Math.max(0, (host.nowMs?.() ?? host.clock.now()) - host.reset.lastAugReset) / 1_000;
-      const sinceInstall = sinceInstallSec > 0 ? world.moneySources.sinceInstall.hacking / sinceInstallSec : 0;
+      // scriptProdSinceLastAug is NOT just hack money: it also accrues
+      // script-initiated stock cash flow (BuyingAndSelling.tsx:176,365) and
+      // offline script gains (ScriptHelpers.ts:67). Every trade in this world
+      // is script-initiated, so the world's trade-only flow is that term; there
+      // is no offline half to add. Omitting it under-reported every run that
+      // traded — but the `stock` MONEY-SOURCE bucket is the wrong stand-in for
+      // it, because that bucket also carries the WSE/TIX/4S access purchases
+      // (~$31b) that upstream never counts as script production. (The
+      // denominator still differs by under one tick: upstream's playtime
+      // advances in 200 ms quanta, virtual time does not.)
+      const produced = world.moneySources.sinceInstall.hacking + world.scriptStockFlowSinceInstall;
+      const sinceInstall = sinceInstallSec > 0 ? produced / sinceInstallSec : 0;
       return [current, sinceInstall];
     },
     getTotalScriptExpGain: (): number => {
@@ -849,22 +872,31 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
           const gain = getSellTransactionGain(found, Math.round(shares), positionType(posType, "getSaleGain"));
           return gain ?? 0;
         },
+        // All four go through the SAME symbol check the ten getters use.
+        // Upstream routes every trade through getStockFromSymbol, which throws
+        // (src/NetscriptFunctions/StockMarket.ts:29-36, :134/142/154/166).
+        // Returning 0 for an unknown symbol was indistinguishable from the 0 a
+        // legitimately rejected trade returns, so a typo read as a rejection.
         buyStock: (symbol: string, shares: number) => {
-          requireTix("buyStock");
+          require4SPosition("buyStock", symbol);
           return stock.buyStock(symbol, shares);
         },
         sellStock: (symbol: string, shares: number) => {
-          requireTix("sellStock");
+          require4SPosition("sellStock", symbol);
           return stock.sellStock(symbol, shares);
         },
+        // Upstream checks the BN8/SF8.2 gate BEFORE resolving the symbol, so a
+        // bad symbol on a node without shorts must still report the gate.
         buyShort: (symbol: string, shares: number) => {
           requireTix("buyShort");
           requireShorts("buyShort");
+          require4SPosition("buyShort", symbol);
           return stock.buyShort(symbol, shares);
         },
         sellShort: (symbol: string, shares: number) => {
           requireTix("sellShort");
           requireShorts("sellShort");
+          require4SPosition("sellShort", symbol);
           return stock.sellShort(symbol, shares);
         },
         purchaseWseAccount: () => stock.purchaseWseAccount(),
@@ -958,10 +990,27 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       }
     },
   }, "cloud", host, process);
+  /** The white side of a Go board. Upstream allows it only against "No AI"
+   * (validatePlayAsWhite, src/Go/effects/netscriptGoImplementation.ts:114-125);
+   * against any AI opponent it throws, and that refusal is real game behaviour
+   * worth reproducing exactly. "No AI" itself is a practice board this model
+   * does not carry, so it reports rather than inventing a white-side game. */
+  const whiteSide = (path: string): never => {
+    if (host.go && host.go.getOpponent() !== GoOpponent.none) {
+      throw new Error(`${GoValidity.invalid}. You can only play as white when playing against 'No AI'`);
+    }
+    return unmodeled("ns", path, "white-side No AI Go is not modeled");
+  };
   const goAnalysis = host.go
     ? namespace({
         getStats: () => host.go!.getStats(),
-        getControlledEmptyNodes: () => host.go!.getControlledEmptyNodes(),
+        // Upstream validates the supplied board and analyses THAT
+        // (src/NetscriptFunctions/Go.ts:104-107); the live game is only the
+        // fallback. Answering about the live board for a hypothetical position
+        // is a well-formed wrong answer, so the argument reports instead.
+        getControlledEmptyNodes: (boardState?: unknown) => boardState === undefined
+          ? host.go!.getControlledEmptyNodes()
+          : unmodeled("ns", "go.analysis.getControlledEmptyNodes", "analysis of a supplied board is not modeled"),
       }, "go.analysis", host, process)
     : namespace({}, "go.analysis", host, process);
   const goCheat = host.go
@@ -972,17 +1021,23 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
         getCheatCount: (playAsWhite = false) => playAsWhite
           ? unmodeled("ns", "go.cheat.getCheatCount", "white-side No AI Go is not modeled")
           : host.go!.getCheatCount(),
+        // THE FOUR MUTATING CHEATS GO THROUGH validateMove, the two getters
+        // above do not (src/NetscriptFunctions/Go.ts:154-225 vs :141-153). So
+        // against an AI opponent these refuse exactly as makeMove does, while
+        // getCheatSuccessChance/getCheatCount genuinely ANSWER for white
+        // upstream — which this model has no white-side state to answer with,
+        // so those two report instead.
         removeRouter: (x: number, y: number, playAsWhite = false) => playAsWhite
-          ? unmodeled("ns", "go.cheat.removeRouter", "white-side No AI Go is not modeled")
+          ? whiteSide("go.cheat.removeRouter")
           : host.go!.removeRouter(x, y),
         playTwoMoves: (x1: number, y1: number, x2: number, y2: number, playAsWhite = false) => playAsWhite
-          ? unmodeled("ns", "go.cheat.playTwoMoves", "white-side No AI Go is not modeled")
+          ? whiteSide("go.cheat.playTwoMoves")
           : host.go!.playTwoMoves(x1, y1, x2, y2),
         repairOfflineNode: (x: number, y: number, playAsWhite = false) => playAsWhite
-          ? unmodeled("ns", "go.cheat.repairOfflineNode", "white-side No AI Go is not modeled")
+          ? whiteSide("go.cheat.repairOfflineNode")
           : host.go!.repairOfflineNode(x, y),
         destroyNode: (x: number, y: number, playAsWhite = false) => playAsWhite
-          ? unmodeled("ns", "go.cheat.destroyNode", "white-side No AI Go is not modeled")
+          ? whiteSide("go.cheat.destroyNode")
           : host.go!.destroyNode(x, y),
       }, "go.cheat", host, process)
     : namespace({}, "go.cheat", host, process);
@@ -995,9 +1050,22 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
           getCurrentPlayer: () => host.go!.getCurrentPlayer(),
           getOpponent: () => host.go!.getOpponent(),
           resetBoardState: (opponent: string, boardSize: number) => host.go!.resetBoardState(opponent, boardSize),
-          makeMove: (x: number, y: number) => host.go!.makeMove(x, y),
-          passTurn: () => host.go!.passTurn(),
-          opponentNextTurn: () => host.go!.opponentNextTurn(),
+          // playAsWhite is a REAL parameter on all three (src/NetscriptFunctions/Go.ts:45-65).
+          // Dropping it from the signature made `makeMove(2, 3, true)` place a
+          // BLACK stone and return a normal Play, where the game throws — a
+          // wrong board with no error and no unmodeled() record. Against an AI
+          // opponent the game's own refusal IS the behaviour to reproduce
+          // (validatePlayAsWhite, netscriptGoImplementation.ts:114-125); the
+          // white side only exists against "No AI", which this model does not
+          // carry, so that case reports instead. The four MUTATING cheat.*
+          // members below share this helper for the same reason; their two
+          // getters do not, because upstream answers those for white.
+          makeMove: (x: number, y: number, playAsWhite = false) =>
+            (playAsWhite ? whiteSide("go.makeMove") : host.go!.makeMove(x, y)),
+          passTurn: (playAsWhite = false) =>
+            (playAsWhite ? whiteSide("go.passTurn") : host.go!.passTurn()),
+          opponentNextTurn: (logOpponentMove = true, playAsWhite = false) =>
+            (playAsWhite ? whiteSide("go.opponentNextTurn") : host.go!.opponentNextTurn()),
           analysis: goAnalysis,
           cheat: goCheat,
         }

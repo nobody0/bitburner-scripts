@@ -1,13 +1,17 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import type { NS, ResetInfo } from "@ns";
 import { setGoNeuralRuntimeForTest } from "../../game/lib/features/remaining.ts";
 import { parseGoals } from "../../shared/goals/presets.ts";
 import { only } from "../feature-selection.ts";
 import { FEATURE_IDS } from "../../shared/features/ids.ts";
 import { ramCostContext, runGame } from "../game-run.ts";
-import { getFunctionRamCost, getRamCost } from "../ns/ram-costs.ts";
+import { getFunctionRamCost, getRamCost, RAM_COSTS } from "../ns/ram-costs.ts";
 import { StubGoValueBackend } from "../../tests/support/go-value-backend.ts";
 import { TestGoNeuralRuntime } from "../../tests/support/go-neural-runtime.ts";
 import { Clock } from "../clock.ts";
+import { SimWorld } from "../world.ts";
+import { makeSimNs, type SimNsHost } from "../ns/api.ts";
+import { ProcessTable } from "../ns/process.ts";
 import { installVirtualTime } from "../realm/timers.ts";
 import { calculateExp } from "../vendor/bitburner/src/PersonObjects/formulas/skill.ts";
 import { lane } from "../../tests/support/lanes.ts";
@@ -21,7 +25,95 @@ import { lane } from "../../tests/support/lanes.ts";
 // That turns one timeout into cascading failures in later virtual-time files.
 setDefaultTimeout(30_000);
 
+describe("the unmodeled fallback", () => {
+  /** The catch-all's whole job is that a path we do not model cannot be
+   * mistaken for an answer. Calling one always reported; ENUMERATING one did
+   * not — the proxy target is a function, whose own properties are
+   * non-enumerable, so Object.keys/values/entries returned [] with no throw and
+   * no noteUnmodeled record. `ns.enums` is a PROPERTY, and three probes in
+   * game/lib/probes/priced.ts read it with Object.values, so an unwired enum
+   * published "this BitNode defines no factions" as an observation. */
+  function unknownNs(): NS {
+    const world = new SimWorld({ seed: 1 });
+    const processes = new ProcessTable(world.servers, world.clock);
+    const process = processes.start({
+      filename: "probe.js",
+      host: "home",
+      args: [],
+      threads: 1,
+      ramPerThreadGb: 0.1,
+      temporary: false,
+    })!;
+    const host: SimNsHost = {
+      world,
+      clock: world.clock,
+      processes,
+      files: new Map([["home", new Set(["probe.js"])]]),
+      contents: new Map(),
+      scripts: new Map(),
+      network: new Map([["home", ["home"]]]),
+      ramCtx: { bitNode: 1 },
+      reset: { currentNode: 1, ownedAugs: new Map(), ownedSF: new Map() } as ResetInfo,
+      output: [],
+      crashes: [],
+    };
+    return makeSimNs(host, process);
+  }
+
+  test("calling an unimplemented path reports and throws", () => {
+    const ns = unknownNs();
+    expect(() => (ns as never as Record<string, () => void>)["notARealMember"]!()).toThrow(/not modelled/);
+  });
+
+  test("enumerating an unimplemented path reports rather than answering empty", () => {
+    const ns = unknownNs();
+    // The exact shape game/lib/probes/priced.ts:218,259,302 use when
+    // host.singularity is absent, so ns.enums is unimplemented.
+    const enums = (ns as never as Record<string, Record<string, unknown>>)["enums"]!;
+    expect(() => Object.keys(enums["FactionName"]!)).toThrow(/not modelled/);
+    expect(() => Object.values(enums["FactionName"]!)).toThrow(/not modelled/);
+    expect(() => Object.entries(enums["FactionName"]!)).toThrow(/not modelled/);
+    expect(() => "Slum Snakes" in (enums["FactionName"] as object)).toThrow(/not modelled/);
+  });
+});
+
 describe("ram costs", () => {
+  test("a member the game prices at 0 GB answers 0, and does not throw", () => {
+    // Upstream's RamCosts is RamCostTree<NSFull>, a non-optional mapped type,
+    // so a missing name means "no such API" — the only thing
+    // getFunctionRamCost throws for (RamCostGenerator.ts:743-764). 73 leaves
+    // that upstream carries with the literal value 0 were absent here, so the
+    // sim threw for members the game prices free, mispricing exactly the
+    // cheapest things a probe can be built from.
+    for (const path of [
+      "ui.openTail",
+      "ui.windowSize",
+      "formulas.hacking.hackChance",
+      "formulas.work.crimeGains",
+      "formulas.hacknetServers.hashGainRate",
+      "heart.break",
+      "printRaw",
+      "dynamicImport",
+    ]) {
+      expect(getFunctionRamCost(path)).toBe(0);
+    }
+    // A genuinely unknown name still throws, exactly as upstream does.
+    expect(() => getFunctionRamCost("ui.notARealMember")).toThrow();
+  });
+
+  test("carries every leaf upstream carries", () => {
+    // Guards the whole class of "we only transcribed the members we use".
+    let leaves = 0;
+    const walk = (node: unknown): void => {
+      if (typeof node !== "object" || node === null) { leaves++; return; }
+      if (typeof (node as { sf4?: number }).sf4 === "number") { leaves++; return; }
+      for (const value of Object.values(node as Record<string, unknown>)) walk(value);
+    };
+    walk(RAM_COSTS);
+    // src/Netscript/RamCostGenerator.ts @ v3.0.1, counted the same way.
+    expect(leaves).toBe(532);
+  });
+
   test("prices the gate batch as the game does", () => {
     // game/lib/probes/gates.ts budgets 1.5 GB and documents ~1.1 GB actual.
     const methods = [

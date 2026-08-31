@@ -17,9 +17,22 @@ import { calculateExp } from "./vendor/bitburner/src/PersonObjects/formulas/skil
  * The entrance is exactly what the route implies — the Source-Files earlier
  * completions earned, the node's own partial level for a mid-milestone leg,
  * and the intelligence the chain carries — on the fixed vanilla network at a
- * cold 8 GB home. Nothing else: a leg begins where a source-file prestige
- * leaves the player, so there are no augmentations, no reputation, no
- * purchased servers and no programs. */
+ * cold home whose RAM comes off the prestige ladder (`entranceHomeRam`).
+ * Nothing else: a leg begins where a source-file prestige leaves the player, so
+ * there are no augmentations, no reputation, no purchased servers and no
+ * programs. */
+
+/** Home RAM the game gives at a prestige. NOT always 8: SF1 doubles it twice
+ * and SF9.2 again, so every route leg from bn1.2 onward enters with 32 GB and
+ * both the minted checkpoint and the synthetic profile used to hardcode 8 — a
+ * 4x understatement at entrance, which moves early batch throughput and
+ * therefore every measured leg time.
+ * Source: src/Prestige.ts:246-252 */
+export function entranceHomeRam(sourceFiles: Readonly<Record<string, number>>): number {
+  if ((sourceFiles["9"] ?? 0) >= 2) return 128;
+  if ((sourceFiles["1"] ?? 0) > 0) return 32;
+  return 8;
+}
 
 /** Money a node entrance starts with, matching SimWorld's own prestige reset
  * (sim/world.ts): $1,000 plus installed-augmentation grants — and a leg
@@ -145,7 +158,7 @@ function mintedSnapshot(leg: RouteLeg, bitNode: number): SaveSnapshot {
       requiredHackingSkill: 1,
       serverGrowth: 1,
       numOpenPortsRequired: 5,
-      maxRam: 8,
+      maxRam: entranceHomeRam(leg.entranceSourceFiles),
       hasAdminRights: true,
     },
     mockServer() as SimServer,

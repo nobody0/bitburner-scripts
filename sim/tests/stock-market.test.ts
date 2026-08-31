@@ -94,6 +94,42 @@ describe("disable4SData", () => {
   });
 });
 
+describe("script production accounting", () => {
+  /** `scriptProdSinceLastAug` (the second half of ns.getTotalScriptIncome)
+   * accrues the SIGNED cash flow of script-initiated TRADES only. The `stock`
+   * money-source bucket is a different quantity: upstream records the WSE, TIX
+   * and 4S access purchases against it too, and those are not script
+   * production. Reading the bucket instead would report a ~$31b hole in
+   * money/sec for the whole install that unlocked the market. */
+  test("market-access purchases move the money source but not the script flow", () => {
+    const world = makeWorld(17);
+    const market = new StockMarketSystem(world, world.player, mulberry32(5), {});
+    world.stockSystem = market;
+    world.player.money = 1e12;
+
+    expect(market.purchaseWseAccount()).toBe(true);
+    expect(market.purchaseTixApi()).toBe(true);
+    expect(world.moneySources.sinceInstall.stock).toBeLessThan(0);
+    expect(world.scriptStockFlowSinceInstall).toBe(0);
+
+    const symbol = market.symbols()[0]!;
+    const spent = world.player.money;
+    expect(market.buyStock(symbol, 100)).toBeGreaterThan(0);
+    const cost = spent - world.player.money;
+    expect(cost).toBeGreaterThan(0);
+    // The trade, and only the trade, lands on the script-production term.
+    expect(world.scriptStockFlowSinceInstall).toBeCloseTo(-cost, 3);
+
+    const gains = market.sellStock(symbol, 100);
+    expect(gains).toBeGreaterThan(0);
+    expect(world.scriptStockFlowSinceInstall).toBeGreaterThan(-cost);
+
+    // An install clears it, exactly as it clears the sinceInstall ledger.
+    world.resetInstallMoneySources();
+    expect(world.scriptStockFlowSinceInstall).toBe(0);
+  });
+});
+
 describe("the price tick", () => {
   test("TIX access alone initializes and advances the market, as canAccessStockMarket permits", () => {
     const world = makeWorld(43);

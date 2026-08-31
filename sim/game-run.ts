@@ -541,7 +541,15 @@ async function runGameInstalled(
     noteUnmodeled("initial-state", "stock.orders", "the save contains limit/stop orders, whose fill engine is not modeled");
   }
   world.stockSystem = stock;
-  const hashMode = (bitnode === 9 || (save?.sourceFiles["9"] ?? 0) > 0) && save?.bitNodeOptions.disableHacknetServer !== true;
+  // canAccessBitNodeFeature(9) — the current node being 9 OR an OWNED SF9 at
+  // any level, in any node (BitNodeUtils.ts:17-19, via HacknetHelpers.tsx:33-35).
+  // Read it off `world.player.sourceFiles` for exactly the reason sf8 above
+  // does: `save?.sourceFiles` is undefined for every entrance that is not a
+  // decoded save, and chained route legs are precisely that — so a leg that had
+  // already completed BN9 silently ran money-nodes where the game gives hash
+  // servers, with the wrong node prices and no 20-node cap.
+  const sf9 = world.player.sourceFiles["9"] ?? (bitnode === 9 ? sourceFileLevel : 0);
+  const hashMode = (bitnode === 9 || sf9 > 0) && save?.bitNodeOptions.disableHacknetServer !== true;
   const hacknet = new HacknetSystem(world, world.player, hashMode, save?.hacknet);
   const education = new EducationSystem(world, world.player, (name) => hacknet.hashLevels[name] ?? 0);
   const fileStore = new Map<string, Set<string>>(

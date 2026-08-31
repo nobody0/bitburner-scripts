@@ -109,17 +109,28 @@ function darkwebItem(name: string): [string, number] | undefined {
   return Object.entries(DARKWEB_PRICES).find(([program]) => program.toLowerCase() === lower);
 }
 
-/** The 1.9^queued escalation, restricted to non-SoA augmentations. */
-const SOA_SET = new Set([
-  "Beauty of Aphrodite",
-  "Chaos of Dionysus",
-  "Flood of Poseidon",
-  "Hunt of Artemis",
-  "Knowledge of Apollo",
-  "Might of Ares",
-  "Trickery of Hermes",
-  "WKS Harmonizer",
-  "Wisdom of Athena",
+/** The 1.9^queued escalation, restricted to non-SoA augmentations.
+ *
+ * THESE NAMES MUST MATCH THE TABLE EXACTLY. Every one of them used to be
+ * written without the prefix the game actually ships ("Might of Ares" rather
+ * than "SoA - Might of Ares"), so the set matched nothing: the SoA branch in
+ * `priceOf` was dead, and `queuedNonSoA` counted SoA augmentations it was
+ * written to exclude. Both directions were wrong — SoA augs were priced with
+ * the generic 1.9^queued x AugmentationMoneyCost formula the game does not
+ * apply to them, and a queued SoA aug inflated the NEXT NeuroFlux purchase by
+ * 1.9x. A miss is silent by construction, which is why the parity suite now
+ * asserts every name resolves.
+ * Source: src/Augmentation/Enums.ts:139-147 */
+export const SOA_SET = new Set([
+  "SoA - Beauty of Aphrodite",
+  "SoA - Chaos of Dionysus",
+  "SoA - Flood of Poseidon",
+  "SoA - Hunt of Artemis",
+  "SoA - Knowledge of Apollo",
+  "SoA - Might of Ares",
+  "SoA - Trickery of Hermes",
+  "SoA - Wisdom of Athena",
+  "SoA - phyzical WKS harmonizer",
 ]);
 
 export interface SingularityNamespace {
@@ -251,10 +262,15 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       };
     }
     if (SOA_SET.has(name)) {
-      const ownedSoA = [...player.augmentations.keys()].filter((entry) => SOA_SET.has(entry)).length;
+      // hasAugmentation defaults ignoreQueued = false (Person.ts:233-241), so
+      // an SoA aug bought earlier this install cycle already raises the price
+      // of the next one: two in one cycle cost base + 7*base, not 2*base.
+      const ownedSoA = [...SOA_SET].filter(
+        (entry) => player.augmentations.has(entry) || player.queuedAugmentations.has(entry),
+      ).length;
       return {
-        moneyCost: aug.baseCost * Math.pow(7, ownedSoA),
-        repCost: aug.baseRepRequirement * Math.pow(1.3, ownedSoA),
+        moneyCost: aug.baseCost * Math.pow(CONSTANTS.SoACostMult, ownedSoA),
+        repCost: aug.baseRepRequirement * Math.pow(CONSTANTS.SoARepMult, ownedSoA),
       };
     }
     return {

@@ -403,7 +403,7 @@ Every feature now has a real driver module; `inert()` is gone from
 | 8 | sleeves | Allocate N sleeves across the task menu | Exact exclusive-key DP: crimes repeat, while faction targets have capacity one. The explicit 50/50 policy forces recovery or synchronisation before productive work. |
 | 9 | go | Wins, territory, streaks | Upstream-oracle arena; trained value network over legal candidates and their seeded faction replies, executed as a WebGPU compute shader. See `spec/go-ai.md`. |
 | 10 | stanek | Pack the grid, then charge | **Exhaustive packing is PROVABLY optimal** — the strongest evidence in the roster. Correctly leaves out a large fragment to fit two smaller ones. |
-| 11 | dnet | Traverse under a stasis-link budget | The controller/prober/agent pipeline explores and authenticates from resident processes, farms cache sources, reclaims RAM, promotes stocks, pins and migrates hosts, fires prepared storms, and walks the labyrinth. The simulator implements all 23 APIs and the complete cache/clue/contract reward lifecycle. |
+| 11 | dnet | Traverse under a stasis-link budget | The controller/prober/agent pipeline explores and authenticates from resident processes, farms cache sources, reclaims RAM, promotes stocks, pins and migrates hosts, fires prepared storms, and walks the labyrinth. The simulator implements all 22 APIs and the complete cache/clue/contract reward lifecycle. |
 | 12 | side | Solve every coding contract | **All 30 v3.0.1 contract types implemented** with exact registry coverage and known-answer tests. Discovery is ls-only; staged batches peak at `attempt` RAM, and a first rejection is logged and quarantined rather than retried. Infiltration stays manual. |
 | 13 | progression | Install timing, reset cadence, node order | Exact favor crossover (`addRepToFavor`); directly tested live milestone selector, with a small-set ordering oracle retained for offline comparisons. |
 
@@ -1902,7 +1902,7 @@ the *strategy* level without full end-to-end execution:
   the source-pinned Agriculture foundation; the simulator has no corporation
   model, so the same calls report `unmodeled()` there instead of fabricating.
 - **Sim models exist for factions, crime, hacknet, stock, Go and dnet.** The
-  darknet model covers all 23 APIs, mutation/restart, sessions, labyrinth and
+  darknet model covers all 22 APIs, mutation/restart, sessions, labyrinth and
   storms, cache/clue rewards, live stock grants and coding contracts for fresh
   and multi-install controller runs. Its declared boundary is save/offline/UI
   state, not a fabricated controller-visible value. Gang, corp,
@@ -2005,8 +2005,6 @@ the *strategy* level without full end-to-end execution:
 Each is an `unmodeled()` call or an explicit UI blocker, never a fabricated
 value:
 
-- `graftAugmentation` / `waitForOngoingGrafting` — needs a second work type with
-  entropy on completion.
 - `b1tflum3` — structural: `currentNodeMults` is module state and `sim/run.ts`
   is one BitNode per process. BitNode ordering is therefore evaluated
   analytically across runs, not inside one. `destroyW0r1dD43m0n` is no longer

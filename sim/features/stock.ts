@@ -169,6 +169,7 @@ export class StockMarketSystem {
     const origTotal = stock.playerShares * stock.playerAvgPx;
     this.#player.money -= totalPrice;
     this.#world.recordMoney("stock", -totalPrice);
+    this.#world.recordScriptStockFlow(-totalPrice);
     const newTotal = origTotal + totalPrice - StockMarketConstants.StockMarketCommission;
     stock.playerShares = Math.round(stock.playerShares + shares);
     stock.playerAvgPx = newTotal / stock.playerShares;
@@ -189,6 +190,7 @@ export class StockMarketSystem {
     const netProfit = gains - stock.playerAvgPx * shares;
     this.#player.money += gains;
     this.#world.recordMoney("stock", gains);
+    this.#world.recordScriptStockFlow(gains);
     this.#credit(netProfit);
     stock.playerShares = Math.round(stock.playerShares - shares);
     if (stock.playerShares === 0) stock.playerAvgPx = 0;
@@ -208,6 +210,7 @@ export class StockMarketSystem {
     const origTotal = stock.playerShortShares * stock.playerAvgShortPx;
     this.#player.money -= totalPrice;
     this.#world.recordMoney("stock", -totalPrice);
+    this.#world.recordScriptStockFlow(-totalPrice);
     const newTotal = origTotal + totalPrice - StockMarketConstants.StockMarketCommission;
     stock.playerShortShares = Math.round(stock.playerShortShares + shares);
     stock.playerAvgShortPx = newTotal / stock.playerShortShares;
@@ -227,6 +230,7 @@ export class StockMarketSystem {
     const profit = totalGain - origCost;
     this.#player.money += totalGain;
     this.#world.recordMoney("stock", totalGain);
+    this.#world.recordScriptStockFlow(totalGain);
     this.#credit(profit);
     stock.playerShortShares = Math.round(stock.playerShortShares - shares);
     if (stock.playerShortShares === 0) stock.playerAvgShortPx = 0;
