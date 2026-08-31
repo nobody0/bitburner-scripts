@@ -36,27 +36,22 @@ export function isSweepableFile(
   return owned.has(filename.slice(0, cut + 1));
 }
 
-/** Repository/game rendezvous for a clean deployment restart. */
+/** Repository/game rendezvous for an already-staged deployment. */
 export const SYNC_CONTROL_FILE = "sync-control.txt";
 
-export type SyncControl =
-  | { id: string; phase: "prepare"; hosts: string[] }
-  | { id: string; phase: "ready" | "commit" };
+export interface SyncControl {
+  id: string;
+  hosts: string[];
+}
 
 export function parseSyncControl(raw: string | undefined): SyncControl | undefined {
   if (!raw?.trim()) return undefined;
   try {
     const value = JSON.parse(raw) as Record<string, unknown>;
     if (typeof value["id"] !== "string" || value["id"] === "") return;
-    const phase = value["phase"];
-    if (phase === "prepare") {
-      const hosts = value["hosts"];
-      if (!Array.isArray(hosts) || hosts.some((host) => typeof host !== "string" || host === "")) return;
-      return { id: value["id"], phase, hosts: [...new Set(hosts as string[])] };
-    }
-    if (phase === "ready" || phase === "commit") {
-      return { id: value["id"], phase };
-    }
+    const hosts = value["hosts"];
+    if (!Array.isArray(hosts) || hosts.some((host) => typeof host !== "string" || host === "")) return;
+    return { id: value["id"], hosts: [...new Set(hosts as string[])] };
   } catch {
     return undefined;
   }

@@ -1,15 +1,11 @@
 import type { NS } from "@ns";
 import {
   parseSyncControl,
-  syncControl,
   SYNC_CONTROL_FILE,
 } from "../shared/deployment.ts";
 import { MAIN_SCRIPT_GB } from "./lib/ram.ts";
-import { realmSleep } from "./lib/wake.ts";
 
 export const MAIN_SCRIPT = "main.js";
-const SYNC_ARG = "--sync";
-const CONTROL_POLL_MS = 100;
 
 function launchMain(ns: NS): void {
   ns.spawn(MAIN_SCRIPT, {
@@ -26,32 +22,20 @@ export function planKillOrder(hosts: readonly string[], home: string): string[] 
   return [...unique.filter((host) => host !== home), home];
 }
 
+async function activateStaged(ns: NS, control: { id: string; hosts: string[] }): Promise<void> {
+  for (const host of planKillOrder(control.hosts, "home")) ns.killall(host, true);
+  await ns.write(SYNC_CONTROL_FILE, "", "w");
+  launchMain(ns);
+}
+
 /** Autoexec and deployment coordinator. */
 export async function main(ns: NS): Promise<void> {
   ns.disableLog("ALL");
-  if (ns.args.length === 0) {
-    launchMain(ns);
+  const initialControl = parseSyncControl(ns.read(SYNC_CONTROL_FILE));
+  if (initialControl) {
+    await activateStaged(ns, initialControl);
     return;
   }
-  if (ns.args.length !== 1 || ns.args[0] !== SYNC_ARG) {
-    throw new Error(`start.js accepts only ${SYNC_ARG}; received ${JSON.stringify(ns.args)}`);
-  }
-
-  const home = "home";
-  let activeId: string | undefined;
-  for (;;) {
-    const control = parseSyncControl(ns.read(SYNC_CONTROL_FILE));
-    if (control?.phase === "prepare" && control.id !== activeId) {
-      activeId = control.id;
-      for (const host of planKillOrder(control.hosts, home)) ns.killall(host, true);
-      await ns.write(SYNC_CONTROL_FILE, syncControl({
-        id: activeId,
-        phase: "ready",
-      }), "w");
-    } else if (control?.phase === "commit" && control.id === activeId) {
-      launchMain(ns);
-      return;
-    }
-    await realmSleep(CONTROL_POLL_MS);
-  }
+  if (ns.args.length !== 0) throw new Error(`start.js accepts no arguments: ${JSON.stringify(ns.args)}`);
+  launchMain(ns);
 }

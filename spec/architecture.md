@@ -13,31 +13,28 @@ Startup has two root artifacts:
 - `main.js` is the controller. The wrapper launches it temporary with a 3.2 GB
   RAM override, zero delay, and duplicate prevention.
 
-Every build embeds one `__BUILD_ID__` in all artifacts, but no build-stamp file
-or runtime adoption protocol exists. A clean sync clears page-realm operational
-caches before the replacement launch. Game prestige retains the prior identity
-long enough for `shared/reset.ts` to classify the reset, then clears world state
-through the registered feature reset hooks.
+Every build embeds one `__BUILD_ID__` in all artifacts. Controllers use the
+staged activation record to adopt it. Activation clears page-realm operational
+caches before the replacement launch. Game prestige retains the
+prior identity long enough for `shared/reset.ts` to classify the reset, then
+clears world state through the registered feature reset hooks.
 
-## Clean sync transaction
+## Staged sync and activation
 
 Bitburner's v3.0.1 Remote File API can push, list and delete files, but cannot
-kill or launch processes. `sync-control.txt` bridges that gap with three
-versioned phases: `prepare`, `ready`, and `commit`.
+kill or launch processes. Sync therefore never depends on a running script:
+it stages everything the file API can do, records activation, and returns.
 
-1. The external process completes the local build and writes `prepare`, naming
-   a unique request id and every accessible host.
-2. `main.js` launches `start.js --sync` and exits. The wrapper runs `killall`
-   over every named host, home last and with its own safety guard, then writes
-   `ready`.
-3. The external process pushes every artifact and strictly deletes stale
-   project-owned `.js` files.
-4. Only after all writes and deletions succeed does it write `commit`. The
-   wrapper spawns the new `main.js` and exits.
-
-A failure before commit leaves the wrapper parked. A later prepare request with
-a new id repeats the kill and resumes the transaction safely. There is no
-legacy deployment detection or compatibility handoff.
+1. The external process builds and pushes every artifact, with `start.js` last.
+2. It attempts to delete stale project-owned `.js` files. Files held by running
+   scripts are reported and left for a later sync rather than invalidating the
+   already-staged build.
+3. It writes a `staged` record naming the request and hosts, then exits
+   successfully.
+4. A live controller launches the staged wrapper immediately. If none is live,
+   the next autoexec or manual `start.js` consumes the same record. The wrapper
+   kills the named fleet, home last with its own safety guard, clears the
+   activation record, and spawns the already-staged `main.js`.
 
 Both transports use `tools/sync.ts`: the UI hub invokes it in-process through
 POST `/sync`, while `bun run sync` forwards to the hub or falls back to a
@@ -49,9 +46,8 @@ do not exist.
 
 The sweep derives owned directories from configured targets. Only stale `.js`
 files directly inside those directories are deletable. Root files, game files,
-player text files, and `data/` remain protected. Because the fleet has already
-been killed, an inaccessible host or refused deletion fails the transaction
-instead of being skipped.
+player text files, and `data/` remain protected. A refused deletion is logged
+and deferred; artifact staging and activation still complete.
 
 The destructive `restore.js` maintenance entrypoint remains outside normal
 builds and is pushed only by `save:restore`.

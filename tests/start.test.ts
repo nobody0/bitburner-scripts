@@ -49,9 +49,10 @@ describe("clean sync control", () => {
   });
 
   test("round-trips valid control messages and rejects malformed input", () => {
-    const prepare = { id: "sync-1", phase: "prepare" as const, hosts: ["home", "home"] };
-    expect(parseSyncControl(syncControl(prepare))).toEqual({ ...prepare, hosts: ["home"] });
-    expect(parseSyncControl('{"id":"","phase":"ready"}')).toBeUndefined();
+    const staged = { id: "sync-1", hosts: ["home", "home"] };
+    expect(parseSyncControl(syncControl(staged))).toEqual({ ...staged, hosts: ["home"] });
+    expect(parseSyncControl('{"id":"","hosts":["home"]}')).toBeUndefined();
+    expect(parseSyncControl('{"id":"sync-1","hosts":"home"}')).toBeUndefined();
     expect(parseSyncControl("not json")).toBeUndefined();
   });
 });

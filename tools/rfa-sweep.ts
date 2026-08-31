@@ -12,10 +12,8 @@ export function planSweep(
   return fileNames.filter((filename) => isSweepableFile(filename, owned, keep)).sort();
 }
 
-/** Remove every stale artifact of this project from `hosts`.
- *
- * Sync has already killed the fleet, so any listing or deletion failure is a
- * failed transaction and must keep the wrapper parked. */
+/** Remove every stale artifact of this project from `hosts`. The staging
+ * caller decides whether a refusal is fatal or deferred. */
 export async function sweepStaleFiles(
   session: RfaSession,
   owned: ReadonlySet<string>,

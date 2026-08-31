@@ -81,7 +81,7 @@ describe("sync stale-file sweep", () => {
     expect(planSweep(current, OWNED, KEEP)).toEqual([]);
   });
 
-  test("a refused delete fails the transaction", async () => {
+  test("reports a refused delete to its caller", async () => {
     const { session, deletions } = fakeSession(
       { home: HOME_LISTING },
       new Set(["worker/unused.js"]),
@@ -90,7 +90,7 @@ describe("sync stale-file sweep", () => {
     expect(deletions).toHaveLength(3);
   });
 
-  test("an unlistable host fails the transaction", async () => {
+  test("reports an unlistable host to its caller", async () => {
     const { session, deletions } = fakeSession({ home: HOME_LISTING, blade: ["worker/unused.js"] });
     await expect(sweepStaleFiles(session, OWNED, KEEP, ["home", "vanished", "blade"])).rejects.toThrow("no such server");
     expect(deletions).toHaveLength(3);

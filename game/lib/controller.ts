@@ -149,7 +149,7 @@ export async function runController(
   // hand them the real placer: the next respawn takes the best block going.
   setProxyPlacer(placeResident);
 
-  let reportedSyncFailure: string | undefined;
+  let reportedActivationFailure: string | undefined;
   let nextTick = Date.now();
   // A BitNode reset makes the next sweep behave like a cold boot: the fleet
   // the heap describes has ceased to exist.
@@ -188,12 +188,12 @@ export async function runController(
 
   for (let tick = 0; ; tick++) {
     const sync = parseSyncControl(ns.read(SYNC_CONTROL_FILE));
-    if (sync?.phase === "prepare") {
+    if (sync) {
       const pid = ns.exec("start.js", "home", {
         threads: 1,
         temporary: true,
         preventDuplicates: true,
-      }, "--sync");
+      });
       if (pid !== 0) {
         TELEMETRY: if (__TELEMETRY__) {
           tel!.dispose();
@@ -203,12 +203,12 @@ export async function runController(
         clearControllerGlobals();
         return;
       }
-      if (reportedSyncFailure !== sync.id) {
-        reportedSyncFailure = sync.id;
-        ns.tprint(`WARNING: failed to launch the sync wrapper for request ${sync.id}; retrying`);
+      if (reportedActivationFailure !== sync.id) {
+        reportedActivationFailure = sync.id;
+        ns.tprint(`WARNING: failed to activate staged sync ${sync.id}; retrying`);
       }
     } else {
-      reportedSyncFailure = undefined;
+      reportedActivationFailure = undefined;
     }
 
     // `playerDirty` short-circuits the cadence rather than replacing it: a

@@ -128,10 +128,11 @@ artifacts on darkweb as root-level basenames. Sync therefore owns only the
 configured `agent.js` and `overseer.js` version families at that root; every
 other darkweb root file remains protected.
 
-Every artifact carries the same embedded build identity. No build stamp or
-runtime handoff exists: all processes are dead before files are replaced, and
-`sync-control.txt` commits only after the complete push and strict stale sweep
-succeed. A failure leaves the wrapper parked for a safe retry.
+Every artifact carries the same embedded build identity. Sync pushes the whole
+build first, records it as staged in `sync-control.txt`, and returns without
+requiring a running game script. A live controller activates it immediately;
+otherwise the next autoexec or manual `start.js` does. A stale file held by a
+running process is reported and left for a later sweep.
 
 `game/restore.ts` is a maintenance entrypoint, not part of that normal allowlist.
 Only `bun run save:restore` builds and pushes `restore.js`.

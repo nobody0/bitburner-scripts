@@ -3,7 +3,6 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
   ownedDirectories,
-  parseSyncControl,
   syncControl,
   SYNC_CONTROL_FILE,
 } from "../shared/deployment.ts";
@@ -47,8 +46,6 @@ export function syncOptionsFrom(body: unknown): SyncOptions {
 }
 
 const TYPES_FILE = fileURLToPath(new URL("../types/NetscriptDefinitions.d.ts", import.meta.url));
-const READY_TIMEOUT_MS = 30_000;
-const READY_POLL_MS = 100;
 
 async function refreshTypes(session: RfaSession, config: BitburnerConfig, log: SyncLog): Promise<void> {
   const definitions = await session.request("getDefinitionFile", { server: config.server });
@@ -79,16 +76,6 @@ function keepSet(pushed: readonly string[]): Set<string> {
   return keep;
 }
 
-async function waitForReady(session: RfaSession, server: string, id: string): Promise<void> {
-  const deadline = Date.now() + READY_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const control = parseSyncControl(await session.getFile(server, SYNC_CONTROL_FILE));
-    if (control?.id === id && control.phase === "ready") return;
-    await new Promise((resolve) => setTimeout(resolve, READY_POLL_MS));
-  }
-  throw new Error(`sync wrapper did not become ready within ${READY_TIMEOUT_MS / 1_000}s`);
-}
-
 export async function runSync(
   session: RfaSession,
   config: BitburnerConfig,
@@ -103,27 +90,28 @@ export async function runSync(
   });
   const hosts = selectSweepHosts(config.server, await session.getAllServers());
   const id = crypto.randomUUID();
-  await session.pushFile(config.server, SYNC_CONTROL_FILE, syncControl({
-    id,
-    phase: "prepare",
-    hosts,
-  }));
-  log(`waiting for sync wrapper ${id}`);
-  await waitForReady(session, config.server, id);
-  log(`stopped scripts across ${hosts.length} servers`);
 
+  const start = artifacts.find((artifact) => artifact.filename === "start.js");
+  if (!start) throw new Error("deployment requires a start.js artifact");
   for (const artifact of artifacts) {
+    if (artifact === start) continue;
     await session.pushFile(config.server, artifact.filename, artifact.content);
     log(`pushed ${config.server}:${artifact.filename}`);
   }
+  await session.pushFile(config.server, start.filename, start.content);
+  log(`pushed ${config.server}:${start.filename}`);
 
   const owned = ownedDirectories(config.entries.map((entry) => entry.target));
-  const deleted = await sweepStaleFiles(session, owned, keepSet(artifacts.map((artifact) => artifact.filename)), hosts);
-  log(`swept ${deleted.length} stale files across ${hosts.length} servers`);
+  try {
+    const deleted = await sweepStaleFiles(session, owned, keepSet(artifacts.map((artifact) => artifact.filename)), hosts);
+    log(`swept ${deleted.length} stale files across ${hosts.length} servers`);
+  } catch (error) {
+    log(`deferred stale sweep until a later sync: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
   await session.pushFile(config.server, SYNC_CONTROL_FILE, syncControl({
     id,
-    phase: "commit",
+    hosts,
   }));
-  log(`committed sync ${id}`);
+  log(`staged sync ${id}; it will activate now or on the next start.js run`);
 }

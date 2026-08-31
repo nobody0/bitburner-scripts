@@ -59,8 +59,7 @@ export class RfaSession {
     return typeof result === "string" ? result : undefined;
   }
 
-  /** False on refusal or transport failure; strict sync turns that into a
-   * failed transaction and leaves the wrapper parked. */
+  /** False on refusal or transport failure; staged sync reports and defers it. */
   async deleteFile(server: string, filename: string): Promise<boolean> {
     const result = await this.request("deleteFile", { server, filename }).catch(() => undefined);
     return result === "OK";
