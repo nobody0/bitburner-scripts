@@ -206,22 +206,38 @@ export class SimArtifactSession {
    * sidecar are written as the run goes and the last checkpoint is what
    * survives. Cheap enough to call on the heartbeat cadence: the manifest is a
    * few hundred bytes and the sidecar a couple of thousand. */
-  checkpoint(): void {
-    if (this.#closing) return;
+  checkpoint(): Promise<void> {
+    if (this.#closing) return Promise.resolve();
+    let durable: Promise<void> = Promise.resolve();
     if (this.#writer && this.#metadata) {
-      // Best effort: the sink's flush may complete asynchronously, so the
-      // recorded size can lag by one buffer. A reader that parses JSONL line
-      // by line tolerates a short tail; one that trusted an over-reported size
+      // The sink's flush may complete asynchronously (it does on Windows), so
+      // a sidecar written right here can lead the file by one buffer. Both
+      // halves matter: the immediate write is what a kill in the next instant
+      // leaves behind, and the rewrite after the flush lands is what makes the
+      // sidecar's claim true on disk — a reader that parses JSONL line by line
+      // tolerates the short-lived tail; one that trusted an over-reported size
       // would not, which is why the size is read back from the file.
       // `FileSink.flush` may answer with a PROMISE, so a bare try/catch would
       // let a failed flush escape as an unhandled rejection and take down the
       // very run the checkpoint exists to preserve evidence for.
+      const metadata = this.#metadata;
+      const file = this.#file;
       try {
-        void Promise.resolve(this.#writer.flush()).catch(() => {});
+        durable = Promise.resolve(this.#writer.flush()).then(() => {}, () => {});
       } catch { /* a sink already ending */ }
-      writeSidecar(this.#metadata, this.#file);
+      writeSidecar(metadata, file);
+      durable = durable.then(() => {
+        // Unless the artifact rotated or closed meanwhile: its finalization
+        // wrote the authoritative sidecar, which must not be overwritten. And
+        // swallowed like the flush: by the time this lands the run may be
+        // tearing its output down, and evidence already on disk is enough.
+        try {
+          if (this.#metadata === metadata) writeSidecar(metadata, file);
+        } catch { /* the immediate sidecar above already stands */ }
+      });
     }
     this.#writeManifest();
+    return durable;
   }
 
   /** The manifest as it stands. Exposed so a caller can put it through

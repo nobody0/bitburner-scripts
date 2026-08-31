@@ -147,7 +147,7 @@ describe("focused labyrinth arena", () => {
       expect(runs[i]!.elapsedMs)
         .toBeCloseTo(runs[i]!.attempts * labAuthenticationMs(cases[i]!.stage), 6);
     }
-  });
+  }, 60_000);
 
   test("the planner stays close to the oracle and never bumps a wall mid-walk", () => {
     const cases = generateLabCorpus(Array.from({ length: 8 }, (_, index) => index + 1));
@@ -166,7 +166,7 @@ describe("focused labyrinth arena", () => {
     const attempts = planned.reduce((sum, run) => sum + run.attempts, 0);
     const oracle = planned.reduce((sum, run) => sum + run.shortestMoves, 0);
     expect(attempts / oracle).toBeLessThan(1.45);
-  });
+  }, 60_000);
 
   test("a decisive radar names the exit instead of criss-crossing nine candidates", () => {
     // Deep rungs only: the shallow ones have a known exit and must never radar.

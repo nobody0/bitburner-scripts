@@ -76,6 +76,19 @@ function sourceList(text: string, name: string): string[] {
     });
 }
 
+// The one test that always runs: a silent skip is how a machine without the
+// checkout quietly stops gating `dnet: "full"`. The suite may skip — the spec
+// only promises parity where the checkout is — but never without saying so.
+test("absence of the parity checkout is announced, never silent", () => {
+  if (!CHECKOUT) {
+    console.warn(
+      `darknet source parity SKIPPED: no bitburner-src checkout at ${SRC_REPO} — `
+      + `the dnet "full" fidelity claim is ungated on this machine. `
+      + `Clone the pinned checkout there or point BITBURNER_SRC at one.`,
+    );
+  }
+});
+
 describe.skipIf(!CHECKOUT)("darknet source parity", () => {
   test("the name generator's coins, tables and loop bounds", async () => {
     const text = await read("src/DarkNet/models/DarknetServerOptions.ts");

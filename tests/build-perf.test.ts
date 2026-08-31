@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { rm } from "node:fs/promises";
+import { readdir, rm, stat } from "node:fs/promises";
 import { buildScripts } from "../tools/build.ts";
 import type { BitburnerConfig } from "../tools/config.ts";
 
@@ -38,10 +38,19 @@ const MAX_MAIN_SOURCE_BYTES = 5_500_000;
 
 afterAll(async () => {
   await rm(config.buildDir, { recursive: true, force: true });
+  // And reclaim siblings a crashed or killed run left behind: the pid suffix
+  // keeps concurrent runs apart, which also means no later run ever reuses —
+  // and therefore never clears — a dead run's directory. An hour of age is
+  // proof no live run owns it.
+  for (const entry of await readdir(".")) {
+    if (!/^build-test-perf-\d+$/.test(entry) || entry === config.buildDir) continue;
+    try {
+      if (Date.now() - (await stat(entry)).mtimeMs > 3_600_000) {
+        await rm(entry, { recursive: true, force: true });
+      }
+    } catch { /* a concurrent run may have removed it first */ }
+  }
 });
-
-const [dnetController] = await buildScripts(dnetConfig, { telemetry: false });
-const dnetControllerSource = dnetController!.content;
 
 /** Every string-literal member chain in a bundle. Receiver names are minified
  * away in shipped artifacts, but the strings — the ns proxy's whole call
@@ -103,7 +112,7 @@ describe("compile-time telemetry elimination", () => {
     }
   });
 
-  test("syntax minification stays off, because the darknet still brackets its ns", () => {
+  test("syntax minification stays off, because the darknet still brackets its ns", async () => {
     // start.js no longer needs this: the ns proxy names members with STRING
     // ARGUMENTS (`nsp("scp", ...)`), which no minifier can turn back into a
     // property access. The darknet is a different story — its three processes
@@ -111,7 +120,11 @@ describe("compile-time telemetry elimination", () => {
     // precisely so the static analyser cannot see the member and bill their
     // `ramOverride` for it. esbuild's syntax minification rewrites exactly
     // that form into a dotted call, so it must stay off for every entry.
-    expect(dnetControllerSource).toContain('["exec"]');
+    // Built HERE, not at module scope: a top-level build runs on every load of
+    // this file — lane discovery, a filtered `bun test` — where afterAll never
+    // fires, and each such load leaked one build-test-perf-<pid>/ directory.
+    const [dnetController] = await buildScripts(dnetConfig, { telemetry: false });
+    expect(dnetController!.content).toContain('["exec"]');
   });
 
   test("--perf build keeps every acquisition path", async () => {

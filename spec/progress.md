@@ -2145,6 +2145,44 @@ and `sim/` cannot drift apart on a formula they both transcribe.
   to the table. The table is now measured, which makes this much less urgent
   than it was, but a live pace is still better evidence than a lane mean.
 
+## First full-horizon leg-bn15.1 run (2026-08-31, model 14, rev 7180976)
+
+Seed 1, 24 h horizon, 40 GB memory budget: `[valid] NOT reached (horizon)` —
+fidelity-clean end to end (zero unmodeled calls, zero crashes, no clock stall,
+RSS peaked ~2.5 GB), 6.1 h of wall time. The run is
+`runs/1788172383387-sim-bn15-screen-seed1-AE2896` and the first BN15 evidence
+on the model-14 instrument; it records no exit, so `bn15.json` stays empty.
+
+Where the 24 virtual hours went, by install segment:
+
+| segment | stage | virtual span | what happened |
+|---|---|---|---|
+| install1 | labyrinth-1 | 0 → 0.39h | rung 1 walked and its reward installed |
+| install2-4 | labyrinth-2 | 0.39 → 9.95h | the charisma-600 climb, with TWO extra mid-climb installs |
+| install5-6 | labyrinth-3 | 9.95 → 18.11h | the charisma-1500 climb, one extra install |
+| install7 | labyrinth-4 | 18.11 → 24h | charisma 2321 of the 2500 gate at horizon |
+
+What this proves: the walker clears DEEP rungs on the real leg, not just the
+lab lane — rungs 1-3 all walked, rewards claimed and installed, the deferral
+window held. The walks themselves are noise, exactly as `LAB_WALK_ATTEMPTS`
+priced them; the charisma climbs are ~23.6 of the 24 hours.
+
+What this opens (the tuning list, in expected-value order):
+
+- **Three installs inside stage 2.** Every install resets charisma to 1, and
+  stage 2's climb — to the LOWEST deep gate — took 9.5 h against stage 3's
+  8.2 h to a gate 2.5x higher. The erased-progress veto priced those two extra
+  installs as worth their reset; on this evidence the pricing undervalues climb
+  progress at low charisma, where the exp curve is slowest per level.
+- **The leg needs roughly 35-45 vh at current tuning** (extrapolating the
+  remaining 2500/3000 climbs plus the post-pill regrow from hacking 3135
+  toward the doubled daemon gate). The next full run is only worth its wall
+  cost after the install pricing moves.
+- Late-run simulator throughput sagged to 0.005 vh/min around 95k live
+  processes (the spec/simulator.md decay pathology at fleet scale) and
+  recovered to ~0.1 once the fleet shrank back to ~30k on its own; the run
+  stayed valid throughout, so this costs wall clock, not trust.
+
 ## Known gaps in the current implementation
 
 Stated plainly rather than buried, because several features are implemented to

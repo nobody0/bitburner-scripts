@@ -28,7 +28,7 @@ const heartbeat = (session: SimArtifactSession): Record<string, unknown>[] =>
  * and neither a signal handler nor an atexit hook can change that. What
  * survives such a death is what was already on disk. */
 describe("artifacts that survive a killed run", () => {
-  test("a checkpoint leaves a complete manifest and sidecar mid-run", () => {
+  test("a checkpoint leaves a complete manifest and sidecar mid-run", async () => {
     const dir = scratch();
     try {
       const session = new SimArtifactSession({ outDir: dir, label: "killed", seed: 2, bitNode: 4 });
@@ -37,7 +37,10 @@ describe("artifacts that survive a killed run", () => {
         seq: 1, t: 0, run: "emitter", src: "sim", kind: "event", name: "sim.meta",
         data: { scenarioFingerprint: "v1:partial" },
       }));
-      session.checkpoint();
+      // Awaited here so the flushed state is what the assertions read; a
+      // `kill -9` mid-flush still finds the immediate (one-buffer-early)
+      // sidecar and manifest on disk.
+      await session.checkpoint();
       // Nothing below closes the session: this is the state a `kill -9` leaves.
 
       const manifest = readManifest(session);
@@ -192,7 +195,7 @@ describe("the progress heartbeat", () => {
       Date.now = () => 1_704_000_000_000;
       const session = new SimArtifactSession({ outDir: dir, label: "clock", seed: 1 });
       session.write(record(0, 0, "sim.started"));
-      session.checkpoint();
+      await session.checkpoint();
       const sidecar = JSON.parse(
         readFileSync(`${session.files[0]!}.meta.json`, "utf8"),
       ) as ArtifactMetadata;
