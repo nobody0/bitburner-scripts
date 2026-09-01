@@ -1,6 +1,7 @@
 import type { ScriptLaunch } from "../lib/launch-shared.ts";
 import type { ArtifactIdentity } from "../../shared/run-identity.ts";
 import type { DnetRecoveryState } from "./wire.ts";
+import type { Order } from "./shared.ts";
 
 export interface DnetControllerLaunch extends ScriptLaunch {
   readonly kind: "dnet-controller";
@@ -18,6 +19,8 @@ export interface DnetControllerLaunch extends ScriptLaunch {
 export interface DnetAgentLaunch extends ScriptLaunch {
   readonly kind: "dnet-agent";
   readonly host: string;
+  /** The exact one-shot job. The child never consults a second global slot. */
+  readonly order?: Order;
   /** Minimal local worker used while owner-blocked RAM cannot yet fit the
    * ordinary prober+resident pair. */
   readonly bootstrapReclaim?: boolean;

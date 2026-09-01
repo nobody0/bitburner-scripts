@@ -1,5 +1,5 @@
 import type { NS } from "@ns";
-import { captureLaunch } from "../lib/launch-shared.ts";
+import { captureExecLaunch } from "../lib/launch-shared.ts";
 import { workerGlobals, type WorkerJob, type WorkerLaunch } from "../lib/worker-shared.ts";
 import { signalWake } from "../lib/wake.ts";
 import { MINIMUM_WORKER_PRECISION_MS } from "../../shared/strategy/timing.ts";
@@ -46,8 +46,9 @@ export async function main(ns: NS): Promise<void> {
   // A worker can execute thousands of HGW calls over its life; telemetry, not
   // Netscript's per-call log, is the automation's observable record.
   ns.disableLog("ALL");
-  const scriptWorker = captureLaunch<WorkerLaunch>("worker", ns.args[0]);
-  if (!scriptWorker) return;
+  const launch = captureExecLaunch<WorkerLaunch>(ns, "worker");
+  if (!launch) return;
+  const scriptWorker = launch.descriptor;
   const id = scriptWorker.id;
   const g = workerGlobals();
   const info = scriptWorker.worker;
@@ -108,6 +109,7 @@ export async function main(ns: NS): Promise<void> {
       g.dispatch_done?.push({ opId: id, kind: "workerExit", target: "", threads: info.threads });
       wakeDispatcher("share");
     }, `share${id}`);
+    launch.ready.resolve();
     const runningTaskPromise = (async () => {
       while (g.worker_info?.has(id)) await ns.share();
     })();
@@ -130,6 +132,7 @@ export async function main(ns: NS): Promise<void> {
       });
       wakeDispatcher("charge");
     }, `charge${id}`);
+    launch.ready.resolve();
     const runningTaskPromise = ns.stanek.chargeFragment(info.x ?? 0, info.y ?? 0).then(() => {
       succeeded = true;
       g.charge_context_pending = true;
@@ -160,6 +163,7 @@ export async function main(ns: NS): Promise<void> {
       });
       wakeDispatcher(hgwKind, info.target);
     }, `op${id}`);
+    launch.ready.resolve();
     const runningTaskPromise = run(info.target, options({ ...info, threads: info.strengthThreads }))
       .then((value) => {
         result = value;
@@ -191,6 +195,7 @@ export async function main(ns: NS): Promise<void> {
     g.dispatch_done?.push({ opId: id, kind: "workerExit", target: "", threads: info.threads });
     wakeDispatcher(hgwKind, current?.target);
   }, `worker${id}`);
+  launch.ready.resolve();
 
   const runningTaskPromise = (async () => {
   for (;;) {

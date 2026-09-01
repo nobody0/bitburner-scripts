@@ -554,7 +554,12 @@ describe("tab rendering", () => {
         admitted: { phish: 1 },
         refused: { "cache-none": 2 },
         examples: [{ host: "dn-1", why: "cache-none", detail: "no .cache file on this host" }],
-        cacheHunter: "dn-1",
+        cacheReserve: {
+          hosts: ["dn-1", "dn-2"],
+          targetChance: 0.95,
+          combinedChance: 0.972,
+          guaranteed: false,
+        },
         expectedMoneyPerSec: 125_000,
         expectedCharismaExpPerSec: 42,
         // Two minutes into a three-minute window, so the countdown is a real
@@ -655,6 +660,9 @@ describe("tab rendering", () => {
     // member exposes, so our own sightings are the only evidence there is.
     expect(rendered).toContain("phish window");
     expect(rendered).toContain("shut — 60s left");
+    expect(rendered).toContain("cache reserve");
+    expect(rendered).toContain("97.2%");
+    expect(rendered).toContain("dn-1, dn-2");
 
     // Farm returns are cumulative state, not a per-call event stream. Cash is
     // kept separate from promotion activity because volatility has no honest
@@ -695,6 +703,24 @@ describe("tab rendering", () => {
     expect(rendered).toContain("backdoors — installed from HOME");
     expect(rendered).toContain("ns.scan cannot see the darknet");
     expect(rendered).not.toContain("nothing out there can act on it");
+  });
+
+  test("the darknet farm card still renders a legacy singular cache hunter", () => {
+    const state = emptyState();
+    state.topics.dnet = {
+      maxDepth: -1,
+      knowledge: {
+        at: 1, generation: "legacy", hosts: [],
+        agents: { live: 0, seenEver: 0, lostSinceBoot: 0 },
+      },
+      farm: {
+        admitted: { phish: 1 }, refused: {}, examples: [], cacheHunter: "dn-old",
+        expectedMoneyPerSec: 0, expectedCharismaExpPerSec: 0,
+      },
+    } as StateMap["dnet"];
+    const rendered = TABS.dnet.render(state);
+    expect(rendered).toContain("cache hunter");
+    expect(rendered).toContain("dn-old");
   });
 
   test("the darknet panel survives a driver tick that no probe has preceded", () => {

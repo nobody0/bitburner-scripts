@@ -677,26 +677,26 @@ target at the base agent plus the topology-only prober
 (`managedResidentRamGb + proberRamGb` ≈ 3.4 GB), rather than the unmanaged
 `agentRamGb` (≈ 5.4 GB).
 
-**There is no post-plant cooldown.** An empty, plantable host is replanted at
-once. `plantRetryMs` applies only after a launch refusal, preventing immediate
-re-derivation. It applies to every host and is stamped per frontier target.
+**There is no post-plant cooldown.** Every `exec` return is synchronously
+published as one PID-keyed entity containing the exact order, readiness, and
+lifetime. The child captures that entity by `ns.pid`, installs its domain exit
+hook, and resolves readiness. Its generic `atExit` resolves the entity lifetime;
+the controller's synchronous subscriber immediately records the host as
+retiring and dodge-calls `kill(entity.pid)`. Upstream runs `atExit` before removing the worker and
+subtracting its RAM; the kill promise therefore resolves only after the
+allocation is gone. A `false` result is equally conclusive because the PID was
+already absent.
 
-The model is "this host needs an agent, and there is no reason to wait", not a
-stamp to be raced clear.
+The follow-up order is derived and staged from cached facts immediately, but
+dispatch waits on that PID barrier. Once it resolves, the controller performs
+one `exec`. There is no sleep, grace window, timeout, or retry. `exec === 0`
+after those proven preconditions is retained as a `launch-refused` invariant
+fault and later derive passes do not hide it by trying again. A new lender or
+agent check-in is the fact that clears the fault.
 
-The managed dispatch cycle also RACES its own RAM. A handoff (the resident
-exiting for the dispatcher, or a finished order) wakes the controller
-synchronously, but the engine can still expose the retiring allocation to the
-next `exec` — so a same-turn replant reads a "full" host that is actually empty.
-Two rules bridge that turn: `preparePlant`'s fit-guard judges a claim against
-durable CAPACITY (`maxRam − blockedRam − proberGb`, never `getServerUsedRam`),
-and a genuinely refused replant `exec` waits 300 ms before each of two retries.
-The controller records retirement independently of surviving process handles,
-so both the replacement prober and resident receive that grace after
-`retireVantage` cleared the old pair. Initial launches have no retiring
-predecessor to wait for. The wait is a realm timer, not a microtask yield or a
-Netscript call; an uncaptured child is never retried because it may already hold
-the target's RAM.
+`preparePlant` uses the same barrier for replacement probers, residents,
+bootstraps, and incoming children, while still fitting work against durable
+capacity (`maxRam − blockedRam − proberGb`, never `getServerUsedRam`).
 
 The automatic ordinary-backdoor policy treats those mutation branches as a
 recycler. It holds exactly two, avoiding both global authentication penalties,
@@ -802,10 +802,13 @@ The cache branch is an `if` and the money branch its `else if`: claiming a cache
 forecloses that call's money roll, and while the cooldown is unexpired every
 call falls straight through to money.
 
-During an open window, difficulty >3 enters the hunter pool because cache
-quality scales with difficulty. The deepest eligible resident wins because
-depth also scales the money call; free RAM breaks depth ties. Lower-difficulty
-residents prefer promotion, but fall back to phish rather than idle.
+The farm keeps a probability reserve phishing continuously, including through
+the closed window, so the first calls completing after the cooldown can restart
+it immediately. One individually certain roll is preferred; otherwise the
+smallest set of largest rolls is reserved until their combined chance reaches
+95%, or every eligible resident is used. Remaining residents compare phishing's
+cash and charisma with promotion's stock opportunity and charisma through the
+shared rate market; difficulty never overrides that comparison.
 
 `openCache(filename)` lowers karma by `difficulty + 1` (returned as a negative
 `karmaLoss`) and yields one reward drawn at random from:
@@ -1429,18 +1432,20 @@ It keeps a queue per host and launches through other processes' Netscript
 slots. A 3.15 GB **prober** performs the host-local `probe()`, reports it, lends
 its otherwise-unused `ns`, and lets the controller use that lender for local
 `exec`.
-An **agent** runs one exact order and exits. Its atExit wake lets the controller
-start the next queued order after the engine returns its RAM. The labyrinth
+An **agent** runs one exact order and exits. Its atExit reports the original PID;
+the controller starts the next queued order after `kill(pid)` proves the engine
+returned its RAM. The labyrinth
 walker is the deliberate exception: it runs alone and keeps its PID for the
 whole maze. Darkweb adds the controller to its ordinary prober + current agent.
 
 Ordinary agents launch through the host's prober lender. A stasis prober is
 probe-only; its agents launch through one atomic shared-proxy lease that
 prepays `connectToSession` and `exec`, runs both on the same resident PID, and
-prevents a recycle between them. If that resident dies, the controller retries
-the entire pair on a fresh proxy process. An `exec` refusal takes the same
-300 ms grace as a plant launch, inside the managed dispatch's five-second
-deadline, so all three attempts cannot race the same retiring allocation.
+prevents a recycle between them. The lease is started independently per host,
+so a slow or failed stasis launch cannot delay ordinary-host dispatch. Once the
+outgoing allocation's PID barrier has resolved, the pair is attempted once; an
+`exec` refusal becomes the same persistent `launch-refused` invariant fault as
+an ordinary launch.
 
 **The rule that nearly makes this impossible.** A session belongs to the PID,
 so one process cannot authenticate on behalf of another.

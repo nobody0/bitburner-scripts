@@ -7,7 +7,7 @@ import { ProcessTable } from "../sim/ns/process.ts";
 import { makeSimNs, type SimNsHost } from "../sim/ns/api.ts";
 import { darkwebServerSpec } from "../sim/network.ts";
 import { main as agentMain } from "../game/dnet/agent.ts";
-import { offerLaunch } from "../game/lib/launch-shared.ts";
+import { launchExec } from "../game/lib/launch-shared.ts";
 import type { DnetAgentLaunch } from "../game/dnet/launch.ts";
 import { awaitDnetOperation, RELEASED } from "../game/dnet/timing.ts";
 import {
@@ -194,8 +194,13 @@ function rig(): Rig {
     mutationEpoch: 0,
     noteMutation: () => 0,
     wake: (cause) => void wakes.push(cause),
-    announceLaunch: () => {},
-    announceProbeRefresh: () => {},
+    bindAgentLaunch: (hostname, launch) => {
+      launch.exited.onResolve(() => {
+        const entry = ensure(hostname);
+        if (entry.agent?.pid === launch.pid) entry.agent = undefined;
+      });
+    },
+    bindProberLaunch: () => {},
     lend: () => {},
     announceProberRespawn: () => false,
     markProberKill: () => {},
@@ -211,9 +216,10 @@ function rig(): Rig {
     beginProbeRefresh: () => { throw new Error("not used"); },
     cancelProbeRefresh: () => {},
     reportProbe: () => {},
-    preparePlant: () => ({ reuseProber: false, retiringAllocation: false }),
+    preparePlant: async () => ({ reuseProber: false }),
     claimPlanted: () => undefined,
     abandonPlant: () => {},
+    launchRefused: () => {},
     registerBootstrap: () => {},
     bootstrapDone: () => {},
     deps: noopDeps,
@@ -257,13 +263,13 @@ afterEach(() => {
 function start(r: Rig, order: Order): number {
   const entry = r.ensure("darkweb");
   entry.pendingOrder = order;
-  const { launchId } = offerLaunch<DnetAgentLaunch>({ kind: "dnet-agent", host: "darkweb" });
-  return r.controllerNs.exec(
-    "agent.js",
-    "darkweb",
-    { threads: order.threads, ramOverride: order.ramOverrideGb, temporary: true },
-    launchId,
-  );
+  return launchExec<DnetAgentLaunch>(
+    { kind: "dnet-agent", host: "darkweb", order },
+    () => r.controllerNs.exec(
+      "agent.js", "darkweb", { threads: order.threads, ramOverride: order.ramOverrideGb, temporary: true },
+    ),
+    (launch) => r.controller.bindAgentLaunch("darkweb", launch),
+  )?.pid ?? 0;
 }
 
 /** Drive the clock until an order of this kind is deep inside its blocking ns
@@ -409,8 +415,11 @@ describe("a worker runs one order and lets go", () => {
   test("a worker started with no order exits at once rather than waiting", async () => {
     const r = rig();
     r.ensure("darkweb");
-    const { launchId } = offerLaunch<DnetAgentLaunch>({ kind: "dnet-agent", host: "darkweb" });
-    r.controllerNs.exec("agent.js", "darkweb", { threads: 1, ramOverride: 4, temporary: true }, launchId);
+    launchExec<DnetAgentLaunch>(
+      { kind: "dnet-agent", host: "darkweb" },
+      () => r.controllerNs.exec("agent.js", "darkweb", { threads: 1, ramOverride: 4, temporary: true }),
+      (launch) => r.controller.bindAgentLaunch("darkweb", launch),
+    );
 
     // Nothing to wait FOR. The controller launches a worker only once it has
     // staged the order, so a worker that finds none was launched for nothing —

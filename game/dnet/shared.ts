@@ -1,5 +1,6 @@
 import type { NS } from "@ns";
-import type { DnetProbeRefresh } from "./launch.ts";
+import type { DnetAgentLaunch, DnetProbeRefresh, DnetProberLaunch } from "./launch.ts";
+import type { ExecLaunchEntity } from "../lib/launch-shared.ts";
 import type { AttemptOutcome, LogDrainOutcome, ReportHost, VaultEntry } from "../../shared/strategy/dnet/courier.ts";
 import type { DnetHost } from "../../shared/strategy/dnet/host.ts";
 import type { TaskKind } from "../../shared/strategy/dnet/jobs.ts";
@@ -51,7 +52,7 @@ import type { DarknetProfit } from "../../shared/telemetry/topics/dnet.ts";
 
 /** Version the shared controller/agent data shape. A mismatched participant
  * exits instead of reading a global whose layout it does not understand. */
-export const DNET_PROTOCOL = 13;
+export const DNET_PROTOCOL = 14;
 
 /** The script base every allocation starts from. Transcribed rather than read,
  * because a launcher sizes a process it has not started yet.
@@ -292,7 +293,7 @@ export interface HostEntry extends DnetHost {
   /** The permanent prober beside the agent. `pid: 0` marks a walk host whose
    *  prober was deliberately killed; `at` is the last report stamp (dead-prober
    *  detection compares it to the mutation clock). */
-  prober?: { pid: number; at: number; neighbours: string[]; epoch: number; armoured?: boolean };
+  prober?: { pid: number; at: number; neighbours: string[]; epoch: number; armoured?: boolean; launch?: ExecLaunchEntity<DnetProberLaunch> };
   /** The prober pid the controller has DELIBERATELY killed.
    *
    * An armoured prober respawns itself out of `atExit`, and `atExit` cannot
@@ -314,7 +315,7 @@ export interface HostEntry extends DnetHost {
    * `withdraw` releases the launch descriptor the dying prober published; it
    * MUST be called if the successor never arrives, or the descriptor sits in
    * the realm map for the rest of the run. */
-  proberRespawn?: { at: number; launchId: number; withdraw: () => void };
+  proberRespawn?: { at: number; ticket: number; withdraw: () => void };
   /** When a prober RESIZE was last exec'd here. An `exec` that returns a pid
    *  only proves the process was admitted, so without this a replacement that
    *  died before lending would be re-launched on every dispatch, for ever. */
@@ -331,7 +332,7 @@ export interface HostEntry extends DnetHost {
    * Undefined means the launcher has not got there yet and still owns the
    * barrier. This replaced a deadline: "has the launcher died between exec and
    * settle" is a question about a process, and the engine answers it. */
-  probeRefreshPid?: number;
+  probeRefreshLaunch?: ExecLaunchEntity<DnetProberLaunch>;
   /** The one order process currently running on this host. */
   agent?: AgentHandle;
   /** A process has been launched for this host but has not adopted yet. It
@@ -343,24 +344,16 @@ export interface HostEntry extends DnetHost {
      * dispatch. A lost launch is only useful diagnostically when its source is
      * preserved. */
     via: "plant" | "plant-exec";
-    /** The child, once there IS one. Undefined means the launcher has not
-     * exec'd yet and still owns the window — it closes it itself, through
-     * `abandonPlant` on refusal or by handing us a pid on success. Once set,
-     * the window is decided by `isRunning`: a process that is there will adopt,
-     * and one that is not is a ghost. No clock is involved either way. */
-    pid?: number;
+    /** Bound synchronously from exec's return. Undefined is the pre-exec plant
+     * window; once present this entity owns both the job and process identity. */
+    launch?: ExecLaunchEntity<DnetAgentLaunch>;
   };
-  /** A controller-directed retirement recently released one or more process
-   * allocations on this host. `preparePlant` uses this fact independently of
-   * whether a prober survived: `retireVantage` clears both handles before the
-   * engine necessarily makes their RAM available to the replacement exec. */
-  retiredAllocationAt?: number;
   /** A spawn-free local reclaimer — not an agent, and must not be staged to. */
-  bootstrap?: { pid: number; startedAt: number };
-  /** Pending orders, kept priority-sorted; the next agent consumes one. */
+  bootstrap?: { pid: number; startedAt: number; launch?: ExecLaunchEntity<DnetAgentLaunch> };
+  /** Pending orders, kept priority-sorted; a launcher moves one into its entity. */
   staged?: Order[];
-  /** The order reserved for a process that has been launched but not adopted.
-   *  This is the whole handoff: data rather than a cross-process closure. */
+  /** The order currently reserved at the scheduler boundary. Once exec returns,
+   * the PID-keyed launch entity is the authoritative handover. */
   pendingOrder?: Order;
   completed?: number;
   failed?: number;
@@ -395,10 +388,10 @@ export interface ControllerHandle {
    * stops being an assertion and becomes a checkable fact. Called with the pid
    * `exec` returned; from here the window survives exactly as long as
    * `isRunning` says that process does. */
-  announceLaunch(host: string, pid: number): void;
+  bindAgentLaunch(host: string, launch: ExecLaunchEntity<DnetAgentLaunch>): void;
   /** Name the prober a plant just exec'd, so the first-probe barrier stops
    * being timed and starts being checked. */
-  announceProbeRefresh(host: string, pid: number): void;
+  bindProberLaunch(host: string, launch: ExecLaunchEntity<DnetProberLaunch>): void;
   /** A prober CHECKING IN: it hands the controller its own `ns` and then does
    * nothing for the rest of its life.
    *
@@ -409,7 +402,7 @@ export interface ControllerHandle {
    *
    * The prober must hold no call of its own after this, or every borrowed call
    * throws CONCURRENCY ERROR. See `HostEntry.ns`. */
-  lend(host: string, borrowed: NS, pid: number, refresh?: DnetProbeRefresh, armoured?: boolean): void;
+  lend(host: string, borrowed: NS, launch: ExecLaunchEntity<DnetProberLaunch>, refresh?: DnetProbeRefresh, armoured?: boolean): void;
   /** An ARMOURED prober is dying and has scheduled its own replacement.
    *
    * Called from the dying prober's `atExit`, before the `spawn` that both
@@ -419,7 +412,7 @@ export interface ControllerHandle {
    *
    * Returns false when the controller refuses the respawn — the pid was marked
    * for a deliberate kill — in which case the caller must NOT spawn. */
-  announceProberRespawn(host: string, pid: number, launchId: number, withdraw: () => void): boolean;
+  announceProberRespawn(host: string, pid: number, ticket: number, withdraw: () => void): boolean;
   /** Mark a prober pid as deliberately killed, so its armour stands down.
    *
    * MUST be called before the `kill`: the handler runs synchronously inside the
@@ -437,7 +430,7 @@ export interface ControllerHandle {
   reportProbe(host: string, neighbours: readonly string[], at: number, pid: number, refresh?: DnetProbeRefresh): void;
   /** Plant calls this before launching the prober: it settles how the agent
    * will be launched and opens the placing window. */
-  preparePlant(host: string): { reuseProber: boolean; retiringAllocation: boolean };
+  preparePlant(host: string): Promise<{ reuseProber: boolean }>;
   /** Plant calls this after the first probe and immediately before the agent
    * `exec`: it closes the placing window and hands back the order the derive
    * staged in it for the new process to adopt. The `exec` is sized from that
@@ -445,9 +438,11 @@ export interface ControllerHandle {
   claimPlanted(host: string): Order | undefined;
   /** Close the placing window without launching anything. */
   abandonPlant(host: string): void;
+  /** Preserve a single refused launch as an invariant fault. */
+  launchRefused(host: string, detail: string): void;
   /** A bootstrap reclaimer registers and, on exit, reports itself done. */
-  registerBootstrap(host: string, pid: number): void;
-  bootstrapDone(host: string): void;
+  registerBootstrap(host: string, launch: ExecLaunchEntity<DnetAgentLaunch>): void;
+  bootstrapDone(host: string, pid: number): void;
   /** The state a body needs that outlives its process, keyed by target. */
   deps: ControllerDeps;
   snapshot(at?: number): DnetSnapshot;
@@ -542,11 +537,6 @@ export const KIND_CALLS: Readonly<Record<OrderKind, readonly string[]>> = {
   storm: ["dnet.unleashStormSeed", "ls", "read", "rm", ...DETAILS],
   relaunchProbe: ["exec"],
 };
-
-/** A refused darknet exec can be observing the allocation its predecessor is
- * still retiring. One browser turn is required before retrying; 300 ms spans
- * the game's ordinary 200 ms cycle without making a healthy launch wait. */
-export const REFUSED_EXEC_RETRY_MS = 300;
 
 /** The permanent prober's calls, and ONLY the two that are host-BOUND.
  *

@@ -42,7 +42,7 @@ import {
   type DnetSnapshot,
 } from "../../dnet/wire.ts";
 import { gameBuildId } from "../build-id.ts";
-import { handoffLaunch, temporaryRunOptions } from "../launch-shared.ts";
+import { launchExec, temporaryRunOptions, waitExecReady } from "../launch-shared.ts";
 import type { DnetControllerLaunch, DnetProberLaunch } from "../../dnet/launch.ts";
 import { emptyDnetProfit, hasDnetProfit } from "../../dnet/profit.ts";
 import { gameGlobal } from "../globals.ts";
@@ -778,7 +778,7 @@ const dnet: FeatureDriver = {
       const wantController = !controllerAlive;
       const wantProber = !proberAlive;
 
-      // `handoffLaunch` must have the pid in the same turn it publishes the
+      // The PID entity must be published in the same turn as `exec` returns;
       // descriptor, and a proxied call is a promise — so `exec` runs on home's
       // own `ns` (already the bundle's, already paid, already the TOR edge) and
       // only `scp`, which the bundle does not own, goes through the proxy.
@@ -793,8 +793,8 @@ const dnet: FeatureDriver = {
         // The controller holds the accumulated map, so a live one is left
         // strictly alone: restarting it to fix a smaller problem would throw
         // that map away.
-        const controller = wantController
-          ? await handoffLaunch<DnetControllerLaunch>(
+        const controllerLaunch = wantController
+          ? launchExec<DnetControllerLaunch>(
             {
               kind: "dnet-controller",
               host: "darkweb",
@@ -804,16 +804,26 @@ const dnet: FeatureDriver = {
               charisma,
               recovery: recoveryFromHome(generation, now),
             },
-            (launchId) => ctx.ns.exec(
+            () => ctx.ns.exec(
               controllerFile,
               "darkweb",
               temporaryRunOptions({ threads: 1, ramOverride: CONTROLLER_GB }),
-              launchId,
             ),
           )
-          : -1;
+          : undefined;
+        const controller = wantController ? controllerLaunch?.pid ?? 0 : -1;
         if (controller === 0) {
           return { controller, prober: 0, reason: "exec refused (darkweb full, or not synced)" };
+        }
+        if (controllerLaunch !== undefined) {
+          // Through the proxy, not `ctx.ns`: `exec` is the ONE member this
+          // bundle owns statically (it is also the only ns holding the TOR edge
+          // to darkweb). Billing `isRunning` onto main.js to poll one launch
+          // would break the rule the whole feature layer is priced by.
+          const ready = await waitExecReady(controllerLaunch, (pid) => ctx.nsp("isRunning", pid));
+          if (ready.status === "gone") {
+            return { controller: 0, prober: 0, reason: "controller exited before publishing rendezvous" };
+          }
         }
         const activeController = dnetRendezvous();
         // The controller registers its rendezvous when its own `main` first
@@ -830,15 +840,15 @@ const dnet: FeatureDriver = {
           : activeController === undefined || claim === undefined
             ? 0
             : claim.launch
-              ? await handoffLaunch<DnetProberLaunch>(
+              ? (launchExec<DnetProberLaunch>(
                 { kind: "dnet-prober", host: "darkweb", refresh: claim.refresh },
-                (launchId) => ctx.ns.exec(
+                () => ctx.ns.exec(
                   proberFile,
                   "darkweb",
                   temporaryRunOptions({ threads: 1, ramOverride: PROBER_GB }),
-                  launchId,
                 ),
-              )
+                (entity) => activeController.bindProberLaunch("darkweb", entity),
+              )?.pid ?? 0)
               : -1;
         if (prober === 0 && claim !== undefined) activeController?.cancelProbeRefresh("darkweb", claim.refresh);
         const refreshed = claim === undefined ? !wantProber : prober !== 0 && await claim.refresh.refreshed !== undefined;

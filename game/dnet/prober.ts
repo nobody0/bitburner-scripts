@@ -1,5 +1,5 @@
 import type { NS } from "@ns";
-import { captureLaunch, offerLaunch, temporaryRunOptions } from "../lib/launch-shared.ts";
+import { captureExecLaunch, captureSpawnLaunch, offerSpawnLaunch, temporaryRunOptions } from "../lib/launch-shared.ts";
 import type { DnetProberLaunch } from "./launch.ts";
 import { live, PROBER_GB } from "./shared.ts";
 
@@ -59,8 +59,10 @@ const ARMOUR_SPAWN_DELAY_MS = 1;
 export async function main(ns: NS): Promise<void> {
   ns.disableLog("ALL");
 
-  const launch = captureLaunch<DnetProberLaunch>("dnet-prober", ns.args[0]);
-  if (!launch) return;
+  const entity = captureExecLaunch<DnetProberLaunch>(ns, "dnet-prober")
+    ?? captureSpawnLaunch<DnetProberLaunch>(ns, "dnet-prober", ns.args[0]);
+  if (!entity) return;
+  const launch = entity.descriptor;
   const host = launch.host;
 
   const controller = live();
@@ -70,11 +72,6 @@ export async function main(ns: NS): Promise<void> {
   // the only place that can promise the lent `ns` is retracted the moment it
   // stops being callable. Guarded on identity — a replacement prober may
   // already have published its own, and this one must not retract that.
-  ns.atExit(() => {
-    const held = live()?.hosts.get(host);
-    if (held?.ns === ns) held.ns = undefined;
-    live()?.wake("prober-died");
-  }, "dnet-prober-checkout");
 
   // ARMOUR, when this launch paid for it. Registered AFTER the checkout hook so
   // the lent `ns` is retracted first and the successor cannot race a stale one.
@@ -106,18 +103,18 @@ export async function main(ns: NS): Promise<void> {
       // The controller re-arms through `resizeProber` if it still wants to, at
       // an order boundary and out of a smaller allocation than the 5.15 GB this
       // process was holding.
-      const offer = offerLaunch<DnetProberLaunch>({ kind: "dnet-prober", host });
+      const offer = offerSpawnLaunch<DnetProberLaunch>({ kind: "dnet-prober", host });
       // The controller is the only thing that knows whether this death was
       // ordered. A deliberate kill must not respawn, or every replacement and
       // every resize becomes a respawn loop.
-      if (!g.announceProberRespawn(host, ns.pid, offer.launchId, offer.withdraw)) {
+      if (!g.announceProberRespawn(host, ns.pid, offer.ticket, offer.withdraw)) {
         offer.withdraw();
         return;
       }
       ns["spawn"](
         PROBER_FILE,
         temporaryRunOptions({ threads: 1, ramOverride: PROBER_GB, spawnDelay: ARMOUR_SPAWN_DELAY_MS }),
-        offer.launchId,
+        offer.ticket,
       );
     }, "dnet-prober-armour");
   }
@@ -125,7 +122,8 @@ export async function main(ns: NS): Promise<void> {
   // CHECK IN. The controller probes through the lent `ns` inside this call, so
   // a freshly planted host is on the map before this line returns — which is
   // what the plant's first-probe barrier is waiting for.
-  controller.lend(host, ns, ns.pid, launch.refresh, launch.armoured === true);
+  controller.lend(host, ns, entity, launch.refresh, launch.armoured === true);
+  entity.ready.resolve();
 
   // Nothing else, for ever. Not `ns.asleep`: see above.
   await new Promise<never>(() => {});

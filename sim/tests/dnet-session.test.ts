@@ -720,12 +720,12 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
     test("the phishing cache cooldown is NET-WIDE, not per host", () => {
       // `lastPhishingCacheTime` lives on DarknetState, so the whole net yields at
       // most twenty caches an hour however many hosts are phishing. That fact is
-      // exactly what the farm ladder's cache-hunter election exists to exploit:
-      // one host with threads beats every host with one.
+      // exactly what the farm ladder's probability reserve exists to exploit:
+      // full-thread calls are accumulated only until the target chance is met.
       const h = harness();
       // NOT the labyrinth: `handlePhishingAttack` excludes a lab server from the
-      // cache branch outright, which is also why `electCacheHunter` never picks
-      // one. `populate` places the lab first, so an unfiltered list starts with
+      // cache branch outright, which is also why the reserve never includes one.
+      // `populate` places the lab first, so an unfiltered list starts with
       // exactly the host that can never claim a window.
       const hosts = [...h.dnet.hosts.values()]
         .filter((host) => host.hostname !== "darkweb" && !host.isStationary)

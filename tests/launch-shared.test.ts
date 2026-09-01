@@ -1,15 +1,17 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import type { NS } from "@ns";
 import {
-  captureLaunch,
-  handoffLaunch,
-  resetLaunchState,
-  temporaryRunOptions,
-  type ScriptLaunch,
+  captureExecLaunch, launchExec, resetLaunchState, temporaryRunOptions, waitExecReady, type ScriptLaunch,
 } from "../game/lib/launch-shared.ts";
 
-interface TestLaunch extends ScriptLaunch {
-  readonly kind: "test";
-  readonly value: number;
+interface TestLaunch extends ScriptLaunch { readonly kind: "test"; readonly value: number }
+
+function child(pid: number): { ns: NS; exit(): void } {
+  const hooks: (() => void)[] = [];
+  return {
+    ns: { pid, atExit: (hook: () => void) => { hooks.push(hook); } } as unknown as NS,
+    exit: () => { for (const hook of hooks) hook(); },
+  };
 }
 
 describe("script launch process identity", () => {
@@ -18,72 +20,66 @@ describe("script launch process identity", () => {
 
   test("automation launches skip duplicate checks", () => {
     expect(temporaryRunOptions({ threads: 2, preventDuplicates: true })).toEqual({
-      threads: 2,
-      temporary: true,
-      preventDuplicates: false,
+      threads: 2, temporary: true, preventDuplicates: false,
     });
   });
 
-  test("every exec receives one monotonically increasing scalar key", async () => {
-    const args: unknown[][] = [];
+  test("exec return publishes the descriptor under the real pid", () => {
+    const bound: number[] = [];
     for (let value = 1; value <= 3; value++) {
-      const pid = await handoffLaunch<TestLaunch>(
-        { kind: "test", value },
-        (...launchArgs) => {
-          args.push(launchArgs);
-          expect(captureLaunch<TestLaunch>("test", launchArgs[0])).toEqual({ kind: "test", value });
-          return 100 + value;
-        },
-      );
-      expect(pid).toBe(100 + value);
+      const entity = launchExec<TestLaunch>(
+        { kind: "test", value }, () => 100 + value, (launch) => bound.push(launch.pid),
+      )!;
+      expect(captureExecLaunch<TestLaunch>(child(entity.pid).ns, "test")?.descriptor)
+        .toEqual({ kind: "test", value });
     }
-
-    expect(args).toEqual([[1], [2], [3]]);
+    expect(bound).toEqual([101, 102, 103]);
   });
 
-  test("launches overlap: a slow child never holds up another", async () => {
-    // Descriptors are keyed by launch id, so a slow child cannot serialize a
-    // later independent launch.
-    // darknet vantage open its frontier one host at a time.
-    const acknowledge: (() => void)[] = [];
-    const captured: number[] = [];
-    const started: number[] = [];
-
-    const launches = [1, 2, 3].map((value) => handoffLaunch<TestLaunch>(
-      { kind: "test", value },
-      (launchId) => {
-        started.push(value);
-        // The child boots LATER, out of order, exactly as the engine does it.
-        acknowledge.push(() => {
-          captured.push(captureLaunch<TestLaunch>("test", launchId)!.value);
-        });
-        return 100 + value;
-      },
-    ));
-
-    // All three published and exec'd without any of them having booted.
-    expect(started).toEqual([1, 2, 3]);
-
-    acknowledge[2]!();
-    acknowledge[0]!();
-    acknowledge[1]!();
-    expect(await Promise.all(launches)).toEqual([101, 102, 103]);
-    // Each child found its OWN descriptor despite the scrambled order.
+  test("out-of-order children capture only their own pid entity", () => {
+    const entities = [1, 2, 3].map((value) =>
+      launchExec<TestLaunch>({ kind: "test", value }, () => 100 + value)!);
+    const captured = [entities[2]!, entities[0]!, entities[1]!].map((entity) =>
+      captureExecLaunch<TestLaunch>(child(entity.pid).ns, "test")!.descriptor.value);
     expect(captured).toEqual([3, 1, 2]);
   });
 
-  test("an unacknowledged child gets a 0 without stalling the next launch", async () => {
-    expect(await handoffLaunch<TestLaunch>(
-      { kind: "test", value: 1 },
-      () => 101,
-    )).toBe(0);
+  test("readiness is explicit and lifetime resolves from atExit", async () => {
+    const entity = launchExec<TestLaunch>({ kind: "test", value: 7 }, () => 107)!;
+    const process = child(entity.pid);
+    const captured = captureExecLaunch<TestLaunch>(process.ns, "test")!;
+    captured.ready.resolve();
+    expect(await waitExecReady(entity, () => true)).toEqual({ status: "ready", value: undefined });
+    process.exit();
+    await expect(entity.exited.promise).resolves.toEqual({ value: undefined });
+  });
 
-    expect(await handoffLaunch<TestLaunch>(
-      { kind: "test", value: 2 },
-      (launchId) => {
-        expect(captureLaunch<TestLaunch>("test", launchId)?.value).toBe(2);
-        return 102;
-      },
-    )).toBe(102);
+  /** The ns resident resolves its readiness with its OWN LIVE `ns`. Native
+   * promise resolution probes anything it is handed for a `then` member, and
+   * on the simulator's modelled `ns` that read is an unmodelled member that
+   * takes the whole run down. The value must therefore travel boxed, and
+   * nothing may ever hand it to `resolve` bare. */
+  test("a readiness value is never probed for a `then` member", async () => {
+    let probed = false;
+    const thenable = { get then() { probed = true; return undefined; } };
+    const entity = launchExec<TestLaunch, typeof thenable>(
+      { kind: "test", value: 5 }, () => 105,
+    )!;
+    const captured = captureExecLaunch<TestLaunch, typeof thenable>(child(entity.pid).ns, "test")!;
+    captured.ready.resolve(thenable);
+    const ready = await waitExecReady(entity, () => true);
+    expect(ready.status).toBe("ready");
+    expect(ready.status === "ready" && ready.value).toBe(thenable);
+    expect(probed).toBe(false);
+  });
+
+  test("a refused exec publishes no entity", () => {
+    expect(launchExec<TestLaunch>({ kind: "test", value: 1 }, () => 0)).toBeUndefined();
+  });
+
+  test("readiness fails only when the returned pid is observed gone", async () => {
+    const entity = launchExec<TestLaunch>({ kind: "test", value: 9 }, () => 109)!;
+    expect(await waitExecReady(entity, () => false)).toEqual({ status: "gone" });
+    await expect(entity.exited.promise).resolves.toEqual({ value: undefined });
   });
 });

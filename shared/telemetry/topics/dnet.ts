@@ -275,8 +275,16 @@ export interface DarknetState {
      *  (`PHISH_CACHE_COOLDOWN_MS`) is a constant in `rates.ts`, so only the
      *  stamp travels. */
     lastPhishCacheAt?: number;
-    /** Resident pinned to the net-wide cache roll. */
+    /** Legacy runs used one resident rather than a probability reserve. */
     cacheHunter?: string;
+    /** Residents kept phishing continuously so the first post-cooldown wave
+     * reaches the stated cache probability. */
+    cacheReserve?: {
+      hosts: string[];
+      targetChance: number;
+      combinedChance: number;
+      guaranteed: boolean;
+    };
     expectedMoneyPerSec: number;
     expectedCharismaExpPerSec: number;
   };

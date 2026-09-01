@@ -1097,9 +1097,20 @@ export const dnetTab: Tab = {
           ...Object.entries(farming.admitted)
             .sort((a, b) => b[1] - a[1])
             .map(([kind, n]) => [hint(kind, "tasks the last derivation admitted"), String(n)] as [Markup, Markup]),
-          ...(farming.cacheHunter !== undefined
+          ...(farming.cacheReserve !== undefined
             ? [[
-              hint("cache hunter", "one .d.cache every three minutes for the WHOLE net, and the roll scales with threads — so the threads go to one deep resident rather than being spread thin"),
+              hint(
+                "cache reserve",
+                "continuous phishers; their first calls to finish after the global cooldown combine into this cache chance",
+              ),
+              `${farming.cacheReserve.hosts.length} resident${farming.cacheReserve.hosts.length === 1 ? "" : "s"}`
+                + ` · ${farming.cacheReserve.guaranteed ? "guaranteed" : fmtPct(farming.cacheReserve.combinedChance)}`
+                + ` (target ${fmtPct(farming.cacheReserve.targetChance)})`
+                + ` · ${farming.cacheReserve.hosts.map(esc).join(", ")}`,
+            ] as [Markup, Markup]]
+            : farming.cacheHunter !== undefined
+            ? [[
+              hint("cache hunter", "legacy run: one resident was pinned to the net-wide cache roll"),
               esc(farming.cacheHunter),
             ] as [Markup, Markup]]
             : []),

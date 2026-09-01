@@ -6,7 +6,7 @@ import type { ChargePricingInput } from "../../shared/strategy/stanek/charge.ts"
 import { initFarm, planFarm, reportFailed, type FarmMemory } from "../../shared/strategy/farm-planner.ts";
 import type { ChargeAction, CompletionEvent, HgwAction, ServerView, ShareAction, StockInfluence, WorldView } from "../../shared/world.ts";
 import { WORKER_RAM } from "../../shared/world.ts";
-import { handoffLaunch, temporaryRunOptions } from "./launch-shared.ts";
+import { launchExec, temporaryRunOptions, waitExecReady } from "./launch-shared.ts";
 import { nsp } from "./proxies.ts";
 import { workerGlobals, type WorkerGlobalThis } from "./worker-shared.ts";
 
@@ -359,19 +359,18 @@ async function startShare(ns: NS, state: DriverState, action: ShareAction): Prom
     mode: "share",
   });
   const info = state.globals.worker_info.get(action.opId)!;
-  const pid = await handoffLaunch(
+  const launch = launchExec(
     { kind: "worker", id: action.opId, worker: info },
-    (launchId) => ns.exec(
+    () => ns.exec(
       workerScript(),
       action.source,
       // ramOverride is per thread, exactly as for HGW workers.
       temporaryRunOptions({ threads: action.threads, ramOverride: WORKER_RAM.share }),
-      launchId,
     ),
+    (entity) => { info.pid = entity.pid; },
   );
-  if (pid !== 0) {
-    const info = state.globals.worker_info.get(action.opId);
-    if (info) info.pid = pid;
+  if (launch !== undefined
+    && (await waitExecReady(launch, (pid) => ns["isRunning"](pid))).status === "ready") {
     return true;
   }
   state.globals.worker_info.delete(action.opId);
@@ -389,18 +388,17 @@ async function startCharge(ns: NS, state: DriverState, action: ChargeAction): Pr
     y: action.y,
   });
   const info = state.globals.worker_info.get(action.opId)!;
-  const pid = await handoffLaunch(
+  const launch = launchExec(
     { kind: "worker", id: action.opId, worker: info },
-    (launchId) => ns.exec(
+    () => ns.exec(
       workerScript(),
       action.source,
       temporaryRunOptions({ threads: action.threads, ramOverride: WORKER_RAM.charge }),
-      launchId,
     ),
+    (entity) => { info.pid = entity.pid; },
   );
-  if (pid !== 0) {
-    const launched = state.globals.worker_info.get(action.opId);
-    if (launched) launched.pid = pid;
+  if (launch !== undefined
+    && (await waitExecReady(launch, (pid) => ns["isRunning"](pid))).status === "ready") {
     return true;
   }
   state.globals.worker_info.delete(action.opId);
@@ -477,9 +475,9 @@ async function startOp(ns: NS, state: DriverState, action: HgwAction, opId: numb
   }
 
   const info = globals.worker_info!.get(execId)!;
-  const pid = await handoffLaunch(
+  const launch = launchExec(
     { kind: "worker", id: execId, worker: info },
-    (launchId) => ns.exec(
+    () => ns.exec(
       workerScript(),
       host,
     // ramOverride is per thread: the generic worker is billed exactly as the
@@ -494,17 +492,16 @@ async function startOp(ns: NS, state: DriverState, action: HgwAction, opId: numb
     // per-role INSTANCES of one script.
     // Source (ramOverride is the per-thread RunningScript allocation): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptWorker.ts#L275-L310
       temporaryRunOptions({ threads: action.threads, ramOverride: WORKER_RAM[action.type] }),
-      launchId,
     ),
+    (entity) => { info.pid = entity.pid; },
   );
-  if (pid === 0) {
+  if (launch === undefined
+    || (await waitExecReady(launch, (pid) => ns["isRunning"](pid))).status === "gone") {
     globals.worker_info!.delete(execId);
     if (action.worker) globals.worker_jobs!.delete(action.worker.id);
     state.execFails++;
     return false;
   }
-  const launchedInfo = globals.worker_info!.get(execId);
-  if (launchedInfo) launchedInfo.pid = pid;
   return true;
 }
 

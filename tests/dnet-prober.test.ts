@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
 import { main as proberMain } from "../game/dnet/prober.ts";
 import type { DnetProbeRefresh, DnetProbeReport, DnetProberLaunch } from "../game/dnet/launch.ts";
-import { handoffLaunch } from "../game/lib/launch-shared.ts";
+import { launchExec, type ExecLaunchEntity } from "../game/lib/launch-shared.ts";
 import {
   DNET_PROTOCOL,
   PROBER_ARMOURED_GB,
@@ -40,12 +40,24 @@ function installController(): {
       return allowRespawn;
     },
     markProberKill() {},
-    lend(host: string, borrowed: NS, pid: number, refresh?: DnetProbeRefresh, armoured?: boolean) {
+    bindProberLaunch(host: string, launch: ExecLaunchEntity<DnetProberLaunch>) {
+      launch.exited.onResolve(() => {
+        const entry = hosts.get(host);
+        if (entry?.prober?.launch === launch) {
+          entry.ns = undefined;
+          entry.prober = { ...entry.prober, pid: 0 };
+          wakes.push("prober-died");
+        }
+      });
+    },
+    lend(host: string, borrowed: NS, launch: ExecLaunchEntity<DnetProberLaunch>, refresh?: DnetProbeRefresh, armoured?: boolean) {
+      const pid = launch.pid;
+      controller.bindProberLaunch(host, launch);
       const entry = hosts.get(host)
         ?? { hostname: host, lastSeenAt: 0, seenAt: {}, dirty: {}, staged: [] };
       entry.ns = borrowed;
       const neighbours = borrowed.dnet.probe();
-      entry.prober = { neighbours: [...neighbours], at: Date.now(), pid, epoch: 0, ...(armoured ? { armoured: true } : {}) };
+      entry.prober = { neighbours: [...neighbours], at: Date.now(), pid, epoch: 0, launch, ...(armoured ? { armoured: true } : {}) };
       hosts.set(host, entry);
       refresh?.settle({ host, neighbours, at: Date.now(), pid });
     },
@@ -103,19 +115,17 @@ async function launch(
   armoured = false,
 ): Promise<{ running: Promise<void> }> {
   let running!: Promise<void>;
-  await handoffLaunch<DnetProberLaunch>(
+  launchExec<DnetProberLaunch>(
     {
       kind: "dnet-prober",
       host: HOST,
       ...(refresh !== undefined ? { refresh } : {}),
       ...(armoured ? { armoured: true } : {}),
     },
-    (launchId) => {
-      (ns.args as unknown[]).push(launchId);
-      running = proberMain(ns);
-      return (ns as unknown as { pid: number }).pid;
-    },
+    () => (ns as unknown as { pid: number }).pid,
   );
+  running = proberMain(ns);
+  await Promise.resolve();
   return { running };
 }
 
@@ -171,6 +181,7 @@ describe("the prober lends its ns and then does nothing", () => {
     // engine runs `atExit` on a kill too, so this is the one place that can
     // promise a dead `ns` is never called.
     exit();
+    await Promise.resolve();
     expect(live.hosts.get(HOST)?.ns).toBeUndefined();
     expect(live.wakes()).toContain("prober-died");
   });
@@ -187,6 +198,7 @@ describe("the prober lends its ns and then does nothing", () => {
     // The old process dies after the new one checked in. Identity is what
     // stops it taking the live lender down with it.
     first.exit();
+    await Promise.resolve();
     expect(live.hosts.get(HOST)?.ns).toBe(second.ns);
   });
 
@@ -255,8 +267,9 @@ describe("the prober lends its ns and then does nothing", () => {
     // hook always throws (ScriptDeath, out of `spawn`). The engine wraps each
     // handler separately and runs them all, so the retraction still happens —
     // but the ordering is what makes it true regardless.
-    expect(hookIds()).toEqual(["dnet-prober-checkout", "dnet-prober-armour"]);
+    expect(hookIds()).toEqual(["exec-handover-exit", "dnet-prober-armour"]);
     exit();
+    await Promise.resolve();
     expect(live.hosts.get(HOST)?.ns).toBeUndefined();
     expect(live.wakes()).toContain("prober-died");
   });

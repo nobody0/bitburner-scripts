@@ -3,15 +3,13 @@ import { LOCAL_CODE, type ReportHost } from "../../shared/strategy/dnet/courier.
 import { isDarknetDataFile, parseDarknetFileClue } from "../../shared/strategy/dnet/file-clues.ts";
 import { harvestLogs } from "../../shared/strategy/dnet/oracle.ts";
 import { grammarDrift, LOG_LINES, targetStateFor } from "./report-shared.ts";
-import { handoffLaunch, temporaryRunOptions, type LaunchOutcome } from "../lib/launch-shared.ts";
-import { realmSleep } from "../lib/wake.ts";
+import { launchExec, temporaryRunOptions } from "../lib/launch-shared.ts";
 import type { DnetAgentLaunch, DnetProberLaunch } from "./launch.ts";
 import {
   live,
   priceOf,
   PROBER_GB,
   PROBER_STASIS_GB,
-  REFUSED_EXEC_RETRY_MS,
   SCRIPT_BASE_GB,
   processSizeFor,
   type AgentIo,
@@ -252,35 +250,9 @@ async function plantOne(
     return diagnose("scp refused", "launch-refused");
   }
 
-  // A replant can race RAM cleanup for the process it replaces. Retry only a
-  // refused exec after giving the engine a real timer turn to release it.
-  // ONLY a refused exec is retried. `handoffLaunch` also returns 0 when the
-  // child DID start and merely failed to acknowledge its descriptor in time:
-  // that process is alive and holding its RAM (and an agent with no
-  // descriptor falls back to its `ns.args` host and becomes a resident), so a
-  // retry would stack a second and third copy on the host instead of
-  // replacing the first.
-  /** The last launch outcome, so a failure can say WHICH of the two it was.
-   * `handoffLaunch` returns 0 for both, and they need opposite fixes: a
-   * refused exec started nothing and the host has room to reconsider, while an
-   * uncaptured child is already running and holding RAM. */
-  const lastOutcome: LaunchOutcome = {};
-  const execWithGrace = async (
-    launchAttempt: (outcome: LaunchOutcome) => Promise<number>,
-    retiringAllocation: boolean,
-  ): Promise<number> => {
-    for (let attempt = 0; ; attempt++) {
-      const outcome: LaunchOutcome = {};
-      const pid = await launchAttempt(outcome);
-      lastOutcome.refused = outcome.refused;
-      lastOutcome.uncaptured = outcome.uncaptured;
-      if (pid !== 0 || outcome.refused !== true || !retiringAllocation || attempt >= 2) return pid;
-      // A Netscript sleep would occupy this process's one allowed API-call
-      // slot while the timer is pending. The realm timer yields the browser
-      // turn needed for RAM retirement without colliding with the next exec.
-      await realmSleep(REFUSED_EXEC_RETRY_MS);
-    }
-  };
+  // Retirement is proven by the controller before this body reaches an exec.
+  // Each exec is therefore attempted once. A zero is an invariant fault, not
+  // a timing hint, and is preserved on the target for diagnosis.
   /** The block at the moment a launch failed. `getServerMaxRam` is NOT in this
    * kind's declared surface, so it stays out — a diagnostic that kills the
    * body it is diagnosing is worse than no diagnostic. */
@@ -295,26 +267,26 @@ async function plantOne(
     // The reclaimer is not a resident and adopts nothing, so no placing window
     // was ever opened for it — `preparePlant` runs below this branch.
     const threads = Math.max(1, target.bootstrapThreads ?? 1);
-    const pid = await execWithGrace((outcome) => handoffLaunch<DnetAgentLaunch>(
+    const launched = launchExec<DnetAgentLaunch>(
       { kind: "dnet-agent", host: target.host, bootstrapReclaim: true },
-      (launchId) => jobNs["exec"](
+      () => jobNs["exec"](
         order.payload.payloads[0]!,
         target.host,
         temporaryRunOptions({ threads, ramOverride: priceOf("bootstrapReclaim") }),
-        launchId,
       ),
-      outcome,
-    ), false);
-    if (pid === 0) {
+      (entity) => live()?.bindAgentLaunch(target.host, entity),
+    );
+    if (launched === undefined) {
+      live()?.launchRefused(target.host, "bootstrap exec returned 0 after retirement barrier");
       count(LOCAL_CODE.LaunchRefused);
       return diagnose("exec refused while launching local reclaim", "launch-refused");
     }
-    live()?.registerBootstrap(target.host, pid);
+    live()?.registerBootstrap(target.host, launched);
     return {
       ok: true,
       codes,
       host: seen(),
-      detail: `${target.host}: local reclaim pid ${pid}, ${threads} thread${threads === 1 ? "" : "s"}`,
+      detail: `${target.host}: local reclaim pid ${launched.pid}, ${threads} thread${threads === 1 ? "" : "s"}`,
     };
   }
 
@@ -322,8 +294,8 @@ async function plantOne(
   const controller = live();
   // Claim the queued successor before sizing the exec. Stasis-linked targets
   // are remotely recoverable, and may already own the ordinary constant probe.
-  const prepared = controller?.preparePlant(target.host)
-    ?? { reuseProber: false, retiringAllocation: false };
+  const prepared = await controller?.preparePlant(target.host)
+    ?? { reuseProber: false };
   const omitProber = target.omitProber === true || prepared.reuseProber;
   const claim = omitProber ? undefined : await controller?.beginProbeRefresh(target.host);
   const proberPid = omitProber
@@ -331,17 +303,17 @@ async function plantOne(
     : proberFile === undefined || controller === undefined || claim === undefined
       ? 0
       : claim.launch
-        ? await execWithGrace((outcome) => handoffLaunch<DnetProberLaunch>(
+        ? (launchExec<DnetProberLaunch>(
           { kind: "dnet-prober", host: target.host, refresh: claim.refresh },
           // A stasis target's prober carries no `exec`: the engine's mutation
           // guard exempts a linked host, so it can never lose its processes and
           // never needs to relaunch them locally. Those bytes become threads.
-          (launchId) => jobNs["exec"](proberFile, target.host, temporaryRunOptions({
+          () => jobNs["exec"](proberFile, target.host, temporaryRunOptions({
             threads: 1,
             ramOverride: target.controllerManaged === true ? PROBER_STASIS_GB : PROBER_GB,
-          }), launchId),
-          outcome,
-        ), prepared.retiringAllocation)
+          })),
+          (entity) => controller.bindProberLaunch(target.host, entity),
+        )?.pid ?? 0)
         : -1;
   if (proberPid === 0) {
     if (claim !== undefined) controller?.cancelProbeRefresh(target.host, claim.refresh);
@@ -355,8 +327,6 @@ async function plantOne(
   // can plant onward without waiting to be told. Break this order and the
   // chain — plant, probe, discover, plant — breaks with it, whatever else is
   // correct. Nothing waits on the agent itself; only on the probe.
-  // Name the prober so the barrier below is checked rather than timed.
-  if (proberPid > 0) controller?.announceProbeRefresh(target.host, proberPid);
   if (claim !== undefined && await claim.refresh.refreshed === undefined) {
     controller?.abandonPlant(target.host);
     count(LOCAL_CODE.LaunchRefused);
@@ -372,6 +342,11 @@ async function plantOne(
   // that same absence and exit. Later work launches through the lender (or the
   // managed stasis path) in the ordinary controller pass.
   if (claimed === undefined && (prepared.reuseProber || proberPid > 0)) {
+    // NOT a refused launch. Nothing was refused and nothing was even asked
+    // for: the prober is standing and there is simply no order to run beside
+    // it. Recording a refusal here would put a healthy host on the panel as a
+    // fault AND — because a recorded refusal now gates dispatch — bar it from
+    // every later launch until something re-lends or adopts on it.
     controller?.abandonPlant(target.host);
     return {
       ok: true,
@@ -384,35 +359,36 @@ async function plantOne(
     claimed,
     SCRIPT_BASE_GB,
   );
-  const pid = await execWithGrace((outcome) => handoffLaunch<DnetAgentLaunch>(
+  const launched = launchExec<DnetAgentLaunch>(
     {
       kind: "dnet-agent",
       host: target.host,
+      ...(claimed !== undefined ? { order: claimed } : {}),
     },
-    (launchId) => jobNs["exec"](
+    () => jobNs["exec"](
       order.payload.payloads[0]!,
       target.host,
       temporaryRunOptions({ threads: agentThreads, ramOverride: agentRam }),
-      launchId,
     ),
-    outcome,
-  ), prepared.retiringAllocation);
-  if (pid === 0) {
+    (entity) => controller?.bindAgentLaunch(target.host, entity),
+  );
+  if (launched === undefined) {
     if (proberPid > 0) jobNs["kill"](proberPid);
     // Hand the claimed first order back: nothing is coming to run it.
     controller?.abandonPlant(target.host);
+    controller?.launchRefused(
+      target.host,
+      "resident exec returned 0 after retirement barrier",
+    );
     count(LOCAL_CODE.LaunchRefused);
     return diagnose(
-      `${lastOutcome.uncaptured === true ? "resident started but never captured its descriptor" : "engine refused the resident exec"}`
+      "engine refused the resident exec"
       + ` (asked ${(agentRam * agentThreads).toFixed(1)}GB as ${agentThreads}x${agentRam.toFixed(1)}`
       + ` for ${claimed?.kind ?? "no queued order"}, host ${blockNow()}, prober ${proberPid})`,
       "launch-refused",
     );
   }
-  // Name the child, so the placing window this plant opened stops being an
-  // assertion: from here it survives exactly as long as `isRunning` says this
-  // process does, and no longer.
-  controller?.announceLaunch(target.host, pid);
+  const pid = launched.pid;
   return {
     ok: true,
     codes,
@@ -642,10 +618,11 @@ async function relaunchProbeOrder(jobNs: NS, order: Order<"relaunchProbe">): Pro
   if (controller === undefined) return { ok: false, codes: {}, detail: "controller unavailable while repairing prober" };
   const claim = await controller.beginProbeRefresh(order.host);
   const pid = claim.launch
-    ? await handoffLaunch<DnetProberLaunch>(
+    ? (launchExec<DnetProberLaunch>(
       { kind: "dnet-prober", host: order.host, refresh: claim.refresh },
-      (launchId) => jobNs["exec"](proberFile, order.host, temporaryRunOptions({ threads: 1, ramOverride: PROBER_GB }), launchId),
-    )
+      () => jobNs["exec"](proberFile, order.host, temporaryRunOptions({ threads: 1, ramOverride: PROBER_GB })),
+      (entity) => controller.bindProberLaunch(order.host, entity),
+    )?.pid ?? 0)
     : -1;
   if (pid === 0) controller.cancelProbeRefresh(order.host, claim.refresh);
   const report = pid !== 0 ? await claim.refresh.refreshed : undefined;

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { main as workerMain } from "../../game/worker/worker.ts";
-import { handoffLaunch } from "../../game/lib/launch-shared.ts";
+import { launchExec } from "../../game/lib/launch-shared.ts";
 import { workerGlobals, type WorkerDone, type WorkerGlobalThis, type WorkerLaunch } from "../../game/lib/worker-shared.ts";
 import { Clock, drainMicrotasks } from "../clock.ts";
 import { installVirtualTime, type VirtualTime } from "../realm/timers.ts";
@@ -37,6 +37,7 @@ function mockNs(pending: MockOp[]): { ns: unknown; exitCbs: (() => void)[] } {
       pending.push({ resolve, ...(opts ? { opts } : {}) });
     });
   const ns = {
+    pid: WORKER_ID,
     args: [] as unknown[],
     disableLog: () => undefined,
     atExit: (cb: () => void) => exitCbs.push(cb),
@@ -61,17 +62,15 @@ async function launchWorker(
 ): Promise<{ run: Promise<void> }> {
   const info = workerGlobals().worker_info!.get(WORKER_ID)!;
   let run!: Promise<void>;
-  await handoffLaunch<WorkerLaunch>(
+  launchExec<WorkerLaunch>(
     { kind: "worker", id: WORKER_ID, worker: info },
-    (launchId) => {
-      ((ns as { args: unknown[] }).args).push(launchId);
-      run = workerMain(ns as never).then(() => {
-        returned?.();
-        if (exitOnReturn) for (const cb of exitCbs) cb();
-      });
-      return WORKER_ID;
-    },
+    () => WORKER_ID,
   );
+  run = workerMain(ns as never).then(() => {
+    returned?.();
+    if (exitOnReturn) for (const cb of exitCbs) cb();
+  });
+  await Promise.resolve();
   return { run };
 }
 

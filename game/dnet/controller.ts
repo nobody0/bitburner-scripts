@@ -9,7 +9,13 @@ import {
   type ReportHost,
   type VaultEntry,
 } from "../../shared/strategy/dnet/courier.ts";
-import { captureLaunch, offerLaunch, temporaryRunOptions } from "../lib/launch-shared.ts";
+import {
+  captureExecLaunch,
+  launchExec,
+  observeExecGone,
+  temporaryRunOptions,
+  type ExecLaunchEntity,
+} from "../lib/launch-shared.ts";
 import type {
   DnetAgentLaunch,
   DnetControllerLaunch,
@@ -89,7 +95,6 @@ import {
   PROBER_GB,
   PROBER_ARMOURED_GB,
   PROBER_STASIS_GB,
-  REFUSED_EXEC_RETRY_MS,
   SCRIPT_BASE_GB,
   CONTROLLER_GB,
   processSizeFor,
@@ -158,10 +163,6 @@ const DERIVE_FALLBACK_MS = 20_000;
  * new prober's first report. It exists only to answer "will this ever arrive",
  * and past this point the honest answer is no. */
 const LAUNCH_WINDOW_MS = 10_000;
-/** A deliberate kill can disappear from controller state one engine turn
- * before its RAM allocation. Cover the complete three-attempt replant window,
- * then stop treating later capacity failures as retirement races. */
-const RETIRING_ALLOCATION_WINDOW_MS = REFUSED_EXEC_RETRY_MS * 3;
 /** Fallback duration used only to compare loaded vantages. */
 const TYPICAL_ORDER_MS = 6_000;
 const MAX_GRAMMAR_LINES = 20;
@@ -179,7 +180,7 @@ function looseId(password: string): string {
 
 const RUNTIME_HOST_FIELDS = [
   "agentAlive", "jobFreeGb", "busy", "ns", "prober", "probeRefresh",
-  "probeRefreshPid", "agent", "inbound", "retiredAllocationAt",
+  "probeRefreshLaunch", "agent", "inbound",
   "bootstrap", "staged", "pendingOrder", "wake",
   "completed", "failed", "lastError",
 ] as const;
@@ -204,8 +205,9 @@ function recoveryKnowledge(generation: string, source: ReadonlyMap<string, HostE
 export async function main(ns: NS): Promise<void> {
   ns.disableLog("ALL");
 
-  const launch = captureLaunch<DnetControllerLaunch>("dnet-controller", ns.args[0]);
-  if (!launch) return;
+  const launchEntity = captureExecLaunch<DnetControllerLaunch>(ns, "dnet-controller");
+  if (!launchEntity) return;
+  const launch = launchEntity.descriptor;
 
   const realm = dnetRealm();
   const bootAt = Date.now();
@@ -252,7 +254,7 @@ export async function main(ns: NS): Promise<void> {
     const refresh = entry.probeRefresh;
     if (refresh === undefined || (expected !== undefined && refresh !== expected)) return;
     entry.probeRefresh = undefined;
-    entry.probeRefreshPid = undefined;
+    entry.probeRefreshLaunch = undefined;
     readyProbeRefreshes.delete(refresh);
     refresh.settle(value);
   };
@@ -493,7 +495,7 @@ export async function main(ns: NS): Promise<void> {
     // frees the allocation only after, so the victim's `armRespawn` spawns its
     // successor on a clear Netscript slot.
     agent.release();
-    killPid(agent.pid);
+    retirePid(entry.hostname, agent.pid);
   };
 
   /** Settle a STAGED order that never ran (retired before pickup), by running
@@ -543,22 +545,75 @@ export async function main(ns: NS): Promise<void> {
     forgetGuesses(hostname);
     retireOrders(hostname, reason, (o) => o.kind === "attempt");
   };
-  /** Kill a process that was ours. Never the controller's own pid, and a throw
-   * (host deleted) counts as gone. Fire and forget: nobody reads the result, so
-   * the rejection is swallowed rather than left to take the controller down.
-   * `kill` on a pid that is already gone is free, so there is no guard. */
-  const killPid = (pid: number | undefined): void => {
-    if (pid === undefined || pid <= 0 || pid === ns.pid) return;
-    void nsp("kill", pid).catch(() => { /* host gone */ });
+  /** PID retirement is the allocation barrier. Upstream runs atExit before it
+   * removes the worker and subtracts RAM; ns.kill(pid) resolves after both.
+   * `false` is equally conclusive: that pid was already absent. */
+  const retiringPids = new Map<number, Promise<void>>();
+  const retiringHosts = new Map<string, Set<number>>();
+  const hostIsRetiring = (host: string): boolean => (retiringHosts.get(host)?.size ?? 0) > 0;
+  const awaitRetired = async (host: string): Promise<void> => {
+    while (true) {
+      const pids = retiringHosts.get(host);
+      if (pids === undefined || pids.size === 0) return;
+      await Promise.all([...pids].map((pid) => retiringPids.get(pid)));
+    }
+  };
+  const retirePid = (host: string, pid: number | undefined): void => {
+    if (pid === undefined || pid <= 0 || pid === ns.pid || retiringPids.has(pid)) return;
+    const held = retiringHosts.get(host) ?? new Set<number>();
+    held.add(pid);
+    retiringHosts.set(host, held);
+    // Defer the call itself so an atExit callback reached synchronously through
+    // another kill sees the barrier already installed and cannot duplicate it.
+    const done = Promise.resolve()
+      .then(() => nsp("kill", pid))
+      .then(() => undefined, () => undefined)
+      .finally(() => {
+        retiringPids.delete(pid);
+        const current = retiringHosts.get(host);
+        current?.delete(pid);
+        if (current?.size === 0) retiringHosts.delete(host);
+        signalDerive();
+      });
+    retiringPids.set(pid, done);
+  };
+  const bindAgentLaunch = (host: string, launch: ExecLaunchEntity<DnetAgentLaunch>): void => {
+    const entry = hosts.get(host);
+    if (entry !== undefined) {
+      entry.inbound = { ...(entry.inbound ?? { at: Date.now(), via: "plant-exec" }), launch };
+    }
+    launch.exited.onResolve(() => {
+      const current = hosts.get(host);
+      if (current?.inbound?.launch === launch) current.inbound = undefined;
+      if (current?.agent?.pid === launch.pid) current.agent = undefined;
+      if (current?.bootstrap?.launch === launch) current.bootstrap = undefined;
+      retirePid(host, launch.pid);
+    });
+  };
+  const bindProberLaunch = (host: string, launch: ExecLaunchEntity<DnetProberLaunch>): void => {
+    const entry = hosts.get(host);
+    if (entry?.probeRefresh !== undefined) entry.probeRefreshLaunch = launch;
+    launch.exited.onResolve(() => {
+      const current = hosts.get(host);
+      if (current?.probeRefreshLaunch === launch) current.probeRefreshLaunch = undefined;
+      if (current?.prober?.launch === launch) {
+        if (current.ns !== undefined) current.ns = undefined;
+        current.prober = { ...current.prober, pid: 0 };
+      }
+      retirePid(host, launch.pid);
+    });
   };
   const retireVantage = (hostname: string, reason: string, detached?: HostEntry): void => {
     const entry = hosts.get(hostname) ?? detached;
     if (entry !== undefined) {
-      const retiredAllocation = (entry.agent?.pid ?? 0) > 0
-        || (entry.prober?.pid ?? 0) > 0
-        || (entry.bootstrap?.pid ?? 0) > 0
-        || (entry.inbound?.pid ?? 0) > 0;
-      if (retiredAllocation) entry.retiredAllocationAt = Date.now();
+      const agentPid = entry.agent?.pid;
+      const proberPid = entry.prober?.pid;
+      const bootstrapPid = entry.bootstrap?.pid;
+      const inboundPid = entry.inbound?.launch?.pid;
+      retirePid(hostname, agentPid);
+      retirePid(hostname, proberPid);
+      retirePid(hostname, bootstrapPid);
+      retirePid(hostname, inboundPid);
       entry.inbound = undefined;
       if (entry.agent !== undefined) {
         entry.agent.settle({ id: entry.agent.order.id, kind: entry.agent.order.kind, host: entry.agent.order.host, from: entry.agent.order.from, ok: false, died: true, detail: reason });
@@ -584,7 +639,6 @@ export async function main(ns: NS): Promise<void> {
       // successor a millisecond later, onto the very host we are clearing. That
       // is a 1 ms respawn loop, and it froze the game.
       if (entry.prober !== undefined && entry.prober.pid > 0) entry.proberKillMark = entry.prober.pid;
-      killPid(entry.prober?.pid);
       entry.prober = undefined;
       entry.bootstrap = undefined;
     }
@@ -830,7 +884,7 @@ export async function main(ns: NS): Promise<void> {
     // Mark before the kill, or an armoured prober respawns into the very RAM
     // the displacement just freed.
     entry!.proberKillMark = probe.pid;
-    killPid(probe.pid);
+    retirePid(host, probe.pid);
     entry!.prober = { ...probe, pid: 0 };
   };
 
@@ -1103,17 +1157,17 @@ export async function main(ns: NS): Promise<void> {
     if (maxRam === undefined) return false;
     const free = maxRam - (fresh<number>(entry, "blockedRam", now, expiry) ?? 0) - heldGb(entry);
     if (free < targetGb) return false;
-    const offer = offerLaunch<DnetProberLaunch>({ kind: "dnet-prober", host, armoured: wanted });
-    let pid = 0;
+    let launched: ExecLaunchEntity<DnetProberLaunch> | undefined;
     try {
-      pid = borrowed["exec"](
-        proberFile, host, temporaryRunOptions({ threads: 1, ramOverride: targetGb }), offer.launchId,
+      launched = launchExec(
+        { kind: "dnet-prober", host, armoured: wanted },
+        () => borrowed["exec"](
+          proberFile, host, temporaryRunOptions({ threads: 1, ramOverride: targetGb }),
+        ),
+        (entity) => bindProberLaunch(host, entity),
       );
-    } catch { pid = 0; }
-    if (pid === 0) {
-      offer.withdraw();
-      return false;
-    }
+    } catch { launched = undefined; }
+    if (launched === undefined) return false;
     entry.proberResizeAt = now;
     return true;
   };
@@ -1132,8 +1186,7 @@ export async function main(ns: NS): Promise<void> {
     return true;
   };
 
-  const restoreRefusedLaunch = (entry: HostEntry, order: Order, offer: { withdraw(): void }): void => {
-    offer.withdraw();
+  const restoreRefusedLaunch = (entry: HostEntry, order: Order): void => {
     if (entry.pendingOrder === order) entry.pendingOrder = undefined;
     entry.inbound = undefined;
     const staged = entry.staged ??= [];
@@ -1146,14 +1199,16 @@ export async function main(ns: NS): Promise<void> {
    * `spawn` once per THREAD, which would charge 2 GB on every thread for a
    * handoff one of them performs once.
    *
-   * `offerLaunch` publishes the descriptor without waiting to be captured: the
-   * worker's own `adopt` is the acknowledgement, and a launch that never adopts
-   * is reaped by pid.
+   * `launchExec` publishes the returned PID and exact order before the child
+   * can run; the worker's own `adopt` is the readiness acknowledgement, and a
+   * launch that never adopts is reaped by PID.
    *
    * Synchronous throughout, which is what makes it safe to call from `stage` —
    * two dispatches for the same host cannot interleave. */
   const dispatchLocal = (entry: HostEntry): void => {
     if (entry.agent !== undefined || processInbound(entry)) return;
+    if (hostIsRetiring(entry.hostname)) return;
+    if (launchRefusals.has(entry.hostname)) return;
     if (standDown) return;
     if (stasisLinked.has(entry.hostname)) return;
     const borrowed = entry.ns;
@@ -1173,46 +1228,36 @@ export async function main(ns: NS): Promise<void> {
     if (!fitQueuedOrder(entry, next)) return;
     entry.pendingOrder = next;
     entry.inbound = { at: Date.now(), via: "plant-exec" };
-    const offer = offerLaunch<DnetAgentLaunch>({ kind: "dnet-agent", host: entry.hostname });
-    let pid = 0;
+    let launched: ExecLaunchEntity<DnetAgentLaunch> | undefined;
     try {
-      pid = borrowed["exec"](
-        agentFile,
-        entry.hostname,
-        temporaryRunOptions(processSizeFor(next, next.ramOverrideGb)),
-        offer.launchId,
+      launched = launchExec(
+        { kind: "dnet-agent", host: entry.hostname, order: next },
+        () => borrowed["exec"](
+          agentFile,
+          entry.hostname,
+          temporaryRunOptions(processSizeFor(next, next.ramOverrideGb)),
+        ),
+        (entity) => bindAgentLaunch(entry.hostname, entity),
       );
-    } catch { pid = 0; }
-    if (pid === 0) {
+    } catch { launched = undefined; }
+    if (launched === undefined) {
       // Nothing started. Put the order back where the next pass will find it
       // rather than leaving it in a handoff slot nobody is coming for.
-      restoreRefusedLaunch(entry, next, offer);
+      restoreRefusedLaunch(entry, next);
       noteLaunchRefused(entry, next, "exec returned 0");
       return;
     }
     launchRefusals.delete(entry.hostname);
-    entry.inbound = { ...entry.inbound, pid };
   };
 
   /** A stasis prober deliberately carries no `exec`. Start its next body from
-   * the shared ns resident instead: connectToSession and exec must run on ONE
-   * PID, because the session belongs to the caller. `guaranteeFit` prepays and
-   * locks that pair; retries cover an externally killed resident and the
-   * engine's transient zero while a prior allocation is being reaped. */
-  const MANAGED_DISPATCH_ATTEMPTS = 3;
-  /** How long the WHOLE managed dispatch may take, retries included, before it
-   *  gives the host back.
-   *
-   * The proxy's own placement retry is unbounded, so without a deadline the
-   * launch window is held for the rest of the run. It must stay well inside
-   * `LAUNCH_WINDOW_MS`: this dispatch holds a pid-less window, and if the window
-   * could expire underneath it another pass would dispatch concurrently and
-   * double-launch. One budget across all attempts rather than one per attempt,
-   * so that stays true however the retry count moves. */
-  const MANAGED_DISPATCH_TIMEOUT_MS = 5_000;
+   * the shared ns resident instead: connectToSession and exec run on one PID,
+   * because the session belongs to the caller. Retirement has already been
+   * proven before this single launch attempt begins. */
   const dispatchManaged = async (entry: HostEntry): Promise<void> => {
     if (!stasisLinked.has(entry.hostname)) return;
     if (entry.agent !== undefined || processInbound(entry) || standDown) return;
+    if (hostIsRetiring(entry.hostname)) return;
     // Keep the permanent topology observer beside the managed body. A missing
     // prober is repaired by spreading; launching work alone would leave the
     // host unable to reveal or validate its neighbour edges.
@@ -1225,61 +1270,32 @@ export async function main(ns: NS): Promise<void> {
 
     entry.pendingOrder = next;
     entry.inbound = { at: Date.now(), via: "plant-exec" };
-    const offer = offerLaunch<DnetAgentLaunch>({ kind: "dnet-agent", host: entry.hostname });
-    let pid = 0;
-    let failureCode = 0;
-    const deadline = Date.now() + MANAGED_DISPATCH_TIMEOUT_MS;
-    for (let attempt = 0; attempt < MANAGED_DISPATCH_ATTEMPTS && pid === 0; attempt++) {
-      const budgetMs = deadline - Date.now();
-      if (budgetMs <= 0) break;
-      try {
-        // TIME-BOUNDED. The window above is already claimed, and the lease can
-        // wait for ever: `NsProxy#respawn` retries placement in an unbounded
-        // loop with no failure exit, so a resident the fleet cannot afford
-        // leaves this await unsettled and the host wedged behind it.
-        //
-        // Abandoning a lease that later succeeds is safe: `restoreRefusedLaunch`
-        // withdraws the launch descriptor, so a late `exec` produces a child
-        // that captures nothing and exits on its first line rather than a second
-        // agent nobody is tracking.
-        const outcome = await Promise.race([
-          nsp.guaranteeFit(
-          ["dnet.connectToSession", "exec"],
-          async (resident) => {
-            const connected = await resident("dnet.connectToSession", entry.hostname, credential.password);
-            if (!connected.success) return { pid: 0, code: connected.code };
-            const launched = await resident(
-              "exec",
-              agentFile,
-              entry.hostname,
-              temporaryRunOptions(processSizeFor(next, next.ramOverrideGb)),
-              offer.launchId,
-            );
-            return { pid: launched, code: launched === 0 ? 0 : 200 };
-          },
-          ),
-          realmSleep(budgetMs).then(() => ({ pid: 0, code: 0 })),
-        ]);
-        pid = outcome.pid;
-        failureCode = outcome.code;
-        if (failureCode === 401 || failureCode === 503) break;
-        if (pid === 0 && attempt + 1 < MANAGED_DISPATCH_ATTEMPTS) {
-          const delayMs = Math.min(REFUSED_EXEC_RETRY_MS, Math.max(0, deadline - Date.now()));
-          if (delayMs > 0) await realmSleep(delayMs);
-        }
-      } catch {
-        // The whole authority pair is the retry unit. A resident killed from
-        // outside the proxy loses its PID-bound session with it.
-      }
-    }
+    let outcome: { launch?: ExecLaunchEntity<DnetAgentLaunch>; code: number } = { code: 0 };
+    try {
+      outcome = await nsp.guaranteeFit(
+        ["dnet.connectToSession", "exec"],
+        async (resident) => {
+          const connected = await resident("dnet.connectToSession", entry.hostname, credential.password);
+          if (!connected.success) return { launch: undefined, code: connected.code };
+          const launched = resident.launchExec<DnetAgentLaunch>(
+            { kind: "dnet-agent", host: entry.hostname, order: next },
+            agentFile,
+            entry.hostname,
+            temporaryRunOptions(processSizeFor(next, next.ramOverrideGb)),
+            (entity) => bindAgentLaunch(entry.hostname, entity),
+          );
+          return { launch: launched, code: launched === undefined ? 0 : 200 };
+        },
+      );
+    } catch { /* a dead resident is one failed launch, not a retry policy */ }
+    const { launch: launched, code: failureCode } = outcome;
 
-    if (pid > 0) {
+    if (launched !== undefined) {
       launchRefusals.delete(entry.hostname);
-      if (entry.agent === undefined) entry.inbound = { ...(entry.inbound ?? { at: Date.now(), via: "plant-exec" }), pid };
       return;
     }
 
-    restoreRefusedLaunch(entry, next, offer);
+    restoreRefusedLaunch(entry, next);
     noteLaunchRefused(entry, next, `managed lease, code ${failureCode}`);
     if (failureCode === 503) {
       retireLifetime(entry.hostname, "stasis target was unavailable during managed dispatch");
@@ -1291,6 +1307,24 @@ export async function main(ns: NS): Promise<void> {
       retireStaged(next, "cancelled", "credential rejected during managed dispatch");
       retireRejectedCredential(entry.hostname);
     }
+  };
+
+  // Managed calls may wait on the shared resident. They are launched
+  // independently so one stasis host cannot delay ordinary-host dispatch.
+  const managedDispatches = new Set<string>();
+  const dispatch = (entry: HostEntry): void => {
+    if (!stasisLinked.has(entry.hostname)) {
+      dispatchLocal(entry);
+      return;
+    }
+    if ((entry.staged?.length ?? 0) === 0 || entry.agent !== undefined
+      || processInbound(entry) || hostIsRetiring(entry.hostname)
+      || launchRefusals.has(entry.hostname)) return;
+    if (managedDispatches.has(entry.hostname)) return;
+    managedDispatches.add(entry.hostname);
+    void dispatchManaged(entry).finally(() => {
+      managedDispatches.delete(entry.hostname);
+    });
   };
 
   const stage = (entry: HostEntry, order: Order): boolean => {
@@ -1320,7 +1354,7 @@ export async function main(ns: NS): Promise<void> {
     // Staging and starting are one act. The controller holds the launcher, so
     // the only reason not to start is that the host is already busy — which
     // each dispatch path checks for itself.
-    if (!stasisLinked.has(entry.hostname)) dispatchLocal(entry);
+    dispatch(entry);
     return true;
   };
 
@@ -1522,7 +1556,7 @@ export async function main(ns: NS): Promise<void> {
   const refreshLiveness = async (): Promise<void> => {
     const asked: { pid: number; host: string }[] = [];
     for (const entry of hosts.values()) {
-      const pid = entry.inbound?.pid;
+      const pid = entry.inbound?.launch?.pid;
       if (pid !== undefined) asked.push({ pid, host: entry.hostname });
     }
     const answers = await Promise.all(
@@ -1541,7 +1575,7 @@ export async function main(ns: NS): Promise<void> {
     // A pid ANSWERS the question and no clock may overrule it: a process that is
     // running has not failed to launch however long it has been there, and
     // reaping its window starts a second launch onto RAM the first one holds.
-    if (inbound.pid !== undefined) return livePids.get(livenessKey(inbound.pid, entry.hostname)) ?? true;
+    if (inbound.launch !== undefined) return livePids.get(livenessKey(inbound.launch.pid, entry.hostname)) ?? true;
     // No pid: the LAUNCHER still owns this window and has not exec'd yet. This
     // is the one case a clock has to decide, because nothing else can.
     return Date.now() - inbound.at <= LAUNCH_WINDOW_MS;
@@ -1989,12 +2023,13 @@ export async function main(ns: NS): Promise<void> {
       if (inbound === undefined || entry.agent !== undefined) continue;
       // Still the launcher's to close, or a process that really is there.
       if (processInbound(entry)) continue;
+      if (inbound.launch !== undefined) observeExecGone(inbound.launch);
       entry.inbound = undefined;
       // Whatever this launch was holding dies with it. A barrier left standing
       // would make every later plant on this host await a report nobody is
       // coming to file.
       const barrier = entry.probeRefresh;
-      if (barrier !== undefined && entry.probeRefreshPid === undefined) {
+      if (barrier !== undefined && entry.probeRefreshLaunch === undefined) {
         releaseProbeRefresh(entry, undefined, barrier);
       }
     }
@@ -2092,7 +2127,7 @@ export async function main(ns: NS): Promise<void> {
       ...foldRefusals(farmPlan.refused),
       expectedMoneyPerSec: farmPlan.expectedMoneyPerSec,
       expectedCharismaExpPerSec: farmPlan.expectedCharismaExpPerSec,
-      ...(farmPlan.cacheHunter !== undefined ? { cacheHunter: farmPlan.cacheHunter } : {}),
+      ...(farmPlan.cacheReserve !== undefined ? { cacheReserve: farmPlan.cacheReserve } : {}),
     };
 
     for (const candidate of spreadCandidates) {
@@ -2311,10 +2346,7 @@ export async function main(ns: NS): Promise<void> {
     // so this only catches hosts that became free since — a worker exited, a
     // refused launch was put back, a lender arrived on a host that was already
     // holding orders.
-    for (const entry of [...hosts.values()]) {
-      if (stasisLinked.has(entry.hostname)) await dispatchManaged(entry);
-      else dispatchLocal(entry);
-    }
+    for (const entry of [...hosts.values()]) dispatch(entry);
     return tasks;
   };
 
@@ -2502,6 +2534,15 @@ export async function main(ns: NS): Promise<void> {
       agentHostsSeen.add(host);
       entry.inbound = undefined;
       entry.agent = handle;
+      // The reservation is SPENT the moment a process owns the order. The
+      // agent used to clear it on its own way in; now that the order travels
+      // in the launch descriptor, `adopt` is the only place that sees the
+      // handover complete. Left standing it is claimed twice: `claimPlanted`
+      // would hand the running order to a second process, and once this agent
+      // exits `reconcilePending` would find a valid order with nothing running
+      // it and re-stage work that has already been done and reported.
+      if (entry.pendingOrder?.id === handle.order.id) entry.pendingOrder = undefined;
+      launchRefusals.delete(host);
       {
         orderById.set(handle.order.id, handle.order);
         const completion = orderDone.get(handle.order.id);
@@ -2529,7 +2570,7 @@ export async function main(ns: NS): Promise<void> {
         // pid means the plant that opened it has not exec'd yet and still owns
         // it — it settles the barrier itself if the launch is refused, and
         // `reapGhostLaunches` settles it if the plant dies holding it.
-        const pid = entry.probeRefreshPid;
+        const pid = entry.probeRefreshLaunch?.pid;
         if (pid === undefined || await running(pid, host)) {
           return { refresh: entry.probeRefresh, launch: false };
         }
@@ -2549,7 +2590,7 @@ export async function main(ns: NS): Promise<void> {
         },
       };
       entry.probeRefresh = refresh;
-      entry.probeRefreshPid = undefined;
+      entry.probeRefreshLaunch = undefined;
       return { refresh, launch: true };
     },
     cancelProbeRefresh(host, refresh) {
@@ -2567,32 +2608,26 @@ export async function main(ns: NS): Promise<void> {
         // Deliberate replacement: mark before the kill so the outgoing prober's
         // armour does not schedule a successor to the process replacing it.
         if (entry.prober !== undefined && entry.prober.pid > 0) entry.proberKillMark = entry.prober.pid;
-        killPid(entry.prober?.pid);
+        retirePid(host, entry.prober?.pid);
       }
       // Armour is a property of the LAUNCH, and a re-probe is not a launch, so
       // the same pid keeps whatever it was sized with. A new pid gets its flag
       // from `lend`, which is the only caller that knows.
       const stillArmoured = entry.prober?.pid === pid && entry.prober.armoured === true;
+      const proberLaunch = entry.prober?.pid === pid ? entry.prober.launch : entry.probeRefreshLaunch;
       entry.prober = {
         neighbours: [...neighbours], at, pid, epoch: rendezvous.mutationEpoch,
         ...(stillArmoured ? { armoured: true } : {}),
+        ...(proberLaunch !== undefined ? { launch: proberLaunch } : {}),
       };
       if (refresh !== undefined && entry.probeRefresh === refresh) {
         readyProbeRefreshes.set(refresh, { host, neighbours: [...neighbours], at, pid });
       }
       signalDerive();
     },
-    announceLaunch(host, pid) {
-      const entry = hosts.get(host);
-      if (entry?.inbound === undefined || pid <= 0) return;
-      entry.inbound = { ...entry.inbound, pid };
-    },
-    announceProbeRefresh(host, pid) {
-      const entry = hosts.get(host);
-      if (entry?.probeRefresh === undefined || pid <= 0) return;
-      entry.probeRefreshPid = pid;
-    },
-    announceProberRespawn(host, pid, launchId, withdraw) {
+    bindAgentLaunch,
+    bindProberLaunch,
+    announceProberRespawn(host, pid, ticket, withdraw) {
       const entry = hosts.get(host);
       if (entry === undefined) return false;
       // BACKSTOP. Marking every deliberate kill is the actual contract, but the
@@ -2616,7 +2651,7 @@ export async function main(ns: NS): Promise<void> {
       // that is trying to retire the net.
       if (standDown) return false;
       entry.proberRespawnAt = at;
-      entry.proberRespawn = { at, launchId, withdraw };
+      entry.proberRespawn = { at, ticket, withdraw };
       return true;
     },
     markProberKill(host, pid) {
@@ -2624,9 +2659,12 @@ export async function main(ns: NS): Promise<void> {
       if (entry === undefined || pid <= 0) return;
       entry.proberKillMark = pid;
     },
-    lend(host, borrowed, pid, refresh, armoured) {
+    lend(host, borrowed, launch, refresh, armoured) {
+      const pid = launch.pid;
+      bindProberLaunch(host, launch);
       const entry = hosts.get(host);
-      if (entry === undefined) { refresh?.settle(undefined); killPid(pid); return; }
+      if (entry === undefined) { refresh?.settle(undefined); retirePid(host, pid); return; }
+      launchRefusals.delete(host);
       // The successor has ARRIVED, so the window it was holding open is closed.
       // Its descriptor was captured by this very process, so there is nothing
       // left to withdraw.
@@ -2648,19 +2686,23 @@ export async function main(ns: NS): Promise<void> {
         // `killPid`, and a mark set afterwards would arrive after it had
         // already scheduled a successor we do not want.
         entry.proberKillMark = entry.prober.pid;
-        killPid(entry.prober.pid);
+        retirePid(host, entry.prober.pid);
       }
       entry.ns = borrowed;
       probeThrough(entry, pid, Date.now(), refresh);
       // AFTER the probe: `reportProbe` rebuilds the record, and only this
       // caller knows what the arriving process was sized for.
-      if (entry.prober?.pid === pid && armoured === true) {
-        entry.prober = { ...entry.prober, armoured: true };
+      if (entry.prober?.pid === pid) {
+        entry.prober = { ...entry.prober, launch, ...(armoured === true ? { armoured: true } : {}) };
       }
     },
-    preparePlant(host) {
+    async preparePlant(host) {
+      // A target can be replanted only after every known outgoing allocation
+      // has crossed Bitburner's kill barrier. This is event-driven and exact:
+      // no grace period and no speculative exec.
+      await awaitRetired(host);
       const entry = hosts.get(host);
-      if (entry === undefined) return { reuseProber: true, retiringAllocation: false };
+      if (entry === undefined) return { reuseProber: true };
       // Only while the files group is actually UNKNOWN — never seen, or
       // dirtied by an action whose `ls` has not landed. Re-arming on every
       // plant regardless is a livelock: spread keeps planting a host whose
@@ -2681,15 +2723,12 @@ export async function main(ns: NS): Promise<void> {
       // `launch-refused` forever. A live LENDER is the proof one is standing —
       // a fact the prober published, not one we polled for.
       const proberPid = entry.prober?.pid;
-      const retiringAllocation = entry.retiredAllocationAt !== undefined
-        && Date.now() - entry.retiredAllocationAt <= RETIRING_ALLOCATION_WINDOW_MS;
       // An armoured successor in the air counts as a standing prober. It is a
       // millisecond away and it will `lend` on arrival; launching beside it
       // spends the same 3.15 GB twice and leaves `lend` to kill one of them.
-      if (proberRespawnPending(entry, Date.now())) return { reuseProber: true, retiringAllocation };
+      if (proberRespawnPending(entry, Date.now())) return { reuseProber: true };
       return {
         reuseProber: entry.ns !== undefined && proberPid !== undefined && proberPid > 0,
-        retiringAllocation,
       };
     },
     abandonPlant(host) {
@@ -2707,6 +2746,18 @@ export async function main(ns: NS): Promise<void> {
         const at = staged.findIndex((o) => compareQueuedDnetWork(claimed, o) < 0);
         if (at === -1) staged.push(claimed); else staged.splice(at, 0, claimed);
       }
+    },
+    launchRefused(host, detail) {
+      const entry = hosts.get(host);
+      if (entry === undefined) return;
+      const order = entry.pendingOrder ?? entry.staged?.[0];
+      if (order !== undefined) {
+        noteLaunchRefused(entry, order, detail);
+        return;
+      }
+      launchRefusals.set(host, {
+        kind: "plant", threads: 1, wantedGb: 0, since: Date.now(), detail,
+      });
     },
     claimPlanted(host) {
       const entry = hosts.get(host);
@@ -2746,8 +2797,17 @@ export async function main(ns: NS): Promise<void> {
       entry.pendingOrder = next;
       return next;
     },
-    registerBootstrap(host, pid) { const entry = hosts.get(host); if (entry) entry.bootstrap = { pid, startedAt: Date.now() }; },
-    bootstrapDone(host) { const e = hosts.get(host); if (e) e.bootstrap = undefined; bootstrapDoneSet.add(host); signalDerive(); },
+    registerBootstrap(host, launch) {
+      bindAgentLaunch(host, launch);
+      const entry = hosts.get(host);
+      if (entry) entry.bootstrap = { pid: launch.pid, startedAt: Date.now(), launch };
+    },
+    bootstrapDone(host, pid) {
+      const e = hosts.get(host);
+      if (e?.bootstrap?.pid === pid) e.bootstrap = undefined;
+      bootstrapDoneSet.add(host);
+      retirePid(host, pid);
+    },
     deps,
     snapshot(requestedAt = Date.now()): DnetSnapshot {
       const lab = labReport(requestedAt);
@@ -2879,6 +2939,7 @@ export async function main(ns: NS): Promise<void> {
   // Agents read `live()` fresh on every pass and never hold a controller across
   // an await, so a replacement is picked up on the next thing any of them does.
   realm.dnet_controller = rendezvous;
+  launchEntity.ready.resolve();
   // ...and CHECK OUT on the way down, however we go down. `atExit` runs on a
   // kill as well as on a clean exit, so this is the one place that can promise
   // it.
@@ -3047,7 +3108,7 @@ export async function main(ns: NS): Promise<void> {
     // reason to stand down that does not depend on statement order.
     if (probe !== undefined && probe.pid > 0 && probe.pid !== ns.pid) {
       entry.proberKillMark = probe.pid;
-      killPid(probe.pid);
+      retirePid(entry.hostname, probe.pid);
     }
   }
   TELEMETRY: if (__TELEMETRY__ && tel) tel.flush();

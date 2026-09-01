@@ -1,7 +1,7 @@
 import type { VaultEntry } from "../../shared/strategy/dnet/courier.ts";
 import type { DnetTimingProfile } from "../../shared/strategy/dnet/rates.ts";
 import type { TaskKind } from "../../shared/strategy/dnet/jobs.ts";
-import type { FarmEconomics } from "../../shared/strategy/dnet/farm.ts";
+import type { CacheReserve, FarmEconomics } from "../../shared/strategy/dnet/farm.ts";
 import type { DarknetProfit, DarknetResidentRam } from "../../shared/telemetry/topics/dnet.ts";
 import type { DnetKnowledge } from "../../shared/strategy/dnet/host.ts";
 
@@ -47,7 +47,9 @@ export interface DnetSpreadReport extends RefusalRollup {
 
 export interface DnetFarmReport extends RefusalRollup {
   admitted: Record<string, number>;
+  /** Legacy snapshots and telemetry may still carry the singular policy. */
   cacheHunter?: string;
+  cacheReserve?: CacheReserve;
   expectedMoneyPerSec: number;
   expectedCharismaExpPerSec: number;
 }

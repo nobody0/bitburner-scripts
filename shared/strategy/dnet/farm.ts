@@ -2,6 +2,7 @@ import { compareDepthDesc } from "./host.ts";
 import type { FarmKind } from "./jobs.ts";
 import {
   PHISH_CACHE_COOLDOWN_MS,
+  phishCacheChance,
   phishExpectedRates,
   promoteExpectedCharismaExpPerSec,
   promoteWaitMs,
@@ -17,9 +18,10 @@ import {
  * compared through the arbiter's cash/XP prices; promotion's stock value is a
  * proxy, never reported income.
  *
- * During an open global cache window one difficulty >3 resident is pinned to
- * phishing. Low-difficulty hosts prefer promotion but may fall back to phish;
- * the quality preference must never create idle RAM. */
+ * A minimum set of residents keeps phishing through the global cooldown so
+ * their first post-cooldown completions have at least a 95% combined cache
+ * chance when the fleet can afford it. Everyone outside that reserve takes the
+ * better balanced cash/XP/stock action, without a difficulty override. */
 
 export type { FarmKind };
 
@@ -177,14 +179,22 @@ export interface FarmTask {
 export interface FarmPlan {
   tasks: FarmTask[];
   refused: FarmRefusal[];
-  /** The resident elected to carry the phishing cache window, when there is
-   *  one. Published so the panel can say WHICH host is the hunter rather than
-   *  leaving the thread counts to be reverse-engineered. */
-  cacheHunter?: string;
+  /** The continuously-phishing floor that makes the first calls to land after
+   *  the global cooldown a near-certain cache wave. */
+  cacheReserve?: CacheReserve;
   /** Forward rates from the admitted earn tasks. Promotion's stock proxy is
    * deliberately excluded from cash; it is utility, not player income. */
   expectedMoneyPerSec: number;
   expectedCharismaExpPerSec: number;
+}
+
+export interface CacheReserve {
+  hosts: string[];
+  targetChance: number;
+  combinedChance: number;
+  /** True only when one call is individually clamped to certainty. Stacking
+   *  sub-certain calls never gets described as a guarantee. */
+  guaranteed: boolean;
 }
 
 /** Below this a `memoryReallocation` call frees literally nothing.
@@ -250,30 +260,49 @@ export function phishWindowOpen(inputs: Pick<FarmInputs, "now" | "lastPhishCache
   return inputs.now - inputs.lastPhishCacheAt > PHISH_CACHE_COOLDOWN_MS;
 }
 
-/** Which resident is guaranteed to keep rolling for the window.
- *
- * There is exactly ONE cache every three minutes for the whole net. Every
- * phisher now runs at full threads (see the phish rung), so the election no
- * longer rations threads — what it decides is which host keeps PHISHING while
- * the window is open instead of being diverted to a higher-EV promote. One
- * host is pinned to the cache roll; the rest optimise their own earn. The
- * deepest resident is elected because depth is also the money term
- * (`0.1 + depth * 0.05`). Free RAM, then name, break ties so the election is
- * deterministic.
- *
- * The caller filters for who can actually SPEND the window before electing: a
- * hunter with no room for a `phishingAttack` is a host pinned to a roll it
- * cannot make, leaving nobody guaranteed to chase the cache.
- */
-export function electCacheHunter(hosts: readonly FarmHost[]): string | undefined {
-  const pool = hosts.filter((host) => host.isLab !== true);
-  if (pool.length === 0) return undefined;
-  const best = [...pool].sort((a, b) => {
-    const primary = compareDepthDesc(a.depth, b.depth) || b.freeGb - a.freeGb;
-    if (primary !== 0) return primary;
-    return a.host < b.host ? -1 : a.host > b.host ? 1 : 0;
-  })[0]!;
-  return best.host;
+/** Desired probability that the reserve's first completed wave claims a newly
+ * opened global cache window. */
+export const PHISH_CACHE_RESERVE_TARGET = 0.95;
+
+interface CacheCandidate {
+  host: FarmHost;
+  chance: number;
+}
+
+/** The smallest full-host wave that makes a newly-open cache window nearly
+ * certain. A single certain call wins outright; otherwise the largest rolls
+ * minimize the number of residents withheld from the earn comparison. */
+function selectCacheReserve(candidates: readonly CacheCandidate[]): CacheReserve | undefined {
+  const ordered = [...candidates].sort((a, b) =>
+    b.chance - a.chance
+    || (b.host.difficulty ?? -Infinity) - (a.host.difficulty ?? -Infinity)
+    || compareDepthDesc(a.host.depth, b.host.depth)
+    || (a.host.host < b.host.host ? -1 : a.host.host > b.host.host ? 1 : 0));
+  if (ordered.length === 0) return undefined;
+
+  const certain = ordered
+    .filter((candidate) => candidate.chance >= 1)
+    .sort((a, b) =>
+      (b.host.difficulty ?? -Infinity) - (a.host.difficulty ?? -Infinity)
+      || compareDepthDesc(a.host.depth, b.host.depth)
+      || (a.host.host < b.host.host ? -1 : a.host.host > b.host.host ? 1 : 0))[0];
+  if (certain !== undefined) {
+    return { hosts: [certain.host.host], targetChance: 1, combinedChance: 1, guaranteed: true };
+  }
+
+  const hosts: string[] = [];
+  let missChance = 1;
+  for (const candidate of ordered) {
+    hosts.push(candidate.host.host);
+    missChance *= 1 - candidate.chance;
+    if (1 - missChance >= PHISH_CACHE_RESERVE_TARGET) break;
+  }
+  return {
+    hosts,
+    targetChance: PHISH_CACHE_RESERVE_TARGET,
+    combinedChance: 1 - missChance,
+    guaranteed: false,
+  };
 }
 
 /** What one `memoryReallocation` frees here, and how long the whole block would
@@ -302,23 +331,14 @@ export function reclaimForecast(
 export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPlan {
   const tasks: FarmTask[] = [];
   const refused: FarmRefusal[] = [];
-  // Only among hosts that could actually spend the window: a hunter with no room
-  // for a `phishingAttack` is a window nobody rolls for.
   const windowOpen = phishWindowOpen(inputs);
   const maxPhishThreads = inputs.maxPhishThreads ?? DEFAULT_MAX_PHISH_THREADS;
-  const eligibleHunters = hosts.filter((host) =>
-    host.isLab !== true && host.reclaimOnly !== true
-    && host.caches !== undefined && host.freeGb >= inputs.gbPerThread.phish);
-  const preferredHunters = eligibleHunters.filter((host) => (host.difficulty ?? -Infinity) > 3);
-  const hunterPool = preferredHunters.length > 0 ? preferredHunters : eligibleHunters;
-  const hunter = electCacheHunter(hunterPool);
-  const avoidingLowDifficulty = windowOpen && preferredHunters.length > 0;
   const economics = inputs.economics ?? {};
   const moneyWorthSec = economics.moneyWorthSec ?? FARM_NOMINAL_CHANNEL_WORTH_SEC;
   const charismaWorthSec = economics.charismaWorthSec ?? FARM_NOMINAL_CHANNEL_WORTH_SEC;
   const symbols = inputs.promoteSymbols ?? [];
 
-  const candidateRates = (host: FarmHost): {
+  const candidateRates = (host: FarmHost, symbol: PromoteSymbol | undefined = symbols[0]): {
     phish: { threads: number; moneyPerSec: number; charismaExpPerSec: number };
     promote: { threads: number; moneyPerSec: number; charismaExpPerSec: number };
   } => {
@@ -345,8 +365,8 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
       phish: { threads: phishThreads, moneyPerSec: phish.moneyPerSec, charismaExpPerSec: phish.charismaExpPerSec },
       promote: {
         threads: promoteThreads,
-        moneyPerSec: symbols.length > 0
-          ? symbols[0]!.expectedProfit * PROMOTE_PROFIT_SHARE / (promoteWaitMs(inputs.charisma) / 1_000)
+        moneyPerSec: symbol !== undefined
+          ? symbol.expectedProfit * PROMOTE_PROFIT_SHARE / (promoteWaitMs(inputs.charisma) / 1_000)
           : 0,
         charismaExpPerSec: promoteExpectedCharismaExpPerSec(
           promoteThreads,
@@ -375,6 +395,7 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
   /** How many hosts have been given propaganda this pass, which is what spreads
    *  them across the named symbols. */
   let promoted = 0;
+  const earnHosts: FarmHost[] = [];
 
   const ordered = [...hosts].sort((a, b) => {
     const byDepth = compareDepthDesc(a.depth, b.depth);
@@ -577,80 +598,103 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
     }
     if (admitted) continue;
     if (host.reclaimOnly === true) continue;
+    earnHosts.push(host);
+  }
 
-    // --- 3./4. earn: phish or promote, whichever pays better ---------------
-    //
-    // The one place the ladder becomes an exchange rate; the header argues it.
-    // Both rungs are tried in arbiter-priced cash-plus-XP order, and the loser
-    // still runs
-    // when the winner refuses on its own gate — no room and in-flight are
-    // reasons to fall through, not to idle. The hunter with an open window
-    // bypasses the arithmetic entirely: the net-wide cache roll is worth more
-    // than either figure.
-    const isHunter = host.host === hunter;
-    const rates = ratesByHost.get(host.host)!;
+  // Remote and gang reclaim may spend another resident as their vantage. Such
+  // a resident is not real cache capacity in this pass even if its own host
+  // otherwise reached the earn rung.
+  const occupiedVantages = new Set(tasks.map((task) => task.from ?? task.host));
+  const reserve = selectCacheReserve(earnHosts
+    .filter((host) =>
+      host.isLab !== true
+      && !occupiedVantages.has(host.host)
+      && host.caches?.length === 0
+      && !(host.busy?.has("cache") ?? false)
+      && !(host.busy?.has("reclaim") ?? false))
+    .map((host): CacheCandidate => {
+      const threads = candidateRates(host).phish.threads;
+      return {
+        host,
+        chance: Math.max(0, Math.min(1, phishCacheChance(
+          threads,
+          inputs.charisma,
+          inputs.crimeSuccessMult ?? 1,
+        ))),
+      };
+    })
+    .filter((candidate) => candidate.chance > 0));
+  const reserved = new Set(reserve?.hosts ?? []);
+
+  // --- 3./4. earn: reserve, then phish or promote by balanced value ---------
+  for (const host of earnHosts) {
+    if (occupiedVantages.has(host.host)) continue;
+    const refuse = (why: FarmRefusalReason, detail: string): void => {
+      refused.push({ host: host.host, why, detail });
+    };
+    const busy = host.busy ?? new Set<FarmKind>();
+    if (busy.has("cache") || busy.has("reclaim")) continue;
+    const symbol = symbols.length > 0 ? symbols[promoted % symbols.length] : undefined;
+    const rates = candidateRates(host, symbol);
     const phishValue = valueOf(rates.phish);
     const promoteValue = valueOf(rates.promote);
 
-    const tryPhish = (): boolean => {
+    type Attempt = "admitted" | "in-flight" | "unavailable";
+    const tryPhish = (): Attempt => {
       if (busy.has("phish")) {
         refuse("phish-in-flight", "a job is already phishing here");
-        return false;
+        return "in-flight";
       }
       if (host.freeGb < inputs.gbPerThread.phish) {
         refuse(
           "phish-no-room",
           `${host.freeGb.toFixed(2)}GB free, a phishingAttack job needs ${inputs.gbPerThread.phish.toFixed(2)}GB`,
         );
-        return false;
+        return "unavailable";
       }
-      // EVERY phisher runs at what its own RAM affords: money and charisma are
+      // Every phisher runs at what its own RAM affords: money and charisma are
       // linear in threads, the batch is TIME-bounded so threads never extend
       // how long the host is held, and a resident runs one job at a time so
-      // the RAM would otherwise sit idle. The hunter election survives as the
-      // panel's answer to "who claims the window" — the deepest host is still
-      // the one whose calls pay most — but it no longer rations anyone else's
-      // threads.
+      // the RAM would otherwise sit idle.
       const threads = rates.phish.threads;
       tasks.push({
         kind: "phish",
         host: host.host,
         threads,
-        reason: isHunter
-          ? (windowOpen
-            ? `cache hunter, window open: ${threads} thread${threads === 1 ? "" : "s"} on the roll`
-            : "cache hunter, window shut: charisma and money until it reopens")
-          : "charisma every call, money by depth",
+        reason: reserved.has(host.host)
+          ? `cache reserve: ${(reserve!.combinedChance * 100).toFixed(1)}% combined first-wave chance; `
+            + `${threads} thread${threads === 1 ? "" : "s"} stays ready while the window is ${windowOpen ? "open" : "shut"}`
+          : `balanced value ${phishValue.toFixed(1)} vs promote ${promoteValue.toFixed(1)}; charisma every call, money by depth`,
       });
       expectedMoneyPerSec += rates.phish.moneyPerSec;
       expectedCharismaExpPerSec += rates.phish.charismaExpPerSec;
-      return true;
+      return "admitted";
     };
 
-    const tryPromote = (): boolean => {
+    const tryPromote = (): Attempt => {
       // Admitted only when home has named a symbol — propaganda on a symbol
       // with no edge moves volatility in both directions for nothing.
       if (symbols.length === 0) {
         refuse("promote-no-symbol", "no symbol home names has an edge; propaganda is symmetric and pays nothing alone");
-        return false;
+        return "unavailable";
       }
       if (busy.has("promote")) {
         refuse("promote-in-flight", "a job is already spreading propaganda here");
-        return false;
+        return "in-flight";
       }
       if (host.freeGb < inputs.gbPerThread.promote) {
         refuse(
           "promote-no-room",
           `${host.freeGb.toFixed(2)}GB free, a promoteStock job needs ${inputs.gbPerThread.promote.toFixed(2)}GB`,
         );
-        return false;
+        return "unavailable";
       }
       // Hosts are spread across the named symbols rather than piled onto the
       // first: the charge curve saturates (two exponentials approaching 4x), so
       // the second symbol's first charge is worth more than the first symbol's
       // hundredth. Indexed by the host's ORDER in this pass, which is
       // deterministic, so the assignment does not move under the panel.
-      const symbol = symbols[promoted % symbols.length]!.symbol;
+      const assigned = symbol!.symbol;
       promoted++;
       const promoteThreads = Math.max(
         1,
@@ -663,19 +707,18 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
         kind: "promote",
         host: host.host,
         threads: promoteThreads,
-        symbol,
-        reason: `propaganda for ${symbol}: volatility only, and it decays 0.4x a market cycle`,
+        symbol: assigned,
+        reason: `balanced value ${promoteValue.toFixed(1)} vs phish ${phishValue.toFixed(1)}; `
+          + `propaganda for ${assigned} from ${symbol!.expectedProfit.toFixed(0)} expected stock profit`,
       });
       expectedCharismaExpPerSec += rates.promote.charismaExpPerSec;
-      return true;
+      return "admitted";
     };
 
-    const lowDifficultySoftAvoid = avoidingLowDifficulty && (host.difficulty ?? -Infinity) <= 3;
-    const phishFirst = (isHunter && windowOpen)
-      || (!lowDifficultySoftAvoid && phishValue >= promoteValue);
+    const phishFirst = reserved.has(host.host) || phishValue >= promoteValue;
     if (phishFirst) {
-      if (!tryPhish()) tryPromote();
-    } else if (!tryPromote()) {
+      if (tryPhish() === "unavailable") tryPromote();
+    } else if (tryPromote() === "unavailable") {
       tryPhish();
     }
   }
@@ -685,6 +728,6 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
     refused,
     expectedMoneyPerSec,
     expectedCharismaExpPerSec,
-    ...(hunter !== undefined ? { cacheHunter: hunter } : {}),
+    ...(reserve !== undefined ? { cacheReserve: reserve } : {}),
   };
 }

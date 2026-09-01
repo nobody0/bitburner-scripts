@@ -28,7 +28,7 @@ function realm(options: {
   let refusals = options.refuseExecs ?? 0;
   const tprints: string[] = [];
 
-  const exitHandlers = new Map<ResidentRecord, () => void>();
+  const exitHandlers = new Map<ResidentRecord, (() => void)[]>();
   const nsMain = {
     getFunctionRamCost: (path: string) => {
       const member = members[path];
@@ -36,7 +36,8 @@ function realm(options: {
       return member.gb;
     },
     tprint: (line: string) => { tprints.push(line); },
-    exec: (script: string, host: string, opts: { ramOverride: number }, launchId: unknown) => {
+    isRunning: (pid: number) => residents[pid - 1]?.alive === true,
+    exec: (script: string, host: string, opts: { ramOverride: number }) => {
       if (refusals > 0) { refusals--; return 0; }
       execs.push({ script, host, ramGb: opts.ramOverride });
       const record: ResidentRecord = { host, ramGb: opts.ramOverride, alive: true, calls: [] };
@@ -46,8 +47,13 @@ function realm(options: {
       // calls that actually reached this process.
       const residentNs: Record<string, unknown> = {
         disableLog: () => {},
-        atExit: (fn: () => void) => { exitHandlers.set(record, fn); },
-        args: [launchId],
+        pid: residents.length,
+        atExit: (fn: () => void) => {
+          const held = exitHandlers.get(record) ?? [];
+          held.push(fn);
+          exitHandlers.set(record, held);
+        },
+        args: [],
       };
       for (const [path, member] of Object.entries(members)) {
         const parts = path.split(".");
@@ -63,9 +69,11 @@ function realm(options: {
       }
       // The engine runs atExit once main returns and only then returns the
       // RAM; the proxy waits on exactly that signal before re-execing.
-      void residentMain(residentNs as unknown as NS).then(() => {
-        record.alive = false;
-        exitHandlers.get(record)?.();
+      queueMicrotask(() => {
+        void residentMain(residentNs as unknown as NS).then(() => {
+          record.alive = false;
+          for (const handler of exitHandlers.get(record) ?? []) handler();
+        });
       });
       return residents.length;
     },

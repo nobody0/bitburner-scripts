@@ -1,14 +1,13 @@
 import { makeOrder } from './support/dnet-order.ts';
 import { afterEach, describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
-import { captureLaunch, handoffLaunch } from "../game/lib/launch-shared.ts";
+import { launchExec, type ExecLaunchEntity } from "../game/lib/launch-shared.ts";
 import type { DnetAgentLaunch, DnetProbeRefresh, DnetProbeReport, DnetProberLaunch } from "../game/dnet/launch.ts";
 import { main as agentMain } from "../game/dnet/agent.ts";
 import { runOrder } from "../game/dnet/orders.ts";
 import {
   DNET_PROTOCOL,
   KIND_CALLS,
-  REFUSED_EXEC_RETRY_MS,
   dnetRealm,
   type AgentIo,
   type ControllerDeps,
@@ -336,7 +335,7 @@ describe("darknet farm job cache observations", () => {
     let proberRefusals = 0;
     let residentRefusals = 0;
     let reuseProber = false;
-    let retiringAllocation = false;
+    let retirement: Promise<void> | undefined;
     let claimedOrder: Order | undefined = makeOrder(
       "inventory",
       { host: "dn-1", from: "dn-1" },
@@ -347,14 +346,23 @@ describe("darknet farm job cache observations", () => {
     dnetRealm().dnet_controller = {
       protocol: DNET_PROTOCOL,
       ...probeRefreshMethods(),
-      announceLaunch: () => {},
-      announceProbeRefresh: () => {},
-      preparePlant: (host: string) => {
+      bindAgentLaunch: () => {},
+      bindProberLaunch: (_host: string, launch: ExecLaunchEntity<DnetProberLaunch>) => {
+        const report = () => {
+          order.push("first-probe");
+          launch.descriptor.refresh?.settle({ host: launch.descriptor.host, neighbours: [], at: Date.now(), pid: launch.pid });
+        };
+        if (autoFirstReport) report();
+        else reportFirst = report;
+      },
+      preparePlant: async (host: string) => {
         order.push(`prepare:${host}`);
-        return { reuseProber, retiringAllocation };
+        await retirement;
+        return { reuseProber };
       },
       claimPlanted: (host: string) => { order.push(`claim:${host}`); return claimedOrder; },
       abandonPlant: () => {},
+      launchRefused: () => {},
     } as unknown as ControllerHandle;
     const ns = {
       dnet: {
@@ -367,23 +375,15 @@ describe("darknet farm job cache observations", () => {
       },
       scp: () => { order.push("scp"); return true; },
       dnsLookup: () => "10.0.0.1",
-      exec: (file: string, _host: string, options: { temporary?: boolean }, launchId: unknown) => {
+      exec: (file: string, _host: string, options: { temporary?: boolean }) => {
         launches.push({ file, options });
         if (file.includes("prober")) {
           order.push("prober");
           if (proberRefusals-- > 0) return 0;
-          const launch = captureLaunch<DnetProberLaunch>("dnet-prober", launchId);
-          const report = () => {
-            order.push("first-probe");
-            launch?.refresh?.settle({ host: launch.host, neighbours: [], at: Date.now(), pid: 41 });
-          };
-          if (autoFirstReport) report();
-          else reportFirst = report;
         }
         else {
           order.push("agent");
           if (residentRefusals-- > 0) return 0;
-          captureLaunch<DnetAgentLaunch>("dnet-agent", launchId);
         }
         return launches.length;
       },
@@ -423,27 +423,25 @@ describe("darknet farm job cache observations", () => {
     expect(refused.ok).toBe(false);
     expect(killed).toEqual([1]);
 
-    // Retirement is its own fact: retireVantage clears both process handles,
-    // so a replacement with no surviving prober must still grace both execs.
+    // Retirement is an exact barrier. No launch is attempted before it
+    // resolves, and a refusal after it resolves is one invariant failure.
     launches.length = 0;
     order.length = 0;
     reuseProber = false;
-    retiringAllocation = true;
+    let releaseRetirement!: () => void;
+    retirement = new Promise<void>((resolve) => { releaseRetirement = resolve; });
     proberRefusals = 1;
-    residentRefusals = 1;
-    const retrying = runOrder(
+    residentRefusals = 0;
+    const barred = runOrder(
       ns,
       makeOrder("plant", { host: "dn-3", from: "darkweb" }, { targets: [{ host: "dn-3", password: "pw" }], payloads: ["dnet/agent.js", "dnet/prober.js"] }),
       makeIo(),
     );
     await Promise.resolve();
+    expect(launches).toHaveLength(0);
+    releaseRetirement();
+    await expect(barred).resolves.toMatchObject({ ok: false });
     expect(launches).toHaveLength(1);
-    await new Promise<void>((resolve) => setTimeout(resolve, REFUSED_EXEC_RETRY_MS + 25));
-    await Promise.resolve();
-    expect(launches).toHaveLength(3);
-    await new Promise<void>((resolve) => setTimeout(resolve, REFUSED_EXEC_RETRY_MS + 25));
-    await expect(retrying).resolves.toMatchObject({ ok: true });
-    expect(launches).toHaveLength(4);
 
     // A surviving prober is already a standing vantage. With no order to run,
     // the plant closes cleanly instead of exec'ing a base agent that exits on
@@ -451,7 +449,7 @@ describe("darknet farm job cache observations", () => {
     launches.length = 0;
     order.length = 0;
     reuseProber = true;
-    retiringAllocation = false;
+    retirement = undefined;
     claimedOrder = undefined;
     const ready = await runOrder(
       ns,
@@ -468,13 +466,12 @@ describe("darknet farm job cache observations", () => {
     dnetRealm().dnet_controller = {
       protocol: DNET_PROTOCOL,
       ...probeRefreshMethods(),
+      bindProberLaunch: (_host: string, launch: ExecLaunchEntity<DnetProberLaunch>) => {
+        reportFirst = () => launch.descriptor.refresh?.settle({ host: launch.descriptor.host, neighbours: [], at: Date.now(), pid: launch.pid });
+      },
     } as unknown as ControllerHandle;
     const ns = {
-      exec: (_file: string, _host: string, _opts: unknown, launchId: unknown) => {
-        const launch = captureLaunch<DnetProberLaunch>("dnet-prober", launchId);
-        reportFirst = () => launch?.refresh?.settle({ host: launch.host, neighbours: [], at: Date.now(), pid: 41 });
-        return 91;
-      },
+      exec: () => 91,
       getFunctionRamCost: (method: string) => method === "dnet.probe" ? 0.2 : method === "spawn" ? 2 : 0,
     } as unknown as NS;
 
@@ -503,7 +500,8 @@ describe("darknet farm job cache observations", () => {
     dnetRealm().dnet_controller = {
       protocol: DNET_PROTOCOL,
       buildId: "test",
-      registerBootstrap: (host: string, pid: number) => registered.push({ host, pid }),
+      bindAgentLaunch: () => {},
+      registerBootstrap: (host: string, launch: ExecLaunchEntity<DnetAgentLaunch>) => registered.push({ host, pid: launch.pid }),
     } as unknown as ControllerHandle;
     const ns = {
       dnet: {
@@ -515,9 +513,8 @@ describe("darknet farm job cache observations", () => {
         }),
       },
       scp: () => true,
-      exec: (file: string, _host: string, options: { temporary?: boolean; threads?: number; ramOverride?: number }, launchId: unknown) => {
+      exec: (file: string, _host: string, options: { temporary?: boolean; threads?: number; ramOverride?: number }) => {
         launches.push({ file, options });
-        captureLaunch<DnetAgentLaunch>("dnet-agent", launchId);
         return 7;
       },
       getFunctionRamCost: (method: string) => method === "dnet.memoryReallocation" ? 1 : 0,
@@ -546,7 +543,8 @@ describe("darknet farm job cache observations", () => {
     dnetRealm().dnet_controller = {
       protocol: DNET_PROTOCOL,
       buildId: "test",
-      registerBootstrap: (host: string, pid: number) => registered.push({ host, pid }),
+      bindAgentLaunch: () => {},
+      registerBootstrap: (host: string, launch: ExecLaunchEntity<DnetAgentLaunch>) => registered.push({ host, pid: launch.pid }),
       // The controller's own `bootstrapDone` is what wakes derivation, so the
       // agent's obligation is simply to call it.
       bootstrapDone: (host: string) => doneHosts.push(host),
@@ -565,14 +563,11 @@ describe("darknet farm job cache observations", () => {
       },
     } as unknown as NS;
     let running!: Promise<void>;
-    await handoffLaunch<DnetAgentLaunch>(
+    launchExec<DnetAgentLaunch>(
       { kind: "dnet-agent", host: "dn-1", bootstrapReclaim: true },
-      (launchId) => {
-        (ns.args as unknown[]).push(launchId);
-        running = agentMain(ns);
-        return ns.pid;
-      },
+      () => ns.pid,
     );
+    running = agentMain(ns);
     await running;
 
     expect(reallocations).toBe(1);

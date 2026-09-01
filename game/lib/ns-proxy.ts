@@ -1,5 +1,11 @@
-import type { NS } from "@ns";
-import { handoffLaunch, temporaryRunOptions } from "./launch-shared.ts";
+import type { NS, RunOptions } from "@ns";
+import {
+  launchExec,
+  temporaryRunOptions,
+  waitExecReady,
+  type ExecLaunchEntity,
+  type ScriptLaunch,
+} from "./launch-shared.ts";
 import { nsMainGlobal, type ProxyLaunch } from "./ns-proxy-shared.ts";
 import { RESIDENT_BASE_GB } from "../../shared/ram/broker.ts";
 import { realmSleep } from "./wake.ts";
@@ -104,10 +110,23 @@ type NsResult<F> =
 /** Call one ns function by dotted path on a resident. Awaiting the result
  * flattens the engine's own promise, so `await nsp("hack", host)` is a number
  * exactly as `await ns.hack(host)` would be. */
-export type NsProxyLease = <P extends string, F = GetPath<NS, P>>(
-  path: AutoPath<NS, P>,
-  ...args: NsArgs<F>
-) => Promise<NsResult<F>>;
+export interface NsProxyLease {
+  <P extends string, F = GetPath<NS, P>>(
+    path: AutoPath<NS, P>,
+    ...args: NsArgs<F>
+  ): Promise<NsResult<F>>;
+
+  /** Launch through this exact leased resident and publish the PID handover
+   * before the engine may resume the compiled child. Only valid when `exec`
+   * was included in the enclosing `guaranteeFit` declaration. */
+  launchExec<T extends ScriptLaunch, R = void>(
+    descriptor: T,
+    script: string,
+    host: string,
+    options: RunOptions,
+    bind?: (entity: ExecLaunchEntity<T, R>) => void,
+  ): ExecLaunchEntity<T, R> | undefined;
+}
 
 /** The ordinary proxy call surface plus an atomic, resident-bound lease.
  *
@@ -462,6 +481,35 @@ class Resident {
         throw error;
       }
     }) as NsProxyLease;
+    leased.launchExec = <T extends ScriptLaunch, R = void>(
+      descriptor: T,
+      script: string,
+      host: string,
+      options: RunOptions,
+      bind?: (entity: ExecLaunchEntity<T, R>) => void,
+    ): ExecLaunchEntity<T, R> | undefined => {
+      if (!allowed.has("exec")) {
+        throw new Error("nsp.guaranteeFit launch requires declared ns.exec");
+      }
+      const fn = this.#paid.get("exec");
+      if (fn === undefined) throw new Error("nsp.guaranteeFit did not pay for ns.exec");
+      return launchExec(
+        descriptor,
+        () => {
+          try {
+            return fn(script, host, options) as number;
+          } catch (error) {
+            // Same poisoning rule as an ordinary leased call: a member that
+            // THREW was a resident killed outside the proxy, and the cached
+            // `#ns`/`#paid` bound to it must be cleared before the caller
+            // retries — otherwise every later lease reuses the dead one.
+            memberFailed = true;
+            throw error;
+          }
+        },
+        bind,
+      );
+    };
     try {
       return await use(leased);
     } catch (error) {
@@ -563,34 +611,28 @@ class Resident {
   /** Exec one resident into an ALREADY-HELD placement and complete the
    * handshake. Returns its pid, or 0 if the engine refused. */
   async #launch(placement: ProxyPlacement): Promise<number> {
-    let published!: (ns: NS) => void;
-    // BOXED, never `resolve(ns)` directly — see the placement loop below.
-    const ready = new Promise<{ ns: NS }>((resolve) => {
-      published = (residentNs) => resolve({ ns: residentNs });
-    });
     let stop!: () => void;
     const stopped = new Promise<void>((resolve) => { stop = resolve; });
-    let gone!: () => void;
-    const exited = new Promise<void>((resolve) => { gone = resolve; });
 
-    const descriptor: ProxyLaunch = { kind: "ns-proxy", publish: published, stop: stopped, gone };
-    const pid = await handoffLaunch(
+    const descriptor: ProxyLaunch = { kind: "ns-proxy", stop: stopped };
+    const launch = launchExec<ProxyLaunch, NS>(
       descriptor,
-      (launchId) => nsMain().exec(
+      () => nsMain().exec(
         nsResidentScript(),
         placement.host,
         temporaryRunOptions({ ramOverride: placement.gb }),
-        launchId,
       ),
     );
-    if (pid === 0) return 0;
-    this.#ns = (await ready).ns;
+    if (launch === undefined) return 0;
+    const ready = await waitExecReady(launch, (pid) => nsMain()["isRunning"](pid));
+    if (ready.status === "gone") return 0;
+    this.#ns = ready.value;
     this.#placement = placement;
-    this.#pid = pid;
+    this.#pid = launch.pid;
     this.#budgetGb = placement.gb - RESIDENT_BASE_GB;
     this.#stop = stop;
-    this.#exited = exited;
-    return pid;
+    this.#exited = launch.exited.promise.then(() => {});
+    return launch.pid;
   }
 
   /** Kill the resident and stand a new one up, retrying until it lands.

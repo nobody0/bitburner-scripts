@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
-import { dnetRealm, processSizeFor, REFUSED_EXEC_RETRY_MS, type ControllerHandle, type HostEntry, type Order } from "../game/dnet/shared.ts";
-import { handoffLaunch, resetLaunchState } from "../game/lib/launch-shared.ts";
+import { dnetRealm, processSizeFor, type ControllerHandle, type HostEntry, type Order } from "../game/dnet/shared.ts";
+import { launchExec, resetLaunchState } from "../game/lib/launch-shared.ts";
+import type { DnetAgentLaunch, DnetProberLaunch } from "../game/dnet/launch.ts";
 import type { DnetRecoveryState } from "../game/dnet/wire.ts";
 
 /** Derivation is FACT-driven: a write-through files its consequences in the
@@ -54,6 +55,7 @@ function mockNs(launchId?: number, standingOn?: string, exec?: (...args: unknown
   return {
     args: launchId === undefined ? [] : [launchId],
     pid: 1,
+    atExit: () => {},
     disableLog: () => {},
     getScriptName: () => "dnet/controller.js",
     getFunctionRamCost: () => 0.2,
@@ -110,7 +112,8 @@ function standProber(
     }
   }
   const borrowed = mockNs(undefined, host, exec);
-  handle.lend(host, borrowed, pid, undefined, armoured);
+  const launch = launchExec<DnetProberLaunch>({ kind: "dnet-prober", host }, () => pid)!;
+  handle.lend(host, borrowed, launch, undefined, armoured);
   return borrowed;
 }
 
@@ -138,7 +141,14 @@ function standHands(leasedCall?: (path: string, ...args: unknown[]) => Promise<u
       use: (resident: (path: string, ...args: unknown[]) => Promise<unknown>) => unknown,
     ): Promise<unknown>;
   };
-  call.guaranteeFit = (_paths, use) => Promise.resolve(use(leasedCall ?? call));
+  call.guaranteeFit = (_paths, use) => {
+    const lease = (leasedCall ?? call) as typeof call & { launchExec: (...args: unknown[]) => undefined };
+    lease.launchExec = (_descriptor, script, host, options) => {
+      void lease("exec", script, host, options);
+      return undefined;
+    };
+    return Promise.resolve(use(lease));
+  };
   (globalThis as Record<string, unknown>)["ns_proxy"] = {
     // `nsp("a.b", ...args)` resolves the dotted path against a real `ns` and
     // calls it. The stub does exactly that against the mock, so a test drives
@@ -154,7 +164,7 @@ async function bootController(recovery?: DnetRecoveryState): Promise<ControllerH
   let bootError: unknown;
   // Exactly the real handoff: the controller captures its descriptor inside
   // the launcher's own turn, which is what acknowledges the launch.
-  await handoffLaunch(
+  launchExec(
     {
       kind: "dnet-controller",
       host: VANTAGE,
@@ -163,8 +173,9 @@ async function bootController(recovery?: DnetRecoveryState): Promise<ControllerH
       charisma: 1_000,
       ...(recovery ? { recovery } : {}),
     },
-    (launchId) => { void main(mockNs(launchId)).catch((error) => { bootError = error; }); return 1; },
+    () => 1,
   );
+  void main(mockNs()).catch((error) => { bootError = error; });
   await Promise.resolve();
   const handle = dnetRealm().dnet_controller;
   expect(handle, `the controller never published its rendezvous: ${String(bootError)}`).toBeDefined();
@@ -280,7 +291,6 @@ describe("a fact derives in its own turn", () => {
       label: "induce target",
       payload: {},
     });
-    first.hosts.get(VANTAGE)!.retiredAllocationAt = Date.now();
     first.deps.recordCredential({ hostname: TARGET, password: "1234", at: Date.now() });
     await settleMicrotasks();
 
@@ -294,7 +304,6 @@ describe("a fact derives in its own turn", () => {
     const durable = captured.recovery.knowledge.hosts.get(VANTAGE)! as HostEntry;
     expect(durable.agent).toBeUndefined();
     expect(durable.ns).toBeUndefined();
-    expect(durable.retiredAllocationAt).toBeUndefined();
 
     durable.depth = 999;
     expect(first.snapshot().recovery.knowledge.hosts.get(VANTAGE)?.depth).not.toBe(999);
@@ -396,7 +405,7 @@ describe("a fact derives in its own turn", () => {
 
     // What the plant body does: open the window, then report the new host's
     // own first probe. TARGET still has no process at all.
-    handle.preparePlant(TARGET);
+    await handle.preparePlant(TARGET);
     const barrier = await handle.beginProbeRefresh(TARGET);
     handle.reportProbe(TARGET, [VANTAGE], Date.now(), 12, barrier.refresh);
     // The barrier itself must imply that derivation has filed the first order.
@@ -436,8 +445,9 @@ describe("a fact derives in its own turn", () => {
     // A child that died before its first line. The plant handed over its pid,
     // so the window is a checkable fact rather than a stopwatch: the process is
     // not running, therefore nothing is coming. No time passes in this test.
-    handle.preparePlant(TARGET);
-    handle.announceLaunch(TARGET, 999_999);
+    await handle.preparePlant(TARGET);
+    const launch = launchExec<DnetAgentLaunch>({ kind: "dnet-agent", host: TARGET }, () => 999_999)!;
+    handle.bindAgentLaunch(TARGET, launch);
     deadPids.add(999_999);
     handle.wake("test");
     await settleMicrotasks();
@@ -457,13 +467,51 @@ describe("a fact derives in its own turn", () => {
     handle.deps.recordCredential({ hostname: TARGET, password: "1234", at: Date.now() });
     await settleMicrotasks();
 
-    handle.preparePlant(TARGET);
+    await handle.preparePlant(TARGET);
     expect(handle.hosts.get(TARGET)?.inbound).toBeDefined();
     // A refused prober exec, or a cancelled refresh: the window closes and the
     // host stops being a place work can be filed onto.
     handle.abandonPlant(TARGET);
     expect(handle.hosts.get(TARGET)?.inbound).toBeUndefined();
     expect(handle.claimPlanted(TARGET)).toBeUndefined();
+  });
+
+  test("an agent checkout waits for kill(pid) to prove its RAM is free", async () => {
+    const handle = await bootController();
+    const hands = standHands();
+    const entry = standHost(handle, TARGET, 11);
+    let releaseKill!: (value: boolean) => void;
+    const killed: number[] = [];
+    (hands as unknown as { kill(pid: number): Promise<boolean> }).kill = (pid) => {
+      killed.push(pid);
+      return new Promise<boolean>((resolve) => { releaseKill = resolve; });
+    };
+    const order: Order<"inventory"> = {
+      id: "inventory:retiring", kind: "inventory", host: TARGET, from: TARGET,
+      ramOverrideGb: 3.6, threads: 1, priority: 1, longLived: false,
+      label: "retiring", payload: {},
+    };
+    const agent = {
+      pid: 77, order, startedAt: Date.now(), beatAt: Date.now(),
+      done: new Promise<never>(() => {}), settle: () => {},
+    };
+    entry.agent = agent;
+
+    const launch = launchExec<DnetAgentLaunch>({ kind: "dnet-agent", host: TARGET, order }, () => 77)!;
+    handle.bindAgentLaunch(TARGET, launch);
+    launch.exited.resolve();
+    let prepared = false;
+    const barrier = handle.preparePlant(TARGET).then(() => { prepared = true; });
+    await settleMicrotasks();
+    expect(killed).toEqual([77]);
+    expect(prepared).toBe(false);
+
+    // Both true (we cleaned it) and false (already absent) resolve only after
+    // Bitburner has no allocation for this pid. The return value is immaterial.
+    releaseKill(false);
+    await barrier;
+    expect(prepared).toBe(true);
+    expect(handle.hosts.get(TARGET)?.inbound).toBeDefined();
   });
 
   test("a resident standing on a host with dirty files stages its own `ls`", async () => {
@@ -477,7 +525,7 @@ describe("a fact derives in its own turn", () => {
 
     // `preparePlant` is what the plant order calls just before exec'ing the
     // resident; it is where the opened host joins `needsInventory`.
-    handle.preparePlant(TARGET);
+    await handle.preparePlant(TARGET);
     const target = standHost(handle, TARGET, 12);
     await settleMicrotasks();
 
@@ -523,7 +571,7 @@ describe("armour is resized at the order boundary", () => {
 
     // The window is open, so nothing may exec a duplicate into the gap between
     // the kill and the macrotask that lands the successor.
-    expect(handle.preparePlant(TARGET).reuseProber).toBe(true);
+    expect((await handle.preparePlant(TARGET)).reuseProber).toBe(true);
 
     // The successor arrives and closes the window by checking in. Its
     // descriptor was captured by the process itself, so there is nothing left
@@ -604,7 +652,7 @@ describe("armour is resized at the order boundary", () => {
     expect(handle.hosts.get(TARGET)?.pendingOrder?.threads).toBe(5);
   });
 
-  test("a stasis host launches its neighbour plant through one retried proxy lease", async () => {
+  test("a stasis launch refusal is recorded after one proxy lease", async () => {
     const handle = await bootController();
     const leaseCalls: string[][] = [];
     let leaseAttempt = 0;
@@ -616,36 +664,65 @@ describe("armour is resized at the order boundary", () => {
       const calls = leaseCalls[leaseAttempt - 1] ??= [];
       calls.push(path);
       if (path === "dnet.connectToSession") return { success: true, code: 200, message: "connected" };
-      if (path === "exec") return leaseAttempt === 1 ? 0 : 700;
+      if (path === "exec") return 0;
       throw new Error(`unexpected leased call ${path}`);
     });
 
     net.set(REMOTE, { maxRam: 16, blockedRam: 0, depth: 1, neighbours: [VANTAGE] });
     net.get(VANTAGE)!.neighbours = [REMOTE];
-    standProber(handle, VANTAGE, 900);
-    handle.reportProbe(VANTAGE, [REMOTE], Date.now(), 900);
-    await settleMicrotasks();
-    handle.deps.recordCredential({ hostname: VANTAGE, password: "", at: Date.now() });
-    handle.deps.recordCredential({ hostname: REMOTE, password: "5678", at: Date.now() });
     handle.configure({
       charisma: 1_000,
       labExpected: false,
       stasisSnapshot: { hosts: [VANTAGE], at: Date.now() },
     });
+    standProber(handle, VANTAGE, 900);
+    handle.reportProbe(VANTAGE, [REMOTE], Date.now(), 900);
+    await settleMicrotasks();
+    handle.deps.recordCredential({ hostname: VANTAGE, password: "", at: Date.now() });
+    handle.deps.recordCredential({ hostname: REMOTE, password: "5678", at: Date.now() });
     await settleMicrotasks();
     expect(leaseAttempt).toBe(1);
-    await new Promise<void>((resolve) => setTimeout(resolve, REFUSED_EXEC_RETRY_MS + 25));
-    await settleMicrotasks();
+    expect(leaseCalls).toEqual([["dnet.connectToSession", "exec"]]);
+    expect(handle.hosts.get(VANTAGE)?.pendingOrder).toBeUndefined();
+    expect(handle.hosts.get(VANTAGE)?.inbound).toBeUndefined();
+    expect(handle.hosts.get(VANTAGE)?.staged?.[0]).toMatchObject({ kind: "plant", from: VANTAGE });
+  });
 
-    expect(leaseAttempt).toBe(2);
-    expect(leaseCalls).toEqual([
-      ["dnet.connectToSession", "exec"],
-      ["dnet.connectToSession", "exec"],
-    ]);
-    const pending = handle.hosts.get(VANTAGE)?.pendingOrder;
-    expect(pending).toMatchObject({ kind: "plant", from: VANTAGE });
-    expect(pending?.kind === "plant" ? pending.payload.targets.map((target) => target.host) : []).toContain(REMOTE);
-    expect(handle.hosts.get(VANTAGE)?.inbound?.pid).toBe(700);
+  test("a pending stasis lease cannot block an ordinary host dispatch", async () => {
+    const handle = await bootController();
+    let stasisLeaseStarted = false;
+    standHands(async (path) => {
+      if (path === "dnet.connectToSession") {
+        stasisLeaseStarted = true;
+        return new Promise<never>(() => {});
+      }
+      throw new Error(`unexpected leased call ${path}`);
+    });
+    handle.configure({
+      charisma: 1_000,
+      labExpected: false,
+      stasisSnapshot: { hosts: [VANTAGE], at: Date.now() },
+    });
+    standProber(handle, VANTAGE, 900);
+    handle.deps.recordCredential({ hostname: VANTAGE, password: "", at: Date.now() });
+
+    const ordinaryLaunches: unknown[][] = [];
+    standProber(handle, TARGET, 901, false, (...args) => {
+      ordinaryLaunches.push(args);
+      return 800;
+    });
+    const makeInventory = (host: string, id: string): Order<"inventory"> => ({
+      id, kind: "inventory", host, from: host, ramOverrideGb: 3.6, threads: 1,
+      priority: -10_000, longLived: false, label: "isolation", payload: {},
+    });
+    handle.hosts.get(VANTAGE)!.staged = [makeInventory(VANTAGE, "inventory:stasis")];
+    handle.hosts.get(TARGET)!.staged = [makeInventory(TARGET, "inventory:ordinary")];
+
+    handle.wake("isolation");
+    await settleMicrotasks();
+    expect(stasisLeaseStarted).toBe(true);
+    expect(ordinaryLaunches.some((args) => args[0] === "dnet/agent.js")).toBe(true);
+    expect(handle.hosts.get(TARGET)?.inbound?.launch?.pid).toBe(800);
   });
 
   test("a launch window with no pid is reaped, not held for ever", async () => {
